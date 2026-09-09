@@ -6,12 +6,13 @@ import { db } from "./db";
 import { join } from "path";
 import { startImageServer } from "./image-server";
 import { setWindowRef } from "./window";
-import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast } from "./rpc";
+import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast } from "./rpc";
 import { APP_NAME } from "./config";
 import { createMenu } from "./menu";
 import { broadcastUpdateStatus, checkForUpdate } from "./updates";
 import { isConfigured, getSetting } from "./db/settings";
 import * as ServerManager from "./server-manager";
+import * as Gateway from "./gateway";
 import { stopAsr } from "./asr";
 
 // Check if Vite dev server is running for HMR
@@ -62,6 +63,7 @@ setWindowRef(mainWindow);
 initServerBroadcast(mainWindow);
 initModelDownloadBroadcast(mainWindow);
 initTTSModelDownloadBroadcast(mainWindow);
+initGatewayBroadcast(mainWindow);
 
 mainWindow.webview.on("dom-ready", () => {
   broadcastUpdateStatus();
@@ -83,24 +85,39 @@ if (
       console.error("Failed to start inference server:", result.error);
     }
   });
+
+  // 本地模式下默认启动 API 网关（OpenAI 兼容 + /docs 接口文档）。
+  if (Gateway.isGatewayEnabled()) {
+    Gateway.startGateway().then((result) => {
+      if (result.ok) {
+        console.log("API gateway started successfully");
+      } else {
+        console.error("Failed to start API gateway:", result.error);
+      }
+    });
+  }
 }
 
 // Handle window close
 mainWindow.on("close", async () => {
-  await Promise.all([ServerManager.stopServer(), stopAsr()]);
+  await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway()]);
   Utils.quit();
 });
 
 // Cleanup on quit
 Electrobun.events.on("before-quit", async () => {
-  await Promise.all([ServerManager.stopServer(), stopAsr()]);
+  await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway()]);
 });
 
 // Safety net for unexpected termination
-process.on("SIGTERM", () => ServerManager.forceKill());
+process.on("SIGTERM", () => {
+  ServerManager.forceKill();
+  void Gateway.stopGateway();
+});
 process.on("uncaughtException", (err) => {
   console.error("Uncaught exception:", err);
   ServerManager.forceKill();
+  void Gateway.stopGateway();
 });
 
 console.log(`${APP_NAME} started!`);

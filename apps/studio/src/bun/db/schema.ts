@@ -48,6 +48,7 @@ export const conversations = sqliteTable("conversations", {
   title: text("title").notNull(),
   app: text("app").notNull().default("chat"),
   modelId: text("model_id"),
+  pinned: int("pinned").notNull().default(0),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
   updatedAt: int("updated_at")
     .$defaultFn(() => Date.now())
@@ -60,6 +61,7 @@ export const messages = sqliteTable("messages", {
   role: text("role").$type<"user" | "assistant">().notNull(),
   content: text("content").notNull(),
   images: text("images"),
+  tokens: int("tokens"),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
 });
 

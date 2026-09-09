@@ -18,7 +18,7 @@ export function SetupScreen({ onComplete }: SetupScreenProps) {
   };
 
   return (
-    <div className="flex h-screen flex-col items-center justify-center bg-background px-6">
+    <div className="flex min-h-screen flex-col items-center justify-center overflow-y-auto bg-background px-6 py-8">
       <div className="electrobun-webkit-app-region-drag fixed inset-x-0 top-0 h-11" />
       <div className="w-full max-w-md">
         {mode === "local" ? (

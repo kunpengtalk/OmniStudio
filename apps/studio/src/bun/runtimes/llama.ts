@@ -1,6 +1,8 @@
 import type { Subprocess } from "bun";
+import { existsSync } from "fs";
 import { getModelProfile, type ServerArgs } from "../../shared/model-profiles";
 import { getSetting } from "../db/settings";
+import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
 import type {
@@ -166,6 +168,32 @@ export class LlamaRuntime implements Runtime {
     return { kind: "hf", ref: "" };
   }
 
+  private getProfileServerArgs(): ServerArgs {
+    const profileId = getSetting("VLLM_MODEL_PROFILE");
+    const profile = getModelProfile(profileId);
+    return profile?.serverArgs ?? DEFAULT_CUSTOM_SERVER_ARGS;
+  }
+
+  buildCommandLine(modelOverride?: string): string {
+    let model: { kind: "local"; path: string; alias: string } | { kind: "hf"; ref: string };
+    if (modelOverride) {
+      if (existsSync(modelOverride)) {
+        model = {
+          kind: "local",
+          path: modelOverride,
+          alias: slugModelFileName(modelOverride.split(/[\\/]/).pop() ?? "model"),
+        };
+      } else {
+        model = { kind: "hf", ref: modelOverride };
+      }
+    } else {
+      model = this.resolveModel();
+    }
+    // 用户终端直接跑原生命令，不带 macOS PTY 包装。
+    const bin = COMMON_BINARY_PATHS.find((p) => existsSync(p)) ?? "llama-server";
+    return [bin, ...this.buildArgs(model, this.getProfileServerArgs())].join(" ");
+  }
+
   private buildArgs(model:
     | { kind: "local"; path: string; alias: string }
     | { kind: "hf"; ref: string },
@@ -236,9 +264,7 @@ export class LlamaRuntime implements Runtime {
       return { ok: false, error: "Server already running" };
     }
 
-    const profileId = getSetting("VLLM_MODEL_PROFILE");
-    const profile = getModelProfile(profileId);
-    const serverArgs = profile?.serverArgs ?? DEFAULT_CUSTOM_SERVER_ARGS;
+    const serverArgs = this.getProfileServerArgs();
 
     const model = this.resolveModel();
     if (model.kind === "hf" && !model.ref) {

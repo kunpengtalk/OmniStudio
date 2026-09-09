@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, rmSync } from "fs";
 import path from "path";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { conversations, messages } from "./db/schema";
 import { getSetting } from "./db/settings";
@@ -15,7 +15,16 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   images?: string[];
+  tokens?: number | null;
   createdAt: number;
+};
+
+export type ChatStats = {
+  conversationId: number;
+  messageId: number;
+  tokens: number;
+  tokensPerSec: number;
+  elapsedMs: number;
 };
 
 export type Conversation = {
@@ -23,6 +32,9 @@ export type Conversation = {
   title: string;
   app: string;
   modelId: string | null;
+  pinned: number;
+  /** 会话内消息条数（用于判断是否为空会话）。仅 listConversations 填充。 */
+  messageCount?: number;
   createdAt: number;
   updatedAt: number;
 };
@@ -42,6 +54,7 @@ type DoneListener = (payload: {
 
 const chunkListeners = new Set<ChunkListener>();
 const doneListeners = new Set<DoneListener>();
+const statsListeners = new Set<(payload: ChatStats) => void>();
 
 export function onChatChunk(cb: ChunkListener): () => void {
   chunkListeners.add(cb);
@@ -51,6 +64,11 @@ export function onChatChunk(cb: ChunkListener): () => void {
 export function onChatDone(cb: DoneListener): () => void {
   doneListeners.add(cb);
   return () => doneListeners.delete(cb);
+}
+
+export function onChatStats(cb: (payload: ChatStats) => void): () => void {
+  statsListeners.add(cb);
+  return () => statsListeners.delete(cb);
 }
 
 function emitChunk(payload: { conversationId: number; messageId: number; delta: string }) {
@@ -64,6 +82,25 @@ function emitDone(payload: {
   error?: string;
 }) {
   for (const cb of doneListeners) cb(payload);
+}
+
+function emitChatStats(payload: ChatStats) {
+  for (const cb of statsListeners) cb(payload);
+}
+
+/**
+ * 在没有 usage 元数据时估算 token 数：CJK（中日韩）字符约 1 token/字，
+ * 其余字符按 4 字符/token 折算。仅用于展示吞吐量，精确值以 API 的 usage 为准。
+ */
+function estimateTokens(text: string): number {
+  if (!text) return 0;
+  let cjk = 0;
+  let other = 0;
+  for (const ch of text) {
+    if (/[\u4e00-\u9fff\u3400-\u4dbf\uF900-\uFAFF\u3040-\u30ff\uac00-\ud7af]/.test(ch)) cjk++;
+    else other++;
+  }
+  return cjk + Math.ceil(other / 4);
 }
 
 const IMAGE_MEDIA_TYPES: Record<string, string> = {
@@ -149,7 +186,16 @@ function buildOpenAiMessages(history: ChatMessage[]): { role: string; content: u
 export function listConversations(app?: string): Conversation[] {
   const q = db.select().from(conversations);
   const filtered = app ? q.where(eq(conversations.app, app)) : q;
-  return filtered.orderBy(desc(conversations.updatedAt)).all() as Conversation[];
+  const rows = filtered
+    .orderBy(desc(conversations.pinned), desc(conversations.updatedAt))
+    .all() as Conversation[];
+  const counts = db
+    .select({ conversationId: messages.conversationId, count: sql<number>`count(*)`.as("count") })
+    .from(messages)
+    .groupBy(messages.conversationId)
+    .all();
+  const countMap = new Map(counts.map((c) => [c.conversationId, c.count]));
+  return rows.map((r) => ({ ...r, messageCount: countMap.get(r.id) ?? 0 }));
 }
 
 export function getConversation(id: number): {
@@ -182,6 +228,38 @@ export function deleteConversation(id: number): void {
   db.delete(conversations).where(eq(conversations.id, id)).run();
   const dir = chatImageDir(id);
   if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+}
+
+export function togglePinConversation(id: number): {
+  ok: boolean;
+  conversation?: Conversation;
+  error?: string;
+} {
+  const conv = db.select().from(conversations).where(eq(conversations.id, id)).get();
+  if (!conv) return { ok: false, error: "Conversation not found" };
+  const pinned = conv.pinned ? 0 : 1;
+  const updated = db
+    .update(conversations)
+    .set({ pinned, updatedAt: Date.now() })
+    .where(eq(conversations.id, id))
+    .returning()
+    .get();
+  return { ok: true, conversation: updated as Conversation };
+}
+
+export function setConversationPinned(id: number, pinned: boolean): {
+  ok: boolean;
+  conversation?: Conversation;
+  error?: string;
+} {
+  const updated = db
+    .update(conversations)
+    .set({ pinned: pinned ? 1 : 0, updatedAt: Date.now() })
+    .where(eq(conversations.id, id))
+    .returning()
+    .get();
+  if (!updated) return { ok: false, error: "Conversation not found" };
+  return { ok: true, conversation: updated as Conversation };
 }
 
 export function getHistory(conversationId: number): ChatMessage[] {
@@ -231,56 +309,32 @@ async function ensureServerReady(timeoutMs = 180_000): Promise<{ ok: boolean; er
   return { ok: false, error: "Timed out waiting for the inference server to start" };
 }
 
-export async function sendMessage(
-  conversationId: number,
-  content: string,
-  images: string[] = [],
-): Promise<{ ok: boolean; error?: string }> {
-  const conv = db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
-  if (!conv) return { ok: false, error: "Conversation not found" };
-  if (!content.trim() && images.length === 0) return { ok: false, error: "Empty message" };
+/**
+ * 流式执行一次模型推理并把结果写到已插入的 assistant 消息行。
+ * 供发消息 / 重新生成 / 翻译 共用；结束后按 API usage（缺失时估算）发出 chatStats。
+ */
+async function streamAssistantReply(opts: {
+  conversationId: number;
+  assistantId: number;
+  payloadMessages: { role: string; content: unknown }[];
+}): Promise<{ ok: boolean; error?: string; content: string }> {
+  const { conversationId, assistantId, payloadMessages } = opts;
 
   const model = getChatModelName();
-  if (!model) {
-    emitDone({ conversationId, messageId: Date.now(), content: "", error: "No model configured" });
-    return { ok: false, error: "No model configured" };
-  }
   const base = getChatBaseUrl();
-  if (!base) {
-    emitDone({
-      conversationId,
-      messageId: Date.now(),
-      content: "",
-      error: "No inference server configured",
-    });
-    return { ok: false, error: "No inference server configured" };
-  }
-
-  const existingCount = getHistory(conversationId).length;
-
-  db.insert(messages)
-    .values({
-      conversationId,
-      role: "user",
-      content,
-      images: images.length ? JSON.stringify(images) : undefined,
-    })
-    .run();
-
-  if (existingCount === 0) {
-    const title = (content.trim() || images.join(" ")).trim().slice(0, 40) || "New conversation";
+  if (!model || !base) {
+    const errMsg = !model ? "No model configured" : "No inference server configured";
+    db.update(messages)
+      .set({ content: `⚠️ ${errMsg}` })
+      .where(eq(messages.id, assistantId))
+      .run();
     db.update(conversations)
-      .set({ title })
+      .set({ updatedAt: Date.now() })
       .where(eq(conversations.id, conversationId))
       .run();
+    emitDone({ conversationId, messageId: assistantId, content: "", error: errMsg });
+    return { ok: false, error: errMsg, content: "" };
   }
-
-  const assistant = db
-    .insert(messages)
-    .values({ conversationId, role: "assistant", content: "" })
-    .returning({ id: messages.id })
-    .get();
-  const assistantId = assistant.id;
 
   // 本地模式下若推理服务器未就绪，先自动启动并等待就绪（进度通过 serverStatusChanged 推送）。
   if (getSetting("SERVER_MODE") === "local") {
@@ -296,7 +350,7 @@ export async function sendMessage(
         .where(eq(conversations.id, conversationId))
         .run();
       emitDone({ conversationId, messageId: assistantId, content: "", error: errMsg });
-      return { ok: false, error: errMsg };
+      return { ok: false, error: errMsg, content: "" };
     }
   }
 
@@ -306,7 +360,7 @@ export async function sendMessage(
 
   const payload = {
     model,
-    messages: buildOpenAiMessages(getHistory(conversationId)),
+    messages: payloadMessages,
     stream: true,
   };
 
@@ -320,6 +374,8 @@ export async function sendMessage(
     emitChunk({ conversationId, messageId: assistantId, delta });
   };
 
+  const startedAt = performance.now();
+  let usage: { prompt_tokens?: number; completion_tokens?: number } | undefined;
   try {
     const res = await fetch(`${base}/v1/chat/completions`, {
       method: "POST",
@@ -347,7 +403,6 @@ export async function sendMessage(
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    let usage: { prompt_tokens?: number; completion_tokens?: number } | undefined;
 
     const consumeLine = (line: string) => {
       const trimmed = line.trim();
@@ -406,18 +461,186 @@ export async function sendMessage(
       .where(eq(conversations.id, conversationId))
       .run();
     emitDone({ conversationId, messageId: assistantId, content: "", error: msg });
-    return { ok: false, error: msg };
+    return { ok: false, error: msg, content: "" };
   }
 
-  if (full) {
-    db.update(messages).set({ content: full }).where(eq(messages.id, assistantId)).run();
-  }
+  const tokens = usage?.completion_tokens ?? estimateTokens(full);
+  const elapsedMs = Math.max(1, performance.now() - startedAt);
+  const tokensPerSec = Math.round((tokens / (elapsedMs / 1000)) * 10) / 10;
 
+  db.update(messages)
+    .set({ content: full, tokens })
+    .where(eq(messages.id, assistantId))
+    .run();
   db.update(conversations)
     .set({ updatedAt: Date.now() })
     .where(eq(conversations.id, conversationId))
     .run();
 
+  emitChatStats({ conversationId, messageId: assistantId, tokens, tokensPerSec, elapsedMs });
   emitDone({ conversationId, messageId: assistantId, content: full });
+  return { ok: true, content: full };
+}
+
+export async function sendMessage(
+  conversationId: number,
+  content: string,
+  images: string[] = [],
+): Promise<{ ok: boolean; error?: string }> {
+  const conv = db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
+  if (!conv) return { ok: false, error: "Conversation not found" };
+  if (!content.trim() && images.length === 0) return { ok: false, error: "Empty message" };
+
+  const model = getChatModelName();
+  if (!model) {
+    emitDone({ conversationId, messageId: Date.now(), content: "", error: "No model configured" });
+    return { ok: false, error: "No model configured" };
+  }
+  const base = getChatBaseUrl();
+  if (!base) {
+    emitDone({
+      conversationId,
+      messageId: Date.now(),
+      content: "",
+      error: "No inference server configured",
+    });
+    return { ok: false, error: "No inference server configured" };
+  }
+
+  const existingCount = getHistory(conversationId).length;
+
+  db.insert(messages)
+    .values({
+      conversationId,
+      role: "user",
+      content,
+      images: images.length ? JSON.stringify(images) : undefined,
+    })
+    .run();
+
+  if (existingCount === 0) {
+    const title = (content.trim() || images.join(" ")).trim().slice(0, 40) || "New conversation";
+    db.update(conversations)
+      .set({ title })
+      .where(eq(conversations.id, conversationId))
+      .run();
+  }
+
+  const assistant = db
+    .insert(messages)
+    .values({ conversationId, role: "assistant", content: "" })
+    .returning({ id: messages.id })
+    .get();
+
+  const result = await streamAssistantReply({
+    conversationId,
+    assistantId: assistant.id,
+    payloadMessages: buildOpenAiMessages(getHistory(conversationId)),
+  });
+  return { ok: result.ok, error: result.error };
+}
+
+/** 删除单条消息（连同其附件图片文件）。 */
+export function deleteMessage(conversationId: number, messageId: number): { ok: boolean } {
+  const row = db.select().from(messages).where(eq(messages.id, messageId)).get();
+  if (!row || row.conversationId !== conversationId) return { ok: false };
+  for (const ref of parseImages(row)) {
+    const filePath = resolveChatImagePath(ref);
+    if (filePath && existsSync(filePath)) rmSync(filePath, { force: true });
+  }
+  db.delete(messages).where(eq(messages.id, messageId)).run();
+  db.update(conversations)
+    .set({ updatedAt: Date.now() })
+    .where(eq(conversations.id, conversationId))
+    .run();
   return { ok: true };
+}
+
+/**
+ * 重新生成一条助手消息：回退到该条之前（删除它及之后的所有消息），
+ * 用同样的上文重新请求一次并把新结果流式写回。
+ */
+export async function regenerateMessage(
+  conversationId: number,
+  messageId: number,
+): Promise<{ ok: boolean; error?: string }> {
+  const target = db.select().from(messages).where(eq(messages.id, messageId)).get();
+  if (!target || target.role !== "assistant") return { ok: false, error: "Message not found" };
+
+  const history = getHistory(conversationId);
+  const context = history.filter((m) => m.id < messageId);
+  if (context.length === 0) return { ok: false, error: "Nothing to regenerate" };
+
+  // 回退：删除目标消息及之后的所有消息（含附件图片）。
+  for (const m of history) {
+    if (m.id >= messageId) deleteMessage(conversationId, m.id);
+  }
+
+  const assistant = db
+    .insert(messages)
+    .values({ conversationId, role: "assistant", content: "" })
+    .returning({ id: messages.id })
+    .get();
+
+  const result = await streamAssistantReply({
+    conversationId,
+    assistantId: assistant.id,
+    payloadMessages: buildOpenAiMessages(context),
+  });
+  return { ok: result.ok, error: result.error };
+}
+
+const TARGET_LANG_LABEL: Record<string, string> = {
+  "zh-CN": "简体中文",
+  "zh-TW": "繁體中文",
+  en: "English",
+  ja: "日本語",
+  ko: "한국어",
+  fr: "français",
+  de: "Deutsch",
+};
+
+/** 翻译一条消息：把原文（含可能的图片）发给模型，译文作为新消息流式追加。 */
+export async function translateMessage(
+  conversationId: number,
+  messageId: number,
+  targetLang = "zh-CN",
+): Promise<{ ok: boolean; error?: string }> {
+  const source = db.select().from(messages).where(eq(messages.id, messageId)).get();
+  if (!source || source.conversationId !== conversationId) {
+    return { ok: false, error: "Message not found" };
+  }
+
+  const langLabel = TARGET_LANG_LABEL[targetLang] ?? targetLang;
+  const instruction = `请把下面的内容翻译成${langLabel}。只输出译文本身，不要附带任何解释、说明或原文。`;
+
+  const parts: { type: string; text?: string; image_url?: { url: string } }[] = [
+    { type: "text", text: source.content || "（空消息）" },
+  ];
+  for (const ref of parseImages(source)) {
+    const img = readImageFile(ref);
+    if (img) {
+      parts.push({
+        type: "image_url",
+        image_url: { url: `data:${img.mediaType};base64,${img.base64}` },
+      });
+    }
+  }
+  const payloadMessages: { role: string; content: unknown }[] = [
+    { role: "system", content: instruction },
+    { role: "user", content: parts.length === 1 ? parts[0]?.text ?? "" : parts },
+  ];
+
+  const assistant = db
+    .insert(messages)
+    .values({ conversationId, role: "assistant", content: "" })
+    .returning({ id: messages.id })
+    .get();
+
+  const result = await streamAssistantReply({
+    conversationId,
+    assistantId: assistant.id,
+    payloadMessages,
+  });
+  return { ok: result.ok, error: result.error };
 }

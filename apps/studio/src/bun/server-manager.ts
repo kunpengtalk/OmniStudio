@@ -1,4 +1,6 @@
-import { getRuntime, getActiveEngine } from "./runtimes";
+import { existsSync } from "fs";
+import { resolveEngineForModel } from "../shared/modelscope";
+import { getRuntime, getActiveEngine, createRuntime, type InferenceEngine } from "./runtimes";
 import type { Runtime } from "./runtimes";
 import type { LogListener, StatusListener } from "./runtimes/types";
 import { extractStartupError } from "./runtimes/errors";
@@ -83,6 +85,23 @@ export function clearLogs() {
 
 export function checkBinaryExists() {
   return getBoundRuntime().checkBinary();
+}
+
+/**
+ * Command line that would launch the inference server. For a local file,
+ * uses the engine that can actually load it (may differ from the active
+ * engine — built with a fresh unattached runtime so the live server is
+ * untouched); otherwise the active model with the active engine.
+ */
+export function getLaunchCommand(modelOverride?: string): { command: string; engine: InferenceEngine } {
+  const active = getActiveEngine();
+  if (modelOverride && existsSync(modelOverride)) {
+    const fileName = modelOverride.split(/[\\/]/).pop() ?? modelOverride;
+    const engine = resolveEngineForModel(fileName, active);
+    const runtime = engine === active ? getBoundRuntime() : createRuntime(engine);
+    return { command: runtime.buildCommandLine(modelOverride), engine };
+  }
+  return { command: getBoundRuntime().buildCommandLine(modelOverride), engine: active };
 }
 
 export async function startServer() {

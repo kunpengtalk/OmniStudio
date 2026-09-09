@@ -1,6 +1,9 @@
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "fs";
 import path from "path";
 import { Utils } from "electrobun/bun";
+import { isModelWeightExt, safeRepoId } from "../shared/modelscope";
+
+export { isModelWeightExt, safeRepoId };
 
 const MODELSCOPE_BASE = "https://modelscope.cn";
 const OPENAPI_BASE = `${MODELSCOPE_BASE}/openapi/v1`;
@@ -30,23 +33,6 @@ export type ModelScopeFile = {
   /** 是否为模型权重文件（可用于任一推理引擎加载） */
   isWeight: boolean;
 };
-
-const MODEL_WEIGHT_EXTS = [
-  ".gguf",
-  ".safetensors",
-  ".bin",
-  ".pt",
-  ".pth",
-  ".ckpt",
-  ".onnx",
-  ".ggml",
-];
-
-/** True when the file name is a model weight (usable by llama.cpp / vLLM / SGLang). */
-export function isModelWeightExt(name: string): boolean {
-  const n = name.toLowerCase();
-  return MODEL_WEIGHT_EXTS.some((ext) => n.endsWith(ext));
-}
 
 function fileKind(name: string): ModelScopeFile["kind"] {
   const n = name.toLowerCase();
@@ -81,10 +67,6 @@ function migrateLegacyCwdDir(legacyName: string, dest: string): void {
   } catch {
     // ignore — data inside a wiped bundle dir is already unrecoverable
   }
-}
-
-export function safeRepoId(repo: string): string {
-  return repo.replace(/[/\\:\s]+/g, "__");
 }
 
 export function splitRepo(repo: string): { owner: string; name: string } {

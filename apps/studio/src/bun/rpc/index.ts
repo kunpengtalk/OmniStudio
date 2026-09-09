@@ -12,8 +12,11 @@ import { processDocumentPages } from "../queue";
 import { updateState, type UpdateInfo } from "../updates";
 import * as ServerManager from "../server-manager";
 import type { ServerStatus } from "../server-manager";
+import * as Gateway from "../gateway";
+import type { GatewayStatus } from "../gateway";
+import { getSetupEnvironment, type SetupEnvironment } from "../setup-env";
 import * as Chat from "../chat";
-import type { Conversation, ChatMessage } from "../chat";
+import type { Conversation, ChatMessage, ChatStats } from "../chat";
 import { listChatModels, selectChatModel, type ChatModelOption } from "../chat-model";
 import * as ModelScope from "../modelscope";
 import type { ModelScopeModel, ModelScopeFile } from "../modelscope";
@@ -86,9 +89,17 @@ export type AppRPC = {
         params: { baseUrl?: string; apiKey?: string } | undefined;
         response: { connected: boolean; error?: string };
       };
+      listRemoteModels: {
+        params: { baseUrl?: string; apiKey?: string } | undefined;
+        response: { ok: boolean; models: string[]; error?: string };
+      };
       checkLlamaServer: {
         params: undefined;
         response: { found: boolean; path?: string };
+      };
+      getSetupEnvironment: {
+        params: undefined;
+        response: SetupEnvironment;
       };
       startServer: {
         params: undefined;
@@ -113,6 +124,40 @@ export type AppRPC = {
       clearServerLogs: {
         params: undefined;
         response: { ok: boolean };
+      };
+      getGatewayStatus: {
+        params: undefined;
+        response: {
+          enabled: boolean;
+          status: GatewayStatus;
+          host: string;
+          port: number;
+          configuredPort?: number;
+          url: string;
+          upstreamStatus: ServerStatus;
+          error?: string;
+          notice?: string;
+        };
+      };
+      startGateway: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      stopGateway: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      restartGateway: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      openGatewayDocs: {
+        params: { url: string };
+        response: { ok: boolean };
+      };
+      getLaunchCommand: {
+        params: { path?: string };
+        response: { command: string; engine: string };
       };
       getDocuments: {
         params: { limit?: number; offset?: number; search?: string } | undefined;
@@ -179,8 +224,28 @@ export type AppRPC = {
         params: { id: number };
         response: { ok: boolean };
       };
+      togglePinConversation: {
+        params: { id: number };
+        response: { ok: boolean; conversation?: Conversation; error?: string };
+      };
+      setConversationPinned: {
+        params: { id: number; pinned: boolean };
+        response: { ok: boolean; conversation?: Conversation; error?: string };
+      };
       sendChatMessage: {
         params: { conversationId: number; content: string; images?: string[] };
+        response: { ok: boolean; error?: string };
+      };
+      deleteMessage: {
+        params: { conversationId: number; messageId: number };
+        response: { ok: boolean };
+      };
+      regenerateMessage: {
+        params: { conversationId: number; messageId: number };
+        response: { ok: boolean; error?: string };
+      };
+      translateMessage: {
+        params: { conversationId: number; messageId: number; targetLang?: string };
         response: { ok: boolean; error?: string };
       };
       listChatModels: {
@@ -488,6 +553,7 @@ export type AppRPC = {
       serverStatusChanged: { status: ServerStatus };
       chatChunk: { conversationId: number; messageId: number; delta: string };
       chatDone: { conversationId: number; messageId: number; content: string; error?: string };
+      chatStats: ChatStats;
       modelDownloadProgress: {
         repo: string;
         fileName: string;
@@ -495,6 +561,9 @@ export type AppRPC = {
       };
       downloadsChanged: {
         tasks: DownloadTask[];
+      };
+      gatewayStatusChanged: {
+        status: GatewayStatus;
       };
     };
   }>;
@@ -530,8 +599,35 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         }
       },
 
+      // 拉取该 Key 有权限的远程模型列表（OpenAI 兼容 GET /models）
+      listRemoteModels: async (params) => {
+        try {
+          const baseUrl = (params?.baseUrl ?? getSetting("VLLM_API_BASE") ?? "").replace(/\/+$/, "");
+          const apiKey = params?.apiKey ?? getSetting("VLLM_API_KEY");
+          if (!baseUrl) return { ok: false, models: [], error: "缺少 Base URL" };
+          const res = await fetch(`${baseUrl}/models`, {
+            headers: apiKey && apiKey !== "EMPTY" ? { Authorization: `Bearer ${apiKey}` } : {},
+            signal: AbortSignal.timeout(15000),
+          });
+          if (!res.ok) return { ok: false, models: [], error: `请求失败：HTTP ${res.status}` };
+          // OpenAI 兼容返回 { data: [{id}] }，个别厂商用 { models: [...] }
+          const data = (await res.json()) as { data?: { id?: unknown }[]; models?: { id?: unknown }[] };
+          const items = data.data ?? data.models ?? [];
+          const models = Array.from(
+            new Set(items.map((m) => (typeof m?.id === "string" ? m.id : "")).filter(Boolean)),
+          ).sort();
+          return { ok: true, models };
+        } catch (e) {
+          return { ok: false, models: [], error: String(e) };
+        }
+      },
+
       checkLlamaServer: async () => {
         return ServerManager.checkBinaryExists();
+      },
+
+      getSetupEnvironment: async () => {
+        return getSetupEnvironment();
       },
 
       startServer: async () => {
@@ -560,9 +656,52 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return getServerStats();
       },
 
+      getLaunchCommand: async ({ path }) => {
+        return ServerManager.getLaunchCommand(path);
+      },
+
       clearServerLogs: async () => {
         ServerManager.clearLogs();
         return { ok: true };
+      },
+
+      getGatewayStatus: async () => {
+        const info = Gateway.getGatewayStatus();
+        return {
+          enabled: Gateway.isGatewayEnabled(),
+          status: info.status,
+          host: info.host,
+          port: info.port,
+          configuredPort: info.configuredPort,
+          url: info.url,
+          upstreamStatus: ServerManager.getStatus(),
+          error: info.error,
+          notice: info.notice,
+        };
+      },
+
+      startGateway: async () => Gateway.startGateway(),
+
+      stopGateway: async () => {
+        await Gateway.stopGateway();
+        return { ok: true };
+      },
+
+      restartGateway: async () => Gateway.restartGateway(),
+
+      openGatewayDocs: async ({ url }) => {
+        try {
+          const cmd =
+            process.platform === "darwin"
+              ? ["open", url]
+              : process.platform === "win32"
+                ? ["cmd", "/c", "start", "", url]
+                : ["xdg-open", url];
+          Bun.spawn(cmd, { stdout: "ignore", stderr: "ignore" });
+          return { ok: true };
+        } catch {
+          return { ok: false };
+        }
       },
 
       getDocuments: async (params) => {
@@ -793,8 +932,28 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { ok: true };
       },
 
+      togglePinConversation: async ({ id }) => {
+        return Chat.togglePinConversation(id);
+      },
+
+      setConversationPinned: async ({ id, pinned }) => {
+        return Chat.setConversationPinned(id, pinned);
+      },
+
       sendChatMessage: async ({ conversationId, content, images }) => {
         return Chat.sendMessage(conversationId, content, images ?? []);
+      },
+
+      deleteMessage: async ({ conversationId, messageId }) => {
+        return Chat.deleteMessage(conversationId, messageId);
+      },
+
+      regenerateMessage: async ({ conversationId, messageId }) => {
+        return Chat.regenerateMessage(conversationId, messageId);
+      },
+
+      translateMessage: async ({ conversationId, messageId, targetLang }) => {
+        return Chat.translateMessage(conversationId, messageId, targetLang);
       },
 
       listChatModels: async () => {
@@ -1245,6 +1404,11 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
       win.webview.rpc?.send.chatDone(payload);
     } catch {}
   });
+  Chat.onChatStats((payload) => {
+    try {
+      win.webview.rpc?.send.chatStats(payload);
+    } catch {}
+  });
 }
 
 export function initModelDownloadBroadcast(win: BrowserWindowWithRPC) {
@@ -1256,6 +1420,14 @@ export function initModelDownloadBroadcast(win: BrowserWindowWithRPC) {
   downloadManager.onTasksChanged(() => {
     try {
       win.webview.rpc?.send.downloadsChanged({ tasks: downloadManager.list() });
+    } catch {}
+  });
+}
+
+export function initGatewayBroadcast(win: BrowserWindowWithRPC) {
+  Gateway.onGatewayStatusChange((status) => {
+    try {
+      win.webview.rpc?.send.gatewayStatusChanged({ status });
     } catch {}
   });
 }

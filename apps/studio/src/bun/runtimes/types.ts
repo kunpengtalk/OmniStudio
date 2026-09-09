@@ -13,6 +13,14 @@ export interface Runtime {
 
   checkBinary(): Promise<BinaryCheckResult>;
 
+  /**
+   * The exact command line that would launch the inference server, using
+   * current settings. `modelOverride` (a local file path or a HF ref) takes
+   * precedence over the currently active model; omit it for the active model.
+   * Used to let users copy the command and run it in their own terminal.
+   */
+  buildCommandLine(modelOverride?: string): string;
+
   start(): Promise<StartResult>;
   stop(): Promise<void>;
   restart(): Promise<StartResult>;

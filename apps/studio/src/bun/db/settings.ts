@@ -80,7 +80,10 @@ export type SettingsKey =
   | "OCR_PROVIDER_BASE"
   | "OCR_PROVIDER_API_KEY"
   | "OCR_PROVIDER_MODEL"
-  | "MODEL_DOWNLOADS";
+  | "MODEL_DOWNLOADS"
+  | "GATEWAY_ENABLED"
+  | "GATEWAY_HOST"
+  | "GATEWAY_PORT";
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
@@ -161,6 +164,9 @@ const DEFAULTS: Record<SettingsKey, string> = {
   OCR_PROVIDER_API_KEY: "",
   OCR_PROVIDER_MODEL: "",
   MODEL_DOWNLOADS: "[]",
+  GATEWAY_ENABLED: "1",
+  GATEWAY_HOST: "127.0.0.1",
+  GATEWAY_PORT: "10000",
 };
 
 export function getSetting(key: SettingsKey): string {

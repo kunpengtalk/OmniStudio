@@ -1,19 +1,24 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   SendIcon,
-  PlusIcon,
   BotIcon,
   Loader2Icon,
   ImagePlusIcon,
   XIcon,
   RefreshCwIcon,
   AlertTriangleIcon,
+  CopyIcon,
+  CheckIcon,
+  RotateCcwIcon,
+  LanguagesIcon,
+  Trash2Icon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
 import { Textarea } from "@ui/textarea";
+import type { ChatMessage } from "../../bun/chat";
 import {
   Select,
   SelectContent,
@@ -48,52 +53,204 @@ function MessageImages({ images }: { images: string[] }) {
   );
 }
 
-function MessageBubble({
-  role,
-  content,
-  images,
+function formatTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+/** 消息下方的操作栏：吞吐统计 + 复制 / 重新生成 / 翻译 / 删除。 */
+function MessageActionBar({
+  message,
+  isStreamingMessage,
 }: {
-  role: "user" | "assistant";
-  content: string;
-  images?: string[];
+  message: ChatMessage;
+  isStreamingMessage: boolean;
 }) {
   const t = useT();
+  const queryClient = useQueryClient();
+  const streaming = useChatStore((s) => s.streaming);
+  const stats = useChatStore((s) => s.messageStats[message.id]);
+  const [copied, setCopied] = useState(false);
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["conversations"] });
+    queryClient.invalidateQueries({ queryKey: ["conversation", message.conversationId] });
+  };
+
+  const deleteMutation = useMutation({
+    mutationFn: () =>
+      rpcClient.deleteMessage({
+        conversationId: message.conversationId,
+        messageId: message.id,
+      }),
+    onSuccess: () => {
+      useChatStore.getState().removeMessage(message.conversationId, message.id);
+      invalidate();
+    },
+  });
+
+  const regenerateMutation = useMutation({
+    // 后端会流式写回新消息；先本地回退到这条之前，避免旧内容残留。
+    onMutate: () => {
+      useChatStore.getState().rewindMessages(message.conversationId, message.id);
+      useChatStore.getState().setStreaming(true);
+    },
+    mutationFn: () =>
+      rpcClient.regenerateMessage({
+        conversationId: message.conversationId,
+        messageId: message.id,
+      }),
+    onSuccess: invalidate,
+    onError: () => {
+      useChatStore.getState().setStreaming(false);
+      invalidate();
+    },
+  });
+
+  const translateMutation = useMutation({
+    onMutate: () => useChatStore.getState().setStreaming(true),
+    mutationFn: () =>
+      rpcClient.translateMessage({
+        conversationId: message.conversationId,
+        messageId: message.id,
+        targetLang: "zh-CN",
+      }),
+    onSuccess: invalidate,
+    onError: () => {
+      useChatStore.getState().setStreaming(false);
+      invalidate();
+    },
+  });
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard unavailable — ignore
+    }
+  };
+
+  // 实时统计优先；刷新页面后只有持久化的 token 数，速度无法复现。
+  const speedLabel = stats
+    ? `${stats.tokensPerSec.toFixed(1)} tok/s · ${formatTokens(stats.tokens)} tokens`
+    : message.tokens != null
+      ? `${formatTokens(message.tokens)} tokens`
+      : null;
+
+  const disabled = streaming;
+
+  const iconBtn = (tooltip: string, onClick: () => void, icon: ReactNode, extraDisabled = false) => (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      tooltip={tooltip}
+      onClick={onClick}
+      disabled={disabled || extraDisabled}
+      className="size-6 text-muted-foreground/80 hover:text-foreground"
+    >
+      {icon}
+    </Button>
+  );
+
+  return (
+    <div
+      className={cn(
+        "mt-1.5 flex items-center gap-0.5",
+        message.role === "user" && "justify-end",
+      )}
+    >
+      {message.role === "assistant" && speedLabel && (
+        <span className="mr-1.5 text-[10px] tabular-nums text-muted-foreground/70">
+          {speedLabel}
+        </span>
+      )}
+      {iconBtn(
+        copied ? t("chat.copied") : t("chat.copy"),
+        handleCopy,
+        copied ? <CheckIcon className="size-3.5 text-emerald-500" /> : <CopyIcon className="size-3.5" />,
+        !message.content,
+      )}
+      {message.role === "assistant" &&
+        iconBtn(
+          t("chat.regenerate"),
+          () => regenerateMutation.mutate(),
+          regenerateMutation.isPending ? (
+            <Loader2Icon className="size-3.5 animate-spin" />
+          ) : (
+            <RotateCcwIcon className="size-3.5" />
+          ),
+          isStreamingMessage,
+        )}
+      {iconBtn(
+        t("chat.translate"),
+        () => translateMutation.mutate(),
+        translateMutation.isPending ? (
+          <Loader2Icon className="size-3.5 animate-spin" />
+        ) : (
+          <LanguagesIcon className="size-3.5" />
+        ),
+        !message.content,
+      )}
+      {iconBtn(
+        t("chat.delete"),
+        () => deleteMutation.mutate(),
+        <Trash2Icon className="size-3.5" />,
+        isStreamingMessage,
+      )}
+    </div>
+  );
+}
+
+function MessageBubble({
+  message,
+  isStreamingMessage,
+}: {
+  message: ChatMessage;
+  isStreamingMessage: boolean;
+}) {
+  const t = useT();
+  const { role, content, images } = message;
   // 后端把启动失败持久化为 "⚠️ <raw error>"，这里补一行本地化的可操作提示。
   const rawError = role === "assistant" ? persistedErrorMessage(content) : null;
   const errorHint = rawError !== null ? serverErrorHint(t, rawError) : null;
 
-  if (role === "user") {
-    return (
-      <div className="flex justify-end">
+  return (
+    <div
+      className={cn(
+        "flex flex-col",
+        role === "user" ? "items-end" : "items-start",
+      )}
+    >
+      {role === "user" ? (
         <div className="max-w-[75%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm text-primary-foreground whitespace-pre-wrap">
           <MessageImages images={images ?? []} />
           {content}
         </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex gap-3">
-      <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted">
-        <BotIcon className="size-4 text-muted-foreground" />
-      </div>
-      <div className="min-w-0 max-w-[85%] flex-1 rounded-2xl rounded-tl-md border bg-card px-4 py-2.5">
-        {content ? (
-          <Markdown content={content} />
-        ) : (
-          <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground">
-            <Loader2Icon className="size-3.5 animate-spin" />
-            Thinking…
+      ) : (
+        <div className="flex gap-3">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted">
+            <BotIcon className="size-4 text-muted-foreground" />
           </div>
-        )}
-        {errorHint && (
-          <p className="mt-2 flex items-start gap-1.5 rounded-lg bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
-            <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
-            <span className="min-w-0 break-words">{errorHint}</span>
-          </p>
-        )}
-      </div>
+          <div className="min-w-0 max-w-[85%] flex-1 rounded-2xl rounded-tl-md border bg-card px-4 py-2.5">
+            {content ? (
+              <Markdown content={content} />
+            ) : (
+              <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground">
+                <Loader2Icon className="size-3.5 animate-spin" />
+                Thinking…
+              </div>
+            )}
+            {errorHint && (
+              <p className="mt-2 flex items-start gap-1.5 rounded-lg bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
+                <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                <span className="min-w-0 break-words">{errorHint}</span>
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+      <MessageActionBar message={message} isStreamingMessage={isStreamingMessage} />
     </div>
   );
 }
@@ -158,7 +315,7 @@ function ModelPicker() {
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       <Select
-        value={current || undefined}
+        value={current}
         onValueChange={handleChange}
         disabled={busy || streaming}
       >
@@ -349,7 +506,13 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
             </div>
           ) : (
             activeMessages.map((m) => (
-              <MessageBubble key={m.id} role={m.role} content={m.content} images={m.images} />
+              <MessageBubble
+                key={m.id}
+                message={m}
+                isStreamingMessage={
+                  streaming && m.id === activeMessages[activeMessages.length - 1]?.id
+                }
+              />
             ))
           )}
         </div>
@@ -470,29 +633,50 @@ export function ChatWindow() {
     },
   });
 
+  const conversationsQuery = useQuery({
+    queryKey: ["conversations", activeApp],
+    queryFn: () => rpcClient.listConversations({ app: activeApp }),
+  });
+
+  // 进入对话时：优先打开一个已有的“空会话”（没有消息的），仅在没有空会话时才新建。
+  // 避免反复进入对话页积累一大堆空白 session。
+  useEffect(() => {
+    if (activeConversationId != null) return;
+    if (conversationsQuery.isLoading && !conversationsQuery.data) return;
+    const empty = conversationsQuery.data?.conversations?.find(
+      (c) => (c.messageCount ?? 0) === 0,
+    );
+    if (empty) {
+      useChatStore.getState().setActiveConversation(empty.id);
+      useChatStore.getState().setActiveMessages([]);
+      useChatStore.getState().setStreaming(false);
+    } else if (!createMutation.isPending) {
+      createMutation.mutate();
+    }
+  }, [
+    activeConversationId,
+    activeApp,
+    conversationsQuery,
+    conversationsQuery.isLoading,
+    createMutation.isPending,
+  ]);
+
   return (
     <div className="flex min-w-0 flex-1">
       {activeConversationId ? (
         <ChatMessages conversationId={activeConversationId} />
       ) : (
         <div className="flex flex-1 items-center justify-center">
-          <div className="flex flex-col items-center gap-2 text-center">
-            <div className="flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-              <BotIcon className="size-7" />
+          {createMutation.isPending ? (
+            <Loader2Icon className="size-6 animate-spin text-muted-foreground" />
+          ) : (
+            <div className="flex flex-col items-center gap-2 text-center">
+              <div className="flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                <BotIcon className="size-7" />
+              </div>
+              <p className="text-sm font-medium">{t("chat.placeholder.new")}</p>
             </div>
-            <p className="text-sm font-medium">{t("chat.placeholder.new")}</p>
-            <p className="max-w-xs text-xs text-muted-foreground">
-              {t("chat.selectConversation")}
-            </p>
-            <Button className="mt-2" onClick={() => createMutation.mutate()} disabled={createMutation.isPending}>
-              {createMutation.isPending ? (
-                <Loader2Icon data-icon="inline-start" className="animate-spin" />
-              ) : (
-                <PlusIcon data-icon="inline-start" />
-              )}
-              {t("chat.newChat")}
-            </Button>
-          </div>
+          )}
         </div>
       )}
     </div>

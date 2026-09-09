@@ -41,6 +41,11 @@ export function getActiveEngine(): InferenceEngine {
   return (getSetting("INFERENCE_ENGINE") as InferenceEngine) || "llama.cpp";
 }
 
+/** Fresh, unattached runtime instance for `engine` (e.g. command previews; never spawns a process). */
+export function createRuntime(engine: InferenceEngine): Runtime {
+  return runtimes[engine]();
+}
+
 export function setRuntime(runtime: Runtime) {
   activeRuntime = runtime;
 }

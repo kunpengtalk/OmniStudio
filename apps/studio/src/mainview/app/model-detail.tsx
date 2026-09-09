@@ -23,7 +23,7 @@ import { useRouter } from "@stores/router";
 import { useModelDetailStore } from "@stores/model-detail";
 import { useModelDownloadStore } from "@stores/model-download";
 import { useT } from "@stores/ui-lang";
-import { classifyModel, engineSupports } from "../../shared/modelscope";
+import { classifyModel, engineSupports, matchQuant } from "../../shared/modelscope";
 import type { ModelFileKind, ModelScopeFile } from "../../shared/modelscope";
 import { cn } from "@/mainview/lib/utils";
 
@@ -39,12 +39,6 @@ function formatParams(params: number): string {
   if (params >= 1e9) return `${(params / 1e9).toFixed(1)}B`;
   if (params >= 1e6) return `${(params / 1e6).toFixed(0)}M`;
   return String(params);
-}
-
-function matchQuant(fileName: string, quant: string): boolean {
-  const a = fileName.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const b = quant.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return b.length > 0 && a.includes(b);
 }
 
 const FORMAT_CLS: Record<ModelScopeFile["kind"], string> = {

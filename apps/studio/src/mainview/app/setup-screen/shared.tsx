@@ -102,6 +102,7 @@ export function LocalStartStep({
   serverStatus,
   serverLogs,
   startError,
+  title = "llama-server",
 }: {
   onBack: () => void;
   onStart: () => void;
@@ -109,6 +110,7 @@ export function LocalStartStep({
   serverStatus: string;
   serverLogs: string;
   startError?: string;
+  title?: string;
 }) {
   const [started, setStarted] = useState(false);
 
@@ -131,7 +133,7 @@ export function LocalStartStep({
           className="max-h-52"
         >
           <TerminalHeader>
-            <TerminalTitle>llama-server</TerminalTitle>
+            <TerminalTitle>{title}</TerminalTitle>
             <div className="flex items-center gap-2">
               <StatusBadge status={serverStatus} />
             </div>
@@ -142,27 +144,35 @@ export function LocalStartStep({
 
       {isFailed && startError && <p className="text-xs text-destructive">{startError}</p>}
 
-      <div className="flex gap-2">
-        <Button variant="outline" size="sm" onClick={onBack} disabled={isLoading}>
-          <ArrowLeftIcon data-icon="inline-start" />
-          Back
-        </Button>
-        {!started ? (
-          <Button className="flex-1" size="sm" onClick={handleStart}>
-            Start Server
+      <div className="flex flex-col gap-2">
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={onBack} disabled={isLoading}>
+            <ArrowLeftIcon data-icon="inline-start" />
+            Back
           </Button>
-        ) : isReady ? (
-          <Button className="flex-1" size="sm" onClick={onComplete}>
-            Get Started
-          </Button>
-        ) : isFailed ? (
-          <Button className="flex-1" size="sm" variant="outline" onClick={handleStart}>
-            Retry
-          </Button>
-        ) : (
-          <Button className="flex-1" size="sm" disabled>
-            <Spinner data-icon="inline-start" />
-            {serverStatus === "downloading" ? "Downloading model..." : "Starting..."}
+          {!started ? (
+            <Button className="flex-1" size="sm" onClick={handleStart}>
+              Start Server
+            </Button>
+          ) : isReady ? (
+            <Button className="flex-1" size="sm" onClick={onComplete}>
+              Get Started
+            </Button>
+          ) : isFailed ? (
+            <Button className="flex-1" size="sm" variant="outline" onClick={handleStart}>
+              Retry
+            </Button>
+          ) : (
+            <Button className="flex-1" size="sm" disabled>
+              <Spinner data-icon="inline-start" />
+              {serverStatus === "downloading" ? "Downloading model..." : "Starting..."}
+            </Button>
+          )}
+        </div>
+        {/* 启动失败 / 卡在下载中时也能直接进入应用，不被引导页困住。 */}
+        {!isReady && (
+          <Button variant="ghost" size="sm" className="self-center" onClick={onComplete}>
+            Skip — enter the app
           </Button>
         )}
       </div>

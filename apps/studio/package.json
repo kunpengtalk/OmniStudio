@@ -63,6 +63,7 @@
     "@vitejs/plugin-react": "catalog:",
     "concurrently": "^9.1.0",
     "drizzle-kit": "^0.31.9",
+    "happy-dom": "^20.14.0",
     "tailwindcss": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:"

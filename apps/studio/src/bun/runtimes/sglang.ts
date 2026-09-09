@@ -184,6 +184,20 @@ export class SglangRuntime implements Runtime {
     return args;
   }
 
+  buildCommandLine(modelOverride?: string): string {
+    let model: string;
+    let servedName: string | undefined;
+    if (modelOverride) {
+      model = modelOverride;
+    } else {
+      const resolved = this.resolveModel();
+      model = resolved.model;
+      servedName = resolved.servedName;
+    }
+    const python = Bun.which("python3") ?? Bun.which("python") ?? "python3";
+    return [python, ...this.buildArgs(model, servedName)].join(" ");
+  }
+
   async start(): Promise<StartResult> {
     if (this.serverStatus === "running" || this.serverStatus === "starting" || this.serverStatus === "downloading") {
       return { ok: false, error: "Server already running" };

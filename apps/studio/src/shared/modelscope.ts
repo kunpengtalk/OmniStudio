@@ -54,6 +54,35 @@ export function repoFormatHint(repoId: string): ModelFileKind | "unknown" {
   return "unknown";
 }
 
+/** Directory name used for a downloaded repo under the models base dir. */
+export function safeRepoId(repo: string): string {
+  return repo.replace(/[/\\:\s]+/g, "__");
+}
+
+const MODEL_WEIGHT_EXTS = [
+  ".gguf",
+  ".safetensors",
+  ".bin",
+  ".pt",
+  ".pth",
+  ".ckpt",
+  ".onnx",
+  ".ggml",
+];
+
+/** True when the file name is a model weight (usable by llama.cpp / vLLM / SGLang). */
+export function isModelWeightExt(name: string): boolean {
+  const n = name.toLowerCase();
+  return MODEL_WEIGHT_EXTS.some((ext) => n.endsWith(ext));
+}
+
+/** Fuzzy quantization match: "Q4_K_M" matches "Qwen3-4B-Q4_K_M.gguf" / "…q4_k_m…". */
+export function matchQuant(fileName: string, quant: string): boolean {
+  const a = fileName.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const b = quant.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return b.length > 0 && a.includes(b);
+}
+
 export type ModelScopeModel = {
   id: string;
   name: string;
@@ -178,6 +207,42 @@ export const MODEL_PRESETS: readonly ChatPreset[] = [
   // 对话 / VLM (GGUF → llama.cpp)
   {
     app: "chat",
+    repo: "unsloth/Qwen3.5-4B-GGUF",
+    label: "Qwen3.5 4B",
+    description: "Qwen3.5 4B 轻量对话模型（GGUF）",
+    defaultQuant: "Q4_K_M",
+    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
+    engine: "llama.cpp",
+  },
+  {
+    app: "chat",
+    repo: "unsloth/Qwen3.5-9B-GGUF",
+    label: "Qwen3.5 9B",
+    description: "Qwen3.5 9B 通用对话模型（GGUF）",
+    defaultQuant: "Q4_K_M",
+    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
+    engine: "llama.cpp",
+  },
+  {
+    app: "chat",
+    repo: "unsloth/Qwen3.5-35B-A3B-GGUF",
+    label: "Qwen3.5 35B-A3B",
+    description: "Qwen3.5 35B-A3B MoE 对话模型（GGUF），激活参数仅 3B",
+    defaultQuant: "Q4_K_M",
+    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
+    engine: "llama.cpp",
+  },
+  {
+    app: "chat",
+    repo: "unsloth/Qwen3.6-27B-GGUF",
+    label: "Qwen3.6 27B",
+    description: "Qwen3.6 27B 旗舰对话模型（GGUF）",
+    defaultQuant: "Q4_K_M",
+    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
+    engine: "llama.cpp",
+  },
+  {
+    app: "chat",
     repo: "Qwen/Qwen2.5-7B-Instruct-GGUF",
     label: "Qwen2.5 7B Instruct",
     description: "Qwen2.5 7B 通用对话模型（GGUF）",
@@ -222,6 +287,42 @@ export const MODEL_PRESETS: readonly ChatPreset[] = [
     engine: "llama.cpp",
   },
   // 对话 / VLM (safetensors → vLLM / SGLang)
+  {
+    app: "chat",
+    repo: "Qwen/Qwen3.5-4B",
+    label: "Qwen3.5 4B (HF)",
+    description: "Qwen3.5 4B 对话模型（safetensors）",
+    defaultQuant: "",
+    quants: [],
+    engine: "vllm",
+  },
+  {
+    app: "chat",
+    repo: "Qwen/Qwen3.5-9B",
+    label: "Qwen3.5 9B (HF)",
+    description: "Qwen3.5 9B 对话模型（safetensors）",
+    defaultQuant: "",
+    quants: [],
+    engine: "vllm",
+  },
+  {
+    app: "chat",
+    repo: "Qwen/Qwen3.5-35B-A3B",
+    label: "Qwen3.5 35B-A3B (HF)",
+    description: "Qwen3.5 35B-A3B MoE 对话模型（safetensors）",
+    defaultQuant: "",
+    quants: [],
+    engine: "vllm",
+  },
+  {
+    app: "chat",
+    repo: "Qwen/Qwen3.6-27B",
+    label: "Qwen3.6 27B (HF)",
+    description: "Qwen3.6 27B 旗舰对话模型（safetensors）",
+    defaultQuant: "",
+    quants: [],
+    engine: "vllm",
+  },
   {
     app: "chat",
     repo: "Qwen/Qwen2.5-7B-Instruct",

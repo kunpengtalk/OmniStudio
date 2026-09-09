@@ -5,6 +5,7 @@ import { useUpdateStore } from "./update-store";
 import { useServerStore } from "../stores/server";
 import { useChatStore } from "../stores/chat";
 import { useModelDownloadStore } from "../stores/model-download";
+import { useGatewayStore } from "../stores/gateway";
 
 const knownCompletedIds = new Set<string>();
 
@@ -38,6 +39,13 @@ const rpc = Electroview.defineRPC<AppRPC>({
         queryClient.invalidateQueries({ queryKey: ["conversations"] });
         queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
       },
+      chatStats: (stats) => {
+        useChatStore.getState().setMessageStats(
+          stats.conversationId,
+          stats.messageId,
+          stats,
+        );
+      },
       modelDownloadProgress: ({ repo, fileName, progress }) => {
         useModelDownloadStore.getState().setProgress(repo, fileName, progress);
         queryClient.invalidateQueries({ queryKey: ["installed-models"] });
@@ -57,6 +65,9 @@ const rpc = Electroview.defineRPC<AppRPC>({
         for (const id of knownCompletedIds) {
           if (!activeIds.has(id)) knownCompletedIds.delete(id);
         }
+      },
+      gatewayStatusChanged: ({ status }) => {
+        useGatewayStore.getState().setStatus(status);
       },
     },
   },

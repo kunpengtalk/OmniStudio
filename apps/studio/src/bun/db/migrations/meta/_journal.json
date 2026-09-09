@@ -36,6 +36,20 @@
       "when": 1789563600000,
       "tag": "0004_add_voice_records",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1789646400000,
+      "tag": "0005_natural_moonstone",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788948595026,
+      "tag": "0006_right_champions",
+      "breakpoints": true
     }
   ]
 }

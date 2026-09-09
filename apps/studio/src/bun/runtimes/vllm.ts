@@ -1,5 +1,7 @@
 import type { Subprocess } from "bun";
+import { existsSync } from "fs";
 import { getSetting } from "../db/settings";
+import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
 import type {
@@ -153,6 +155,28 @@ export class VllmRuntime implements Runtime {
     if (customHf) return { model: customHf.split(":")[0] ?? customHf };
 
     return { model: "" };
+  }
+
+  buildCommandLine(modelOverride?: string): string {
+    let model: string;
+    let servedName: string | undefined;
+    if (modelOverride) {
+      model = modelOverride;
+      if (existsSync(modelOverride)) {
+        servedName = slugModelFileName(modelOverride.split(/[\\/]/).pop() ?? "model");
+      }
+    } else {
+      const resolved = this.resolveModel();
+      model = resolved.model;
+      servedName = resolved.servedName;
+    }
+
+    const args = this.buildArgs(model, servedName);
+    const vllmPath = Bun.which("vllm");
+    if (vllmPath) return [vllmPath, ...args].join(" ");
+    const python = Bun.which("python3") ?? Bun.which("python");
+    if (python) return [python, "-m", "vllm.entrypoints.openai.api_server", ...args.slice(1)].join(" ");
+    return ["vllm", ...args].join(" ");
   }
 
   private buildArgs(model: string, servedName?: string): string[] {
