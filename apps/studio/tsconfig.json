@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@components/*": ["./src/mainview/components/*"],
+      "@ui/*": ["./src/mainview/components/ui/*"],
+      "@stores/*": ["./src/mainview/stores/*"],
+      "@lib/*": ["./src/mainview/lib/*"],
+      "@hooks/*": ["./src/mainview/hooks/*"]
+    }
+  },
+  "include": ["src", "vite.config.ts", "electrobun.config.ts", "drizzle.config.ts"]
+}

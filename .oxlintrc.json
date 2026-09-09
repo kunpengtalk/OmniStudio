@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [
+    "dist",
+    "build",
+    "node_modules",
+    "bun.lock",
+    "*.tsbuildinfo",
+    "**/.DS_Store",
+    "**/.env"
+  ],
+  "plugins": ["eslint", "oxc", "react", "typescript", "import"],
+  "categories": {
+    "correctness": "warn",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "rules": {
+    "react-in-jsx-scope": "off",
+    "eslint/no-shadow": "off",
+    "eslint/no-await-in-loop": "off",
+    "react/no-array-index-key": "off",
+    "oxc/no-map-spread": "off",
+    "eslint-plugin-import/no-unassigned-import": "off"
+  }
+}

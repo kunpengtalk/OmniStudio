@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "ignorePatterns": [
+    "dist",
+    "build",
+    "node_modules",
+    "bun.lock",
+    "tsconfig.json",
+    "*.tsbuildinfo",
+    "**/.DS_Store",
+    "**/.env",
+  ],
+  "sortPackageJson": true,
+  "sortTailwindcss": {
+    "stylesheet": "./apps/studio/src/mainview/styles/index.css",
+    "functions": ["cn", "cva"],
+  },
+}

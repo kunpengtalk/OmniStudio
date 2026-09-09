@@ -1,0 +1,26 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "./fonts.css";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  --color-bg: #09090b;
+  --color-surface: #18181b;
+  --color-border: #27272a;
+  --color-muted: #a1a1aa;
+  --color-foreground: #fafafa;
+  --color-accent: #a78bfa;
+  --color-accent-dim: #7c3aed;
+}
+
+html {
+  background-color: var(--color-bg);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+}

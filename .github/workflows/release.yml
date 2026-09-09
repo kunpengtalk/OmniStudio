@@ -1,0 +1,120 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.0.2-canary)"
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-macos-arm64:
+    runs-on: macos-14 # M1/M2 Apple Silicon runner
+
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Determine build environment
+        id: build-env
+        run: |
+          if [[ "$RELEASE_TAG" == *"-canary"* ]]; then
+            echo "env=canary" >> $GITHUB_OUTPUT
+            echo "Building canary release"
+          else
+            echo "env=stable" >> $GITHUB_OUTPUT
+            echo "Building stable release"
+          fi
+
+      - name: Install Apple Certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+        run: |
+          # Clean up any existing keychain from previous builds
+          security delete-keychain build.keychain || true
+
+          # Create temporary keychain
+          echo $MACOS_CERTIFICATE | base64 --decode > certificate.p12
+          security create-keychain -p actions build.keychain
+
+          # Add to search list so codesign can find it
+          security list-keychains -d user -s build.keychain $(security list-keychains -d user | sed s/\"//g)
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+
+          # Import certificate with proper access
+          security import certificate.p12 -k build.keychain -P $MACOS_CERTIFICATE_PWD -T /usr/bin/codesign -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
+
+          # Keep keychain unlocked for the entire session
+          security set-keychain-settings -lut 21600 build.keychain
+
+          # Verify certificate is accessible
+          echo "Available signing identities:"
+          security find-identity -v -p codesigning build.keychain
+
+          rm certificate.p12
+
+      - name: Sign native dylibs before build
+        env:
+          ELECTROBUN_DEVELOPER_ID: ${{ secrets.ELECTROBUN_DEVELOPER_ID }}
+        run: |
+          # Electrobun only signs .node files, not .dylib — pre-sign them so build.copy preserves the signature
+          find -L apps/studio/node_modules/@img -name "*.dylib" | while read f; do
+            echo "Signing: $f"
+            codesign --sign "$ELECTROBUN_DEVELOPER_ID" --timestamp --force --options runtime "$f"
+          done
+
+      - name: Build app
+        env:
+          ELECTROBUN_DEVELOPER_ID: ${{ secrets.ELECTROBUN_DEVELOPER_ID }}
+          ELECTROBUN_APPLEID: ${{ secrets.ELECTROBUN_APPLEID }}
+          ELECTROBUN_APPLEIDPASS: ${{ secrets.ELECTROBUN_APPLEIDPASS }}
+          ELECTROBUN_TEAMID: ${{ secrets.ELECTROBUN_TEAMID }}
+        run: |
+          if [ "${{ steps.build-env.outputs.env }}" = "canary" ]; then
+            cd apps/studio && bun run build:canary
+          else
+            cd apps/studio && bun run build:stable
+          fi
+
+      - name: List artifacts
+        run: ls -la apps/studio/artifacts/
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          security delete-keychain build.keychain || true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: |
+            apps/studio/artifacts/*
+          draft: false
+          prerelease: ${{ steps.build-env.outputs.env == 'canary' }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

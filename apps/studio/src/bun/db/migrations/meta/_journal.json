@@ -1,0 +1,41 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1773921733892,
+      "tag": "0000_reflective_captain_midlands",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1788858617005,
+      "tag": "0001_fat_barracuda",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789200000000,
+      "tag": "0002_add_conversation_app",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1789473600000,
+      "tag": "0003_add_message_images",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1789563600000,
+      "tag": "0004_add_voice_records",
+      "breakpoints": true
+    }
+  ]
+}

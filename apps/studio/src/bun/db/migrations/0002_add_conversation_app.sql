@@ -1,0 +1,1 @@
+ALTER TABLE conversations ADD COLUMN app text NOT NULL DEFAULT 'chat';

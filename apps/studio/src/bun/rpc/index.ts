@@ -1,0 +1,1278 @@
+import { BrowserView, BrowserWindow, RPCSchema, Updater, Utils } from "electrobun/bun";
+import { asc, eq, desc, like, sql } from "drizzle-orm";
+import path from "path";
+import { existsSync, rmSync, copyFileSync, mkdirSync } from "fs";
+
+import { db } from "../db";
+import { documents, pages } from "../db/schema";
+import { getAllSettings, getSetting, isConfigured, updateSettings } from "../db/settings";
+import { getImagesBaseDir, getUploadsBaseDir } from "../image-server";
+import { chatImageDir, chatImageUrl } from "../image-server";
+import { processDocumentPages } from "../queue";
+import { updateState, type UpdateInfo } from "../updates";
+import * as ServerManager from "../server-manager";
+import type { ServerStatus } from "../server-manager";
+import * as Chat from "../chat";
+import type { Conversation, ChatMessage } from "../chat";
+import { listChatModels, selectChatModel, type ChatModelOption } from "../chat-model";
+import * as ModelScope from "../modelscope";
+import type { ModelScopeModel, ModelScopeFile } from "../modelscope";
+import * as ModelStore from "../model-store";
+import type { InstalledModel } from "../model-store";
+import { getServerStats, type ServerStats } from "../stats";
+import { runBenchmark, type BenchmarkParams, type BenchmarkResult } from "../benchmark";
+import { downloadManager, type DownloadTask } from "../download-manager";
+import * as Voice from "../voice";
+import type { VoiceRecordRow, VoiceRecordKind, VoiceClone } from "../voice";
+import * as Asr from "../asr";
+import type { AsrModelItem, AsrSegment, AsrStatus } from "../asr";
+import * as AsrAudioCpp from "../asr-audiocpp";
+import type { AsrAudioCppModelInfo, AsrAudioCppStatus } from "../asr-audiocpp";
+import * as WhisperEngine from "../whisper-engine";
+import type { WhisperEngineInfo } from "../whisper-engine";
+import * as TTSModels from "../tts-models";
+import type { TTSModelInfo } from "../tts-models";
+import * as TTSLocal from "../tts-local";
+import type { TtsLocalModelInfo, TtsLocalStatus } from "../tts-local";
+import * as Ocr from "../ocr";
+import type { OcrLangModelInfo, OcrStatus, OcrResult, OcrVlmResult, OcrProviderConfig } from "../ocr";
+import type { EdgeVoice } from "../edge-tts";
+import type { ModelCategory } from "../../shared/modelscope";
+
+export type PageData = {
+  pageNumber: number;
+  markdown: string | null;
+  raw: string | null;
+  status: string;
+  error: string | null;
+  startedAt: number | null;
+  completedAt: number | null;
+  failedAt: number | null;
+};
+
+export type DocumentMeta = {
+  id: number;
+  path: string;
+  name: string;
+  type: string;
+  size: number;
+  status: string;
+  totalPages: number | null;
+  processedPages: number | null;
+  createdAt: number | null;
+  processingStartedAt: number | null;
+};
+
+export type DocumentFull = DocumentMeta & {
+  pages: PageData[];
+  imagesDir: string | null;
+  completedAt: number | null;
+  failedAt: number | null;
+  error: string | null;
+};
+
+export type AppRPC = {
+  bun: RPCSchema<{
+    requests: {
+      getSettings: {
+        params: undefined;
+        response: { configured: boolean; settings: Record<string, string> };
+      };
+      updateSettings: {
+        params: { settings: Record<string, string> };
+        response: { ok: boolean };
+      };
+      checkConnection: {
+        params: { baseUrl?: string; apiKey?: string } | undefined;
+        response: { connected: boolean; error?: string };
+      };
+      checkLlamaServer: {
+        params: undefined;
+        response: { found: boolean; path?: string };
+      };
+      startServer: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      stopServer: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      restartServer: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      getServerStatus: {
+        params: undefined;
+        response: { status: ServerStatus; pid?: number; logs: string; error?: string };
+      };
+      getServerStats: {
+        params: undefined;
+        response: ServerStats;
+      };
+      clearServerLogs: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      getDocuments: {
+        params: { limit?: number; offset?: number; search?: string } | undefined;
+        response: { documents: DocumentMeta[]; total: number };
+      };
+      getDocument: {
+        params: { id: number };
+        response: { document: DocumentFull | null };
+      };
+      openFileDialog: {
+        params: { allowedFileTypes?: string } | undefined;
+        response: { paths: string[] };
+      };
+      addDocument: {
+        params: { filePath: string };
+        response: { id: number };
+      };
+      addDocumentByUpload: {
+        params: { data: string; name: string; type: string };
+        response: { id: number };
+      };
+      processDocument: {
+        params: { id: number };
+        response: { ok: boolean; error?: string };
+      };
+      deleteDocument: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      saveImageToDownloads: {
+        params: { url: string; filename: string };
+        response: { ok: boolean };
+      };
+      saveAudioToFolder: {
+        params: { url: string; filename: string };
+        response: { ok: boolean; canceled?: boolean; path?: string; error?: string };
+      };
+      showInExplorer: {
+        params: { filePath: string };
+        response: { ok: boolean };
+      };
+      getUpdateState: {
+        params: undefined;
+        response: UpdateInfo;
+      };
+      applyUpdate: {
+        params: undefined;
+        response: undefined;
+      };
+      // Chat
+      listConversations: {
+        params: { app?: string } | undefined;
+        response: { conversations: Conversation[] };
+      };
+      getConversation: {
+        params: { id: number };
+        response: { conversation: Conversation | null; messages: ChatMessage[] };
+      };
+      createConversation: {
+        params: { title?: string; app?: string };
+        response: { conversation: Conversation };
+      };
+      deleteConversation: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      sendChatMessage: {
+        params: { conversationId: number; content: string; images?: string[] };
+        response: { ok: boolean; error?: string };
+      };
+      listChatModels: {
+        params: undefined;
+        response: { models: ChatModelOption[] };
+      };
+      selectChatModel: {
+        params: { type: "local" | "api"; value: string };
+        response: { ok: boolean; error?: string; restarting?: boolean };
+      };
+      stageChatImages: {
+        params: { conversationId: number; paths: string[] };
+        response: { images: { ref: string; url: string }[] };
+      };
+      discardChatImage: {
+        params: { ref: string };
+        response: { ok: boolean };
+      };
+      // ModelScope search / install
+      searchModelScope: {
+        params: { query: string; page?: number };
+        response: { models: ModelScopeModel[]; total: number };
+      };
+      listModelScopeFiles: {
+        params: { repo: string };
+        response: { files: ModelScopeFile[] };
+      };
+      listDownloads: {
+        params: undefined;
+        response: { tasks: DownloadTask[] };
+      };
+      startModelDownload: {
+        params: { repo: string; fileName: string; category?: ModelCategory; source?: "modelscope" | "huggingface" };
+        response: { task: DownloadTask };
+      };
+      pauseModelDownload: {
+        params: { id: string };
+        response: { ok: boolean };
+      };
+      resumeModelDownload: {
+        params: { id: string };
+        response: { ok: boolean };
+      };
+      cancelModelDownload: {
+        params: { id: string };
+        response: { ok: boolean };
+      };
+      removeDownload: {
+        params: { id: string };
+        response: { ok: boolean };
+      };
+      listInstalledModels: {
+        params: undefined;
+        response: { models: InstalledModel[] };
+      };
+      toggleFavoriteModel: {
+        params: { path: string };
+        response: { ok: boolean };
+      };
+      setActiveModel: {
+        params: { path: string };
+        response: { ok: boolean; error?: string };
+      };
+      deleteLocalModel: {
+        params: { path: string };
+        response: { ok: boolean };
+      };
+      getModelDirs: {
+        params: undefined;
+        response: { dirs: string[] };
+      };
+      getAboutInfo: {
+        params: undefined;
+        response: { version: string; channel: string; sessionStartedAt: number; basePath: string };
+      };
+      runBenchmark: {
+        params: BenchmarkParams;
+        response: BenchmarkResult;
+      };
+      // Voice (TTS / ASR / voice cloning)
+      listVoiceRecords: {
+        params: { kind?: VoiceRecordKind } | undefined;
+        response: { records: VoiceRecordRow[] };
+      };
+      deleteVoiceRecord: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      stageAudio: {
+        params: { paths: string[] };
+        response: { files: { ref: string; url: string }[] };
+      };
+      runTTS: {
+        params: { text: string; voice?: string; model?: string; base?: string };
+        response: { record: VoiceRecordRow };
+      };
+      runASR: {
+        params: { audioRef: string; model?: string };
+        response: { record: VoiceRecordRow };
+      };
+      listVoiceClones: {
+        params: undefined;
+        response: { clones: VoiceClone[] };
+      };
+      createVoiceClone: {
+        params: { name: string; audioRef: string; model?: string };
+        response: { clone: VoiceClone };
+      };
+      deleteVoiceClone: {
+        params: { id: string };
+        response: { ok: boolean };
+      };
+      // TTS model launcher (Edge TTS + vLLM-deployable TTS models)
+      listTTSModels: {
+        params: undefined;
+        response: { models: TTSModelInfo[] };
+      };
+      downloadTTSModel: {
+        params: { id: string };
+        response: { ok: boolean; error?: string };
+      };
+      enableTTSModel: {
+        params: { id: string; enabled: boolean };
+        response: { ok: boolean };
+      };
+      listEdgeVoices: {
+        params: undefined;
+        response: { voices: EdgeVoice[] };
+      };
+      listTTSHttpVoices: {
+        params: undefined;
+        response: { voices: { id: string; name: string; desc?: string }[] };
+      };
+      runTTSEdge: {
+        params: { text: string; voice: string };
+        response: { record: VoiceRecordRow };
+      };
+      getTTSProviderConfig: {
+        params: undefined;
+        response: { config: { base: string; apiKey: string; model: string } };
+      };
+      saveTTSProviderConfig: {
+        params: { base?: string; apiKey?: string; model?: string };
+        response: { ok: boolean };
+      };
+      listProviderModels: {
+        params: { base?: string; apiKey?: string } | undefined;
+        response: { models: string[]; error?: string };
+      };
+      // Local ASR (whisper.cpp engine + remote fallback)
+      listAsrModels: {
+        params: undefined;
+        response: { models: AsrModelItem[] };
+      };
+      getAsrStatus: {
+        params: undefined;
+        response: AsrStatus;
+      };
+      downloadWhisperEngine: {
+        params: undefined;
+        response: { ok: boolean; error?: string; version?: string };
+      };
+      startAsr: {
+        params: { model?: string } | undefined;
+        response: { ok: boolean; error?: string };
+      };
+      stopAsr: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      transcribeAudio: {
+        params: {
+          audioRef?: string;
+          wavBase64?: string;
+          model?: string;
+          save?: boolean;
+          source?: "auto" | "local" | "remote";
+          diarize?: boolean;
+        };
+        response: {
+          text: string;
+          engine: string;
+          segments?: AsrSegment[];
+          hasSpeakers?: boolean;
+          record?: VoiceRecordRow;
+          error?: string;
+        };
+      };
+      getASRProviderConfig: {
+        params: undefined;
+        response: { config: { base: string; apiKey: string; model: string } };
+      };
+      saveASRProviderConfig: {
+        params: { base?: string; apiKey?: string; model?: string };
+        response: { ok: boolean };
+      };
+      // Local ASR engine (audio.cpp)
+      listAsrAudioCppModels: {
+        params: undefined;
+        response: { models: AsrAudioCppModelInfo[]; error?: string };
+      };
+      getAsrAudioCppStatus: {
+        params: undefined;
+        response: AsrAudioCppStatus;
+      };
+      startAsrAudioCpp: {
+        params: { modelId: string };
+        response: { ok: boolean; error?: string };
+      };
+      stopAsrAudioCpp: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      deleteAsrAudioCppModel: {
+        params: { modelId: string };
+        response: { ok: boolean; error?: string };
+      };
+      // Local TTS engine (audio.cpp)
+      listTtsLocalModels: {
+        params: undefined;
+        response: { models: TtsLocalModelInfo[] };
+      };
+      getTtsLocalStatus: {
+        params: undefined;
+        response: TtsLocalStatus;
+      };
+      downloadTtsLocalEngine: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      startTtsLocal: {
+        params: { modelId: string } | undefined;
+        response: { ok: boolean; error?: string };
+      };
+      stopTtsLocal: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      deleteTtsLocalModel: {
+        params: { modelId: string };
+        response: { ok: boolean };
+      };
+      runTTSLocal: {
+        params: { text: string; voice?: string; emotion?: string; language?: string; instruct?: string; model?: string };
+        response: { record: VoiceRecordRow };
+      };
+      // OCR（Tesseract 本地引擎 + VLM 服务）
+      listOcrModels: {
+        params: undefined;
+        response: { models: OcrLangModelInfo[]; error?: string };
+      };
+      getOcrStatus: {
+        params: undefined;
+        response: OcrStatus;
+      };
+      downloadOcrModel: {
+        params: { modelId: string };
+        response: { ok: boolean; error?: string };
+      };
+      startOcr: {
+        params: { modelId: string };
+        response: { ok: boolean; error?: string };
+      };
+      stopOcr: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      deleteOcrModel: {
+        params: { modelId: string };
+        response: { ok: boolean };
+      };
+      stageOcrImage: {
+        params: { paths: string[] };
+        response: { files: { ref: string; url: string }[] };
+      };
+      runOcr: {
+        params: { imageRef: string; model?: string; psm?: number };
+        response: { result?: OcrResult; error?: string };
+      };
+      runOcrVlm: {
+        params: { imageRef: string; profileId?: string; source?: "local" | "remote" };
+        response: { result?: OcrVlmResult; error?: string };
+      };
+      getOcrProviderConfig: {
+        params: undefined;
+        response: { config: OcrProviderConfig };
+      };
+      saveOcrProviderConfig: {
+        params: { base?: string; apiKey?: string; model?: string };
+        response: { ok: boolean };
+      };
+      listOcrProviderModels: {
+        params: { base?: string; apiKey?: string } | undefined;
+        response: { models: string[]; error?: string };
+      };
+    };
+    messages: {};
+  }>;
+  webview: RPCSchema<{
+    requests: {};
+    messages: {
+      updateStatus: UpdateInfo;
+      documentChanged: { id: number };
+      serverLog: { text: string };
+      serverStatusChanged: { status: ServerStatus };
+      chatChunk: { conversationId: number; messageId: number; delta: string };
+      chatDone: { conversationId: number; messageId: number; content: string; error?: string };
+      modelDownloadProgress: {
+        repo: string;
+        fileName: string;
+        progress: { received: number; total: number | null; percent: number | null };
+      };
+      downloadsChanged: {
+        tasks: DownloadTask[];
+      };
+    };
+  }>;
+};
+
+export type BrowserWindowWithRPC = BrowserWindow<typeof appRPC>;
+
+export const appRPC = BrowserView.defineRPC<AppRPC>({
+  maxRequestTime: 900_000, // 15 minutes (large TTS model downloads)
+  handlers: {
+    requests: {
+      getSettings: async () => ({
+        configured: isConfigured(),
+        settings: getAllSettings(),
+      }),
+
+      updateSettings: async ({ settings }) => {
+        updateSettings(settings);
+        return { ok: true };
+      },
+
+      checkConnection: async (params) => {
+        try {
+          const baseUrl = params?.baseUrl ?? getSetting("VLLM_API_BASE");
+          const apiKey = params?.apiKey ?? getSetting("VLLM_API_KEY");
+          const res = await fetch(`${baseUrl}/models`, {
+            headers: apiKey !== "EMPTY" ? { Authorization: `Bearer ${apiKey}` } : {},
+            signal: AbortSignal.timeout(5000),
+          });
+          return { connected: res.ok };
+        } catch (e) {
+          return { connected: false, error: String(e) };
+        }
+      },
+
+      checkLlamaServer: async () => {
+        return ServerManager.checkBinaryExists();
+      },
+
+      startServer: async () => {
+        return ServerManager.startServer();
+      },
+
+      stopServer: async () => {
+        await ServerManager.stopServer();
+        return { ok: true };
+      },
+
+      restartServer: async () => {
+        return ServerManager.restartServer();
+      },
+
+      getServerStatus: async () => {
+        return {
+          status: ServerManager.getStatus(),
+          pid: ServerManager.getPid(),
+          logs: ServerManager.getLogs(),
+          error: ServerManager.getLastError() || undefined,
+        };
+      },
+
+      getServerStats: async () => {
+        return getServerStats();
+      },
+
+      clearServerLogs: async () => {
+        ServerManager.clearLogs();
+        return { ok: true };
+      },
+
+      getDocuments: async (params) => {
+        const limit = params?.limit ?? 50;
+        const offset = params?.offset ?? 0;
+        const search = params?.search?.trim();
+
+        const selectFields = {
+          id: documents.id,
+          path: documents.path,
+          type: documents.type,
+          size: documents.size,
+          status: documents.status,
+          totalPages: documents.totalPages,
+          processedPages: documents.processedPages,
+          createdAt: documents.createdAt,
+          processingStartedAt: documents.processingStartedAt,
+        };
+
+        const baseQuery = search
+          ? db.select(selectFields).from(documents).where(like(documents.path, `%${search}%`))
+          : db.select(selectFields).from(documents);
+
+        const countResult = search
+          ? db
+              .select({ count: sql<number>`count(*)` })
+              .from(documents)
+              .where(like(documents.path, `%${search}%`))
+              .get()
+          : db
+              .select({ count: sql<number>`count(*)` })
+              .from(documents)
+              .get();
+
+        const total = countResult?.count ?? 0;
+
+        const docs = baseQuery.orderBy(desc(documents.createdAt)).limit(limit).offset(offset).all();
+
+        return {
+          documents: docs.map((d) => ({
+            ...d,
+            name: path.basename(d.path),
+          })),
+          total,
+        };
+      },
+
+      getDocument: async ({ id }) => {
+        const doc = db.select().from(documents).where(eq(documents.id, id)).get();
+        if (!doc) return { document: null };
+        const docPages = db
+          .select({
+            pageNumber: pages.pageNumber,
+            markdown: pages.markdown,
+            raw: pages.raw,
+            status: pages.status,
+            error: pages.error,
+            startedAt: pages.startedAt,
+            completedAt: pages.completedAt,
+            failedAt: pages.failedAt,
+          })
+          .from(pages)
+          .where(eq(pages.documentId, id))
+          .orderBy(asc(pages.pageNumber))
+          .all();
+        return {
+          document: { ...doc, name: path.basename(doc.path), pages: docPages },
+        };
+      },
+
+      openFileDialog: async (params) => {
+        const allowedFileTypes = params?.allowedFileTypes;
+        const paths = await Utils.openFileDialog({
+          allowedFileTypes: allowedFileTypes ?? "pdf,png,jpg,jpeg,webp,tiff,bmp,heic,heif",
+          canChooseFiles: true,
+          canChooseDirectory: false,
+          allowsMultipleSelection: true,
+        });
+        return { paths: (paths ?? []).filter((p) => p && p.length > 0) };
+      },
+
+      addDocument: async ({ filePath }) => {
+        const file = Bun.file(filePath);
+        const result = db
+          .insert(documents)
+          .values({
+            path: filePath,
+            type: file.type || "application/octet-stream",
+            size: file.size,
+          })
+          .returning({ id: documents.id })
+          .get();
+
+        return { id: result.id };
+      },
+
+      addDocumentByUpload: async ({ data, name, type }) => {
+        const uploadsDir = getUploadsBaseDir();
+        if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
+
+        const safeName = name.replace(/[^a-zA-Z0-9._-]/g, "_");
+        let destPath = path.join(uploadsDir, safeName);
+        if (existsSync(destPath)) {
+          const ext = path.extname(safeName);
+          const base = safeName.slice(0, -ext.length || undefined);
+          let n = 1;
+          while (existsSync(destPath)) {
+            destPath = path.join(uploadsDir, `${base}_${n}${ext}`);
+            n++;
+          }
+        }
+        const buffer = Buffer.from(data, "base64");
+        await Bun.write(destPath, buffer);
+
+        const bunFile = Bun.file(destPath);
+        const result = db
+          .insert(documents)
+          .values({
+            path: destPath,
+            type: bunFile.type || type || "application/octet-stream",
+            size: buffer.length,
+          })
+          .returning({ id: documents.id })
+          .get();
+
+        return { id: result.id };
+      },
+
+      processDocument: async ({ id }) => {
+        const doc = db.select().from(documents).where(eq(documents.id, id)).get();
+        if (!doc) return { ok: false, error: "Document not found" };
+
+        processDocumentPages(id);
+        return { ok: true };
+      },
+
+      deleteDocument: async ({ id }) => {
+        const doc = db.select().from(documents).where(eq(documents.id, id)).get();
+        if (doc?.imagesDir && existsSync(doc.imagesDir)) {
+          rmSync(doc.imagesDir, { recursive: true, force: true });
+        }
+        db.delete(pages).where(eq(pages.documentId, id)).run();
+        db.delete(documents).where(eq(documents.id, id)).run();
+        return { ok: true };
+      },
+
+      saveImageToDownloads: async ({ url, filename }) => {
+        try {
+          const parsed = new URL(url);
+          const filePath = path.join(getImagesBaseDir(), decodeURIComponent(parsed.pathname));
+          if (!existsSync(filePath)) return { ok: false };
+          const dest = path.join(Utils.paths.downloads, filename);
+          copyFileSync(filePath, dest);
+          return { ok: true };
+        } catch {
+          return { ok: false };
+        }
+      },
+
+      /** 选择目录并把生成的音频文件复制到该目录（重名自动加序号）。 */
+      saveAudioToFolder: async ({ url, filename }) => {
+        try {
+          const parsed = new URL(url);
+          const relative = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
+          const base = path.resolve(getImagesBaseDir());
+          const src = path.resolve(base, relative);
+          if (!src.startsWith(base + path.sep) || !existsSync(src)) {
+            return { ok: false, error: "音频文件不存在" };
+          }
+          const dirs = await Utils.openFileDialog({
+            startingFolder: Utils.paths.downloads,
+            canChooseFiles: false,
+            canChooseDirectory: true,
+            allowsMultipleSelection: false,
+          });
+          const dir = (dirs ?? [])[0]?.trim();
+          if (!dir) return { ok: false, canceled: true };
+
+          const safeName = path.basename(filename).replace(/[\\/:*?"<>|]/g, "_") || "audio.mp3";
+          const ext = path.extname(safeName);
+          const stem = path.basename(safeName, ext);
+          let dest = path.join(dir, safeName);
+          let i = 1;
+          while (existsSync(dest)) {
+            dest = path.join(dir, `${stem} (${i})${ext}`);
+            i++;
+          }
+          copyFileSync(src, dest);
+          return { ok: true, path: dest };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      showInExplorer: async ({ filePath }) => {
+        try {
+          Utils.showItemInFolder(filePath);
+          return { ok: true };
+        } catch {
+          return { ok: false };
+        }
+      },
+
+      getUpdateState: async () => {
+        return updateState;
+      },
+
+      applyUpdate: async () => {
+        console.log("Applying update...");
+        Updater.applyUpdate();
+      },
+
+      // Chat
+      listConversations: async (params) => {
+        return { conversations: Chat.listConversations(params?.app) };
+      },
+
+      getConversation: async ({ id }) => {
+        return Chat.getConversation(id);
+      },
+
+      createConversation: async (params) => {
+        return { conversation: Chat.createConversation(params?.title, params?.app) };
+      },
+
+      deleteConversation: async ({ id }) => {
+        Chat.deleteConversation(id);
+        return { ok: true };
+      },
+
+      sendChatMessage: async ({ conversationId, content, images }) => {
+        return Chat.sendMessage(conversationId, content, images ?? []);
+      },
+
+      listChatModels: async () => {
+        return listChatModels();
+      },
+
+      selectChatModel: async ({ type, value }) => {
+        return selectChatModel(type, value);
+      },
+
+      stageChatImages: async ({ conversationId, paths }) => {
+        const dir = chatImageDir(conversationId);
+        mkdirSync(dir, { recursive: true });
+        const images: { ref: string; url: string }[] = [];
+        for (const p of paths) {
+          if (!existsSync(p)) continue;
+          const ext = path.extname(p).toLowerCase();
+          if (!/^\.(png|jpe?g|webp|gif|bmp)$/.test(ext)) continue;
+          const name = `${crypto.randomUUID()}${ext}`;
+          const dest = path.join(dir, name);
+          await Bun.write(dest, Bun.file(p));
+          const ref = `chat/${conversationId}/${name}`;
+          images.push({ ref, url: chatImageUrl(ref) });
+        }
+        return { images };
+      },
+
+      discardChatImage: async ({ ref }) => {
+        const base = getImagesBaseDir();
+        const resolved = path.resolve(base, ref);
+        if (!resolved.startsWith(base + path.sep) || !resolved.includes(`${path.sep}chat${path.sep}`)) {
+          return { ok: false };
+        }
+        rmSync(resolved, { force: true });
+        return { ok: true };
+      },
+
+      // ModelScope
+      searchModelScope: async ({ query, page }) => {
+        return ModelScope.searchModels(query, page ?? 1);
+      },
+
+      listModelScopeFiles: async ({ repo }) => {
+        return { files: await ModelScope.listRepoFiles(repo) };
+      },
+
+      listDownloads: async () => {
+        return { tasks: downloadManager.list() };
+      },
+
+      startModelDownload: async ({ repo, fileName, category, source }) => {
+        return { task: downloadManager.start(repo, fileName, category, source) };
+      },
+
+      pauseModelDownload: async ({ id }) => {
+        return { ok: downloadManager.pause(id) };
+      },
+
+      resumeModelDownload: async ({ id }) => {
+        return { ok: downloadManager.resume(id) };
+      },
+
+      cancelModelDownload: async ({ id }) => {
+        return { ok: downloadManager.cancel(id) };
+      },
+
+      removeDownload: async ({ id }) => {
+        return { ok: downloadManager.remove(id) };
+      },
+
+      listInstalledModels: async () => {
+        return { models: ModelStore.listInstalledModels() };
+      },
+
+      toggleFavoriteModel: async ({ path }) => {
+        ModelStore.toggleFavorite(path);
+        return { ok: true };
+      },
+
+      setActiveModel: async ({ path }) => {
+        return ModelStore.setActiveModel(path);
+      },
+
+      deleteLocalModel: async ({ path }) => {
+        return ModelStore.deleteLocalModel(path);
+      },
+
+      getModelDirs: async () => {
+        return { dirs: ModelStore.getModelsDirs() };
+      },
+
+      getAboutInfo: async () => {
+        const sessionStartedAt = (await getServerStats()).sessionStartedAt;
+        const version = updateState.currentVersion;
+        const channel = getSetting("UPDATE_CHANNEL") || "stable";
+        return {
+          version,
+          channel,
+          sessionStartedAt,
+          basePath: ModelStore.getModelsBaseDirForRuntime(),
+        };
+      },
+
+      runBenchmark: async (params) => {
+        return runBenchmark(params);
+      },
+
+      // Voice
+      listVoiceRecords: async (params) => {
+        return { records: Voice.listVoiceRecords(params?.kind) };
+      },
+
+      deleteVoiceRecord: async ({ id }) => {
+        Voice.deleteVoiceRecord(id);
+        return { ok: true };
+      },
+
+      stageAudio: async ({ paths }) => {
+        return { files: await Voice.stageAudio(paths) };
+      },
+
+      runTTS: async (params) => {
+        return { record: await Voice.runTTS(params) };
+      },
+
+      runASR: async (params) => {
+        return { record: await Voice.runASR(params) };
+      },
+
+      listVoiceClones: async () => {
+        return { clones: Voice.listVoiceClones() };
+      },
+
+      createVoiceClone: async (params) => {
+        return { clone: await Voice.createVoiceClone(params) };
+      },
+
+      deleteVoiceClone: async ({ id }) => {
+        Voice.deleteVoiceClone(id);
+        return { ok: true };
+      },
+
+      listTTSModels: async () => {
+        return { models: TTSModels.listTTSModels() };
+      },
+
+      downloadTTSModel: async ({ id }) => {
+        return await TTSModels.downloadTTSModel(id, (event) => {
+          ttsModelDownloadSink?.(event);
+        });
+      },
+
+      enableTTSModel: async ({ id, enabled }) => {
+        TTSModels.enableTTSModel(id, enabled);
+        return { ok: true };
+      },
+
+      listEdgeVoices: async () => {
+        return { voices: TTSModels.listEdgeTTSVoices() };
+      },
+
+      listTTSHttpVoices: async () => {
+        return { voices: TTSModels.listTTSVoicesForHttp() };
+      },
+
+      runTTSEdge: async (params) => {
+        return { record: await Voice.runTTSEdge(params) };
+      },
+
+      getTTSProviderConfig: async () => {
+        return { config: Voice.getTTSProviderConfig() };
+      },
+
+      saveTTSProviderConfig: async ({ base, apiKey, model }) => {
+        Voice.saveTTSProviderConfig({ base, apiKey, model });
+        return { ok: true };
+      },
+
+      listProviderModels: async (params) => {
+        try {
+          const cfg = Voice.getTTSProviderConfig();
+          const models = await Voice.listProviderModels(
+            params?.base ?? cfg.base,
+            params?.apiKey ?? cfg.apiKey,
+          );
+          return { models };
+        } catch (e) {
+          return { models: [], error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      // Local ASR
+      listAsrModels: async () => {
+        return { models: Asr.listAsrModels() };
+      },
+
+      getAsrStatus: async () => {
+        return Asr.getAsrStatus();
+      },
+
+      downloadWhisperEngine: async () => {
+        try {
+          return await WhisperEngine.downloadWhisperEngine();
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      startAsr: async (params) => {
+        try {
+          return await Asr.startAsr(params?.model);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      stopAsr: async () => {
+        try {
+          await Asr.stopAsr();
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      transcribeAudio: async (params) => {
+        try {
+          return await Asr.transcribeAudio(params);
+        } catch (e) {
+          return {
+            text: "",
+            engine: "error",
+            segments: [],
+            hasSpeakers: false,
+            error: e instanceof Error ? e.message : String(e),
+          };
+        }
+      },
+
+      getASRProviderConfig: async () => {
+        return { config: Asr.getASRProviderConfig() };
+      },
+
+      saveASRProviderConfig: async ({ base, apiKey, model }) => {
+        Asr.saveASRProviderConfig({ base, apiKey, model });
+        return { ok: true };
+      },
+
+      // Local ASR (audio.cpp)
+      listAsrAudioCppModels: async () => {
+        try {
+          return { models: AsrAudioCpp.listAsrAudioCppModels() };
+        } catch (e) {
+          return { models: [], error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      getAsrAudioCppStatus: async () => {
+        try {
+          return await AsrAudioCpp.getAsrAudioCppStatus();
+        } catch (e) {
+          return {
+            engineInstalled: false,
+            binaryPath: null,
+            active: false,
+            activeModelId: null,
+            activeModelPath: null,
+          };
+        }
+      },
+
+      startAsrAudioCpp: async ({ modelId }) => {
+        // 两个本地引擎互斥：切到 audio.cpp 前先停掉 whisper-server。
+        try {
+          await Asr.stopAsr();
+          return await AsrAudioCpp.startAsrAudioCpp(modelId);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      stopAsrAudioCpp: async () => {
+        try {
+          await AsrAudioCpp.stopAsrAudioCpp();
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      deleteAsrAudioCppModel: async ({ modelId }) => {
+        try {
+          return AsrAudioCpp.deleteAsrAudioCppModel(modelId);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      // Local TTS (audio.cpp)
+      listTtsLocalModels: async () => {
+        return { models: TTSLocal.listTtsLocalModels() };
+      },
+
+      getTtsLocalStatus: async () => {
+        return TTSLocal.getTtsLocalStatus();
+      },
+
+      downloadTtsLocalEngine: async () => {
+        return TTSLocal.downloadTtsLocalEngine();
+      },
+
+      startTtsLocal: async (params) => {
+        if (!params?.modelId) return { ok: false, error: "缺少模型参数" };
+        return TTSLocal.startTtsLocal(params.modelId);
+      },
+
+      stopTtsLocal: async () => {
+        await TTSLocal.stopTtsLocal();
+        return { ok: true };
+      },
+
+      deleteTtsLocalModel: async ({ modelId }) => {
+        return TTSLocal.deleteTtsLocalModel(modelId);
+      },
+
+      runTTSLocal: async (params) => {
+        return { record: await TTSLocal.runTTSLocal(params) };
+      },
+
+      // OCR
+      listOcrModels: async () => {
+        try {
+          return { models: Ocr.listOcrModels() };
+        } catch (e) {
+          return { models: [], error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      getOcrStatus: async () => {
+        try {
+          return await Ocr.getOcrStatus();
+        } catch {
+          return {
+            tesseractInstalled: false,
+            tesseractPath: null,
+            tesseractVersion: "",
+            engine: "",
+            activeModelId: null,
+            activeModelPath: null,
+            serverStatus: ServerManager.getStatus(),
+          };
+        }
+      },
+
+      downloadOcrModel: async ({ modelId }) => {
+        try {
+          return await Ocr.downloadOcrModel(modelId);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      startOcr: async ({ modelId }) => {
+        try {
+          return await Ocr.startOcr(modelId);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      stopOcr: async () => {
+        try {
+          await Ocr.stopOcr();
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      deleteOcrModel: async ({ modelId }) => {
+        return Ocr.deleteOcrModel(modelId);
+      },
+
+      stageOcrImage: async ({ paths }) => {
+        return { files: await Ocr.stageOcrImage(paths) };
+      },
+
+      runOcr: async (params) => {
+        try {
+          return { result: await Ocr.runOcr(params) };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      runOcrVlm: async (params) => {
+        try {
+          return { result: await Ocr.runOcrVlm(params) };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      getOcrProviderConfig: async () => {
+        return { config: Ocr.getOcrProviderConfig() };
+      },
+
+      saveOcrProviderConfig: async ({ base, apiKey, model }) => {
+        Ocr.saveOcrProviderConfig({ base, apiKey, model });
+        return { ok: true };
+      },
+
+      listOcrProviderModels: async (params) => {
+        try {
+          const cfg = Ocr.getOcrProviderConfig();
+          const models = await Ocr.listOcrProviderModels(
+            params?.base ?? cfg.base,
+            params?.apiKey ?? cfg.apiKey,
+          );
+          return { models };
+        } catch (e) {
+          return { models: [], error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    },
+    messages: {},
+  },
+});
+
+export function initServerBroadcast(win: BrowserWindowWithRPC) {
+  ServerManager.onLog((text) => {
+    try {
+      win.webview.rpc?.send.serverLog({ text });
+    } catch {}
+  });
+  ServerManager.onStatusChange((status) => {
+    try {
+      win.webview.rpc?.send.serverStatusChanged({ status });
+    } catch {}
+  });
+  Chat.onChatChunk((payload) => {
+    try {
+      win.webview.rpc?.send.chatChunk(payload);
+    } catch {}
+  });
+  Chat.onChatDone((payload) => {
+    try {
+      win.webview.rpc?.send.chatDone(payload);
+    } catch {}
+  });
+}
+
+export function initModelDownloadBroadcast(win: BrowserWindowWithRPC) {
+  downloadManager.onProgress((payload) => {
+    try {
+      win.webview.rpc?.send.modelDownloadProgress(payload);
+    } catch {}
+  });
+  downloadManager.onTasksChanged(() => {
+    try {
+      win.webview.rpc?.send.downloadsChanged({ tasks: downloadManager.list() });
+    } catch {}
+  });
+}
+
+let ttsModelDownloadSink:
+  | ((event: {
+      repo: string;
+      fileName: string;
+      progress: { received: number; total: number | null; percent: number | null };
+    }) => void)
+  | null = null;
+
+/** TTS 模型目录（tts-models.ts）的下载进度，复用 modelDownloadProgress 通道。 */
+export function initTTSModelDownloadBroadcast(win: BrowserWindowWithRPC) {
+  ttsModelDownloadSink = (payload) => {
+    try {
+      win.webview.rpc?.send.modelDownloadProgress(payload);
+    } catch {}
+  };
+}
