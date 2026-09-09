@@ -37,6 +37,8 @@ jobs:
 
       - name: Determine build environment
         id: build-env
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
         run: |
           if [[ "$RELEASE_TAG" == *"-canary"* ]]; then
             echo "env=canary" >> $GITHUB_OUTPUT
@@ -45,9 +47,16 @@ jobs:
             echo "env=stable" >> $GITHUB_OUTPUT
             echo "Building stable release"
           fi
+          # `secrets` cannot be referenced in step `if:`, so surface signing
+          # availability as an output instead.
+          if [[ -n "$MACOS_CERTIFICATE" ]]; then
+            echo "signed=true" >> $GITHUB_OUTPUT
+          else
+            echo "signed=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Install Apple Certificate
-        if: ${{ secrets.MACOS_CERTIFICATE != '' }}
+        if: ${{ steps.build-env.outputs.signed == 'true' }}
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
@@ -78,7 +87,7 @@ jobs:
           rm certificate.p12
 
       - name: Sign native dylibs before build
-        if: ${{ secrets.MACOS_CERTIFICATE != '' }}
+        if: ${{ steps.build-env.outputs.signed == 'true' }}
         env:
           ELECTROBUN_DEVELOPER_ID: ${{ secrets.ELECTROBUN_DEVELOPER_ID }}
         run: |
@@ -96,7 +105,7 @@ jobs:
           ELECTROBUN_TEAMID: ${{ secrets.ELECTROBUN_TEAMID }}
           # Unset signing secrets => build an unsigned package so CI can still
           # deliver an artifact. Once the secrets are configured this becomes 0.
-          ELECTROBUN_NO_SIGN: ${{ secrets.MACOS_CERTIFICATE != '' && '0' || '1' }}
+          ELECTROBUN_NO_SIGN: ${{ steps.build-env.outputs.signed == 'true' && '0' || '1' }}
         run: |
           if [ "$ELECTROBUN_NO_SIGN" = "1" ]; then
             echo "::warning::No signing certificate secrets configured — producing an UNSIGNED artifact."
@@ -116,7 +125,7 @@ jobs:
           security delete-keychain build.keychain || true
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
