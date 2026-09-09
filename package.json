@@ -1,6 +1,6 @@
 {
   "name": "@omni-studio/monorepo",
-  "version": "0.0.3-canary.6",
+  "version": "0.0.3-canary.7",
   "private": true,
   "description": "OmniStudio — 本地大模型一体化桌面工作台 | A desktop workstation for local LLMs: models, servers, and apps (chat, voice, image, OCR).",
   "repository": {
