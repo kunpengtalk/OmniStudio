@@ -47,6 +47,7 @@ jobs:
           fi
 
       - name: Install Apple Certificate
+        if: ${{ secrets.MACOS_CERTIFICATE != '' }}
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
@@ -77,6 +78,7 @@ jobs:
           rm certificate.p12
 
       - name: Sign native dylibs before build
+        if: ${{ secrets.MACOS_CERTIFICATE != '' }}
         env:
           ELECTROBUN_DEVELOPER_ID: ${{ secrets.ELECTROBUN_DEVELOPER_ID }}
         run: |
@@ -92,7 +94,13 @@ jobs:
           ELECTROBUN_APPLEID: ${{ secrets.ELECTROBUN_APPLEID }}
           ELECTROBUN_APPLEIDPASS: ${{ secrets.ELECTROBUN_APPLEIDPASS }}
           ELECTROBUN_TEAMID: ${{ secrets.ELECTROBUN_TEAMID }}
+          # Unset signing secrets => build an unsigned package so CI can still
+          # deliver an artifact. Once the secrets are configured this becomes 0.
+          ELECTROBUN_NO_SIGN: ${{ secrets.MACOS_CERTIFICATE != '' && '0' || '1' }}
         run: |
+          if [ "$ELECTROBUN_NO_SIGN" = "1" ]; then
+            echo "::warning::No signing certificate secrets configured — producing an UNSIGNED artifact."
+          fi
           if [ "${{ steps.build-env.outputs.env }}" = "canary" ]; then
             cd apps/studio && bun run build:canary
           else

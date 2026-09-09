@@ -1,6 +1,11 @@
 import type { ElectrobunConfig } from "electrobun";
 import pkg from "../../package.json";
 
+// CI builds without a signing certificate (secrets unset) must still package.
+// ElectroBun skips codesign/notarization when codesign is false; local
+// behavior is unchanged unless ELECTROBUN_NO_SIGN=1 is explicitly set.
+const signForDistribution = process.env.ELECTROBUN_NO_SIGN !== "1";
+
 export default {
   app: {
     name: "OmniStudio",
@@ -26,8 +31,8 @@ export default {
     mac: {
       icons: "icon.iconset",
       bundleCEF: false,
-      codesign: true,
-      notarize: true,
+      codesign: signForDistribution,
+      notarize: signForDistribution,
       entitlements: {
         // Microphone access (voice recording for ASR). Electrobun maps this
         // entitlement to NSMicrophoneUsageDescription in the generated Info.plist.
