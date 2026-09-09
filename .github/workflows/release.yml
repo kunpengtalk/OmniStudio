@@ -15,7 +15,8 @@ permissions:
   id-token: write
 
 jobs:
-  build-macos-arm64:
+  build-macos:
+    name: Build macOS (Apple Silicon)
     runs-on: macos-14 # M1/M2 Apple Silicon runner
 
     env:
@@ -124,14 +125,149 @@ jobs:
         run: |
           security delete-keychain build.keychain || true
 
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnistudio-darwin-arm64
+          path: apps/studio/artifacts/
+          if-no-files-found: error
+
+  build-windows:
+    name: Build Windows (x64)
+    runs-on: windows-latest
+
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Determine build environment
+        id: build-env
+        shell: bash
+        run: |
+          if [[ "$RELEASE_TAG" == *"-canary"* ]]; then
+            echo "env=canary" >> $GITHUB_OUTPUT
+            echo "Building canary release"
+          else
+            echo "env=stable" >> $GITHUB_OUTPUT
+            echo "Building stable release"
+          fi
+
+      - name: Build app
+        shell: bash
+        run: |
+          cd apps/studio
+          if [ "${{ steps.build-env.outputs.env }}" = "canary" ]; then
+            bun run build:canary
+          else
+            bun run build:stable
+          fi
+
+      - name: List artifacts
+        shell: bash
+        run: ls -la apps/studio/artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnistudio-win-x64
+          path: apps/studio/artifacts/
+          if-no-files-found: error
+
+  build-linux:
+    name: Build Linux (x64)
+    runs-on: ubuntu-latest
+
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Determine build environment
+        id: build-env
+        run: |
+          if [[ "$RELEASE_TAG" == *"-canary"* ]]; then
+            echo "env=canary" >> $GITHUB_OUTPUT
+            echo "Building canary release"
+          else
+            echo "env=stable" >> $GITHUB_OUTPUT
+            echo "Building stable release"
+          fi
+
+      - name: Build app
+        run: |
+          cd apps/studio
+          if [ "${{ steps.build-env.outputs.env }}" = "canary" ]; then
+            bun run build:canary
+          else
+            bun run build:stable
+          fi
+
+      - name: List artifacts
+        run: ls -la apps/studio/artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omnistudio-linux-x64
+          path: apps/studio/artifacts/
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Determine release environment
+        id: release-env
+        run: |
+          if [[ "$RELEASE_TAG" == *"-canary"* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
-            apps/studio/artifacts/*
+            omnistudio-darwin-arm64/*
+            omnistudio-win-x64/*
+            omnistudio-linux-x64/*
           draft: false
-          prerelease: ${{ steps.build-env.outputs.env == 'canary' }}
+          prerelease: ${{ steps.release-env.outputs.prerelease }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
