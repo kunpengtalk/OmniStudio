@@ -38,6 +38,7 @@ import {
 import { useT } from "@stores/ui-lang";
 import { useImageStore } from "@stores/image";
 import { useMlxInstallStore } from "@stores/mlx-install";
+import { useMlxModelDownloadStore } from "@stores/mlx-model-download";
 import type { ImageGenBackend, ImageRecordRow } from "../../bun/image-gen";
 import type { MlxModelInfo, MlxGenStatus } from "../../bun/mlx-gen";
 import { cn } from "@/mainview/lib/utils";
@@ -80,6 +81,18 @@ function formatTime(ts: number): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatBytes(b: number): string {
+  if (!b || !Number.isFinite(b) || b <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let v = b;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
 function ResultError({ error }: { error?: string }) {
@@ -403,6 +416,27 @@ function GenerateTab() {
     enabled: backend === "mlx",
   });
   const mlxModels: MlxModelInfo[] = mlxModelsData?.models ?? [];
+
+  // ---------- MLX 模型权重下载（先下载、后生成；带进度） ----------
+  const { data: mlxDownloadedData, refetch: refetchMlxDownloaded } = useQuery({
+    queryKey: ["mlx-downloaded-models"],
+    queryFn: () => rpcClient.getDownloadedMlxModels(),
+    enabled: backend === "mlx",
+  });
+  const mlxDownloaded = new Set(mlxDownloadedData?.downloaded ?? []);
+  const modelProgress = useMlxModelDownloadStore((s) => s.progress);
+  const downloading = modelProgress?.stage === "downloading";
+  const downloadingThis =
+    downloading && !!modelProgress && modelProgress.modelId === model && mlxStatus?.engineInstalled;
+  const downloadMlxModelMut = useMutation({
+    mutationFn: () => rpcClient.downloadMlxModel({ modelId: model }),
+    onSuccess: (r) => {
+      if (!r.ok) setConfigError(r.error);
+      else setConfigError(undefined);
+      void refetchMlxDownloaded();
+    },
+    onError: (e) => setConfigError(String(e)),
+  });
   const installMlx = useMutation({
     mutationFn: () => rpcClient.downloadMlxGenEngine(),
     onSuccess: (r) => {
@@ -431,6 +465,10 @@ function GenerateTab() {
       : backend === "comfyui"
         ? !!comfyBase.trim()
         : !!apiBase.trim();
+
+  // MLX 后端：引擎就绪 + 已选模型 + 权重已下载，才允许生图。
+  const mlxModelReady =
+    (mlxStatus?.engineInstalled ?? false) && !!model.trim() && mlxDownloaded.has(model.trim());
 
   // ---------- 侧边栏聚焦的历史记录 ----------
   const { data: recordsData } = useQuery({
@@ -482,7 +520,13 @@ function GenerateTab() {
     onError: (e) => setConfigError(String(e)),
   });
 
-  const canGenerate = !!prompt.trim() && !generate.isPending && configured;
+  // 生图前需先下载好 MLX 模型权重（不改原有的自动下载行为）。
+  const canGenerate =
+    !!prompt.trim() &&
+    !generate.isPending &&
+    configured &&
+    (backend !== "mlx" || mlxModelReady);
+
 
   const ratio = RATIOS[ratioIdx]!;
   // 右上角预览卡：取结果里最新一条（即最后生成的那张）。
@@ -591,19 +635,105 @@ function GenerateTab() {
                     <SelectValue placeholder={t("image.mlx.selectModel")} />
                   </SelectTrigger>
                   <SelectContent>
-                    {mlxModels.map((m) => (
-                      <SelectItem key={m.id} value={m.id} className="text-xs">
-                        <span className="flex w-full items-center justify-between gap-2">
-                          <span className="truncate">{m.label}</span>
-                          <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-                            ~{m.approxSizeGb}GB
+                    {mlxModels.map((m) => {
+                      const downloaded = mlxDownloaded.has(m.id);
+                      return (
+                        <SelectItem key={m.id} value={m.id} className="text-xs">
+                          <span className="flex w-full items-center justify-between gap-2">
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              <span className="truncate">{m.label}</span>
+                              {downloaded ? (
+                                <Badge
+                                  variant="secondary"
+                                  className="h-4 shrink-0 gap-0.5 px-1 text-[9px] font-normal text-emerald-600 dark:text-emerald-400"
+                                >
+                                  <CircleIcon className="size-2 fill-current" />
+                                  {t("image.mlx.modelDownloaded")}
+                                </Badge>
+                              ) : (
+                                <span className="shrink-0 text-[9px] text-muted-foreground">
+                                  {t("image.mlx.modelNotDownloaded")}
+                                </span>
+                              )}
+                            </span>
+                            <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+                              ~{m.approxSizeGb}GB
+                            </span>
                           </span>
-                        </span>
-                      </SelectItem>
-                    ))}
+                        </SelectItem>
+                      );
+                    })}
                   </SelectContent>
                 </Select>
-                <p className="mt-1 text-[11px] text-muted-foreground">{t("image.mlx.modelHint")}</p>
+
+                {/* 下载模型（权重） + 实时进度 */}
+                {mlxStatus?.engineInstalled && (
+                  <div className="mt-2 flex flex-col gap-2">
+                    {downloadingThis && modelProgress ? (
+                      <div className="flex flex-col gap-1 rounded-md border bg-muted/40 p-2">
+                        <div className="flex items-center justify-between text-[10px] tabular-nums text-muted-foreground">
+                          <span className="truncate text-primary">
+                            {modelProgress.fileName
+                              ? `${t("image.mlx.downloadingFile")}：${modelProgress.fileName.split("/").pop()}`
+                              : t("image.mlx.downloadingModel")}
+                          </span>
+                          <span className="ml-2 shrink-0">{modelProgress.percent}%</span>
+                        </div>
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                          <div
+                            className="h-full rounded-full bg-primary transition-[width] duration-300"
+                            style={{ width: `${Math.min(100, modelProgress.percent)}%` }}
+                          />
+                        </div>
+                        <p className="text-[9px] tabular-nums text-muted-foreground">
+                          {modelProgress.filesTotal > 0
+                            ? `${modelProgress.filesDone}/${modelProgress.filesTotal} 文件 · ${formatBytes(
+                                modelProgress.doneBytes + modelProgress.received,
+                              )} / ${formatBytes(modelProgress.allBytes)}`
+                            : formatBytes(modelProgress.received)}
+                        </p>
+                      </div>
+                    ) : mlxDownloaded.has(model.trim()) ? (
+                      <Badge
+                        variant="secondary"
+                        className="w-fit gap-1 text-[10px] font-normal text-emerald-600 dark:text-emerald-400"
+                      >
+                        <CircleIcon className="size-2.5 fill-current" />
+                        {t("image.mlx.modelDownloaded")}
+                      </Badge>
+                    ) : (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={!model.trim() || downloadMlxModelMut.isPending}
+                          onClick={() => {
+                            setConfigError(undefined);
+                            useMlxModelDownloadStore.getState().reset();
+                            downloadMlxModelMut.mutate();
+                          }}
+                        >
+                          {downloadMlxModelMut.isPending ? (
+                            <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                          ) : (
+                            <DownloadCloudIcon data-icon="inline-start" />
+                          )}
+                          {downloadMlxModelMut.isPending
+                            ? t("image.mlx.downloadingModel")
+                            : t("image.mlx.downloadModel")}
+                        </Button>
+                        {model.trim() && (
+                          <p className="text-[10px] leading-relaxed text-amber-600/80 dark:text-amber-400/80">
+                            {t("image.mlx.modelNeedDownload")}
+                          </p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+                <p className="mt-2 text-[11px] text-muted-foreground">
+                  {t("image.mlx.modelHint")}
+                </p>
               </div>
               {configError && <ResultError error={configError} />}
             </div>
@@ -918,6 +1048,11 @@ function GenerateTab() {
             )}
             {generate.isPending ? t("image.generating") : t("image.generate")}
           </Button>
+          {backend === "mlx" && !canGenerate && !mlxModelReady && mlxStatus?.engineInstalled && (
+            <p className="text-center text-[10px] text-amber-600/80 dark:text-amber-400/80">
+              {t("image.mlx.modelNeedDownload")}
+            </p>
+          )}
         </div>
       </aside>
 

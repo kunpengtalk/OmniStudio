@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from "fs";
+import { existsSync, rmSync, readdirSync, statSync } from "fs";
 import path from "path";
 import { Utils } from "electrobun/bun";
 
@@ -330,8 +330,318 @@ export async function downloadMlxEngine(): Promise<{
 }
 
 // ---------------------------------------------------------------------------
+// 模型权重下载（先下载、后生成；带进度）
+// ---------------------------------------------------------------------------
+
+export type MlxModelDownloadProgress = {
+  modelId: string;
+  /** 当前正在下载的文件（相对仓库路径）。 */
+  fileName: string;
+  /** 当前文件已接收/总字节。 */
+  received: number;
+  total: number;
+  /** 已下载完成的累计字节 / 仓库总字节。 */
+  doneBytes: number;
+  allBytes: number;
+  /** 已下载文件数 / 总文件数。 */
+  filesDone: number;
+  filesTotal: number;
+  /** 整体百分比 0-100。 */
+  percent: number;
+  /** downloading | done | error */
+  stage: "downloading" | "done" | "error";
+};
+
+type MlxProgressCallback = (p: MlxModelDownloadProgress) => void;
+const progressListeners = new Set<MlxProgressCallback>();
+
+export function onMlxModelProgress(cb: MlxProgressCallback): () => void {
+  progressListeners.add(cb);
+  return () => progressListeners.delete(cb);
+}
+
+function emitProgress(p: MlxModelDownloadProgress): void {
+  for (const cb of progressListeners) {
+    try {
+      cb(p);
+    } catch {}
+  }
+}
+
+/** venv 内 python3 可执行文件。 */
+function enginePython(): string {
+  return venvBinary("python3");
+}
+
+/** 模型权重预下载脚本的绝对路径。 */
+function modelHelperScript(): string {
+  return path.join(import.meta.dir, "mlx-model.py");
+}
+
+/** 解析脚本 stdout/stderr 输出的 tqdm 字节进度（如 “1.2G/2.4G”）。 */
+function parseBytes(s: string): { current: number; total: number } | null {
+  const m = s.match(/(\d+(?:\.\d+)?)([KMG]?)B\/(\d+(?:\.\d+)?)([KMG]?)B/);
+  if (!m) return null;
+  const unit = (v: string) => (v === "K" ? 1e3 : v === "M" ? 1e6 : v === "G" ? 1e9 : 1);
+  return {
+    current: parseFloat(m[1]!) * unit(m[2]!),
+    total: parseFloat(m[3]!) * unit(m[4]!),
+  };
+}
+
+/**
+ * 预下载某个 MLX 模型的权重（调用 venv 内的 mlx-model.py）。
+ * 不阻塞 UI：返回 Promise，过程中经 onMlxModelProgress 推送进度、
+ * onInstallLog 推送日志，结束（成功/失败）后 Promise resolve。
+ * 同一模型的重复调用会复用进行中的下载，不会起多个进程。
+ */
+const activeMlxDownloads = new Map<string, Promise<{ ok: boolean; error?: string }>>();
+
+export function downloadMlxModel(modelId: string): Promise<{ ok: boolean; error?: string }> {
+  const existing = activeMlxDownloads.get(modelId);
+  if (existing) return existing;
+  const p = doDownloadMlxModel(modelId).finally(() => {
+    activeMlxDownloads.delete(modelId);
+    // 下载结束（成功/失败）后失效缓存，让下一次查询重新扫盘得到最新状态。
+    invalidateDownloadedMlxCache();
+  });
+  activeMlxDownloads.set(modelId, p);
+  return p;
+}
+
+async function doDownloadMlxModel(
+  modelId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const model = findMlxModel(modelId) ?? MLX_MODELS[0]!;
+  const py = enginePython();
+  if (!existsSync(py)) {
+    return { ok: false, error: "MLX 引擎未安装，请先点击「下载引擎」" };
+  }
+
+  emitLog(`开始下载模型权重：${model.label} …`);
+  emitProgress({
+    modelId,
+    fileName: "",
+    received: 0,
+    total: 0,
+    doneBytes: 0,
+    allBytes: 0,
+    filesDone: 0,
+    filesTotal: 0,
+    percent: 0,
+    stage: "downloading",
+  });
+
+  const proc = Bun.spawn(
+    [py, modelHelperScript(), "download", model.id],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+
+  const parser = (async () => {
+    const reader = proc.stdout.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line.trim()) await handleLine(line.trim());
+      }
+    }
+    if (buf.trim()) await handleLine(buf.trim());
+
+    function handleLine(line: string) {
+      // 统一状态
+      const st = singleRun;
+      if (line.startsWith("REPO ")) {
+        st.repo = line.slice(5);
+      } else if (line.startsWith("TOTAL ")) {
+        st.allBytes = Number(line.slice(6)) || 0;
+      } else if (line.startsWith("FILE ")) {
+        const parts = line.split(" ");
+        const file = parts[1] ?? "";
+        const startByte = Number(parts[2]) || 0;
+        const fileSize = Number(parts[3]) || 0;
+        st.filesTotal += 1;
+        st.curFile = file;
+        st.curStart = startByte;
+        st.curSize = fileSize;
+        emitProgress(buildProgress(st, "downloading"));
+      } else if (line.startsWith("DONE ")) {
+        st.filesDone += 1;
+        st.doneBytes = st.curStart + st.curSize;
+        emitProgress(buildProgress(st, "downloading"));
+      } else if (line.startsWith("OK")) {
+        st.stage = "done";
+        emitProgress(buildProgress(st, "done"));
+      } else if (line.startsWith("ERROR ")) {
+        st.error = line.slice(6);
+        st.stage = "error";
+        emitProgress(buildProgress(st, "error"));
+      }
+    }
+  })();
+
+  // tqdm 字节进度（stderr）→ 更新当前文件 received
+  let singleRun = {
+    repo: "",
+    allBytes: 0,
+    curFile: "",
+    curStart: 0,
+    curSize: 0,
+    curReceived: 0,
+    doneBytes: 0,
+    filesDone: 0,
+    filesTotal: 0,
+    stage: "downloading" as "downloading" | "done" | "error",
+    error: "",
+  };
+  const stderrTail: string[] = [];
+  const stderrReader = proc.stderr.getReader();
+  const stderrDec = new TextDecoder();
+  let sbuf = "";
+  (async () => {
+    for (;;) {
+      const { done, value } = await stderrReader.read();
+      if (done) break;
+      sbuf += stderrDec.decode(value, { stream: true });
+      const lines = sbuf.split("\r");
+      sbuf = lines.pop() ?? "";
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        stderrTail.push(line);
+        if (stderrTail.length > 50) stderrTail.shift();
+        const b = parseBytes(line);
+        if (b && singleRun.curSize > 0) {
+          // tqdm 报的是当前文件内已接收字节，回写后再广播，前端进度条才会动。
+          singleRun.curReceived = Math.min(b.current, singleRun.curSize);
+          emitProgress(buildProgress(singleRun, "downloading"));
+        }
+      }
+    }
+  })();
+
+  function buildProgress(
+    st: typeof singleRun,
+    stage: "downloading" | "done" | "error",
+  ): MlxModelDownloadProgress {
+    const all = st.allBytes || 1;
+    // 整体百分比 = 已完成文件 + 当前文件的部分进度，下载大文件时不会长时间停住。
+    const part = st.stage === "downloading" ? Math.min(st.curReceived, st.curSize) : 0;
+    const percent =
+      stage === "done"
+        ? 100
+        : Math.min(100, Math.round((((st.doneBytes + part) / all) * 10000) / 100));
+    return {
+      modelId: model.id,
+      fileName: st.curFile,
+      received: st.curReceived,
+      total: st.curSize,
+      doneBytes: st.doneBytes,
+      allBytes: st.allBytes,
+      filesDone: st.filesDone,
+      filesTotal: st.filesTotal,
+      percent,
+      stage,
+    };
+  }
+
+  const [code] = await Promise.all([proc.exited, parser]);
+  const done = singleRun.stage === "done" || code === 0 && !singleRun.error;
+  if (done && singleRun.stage !== "error") {
+    emitLog(`模型 ${model.label} 下载完成。`);
+    emitProgress({ ...buildProgress(singleRun, "done"), percent: 100 });
+    return { ok: true };
+  }
+  const err =
+    singleRun.error ||
+    stderrTail.slice(-5).join(" | ") ||
+    `模型权重下载失败（退出码 ${code}）`;
+  emitLog(`模型 ${model.label} 下载失败：${err}`);
+  emitProgress({ ...buildProgress(singleRun, "error"), percent: 0 });
+  return { ok: false, error: err };
+}
+
+/** 模型 id → HuggingFace 仓库（与 mlx-model.py 保持一致）。 */
+const MLX_MODEL_REPOS: Record<string, string> = {
+  "z-image-turbo": "Tongyi-MAI/Z-Image-Turbo",
+  "flux-schnell": "black-forest-labs/FLUX.1-schnell",
+  "flux2-klein-9b": "black-forest-labs/FLUX.2-klein-9B",
+  "flux-dev": "black-forest-labs/FLUX.1-dev",
+};
+
+/** HF 仓库对应的本地缓存 snapshots 目录。 */
+function hfSnapshotDir(repo: string): string {
+  const home = process.env.HOME ?? "";
+  const name = `models--${repo.replace("/", "--")}`;
+  return path.join(home, ".cache", "huggingface", "hub", name, "snapshots");
+}
+
+function dirHasSafetensors(dir: string): boolean {
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (dirHasSafetensors(p)) return true;
+      } else if (entry.name.endsWith(".safetensors")) {
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
+/**
+ * 快速判断某个 MLX 模型权重是否已下载（纯文件系统检查，不发 HTTP、不起 Python）。
+ * 只要 HF 缓存里存在任一含有 .safetensors 的 snapshot 即视为已下载。
+ */
+export function isMlxModelDownloaded(modelId: string): boolean {
+  const repo = MLX_MODEL_REPOS[modelId];
+  if (!repo) return false;
+  const snapshots = hfSnapshotDir(repo);
+  if (!existsSync(snapshots)) return false;
+  try {
+    for (const rev of readdirSync(snapshots)) {
+      const revDir = path.join(snapshots, rev);
+      if (!statSync(revDir).isDirectory()) continue;
+      if (dirHasSafetensors(revDir)) return true;
+    }
+  } catch {}
+  return false;
+}
+
+/** 返回已下载（可生成）的 MLX 模型 id 列表。 */
+export function getDownloadedMlxModelsSync(): string[] {
+  return MLX_MODELS.filter((m) => isMlxModelDownloaded(m.id)).map((m) => m.id);
+}
+
+/** 已下载模型快照（带缓存 TTL，避免主进程反复扫描磁盘）。 */
+let downloadedCache: { at: number; ids: string[] } | null = null;
+export function getDownloadedMlxModels(): string[] {
+  const now = Date.now();
+  if (downloadedCache && now - downloadedCache.at < 3000) {
+    return downloadedCache.ids;
+  }
+  const ids = getDownloadedMlxModelsSync();
+  downloadedCache = { at: now, ids };
+  return ids;
+}
+
+/** 主动失效已下载缓存（下载完成后调用）。 */
+export function invalidateDownloadedMlxCache(): void {
+  downloadedCache = null;
+}
+
+// ---------------------------------------------------------------------------
 // 生成
 // ---------------------------------------------------------------------------
+
+/** 当前进行中的 MLX 生成进程（防重复启动）。 */
+let activeGenerate: Promise<number> | null = null;
 
 export type MlxGenerateParams = {
   modelId: string;
@@ -355,6 +665,17 @@ export async function generateWithMlx(
   if (!existsSync(bin)) {
     return { ok: false, error: "MLX 引擎未安装，请先点击「下载引擎」" };
   }
+  // 不再允许生成时自动下载：必须先在「下载模型」里把权重下载好。
+  if (!isMlxModelDownloaded(model.id)) {
+    return {
+      ok: false,
+      error: `模型「${model.label}」尚未下载，请先点击「下载模型」（约 ${model.approxSizeGb}GB）`,
+    };
+  }
+  // 全局只允许一个生成进程，避免连点/多窗口时像之前那样堆一堆 mflux 进程互抢。
+  if (activeGenerate) {
+    return { ok: false, error: "上一次生图仍在进行中，请稍候或等它完成" };
+  }
 
   const args: string[] = [];
   if (model.modelArg) args.push("--model", model.modelArg);
@@ -377,18 +698,39 @@ export async function generateWithMlx(
     args.push("-q", String(params.quantize));
   }
 
+  // 超时保护：进程挂住（网络/内存等）时不再让 UI 永远停在“生图当中”。
+  const TIMEOUT_MS = 30 * 60_000;
   const proc = Bun.spawn([bin, ...args], { stdout: "pipe", stderr: "pipe" });
-  const [code, stderr] = await Promise.all([
-    proc.exited,
-    new Response(proc.stderr).text(),
-  ]);
+  activeGenerate = proc.exited;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try {
+      proc.kill();
+    } catch {}
+  }, TIMEOUT_MS);
 
-  if (code !== 0) {
-    const tail = stderr.trim().split("\n").slice(-6).join("\n");
-    return {
-      ok: false,
-      error: tail || `mflux 生成失败（退出码 ${code}）`,
-    };
+  try {
+    const [code, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stderr).text(),
+    ]);
+    if (timedOut) {
+      return {
+        ok: false,
+        error: `mflux 生成超时（超过 ${TIMEOUT_MS / 60_000} 分钟），已终止进程，请重试`,
+      };
+    }
+    if (code !== 0) {
+      const tail = stderr.trim().split("\n").slice(-6).join("\n");
+      return {
+        ok: false,
+        error: tail || `mflux 生成失败（退出码 ${code}）`,
+      };
+    }
+    return { ok: true };
+  } finally {
+    clearTimeout(timer);
+    activeGenerate = null;
   }
-  return { ok: true };
 }

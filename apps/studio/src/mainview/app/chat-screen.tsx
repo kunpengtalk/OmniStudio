@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  SendIcon,
+  ArrowUpIcon,
   BotIcon,
   Loader2Icon,
   ImagePlusIcon,
+  PaperclipIcon,
+  GlobeIcon,
+  FileTextIcon,
   XIcon,
   RefreshCwIcon,
   AlertTriangleIcon,
@@ -17,6 +20,7 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
+import { Input } from "@ui/input";
 import { Textarea } from "@ui/textarea";
 import type { ChatMessage } from "../../bun/chat";
 import {
@@ -256,6 +260,7 @@ function MessageBubble({
 }
 
 type Attachment = { ref: string; url: string };
+type FileAttachment = { name: string; content: string };
 
 /** 输入框下方的模型选择器：本地已安装模型 + OpenAI 兼容 API 模型。 */
 function ModelPicker() {
@@ -302,8 +307,23 @@ function ModelPicker() {
     selectMutation.mutate(option);
   };
 
-  const localOptions = options.filter((o) => o.type === "local");
-  const apiOptions = options.filter((o) => o.type === "api");
+  // 下拉框内搜索：按名称 / 详情过滤本地与 API 模型。
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const keyword = query.trim().toLowerCase();
+  const matches = (o: { label: string; value: string; detail?: string }) =>
+    !keyword ||
+    o.label.toLowerCase().includes(keyword) ||
+    o.value.toLowerCase().includes(keyword) ||
+    (o.detail ?? "").toLowerCase().includes(keyword);
+  const closeAndReset = (next: boolean) => {
+    setOpen(next);
+    if (!next) setQuery("");
+  };
+
+  const localOptions = options.filter((o) => o.type === "local" && matches(o));
+  const apiOptions = options.filter((o) => o.type === "api" && matches(o));
+  const firstMatch = localOptions[0] ?? apiOptions[0];
   const busy = selectMutation.isPending || modelsQuery.isLoading;
   const selectError =
     selectMutation.isError
@@ -316,13 +336,41 @@ function ModelPicker() {
     <div className="flex min-w-0 items-center gap-1.5">
       <Select
         value={current}
-        onValueChange={handleChange}
+        open={open}
+        onOpenChange={closeAndReset}
+        onValueChange={(v) => {
+          handleChange(v);
+          closeAndReset(false);
+        }}
         disabled={busy || streaming}
       >
         <SelectTrigger size="sm" className="h-7 max-w-64 text-xs">
           <SelectValue placeholder={t("chat.modelEmpty")} />
         </SelectTrigger>
-        <SelectContent className="max-w-80">
+        <SelectContent className="max-w-80" position="popper" align="end" sideOffset={6}>
+          {/* 搜索框：拦截键盘事件，避免被 Select 的 typeahead 抢走焦点 */}
+          <div
+            className="sticky top-0 z-10 bg-popover p-1.5 pb-1"
+            onKeyDown={(e) => e.stopPropagation()}
+          >
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && firstMatch) {
+                  e.preventDefault();
+                  handleChange(firstMatch.value);
+                  closeAndReset(false);
+                } else if (e.key === "Escape") {
+                  e.preventDefault();
+                  closeAndReset(false);
+                }
+              }}
+              placeholder={t("chat.modelSearch")}
+              autoFocus
+              className="h-7 text-xs"
+            />
+          </div>
           {localOptions.length > 0 && (
             <SelectGroup>
               <SelectLabel>{t("chat.modelLocal")}</SelectLabel>
@@ -365,6 +413,11 @@ function ModelPicker() {
               {t("chat.modelEmpty")}
             </div>
           )}
+          {options.length > 0 && !firstMatch && (
+            <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+              {t("chat.modelNoMatch")}
+            </div>
+          )}
         </SelectContent>
       </Select>
       <Button
@@ -404,6 +457,9 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
   const serverStatus = useServerStore((s) => s.status);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
+  const [webSearch, setWebSearch] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const convQuery = useQuery({
@@ -416,6 +472,14 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
     queryFn: () => rpcClient.getSettings(undefined),
   });
   const isRemoteMode = settingsQuery.data?.settings?.SERVER_MODE === "remote";
+  const webSearchDefault = settingsQuery.data?.settings?.WEB_SEARCH_ENABLED === "1";
+
+  // 联网检索开关的默认值跟随设置项（仅初始化一次，之后由用户在输入框里切换）。
+  const webSearchDefaultRef = useRef(false);
+  if (!webSearchDefaultRef.current && settingsQuery.isSuccess) {
+    webSearchDefaultRef.current = true;
+    setWebSearch(webSearchDefault);
+  }
 
   const serverStarting =
     !isRemoteMode && (serverStatus === "starting" || serverStatus === "downloading");
@@ -427,6 +491,7 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
       useChatStore.getState().setActiveMessages(convQuery.data.messages);
     }
     setAttachments([]);
+    setFileAttachments([]);
   }, [conversationId, convQuery.data]);
 
   useEffect(() => {
@@ -435,8 +500,24 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
   }, [activeMessages.length, activeMessages[activeMessages.length - 1]?.content]);
 
   const sendMutation = useMutation({
-    mutationFn: ({ content, images }: { content: string; images?: string[] }) =>
-      rpcClient.sendChatMessage({ conversationId, content, images }),
+    mutationFn: ({
+      content,
+      images,
+      files,
+      search,
+    }: {
+      content: string;
+      images?: string[];
+      files?: FileAttachment[];
+      search?: boolean;
+    }) =>
+      rpcClient.sendChatMessage({
+        conversationId,
+        content,
+        images,
+        webSearch: search,
+        files,
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
       queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
@@ -463,6 +544,21 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
     },
   });
 
+  const attachFileMutation = useMutation({
+    mutationFn: async () => {
+      const { paths } = await rpcClient.openFileDialog({
+        allowedFileTypes:
+          "txt,md,markdown,json,csv,tsv,log,xml,yml,yaml,html,htm,js,jsx,ts,tsx,mjs,cjs,css,scss,less,py,rb,rs,go,java,kt,swift,c,h,cpp,hpp,cs,php,sh,bash,zsh,toml,ini,cfg,conf,sql,vue,svelte,graphql,proto",
+      });
+      if (paths.length === 0) return;
+      const { files } = await rpcClient.stageChatFiles({ conversationId, paths });
+      setFileAttachments((prev) => {
+        const known = new Set(prev.map((f) => f.name));
+        return [...prev, ...files.filter((f) => !known.has(f.name))];
+      });
+    },
+  });
+
   const removeAttachment = async (attachment: Attachment) => {
     setAttachments((prev) => prev.filter((a) => a.ref !== attachment.ref));
     try {
@@ -472,23 +568,42 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
     }
   };
 
+  const autoResize = () => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
+  };
+
   const handleSend = () => {
     const content = input.trim();
     const images = attachments.map((a) => a.ref);
-    if ((!content && images.length === 0) || streaming) return;
+    const files = fileAttachments;
+    if ((!content && images.length === 0 && files.length === 0) || streaming) return;
     setInput("");
     setAttachments([]);
+    setFileAttachments([]);
+    requestAnimationFrame(autoResize);
     const now = Date.now();
     useChatStore.getState().setActiveMessages([
       ...activeMessages,
-      { id: now, conversationId, role: "user", content, images, createdAt: now },
+      {
+        id: now,
+        conversationId,
+        role: "user",
+        content,
+        images,
+        createdAt: now,
+      },
     ]);
     useChatStore.getState().setStreaming(true);
-    sendMutation.mutate({ content, images });
+    sendMutation.mutate({ content, images, files, search: webSearch });
   };
 
   const hasMessages = activeMessages.length > 0;
-  const canSend = (input.trim().length > 0 || attachments.length > 0) && !streaming;
+  const canSend =
+    (input.trim().length > 0 || attachments.length > 0 || fileAttachments.length > 0) &&
+    !streaming;
 
   return (
     <div className="flex min-w-0 flex-1 flex-col">
@@ -499,10 +614,8 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
               <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
                 <BotIcon className="size-6" />
               </div>
-              <p className="text-sm font-medium">Start a conversation</p>
-              <p className="text-xs text-muted-foreground">
-                Ask anything — the reply streams in real time.
-              </p>
+              <p className="text-sm font-medium">{t("chat.startConversation")}</p>
+              <p className="text-xs text-muted-foreground">{t("chat.askAnything")}</p>
             </div>
           ) : (
             activeMessages.map((m) => (
@@ -518,7 +631,7 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
         </div>
       </div>
 
-      <div className="border-t p-4">
+      <div className="border-t bg-gradient-to-t from-muted/40 to-transparent p-4">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
           {(serverStarting || (sendMutation.isPending && serverFailed)) && (
             <div
@@ -544,71 +657,136 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
               )}
             </div>
           )}
-          {attachments.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {attachments.map((a) => (
-                <div key={a.ref} className="group relative">
-                  <img
-                    src={a.url}
-                    alt=""
-                    className="h-16 w-16 rounded-lg border object-cover"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => removeAttachment(a)}
-                    className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full bg-destructive text-destructive-foreground opacity-0 transition-opacity group-hover:opacity-100"
-                    title="Remove"
+
+          {/* 大卡片式输入框：上方附件预览 + 多行输入区 + 底部工具条 */}
+          <div
+            className={cn(
+              "flex flex-col rounded-2xl border bg-card shadow-sm transition-colors",
+              "focus-within:border-primary/40 focus-within:shadow-md",
+            )}
+          >
+            {(attachments.length > 0 || fileAttachments.length > 0) && (
+              <div className="flex flex-wrap gap-2 px-3 pt-3">
+                {attachments.map((a) => (
+                  <div key={a.ref} className="group relative">
+                    <img
+                      src={a.url}
+                      alt=""
+                      className="h-16 w-16 rounded-lg border object-cover"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(a)}
+                      className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full bg-destructive text-destructive-foreground opacity-0 transition-opacity group-hover:opacity-100"
+                      title={t("chat.removeAttachment")}
+                    >
+                      <XIcon className="size-3" />
+                    </button>
+                  </div>
+                ))}
+                {fileAttachments.map((f) => (
+                  <div
+                    key={f.name}
+                    className="group relative flex max-w-52 items-center gap-1.5 rounded-lg border bg-muted/50 px-2 py-1.5"
                   >
-                    <XIcon className="size-3" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="flex items-end gap-2">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-10 shrink-0"
-              tooltip="Attach images"
-              onClick={() => attachMutation.mutate()}
-              disabled={streaming || attachMutation.isPending}
-            >
-              {attachMutation.isPending ? (
-                <Loader2Icon className="size-4 animate-spin" />
-              ) : (
-                <ImagePlusIcon className="size-4" />
-              )}
-            </Button>
+                    <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                    <span className="truncate text-xs">{f.name}</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setFileAttachments((prev) => prev.filter((x) => x.name !== f.name))
+                      }
+                      className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full bg-destructive text-destructive-foreground opacity-0 transition-opacity group-hover:opacity-100"
+                      title={t("chat.removeAttachment")}
+                    >
+                      <XIcon className="size-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <Textarea
-              placeholder="Type a message…"
+              ref={textareaRef}
+              placeholder={t("chat.inputPlaceholder")}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                autoResize();
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   handleSend();
                 }
               }}
-              className="max-h-40 min-h-10 resize-none"
-              rows={1}
+              className="max-h-56 min-h-16 resize-none border-none bg-transparent px-4 pt-3.5 text-[0.9rem] shadow-none focus-visible:ring-0 dark:bg-transparent"
+              rows={2}
             />
-            <Button
-              variant="default"
-              size="icon"
-              className="h-10"
-              tooltip="Send"
-              onClick={handleSend}
-              disabled={!canSend || sendMutation.isPending}
-            >
-              <SendIcon className="size-4" />
-            </Button>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <ModelPicker />
-            <span className="shrink-0 text-[10px] text-muted-foreground/70">
-              {t("chat.enterHint")}
-            </span>
+
+            <div className="flex items-center gap-0.5 px-2.5 pb-2.5">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground"
+                tooltip={t("chat.attachFile")}
+                onClick={() => attachFileMutation.mutate()}
+                disabled={streaming || attachFileMutation.isPending}
+              >
+                {attachFileMutation.isPending ? (
+                  <Loader2Icon className="size-4 animate-spin" />
+                ) : (
+                  <PaperclipIcon className="size-4" />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground"
+                tooltip={t("chat.attachImage")}
+                onClick={() => attachMutation.mutate()}
+                disabled={streaming || attachMutation.isPending}
+              >
+                {attachMutation.isPending ? (
+                  <Loader2Icon className="size-4 animate-spin" />
+                ) : (
+                  <ImagePlusIcon className="size-4" />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-pressed={webSearch}
+                className={cn(
+                  webSearch
+                    ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
+                    : "text-muted-foreground",
+                )}
+                tooltip={webSearch ? t("chat.webSearchOn") : t("chat.webSearchOff")}
+                onClick={() => setWebSearch((v) => !v)}
+                disabled={streaming}
+              >
+                <GlobeIcon className="size-4" />
+              </Button>
+
+              <div className="ml-auto flex min-w-0 items-center gap-1.5">
+                <ModelPicker />
+                <Button
+                  variant="default"
+                  size="icon-lg"
+                  className="shrink-0 rounded-full"
+                  tooltip={`${t("chat.send")} · ${t("chat.enterHint")}`}
+                  onClick={handleSend}
+                  disabled={!canSend || sendMutation.isPending}
+                >
+                  {sendMutation.isPending ? (
+                    <Loader2Icon className="size-4 animate-spin" />
+                  ) : (
+                    <ArrowUpIcon className="size-4" />
+                  )}
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
       </div>

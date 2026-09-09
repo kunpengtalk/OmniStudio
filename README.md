@@ -5,14 +5,15 @@
 <h1 align="center">OmniStudio</h1>
 
 <p align="center">
-  <b>EN</b> — A desktop workstation for local LLMs: manage models, run inference servers, and build with Chat / Voice / Image / OCR apps — all local-first.<br/>
+  <b>EN</b> — A desktop workstation for local LLMs: manage models, run inference servers, and build with Chat / Voice / Image / OCR / Translate apps — all local-first.<br/>
   <b>中文</b> — 本地大模型一体化桌面工作台：管理模型、运行推理服务，内置对话 / 语音 / 图片 / OCR 应用，全程本地优先。
 </p>
 
 <p align="center">
   <a href="https://kunpengtalk.com">Website 官网</a> ·
   <a href="https://kunpengtalk.com/assets/kunpengtalk-studio-demo.mp4">Demo 演示</a> ·
-  <a href="https://github.com/kunpengtalk/OmniStudio/releases/latest">Download 下载</a>
+  <a href="https://github.com/kunpengtalk/OmniStudio/releases/latest">Download 下载</a> ·
+  <a href="./CHANGELOG.md">Changelog 更新日志</a>
 </p>
 
 <p align="center">
@@ -36,12 +37,13 @@
 - **Remote mode 远程模式** — Directly connect any OpenAI-compatible endpoint (base URL / API key / model) with connection testing. 直连任意 OpenAI 兼容端点并测试连接。
 - **Endpoints 服务端点** — Chat Completions `/v1`, `/health`, `/metrics`, one-click copy in settings. 设置页展示端点并一键复制。
 
-### Four built-in apps 四个内置应用
+### Five built-in apps 五个内置应用
 
-- **Chat 对话** — Streaming responses with reasoning display, image attachments (multimodal), auto-titled conversations, session isolation per app, usage tracked to the dashboard. 流式回复 + 推理过程展示、图片多模态输入、自动标题、按应用隔离会话、用量统计。
+- **Chat 对话** — Streaming responses with reasoning display, image attachments (multimodal), web search (Bing / DuckDuckGo / Tavily, results injected as context with sources), and text-file attachments (whitelisted text/code formats wrapped into context); auto-titled conversations, session isolation per app, usage tracked to the dashboard. 流式回复 + 推理过程展示、图片多模态输入、联网检索（多服务商、结果注入上下文并标注来源）、文本附件（白名单格式注入上下文）、自动标题、按应用隔离会话、用量统计。
 - **Voice 语音** — TTS with multiple sources: audio.cpp local C++ engine (GGUF models, Metal accelerated, one-click install), Edge-TTS, and OpenAI-compatible TTS servers; voice cloning with a clone library; ASR via whisper.cpp (one-click install), audio.cpp, or OpenAI-compatible transcription. Everything logged as records with an embedded player. 多来源 TTS（audio.cpp 本地引擎 / Edge-TTS / OpenAI 兼容）+ 声音克隆 + 多引擎 ASR（whisper.cpp / audio.cpp / OpenAI 兼容），记录库内嵌播放器。
-- **OCR 文档识别** — Two engines: Tesseract (local C++, multilingual LSTM language packs, word/line bounding boxes) and VLM (Chandra / GLM-OCR / LightOnOCR-class models on the inference server). Upload PDF / PNG / JPG / WebP / TIFF / BMP / HEIC and get structured markdown — GFM tables, KaTeX math, code blocks, captions, and bounding-box-cropped image regions — with a document queue, search and browsing. 双引擎：本地 Tesseract（多语言包、词级 bbox）与 VLM；输出结构化 Markdown，文档队列与检索。
-- **Image 图片** — Slot for image-generation models (SDXL / Kolors-class presets); the dedicated generation loop is on the roadmap. 图像模型分类与预设已就位，专门生图流程开发中。
+- **OCR 文档识别** — Two engines: Tesseract (local C++, multilingual LSTM language packs, word/line bounding boxes) and VLM (Chandra / GLM-OCR / LightOnOCR-class models on the inference server). Upload PDF / PNG / JPG / WebP / TIFF / BMP / HEIC and get structured markdown — GFM tables, KaTeX math, code blocks, captions, and bounding-box-cropped image regions — with a document queue, search and browsing. The extraction workspace uses a two-pane layout (left config + right results). 双引擎：本地 Tesseract（多语言包、词级 bbox）与 VLM；输出结构化 Markdown，文档队列与检索；提取页为双栏布局。
+- **Image 图片** — Image generation via cloud OpenAI-compatible APIs, ComfyUI, or the local MLX (mflux) engine on Apple Silicon. MLX model weights are pre-downloaded with live progress before generation. 生图：云端 OpenAI 兼容 API / ComfyUI / 本地 MLX（mflux）引擎；MLX 权重预下载并实时显示进度。
+- **Translate 翻译** — Translate text through the current chat model (local inference server or any OpenAI-compatible API) across 22 languages, with source auto-detection, language swap, and one-click copy. 通过当前对话模型进行多语言互译，支持源语言自动检测、交换与一键复制。
 
 ### Ops & telemetry 运维与遥测
 
@@ -109,7 +111,7 @@ apps/
 - [x] Unified llama.cpp / vLLM / SGLang runtime + remote OpenAI-compatible API 三引擎统一运行时 + 远程 API
 - [x] Chat / Voice / OCR apps with per-app sessions; voice multi-engine TTS/ASR + cloning + records 对话 / 语音（多引擎）/ OCR 应用
 - [x] Dashboard, benchmarks, log viewer, CLI integrations, update channels, i18n 仪表盘 / 基准 / 日志 / 集成 / 更新 / 多语言
-- [ ] Image generation loop for the Image app 图片应用生图闭环
+- [x] Image generation loop for the Image app 图片应用生图闭环
 - [ ] Linux and Windows support Linux 与 Windows 支持
 - [ ] More document formats (PowerPoint, Word, Excel, etc.) 更多文档格式
 - [ ] Memory lifecycle (idle unload, prefault protection), KV cache tiering with SSD offload 内存生命周期与 KV 缓存分层

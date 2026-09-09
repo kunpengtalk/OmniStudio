@@ -292,3 +292,20 @@
   background-attachment: scroll;
   animation: gen-shimmer 1.6s linear infinite;
 }
+
+/* ------------------------------------------------------------------ */
+/* 语音合成 — 生成中的动画（跳动的频谱条）                                */
+/* ------------------------------------------------------------------ */
+@keyframes tts-eq {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.tts-eq {
+  transform-origin: 50% 100%;
+  animation: tts-eq 1.1s ease-in-out infinite;
+}

@@ -17,6 +17,7 @@ import type { GatewayStatus } from "../gateway";
 import { getSetupEnvironment, type SetupEnvironment } from "../setup-env";
 import * as Chat from "../chat";
 import type { Conversation, ChatMessage, ChatStats } from "../chat";
+import * as Translate from "../translate";
 import { listChatModels, selectChatModel, type ChatModelOption } from "../chat-model";
 import * as ModelScope from "../modelscope";
 import type { ModelScopeModel, ModelScopeFile } from "../modelscope";
@@ -42,9 +43,14 @@ import type { OcrLangModelInfo, OcrStatus, OcrResult, OcrVlmResult, OcrProviderC
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
 import * as MlxGen from "../mlx-gen";
-import type { MlxModelInfo, MlxGenStatus } from "../mlx-gen";
+import type { MlxModelInfo, MlxGenStatus, MlxModelDownloadProgress } from "../mlx-gen";
 import type { EdgeVoice } from "../edge-tts";
 import type { ModelCategory } from "../../shared/modelscope";
+
+/** 聊天附件允许的文本文件类型与大小上限（超限直接跳过）。 */
+const CHAT_TEXT_FILE_RE =
+  /\.(txt|md|markdown|json|csv|tsv|log|xml|yml|yaml|html?|htm|js|jsx|ts|tsx|mjs|cjs|css|scss|less|py|rb|rs|go|java|kt|swift|c|h|cpp|hpp|cs|php|sh|bash|zsh|toml|ini|cfg|conf|sql|vue|svelte|graphql|proto)$/i;
+const CHAT_FILE_MAX_BYTES = 512 * 1024;
 
 export type PageData = {
   pageNumber: number;
@@ -237,7 +243,13 @@ export type AppRPC = {
         response: { ok: boolean; conversation?: Conversation; error?: string };
       };
       sendChatMessage: {
-        params: { conversationId: number; content: string; images?: string[] };
+        params: {
+          conversationId: number;
+          content: string;
+          images?: string[];
+          webSearch?: boolean;
+          files?: { name: string; content: string }[];
+        };
         response: { ok: boolean; error?: string };
       };
       deleteMessage: {
@@ -252,6 +264,10 @@ export type AppRPC = {
         params: { conversationId: number; messageId: number; targetLang?: string };
         response: { ok: boolean; error?: string };
       };
+      runTranslation: {
+        params: { text: string; sourceLang?: string; targetLang: string };
+        response: { text?: string; error?: string };
+      };
       listChatModels: {
         params: undefined;
         response: { models: ChatModelOption[] };
@@ -263,6 +279,10 @@ export type AppRPC = {
       stageChatImages: {
         params: { conversationId: number; paths: string[] };
         response: { images: { ref: string; url: string }[] };
+      };
+      stageChatFiles: {
+        params: { conversationId: number; paths: string[] };
+        response: { files: { name: string; content: string }[] };
       };
       discardChatImage: {
         params: { ref: string };
@@ -594,6 +614,15 @@ export type AppRPC = {
         params: undefined;
         response: { models: MlxModelInfo[] };
       };
+      downloadMlxModel: {
+        params: { modelId: string };
+        response: { ok: boolean; error?: string };
+      };
+      /** 已下载（可生成）的 MLX 模型 id 列表。 */
+      getDownloadedMlxModels: {
+        params: undefined;
+        response: { downloaded: string[] };
+      };
     };
     messages: {};
   }>;
@@ -621,6 +650,7 @@ export type AppRPC = {
       mlxInstallLog: {
         text: string;
       };
+      mlxModelDownloadProgress: MlxModelDownloadProgress;
     };
   }>;
 };
@@ -996,8 +1026,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return Chat.setConversationPinned(id, pinned);
       },
 
-      sendChatMessage: async ({ conversationId, content, images }) => {
-        return Chat.sendMessage(conversationId, content, images ?? []);
+      sendChatMessage: async ({ conversationId, content, images, webSearch, files }) => {
+        return Chat.sendMessage(conversationId, content, images ?? [], { webSearch, files });
       },
 
       deleteMessage: async ({ conversationId, messageId }) => {
@@ -1010,6 +1040,14 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       translateMessage: async ({ conversationId, messageId, targetLang }) => {
         return Chat.translateMessage(conversationId, messageId, targetLang);
+      },
+
+      runTranslation: async (params) => {
+        try {
+          return await Translate.runTranslation(params);
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
       },
 
       listChatModels: async () => {
@@ -1045,6 +1083,23 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         }
         rmSync(resolved, { force: true });
         return { ok: true };
+      },
+
+      stageChatFiles: async ({ paths }) => {
+        const files: { name: string; content: string }[] = [];
+        for (const p of paths) {
+          if (!existsSync(p)) continue;
+          if (!CHAT_TEXT_FILE_RE.test(p)) continue;
+          try {
+            const file = Bun.file(p);
+            if (file.size > CHAT_FILE_MAX_BYTES) continue;
+            const content = await file.text();
+            files.push({ name: path.basename(p), content });
+          } catch {
+            // skip unreadable files
+          }
+        }
+        return { files };
       },
 
       // ModelScope
@@ -1503,6 +1558,15 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       listMlxGenModels: async () => {
         return { models: MlxGen.MLX_MODELS };
       },
+
+      downloadMlxModel: async ({ modelId }) => {
+        MlxGen.invalidateDownloadedMlxCache();
+        return MlxGen.downloadMlxModel(modelId);
+      },
+
+      getDownloadedMlxModels: async () => {
+        return { downloaded: MlxGen.getDownloadedMlxModels() };
+      },
     },
     messages: {},
   },
@@ -1562,6 +1626,15 @@ export function initMlxInstallBroadcast(win: BrowserWindowWithRPC) {
   MlxGen.onInstallLog((text) => {
     try {
       win.webview.rpc?.send.mlxInstallLog({ text });
+    } catch {}
+  });
+}
+
+/** MLX 模型权重下载进度，实时推送到前端。 */
+export function initMlxModelDownloadBroadcast(win: BrowserWindowWithRPC) {
+  MlxGen.onMlxModelProgress((p) => {
+    try {
+      win.webview.rpc?.send.mlxModelDownloadProgress(p);
     } catch {}
   });
 }

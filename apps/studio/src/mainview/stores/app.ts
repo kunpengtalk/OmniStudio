@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type AppId = "chat" | "voice" | "image" | "ocr";
+export type AppId = "chat" | "voice" | "image" | "ocr" | "translate";
 
 type AppState = {
   activeApp: AppId;

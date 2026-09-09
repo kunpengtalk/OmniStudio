@@ -17,6 +17,7 @@ import {
   SparklesIcon,
   Maximize2Icon,
   LayersIcon,
+  LanguagesIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -62,12 +63,13 @@ const PAGE_SIZE = 30;
 const RING_SIZE = 14;
 const RING_STROKE = 2;
 
-const APP_IDS: AppId[] = ["chat", "voice", "image", "ocr"];
+const APP_IDS: AppId[] = ["chat", "voice", "image", "ocr", "translate"];
 const APP_ICONS: Record<AppId, React.ReactNode> = {
   chat: <MessageSquareIcon className="size-4" />,
   voice: <MicIcon className="size-4" />,
   image: <ImageIcon className="size-4" />,
   ocr: <ScanTextIcon className="size-4" />,
+  translate: <LanguagesIcon className="size-4" />,
 };
 
 function DocStatusDot({
@@ -699,6 +701,21 @@ function ImageRecordList() {
   );
 }
 
+function TranslateSidebarGroup() {
+  const t = useT();
+  return (
+    <SidebarGroup className="min-h-0 flex-1">
+      <SidebarGroupLabel>
+        <LanguagesIcon className="size-3.5" />
+        {t("apps.translate")}
+      </SidebarGroupLabel>
+      <div className="px-3 py-8 text-center text-xs text-muted-foreground">
+        {t("translate.sidebarHint")}
+      </div>
+    </SidebarGroup>
+  );
+}
+
 function AppSwitcher() {
   const t = useT();
   const { activeApp, setActiveApp } = useAppStore();
@@ -714,7 +731,7 @@ function AppSwitcher() {
 
   return (
     <SidebarGroup className="gap-0.5 px-0 py-0">
-      <div className="grid grid-cols-4 gap-1">
+      <div className="grid grid-cols-5 gap-1">
         {APP_IDS.map((app) => {
           const isActive = activeApp === app;
           return (
@@ -765,6 +782,8 @@ export function AppSidebar() {
           <VoiceRecordList />
         ) : activeApp === "image" ? (
           <ImageRecordList />
+        ) : activeApp === "translate" ? (
+          <TranslateSidebarGroup />
         ) : (
           <ConversationRecordList app={activeApp} />
         )}

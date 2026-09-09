@@ -7,6 +7,7 @@ import { useChatStore } from "../stores/chat";
 import { useModelDownloadStore } from "../stores/model-download";
 import { useGatewayStore } from "../stores/gateway";
 import { useMlxInstallStore } from "../stores/mlx-install";
+import { useMlxModelDownloadStore } from "../stores/mlx-model-download";
 
 const knownCompletedIds = new Set<string>();
 
@@ -75,6 +76,13 @@ const rpc = Electroview.defineRPC<AppRPC>({
         // 安装完成（成功或失败）后刷新引擎状态；失败的日志形如「mflux 安装失败」。
         if (text.includes("安装成功") || text.includes("安装失败")) {
           queryClient.invalidateQueries({ queryKey: ["mlx-gen-status"] });
+        }
+      },
+      mlxModelDownloadProgress: (p) => {
+        useMlxModelDownloadStore.getState().setProgress(p);
+        // 下载结束（成功/失败）后刷新「已下载模型」列表，UI 的下载按钮/徽章随之更新。
+        if (p.stage !== "downloading") {
+          queryClient.invalidateQueries({ queryKey: ["mlx-downloaded-models"] });
         }
       },
     },

@@ -14,14 +14,30 @@ import { ChatWindow } from "../chat-screen";
 import { VoiceScreen } from "../voice-screen";
 import { ImageScreen } from "../image-screen";
 import { OcrScreen } from "../ocr-screen";
+import { TranslateScreen } from "../translate-screen";
 import { ModelsScreen } from "../models-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { DownloadsButton } from "@components/download-panel";
 import { StatusPill } from "@components/status-pill";
 import { ErrorBoundary } from "@components/error-boundary";
-import { useAppStore } from "@stores/app";
+import { useAppStore, type AppId } from "@stores/app";
 import { useUILang } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
+
+const renderActiveApp = (activeApp: AppId): ReactNode => {
+  switch (activeApp) {
+    case "ocr":
+      return <OcrScreen />;
+    case "voice":
+      return <VoiceScreen />;
+    case "image":
+      return <ImageScreen />;
+    case "translate":
+      return <TranslateScreen />;
+    default:
+      return <ChatWindow />;
+  }
+};
 
 const Outlet = () => {
   const route = useRouter((s) => s.route);
@@ -40,29 +56,10 @@ const Outlet = () => {
     content = <ServerStatsScreen />;
   } else if (route.path === "document") {
     content = <DocumentView id={route.id} />;
-  } else if (route.path === "chat") {
-    content =
-      activeApp === "ocr" ? (
-        <OcrScreen />
-      ) : activeApp === "voice" ? (
-        <VoiceScreen />
-      ) : activeApp === "image" ? (
-        <ImageScreen />
-      ) : (
-        <ChatWindow />
-      );
+  } else if (route.path === "chat" || route.path === "index") {
+    content = renderActiveApp(activeApp);
   } else {
-    // index / default home
-    content =
-      activeApp === "ocr" ? (
-        <OcrScreen />
-      ) : activeApp === "voice" ? (
-        <VoiceScreen />
-      ) : activeApp === "image" ? (
-        <ImageScreen />
-      ) : (
-        <ChatWindow />
-      );
+    content = renderActiveApp(activeApp);
   }
 
   // key by route so navigating to a different screen remounts the boundary

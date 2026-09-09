@@ -9,7 +9,6 @@ import {
   Trash2Icon,
   FileAudioIcon,
   SparklesIcon,
-  ArrowUpIcon,
   SquareIcon,
   PlayIcon,
   CircleIcon,
@@ -22,7 +21,6 @@ import {
   RefreshCwIcon,
   CpuIcon,
   TrashIcon,
-  UsersIcon,
   TimerIcon,
 } from "lucide-react";
 
@@ -36,13 +34,11 @@ import { Spinner } from "@ui/spinner";
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
-  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@ui/select";
+import { Tabs, TabsList, TabsTrigger } from "@ui/tabs";
 import { useT } from "@stores/ui-lang";
 import { useVoiceStore, type VoiceTab } from "@stores/voice";
 import { useModelDownloadStore } from "@stores/model-download";
@@ -121,6 +117,77 @@ function ResultPanel({ record, label }: { record?: VoiceRecordRow; label: string
       ) : (
         <p className="whitespace-pre-wrap text-xs">{record.text}</p>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 生成中动画：跳动的频谱条正在“演奏”你的音频
+// ---------------------------------------------------------------------------
+
+function TtsLoading({ text }: { text: string }) {
+  const t = useT();
+  return (
+    <div className="flex flex-col items-center gap-6">
+      {/* 音浪画布 */}
+      <div className="gen-canvas relative flex size-56 items-center justify-center overflow-hidden rounded-3xl border bg-gradient-to-b from-violet-100/70 to-fuchsia-200/60 dark:from-violet-950/40 dark:to-fuchsia-950/40">
+        {/* 扩散光环 */}
+        <span className="gen-ring pointer-events-none absolute inset-0 rounded-3xl border-2 border-fuchsia-400/70" />
+        <span
+          className="gen-ring pointer-events-none absolute inset-0 rounded-3xl border border-primary/40"
+          style={{ animationDelay: "0.8s" }}
+        />
+
+        {/* 角落声波符号 */}
+        <AudioLinesIcon
+          className="gen-spark pointer-events-none absolute left-8 top-8 size-5 text-fuchsia-500/80"
+          style={{ animationDelay: "0.3s" }}
+        />
+        <AudioLinesIcon
+          className="gen-spark pointer-events-none absolute right-7 top-12 size-4 text-violet-500/70"
+          style={{ animationDelay: "1.1s" }}
+        />
+
+        {/* 频谱条 */}
+        <div className="flex h-28 items-end gap-1.5">
+          {Array.from({ length: 14 }).map((_, i) => (
+            <span
+              key={i}
+              className="tts-eq w-2 rounded-full bg-gradient-to-t from-violet-500 to-fuchsia-400"
+              style={{ height: `${26 + ((i * 7) % 5) * 13}px`, animationDelay: `${i * 0.09}s` }}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* 提示文字 */}
+      <div className="flex max-w-sm flex-col items-center gap-2">
+        <p className="flex items-center gap-2 text-sm font-medium text-foreground">
+          <Loader2Icon className="size-4 animate-spin text-primary" />
+          {t("voice.tts.generating")}
+        </p>
+        {text && (
+          <p className="gen-shimmer line-clamp-2 rounded-lg px-3 py-1 text-center text-xs text-muted-foreground">
+            {text}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 右侧结果区空状态
+// ---------------------------------------------------------------------------
+
+function ResultEmpty({ icon, title, hint }: { icon: React.ReactNode; title: string; hint?: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 text-center">
+      <div className="flex size-20 items-center justify-center rounded-2xl bg-primary/15">
+        {icon}
+      </div>
+      <p className="text-lg font-medium">{title}</p>
+      {hint && <p className="max-w-xs text-sm text-muted-foreground">{hint}</p>}
     </div>
   );
 }
@@ -286,6 +353,7 @@ function LocalModelRow({
   model,
   status,
   pending,
+  showControls = true,
   onDownload,
   onStart,
   onStop,
@@ -294,6 +362,7 @@ function LocalModelRow({
   model: TtsLocalModelInfo;
   status?: TtsLocalStatus;
   pending: boolean;
+  showControls?: boolean;
   onDownload: (m: TtsLocalModelInfo) => void;
   onStart: (m: TtsLocalModelInfo) => void;
   onStop: () => void;
@@ -350,7 +419,7 @@ function LocalModelRow({
               ? `${task?.percent != null ? Math.round(task.percent) : 0}%`
               : t("voice.local.download")}
           </Button>
-        ) : (
+        ) : showControls ? (
           <>
             <Button
               size="sm"
@@ -367,6 +436,21 @@ function LocalModelRow({
               )}
               {running ? t("voice.local.stop") : t("voice.local.start")}
             </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              tooltip={t("voice.local.delete")}
+              onClick={() => onDelete(model)}
+              disabled={pending}
+            >
+              <TrashIcon className="size-4" />
+            </Button>
+          </>
+        ) : (
+          <>
+            <Badge variant="secondary" className="text-[10px]">
+              {t("voice.local.installed")}
+            </Badge>
             <Button
               variant="ghost"
               size="icon-sm"
@@ -560,23 +644,17 @@ function TtsTab() {
     }
   }, [settings, localModels, localModelsData]);
 
-  // 模型选择（选择模型的界面）：Edge TTS / 本地 audio.cpp 模型 / OpenAI 兼容服务。
-  const sourcePickerValue =
-    source === "edge" ? "edge-tts" : source === "compat" ? "__compat__" : localModelId;
-  const handleSourceModelPick = (id: string) => {
+  // 顶部切换推理引擎（本地 audio.cpp / Edge TTS / OpenAI 兼容服务）。
+  const switchSource = (s: "local" | "edge" | "compat") => {
     setLocalError(undefined);
-    if (id === "edge-tts") {
-      setSource("edge");
+    setSource(s);
+    if (s === "edge") {
       void rpcClient.updateSettings({ settings: { TTS_MODEL: "edge-tts" } });
-      return;
+    } else if (s === "local") {
+      if (localModelId) void rpcClient.updateSettings({ settings: { TTS_MODEL: localModelId } });
+    } else if (s === "compat") {
+      if (model.trim()) void rpcClient.updateSettings({ settings: { TTS_MODEL: model.trim() } });
     }
-    if (id === "__compat__") {
-      setSource("compat");
-      return;
-    }
-    setSource("local");
-    setLocalModelId(id);
-    void rpcClient.updateSettings({ settings: { TTS_MODEL: id } });
   };
 
   const selectedLocal = localModels.find((m) => m.id === localModelId);
@@ -752,359 +830,428 @@ function TtsTab() {
   });
 
   return (
-    <div className="flex flex-col gap-5">
-      {/* 选择模型：Edge TTS（在线免费）/ 本地 audio.cpp 模型 / OpenAI 兼容服务 */}
-      <div>
-        <Label className="mb-1 block text-xs">{t("voice.tts.model")}</Label>
-        <Select value={sourcePickerValue} onValueChange={handleSourceModelPick}>
-          <SelectTrigger className="w-full text-xs">
-            <SelectValue placeholder={t("voice.tts.modelPlaceholder")} />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="edge-tts">
-              <span className="flex w-full items-center gap-1.5">
-                <GlobeIcon className="size-3.5 shrink-0" />
-                <span className="truncate">{t("voice.tts.sourceEdge")}</span>
-              </span>
-            </SelectItem>
-            <SelectSeparator />
-            <SelectGroup>
-              <SelectLabel>{t("voice.tts.sourceLocal")}</SelectLabel>
-              {localModels.map((m) => (
-                <SelectItem key={m.id} value={m.id} className="text-xs">
-                  <span className="flex w-full items-center justify-between gap-2">
-                    <span className="truncate">{m.name}</span>
-                    <span
-                      className={cn(
-                        "shrink-0 text-[10px]",
-                        m.downloaded ? "text-emerald-500" : "text-amber-500",
+    <div className="flex h-full min-h-0 flex-col">
+      {/* 顶部：推理引擎 */}
+      <div className="shrink-0 border-b px-6 py-3">
+        <Label className="mb-1.5 block text-xs">{t("voice.tts.engine")}</Label>
+        <div className="flex overflow-hidden rounded-lg border">
+          {(
+            [
+              { key: "local", label: t("voice.tts.sourceLocal"), icon: <CpuIcon className="size-3.5" /> },
+              { key: "edge", label: t("voice.tts.sourceEdge"), icon: <GlobeIcon className="size-3.5" /> },
+              { key: "compat", label: t("voice.tts.sourceCompat"), icon: <ServerIcon className="size-3.5" /> },
+            ] as const
+          ).map(({ key, label, icon }) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => switchSource(key)}
+              className={cn(
+                "flex flex-1 items-center justify-center gap-1.5 px-3 py-2 text-xs transition-colors",
+                source === key
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              {icon}
+              {label}
+            </button>
+          ))}
+        </div>
+        <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+          {t(source === "local" ? "voice.local.desc" : source === "edge" ? "voice.tts.edgeDesc" : "voice.compat.desc")}
+        </p>
+      </div>
+
+      <div className="flex min-h-0 flex-1">
+        {/* 左侧：引擎设置 */}
+        <aside className="w-[340px] shrink-0 overflow-y-auto border-r p-4">
+          <div className="flex flex-col gap-5">
+            {source === "local" && (
+              <>
+                {/* 引擎状态 */}
+                <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
+                  <CpuIcon className="size-4 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">{t("voice.local.engine")}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {!localStatus?.engineInstalled
+                        ? t("voice.local.engineNone")
+                        : `${t("voice.local.engineReady")}${localStatus.binaryPath ? ` · ${localStatus.binaryPath}` : ""}`}
+                    </p>
+                  </div>
+                  {!localStatus?.engineInstalled ? (
+                    <Button size="sm" disabled={downloadEngine.isPending} onClick={() => downloadEngine.mutate()}>
+                      {downloadEngine.isPending ? (
+                        <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                      ) : (
+                        <DownloadCloudIcon data-icon="inline-start" />
                       )}
-                    >
-                      {m.downloaded
-                        ? m.active
-                          ? t("voice.local.active")
-                          : t("voice.tts.model.downloaded")
-                        : t("voice.tts.model.notDownloaded")}
+                      {downloadEngine.isPending ? t("voice.local.downloadingEngine") : t("voice.local.downloadEngine")}
+                    </Button>
+                  ) : (
+                    <Badge variant="default" className="gap-1 text-[10px]">
+                      <CircleIcon className="size-2.5 fill-current" />
+                      {t("voice.local.engineReady")}
+                    </Badge>
+                  )}
+                </div>
+
+                {/* 模型列表（下载管理） */}
+                <div>
+                  <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
+                    <AudioLinesIcon className="size-4 text-muted-foreground" />
+                    {t("voice.local.models")}
+                    <span className="text-xs font-normal text-muted-foreground">
+                      {t("voice.local.modelsHint")}
                     </span>
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectGroup>
-            <SelectSeparator />
-            <SelectItem value="__compat__">
-              <span className="flex w-full items-center gap-1.5">
-                <ServerIcon className="size-3.5 shrink-0" />
-                <span className="truncate">{t("voice.tts.sourceCompat")}</span>
-              </span>
-            </SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-
-      {source === "local" && (
-        <>
-          <p className="text-xs text-muted-foreground">{t("voice.local.desc")}</p>
-
-          {/* 引擎状态 */}
-          <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
-            <CpuIcon className="size-4 text-muted-foreground" />
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium">{t("voice.local.engine")}</p>
-              <p className="text-xs text-muted-foreground">
-                {!localStatus?.engineInstalled
-                  ? t("voice.local.engineNone")
-                  : `${t("voice.local.engineReady")}${localStatus.binaryPath ? ` · ${localStatus.binaryPath}` : ""}`}
-                {localStatus?.active
-                  ? ` · ${t("voice.local.running")}`
-                  : ` · ${t("voice.local.notStarted")}`}
-              </p>
-            </div>
-            {!localStatus?.engineInstalled ? (
-              <Button size="sm" disabled={downloadEngine.isPending} onClick={() => downloadEngine.mutate()}>
-                {downloadEngine.isPending ? (
-                  <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                ) : (
-                  <DownloadCloudIcon data-icon="inline-start" />
-                )}
-                {downloadEngine.isPending ? t("voice.local.downloadingEngine") : t("voice.local.downloadEngine")}
-              </Button>
-            ) : (
-              <Badge variant="default" className="gap-1 text-[10px]">
-                <CircleIcon className="size-2.5 fill-current" />
-                {t("voice.local.engineReady")}
-              </Badge>
-            )}
-          </div>
-
-          {/* 模型列表 */}
-          <div>
-            <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
-              <AudioLinesIcon className="size-4 text-muted-foreground" />
-              {t("voice.local.models")}
-              <span className="text-xs font-normal text-muted-foreground">
-                {t("voice.local.modelsHint")}
-              </span>
-            </h3>
-            <div className="flex flex-col gap-2">
-              {localModels.map((m) => (
-                <LocalModelRow
-                  key={m.id}
-                  model={m}
-                  status={localStatus}
-                  pending={localPending}
-                  onDownload={(mm) => downloadLocalModel.mutate(mm)}
-                  onStart={(mm) => startLocalModel.mutate(mm)}
-                  onStop={() => stopLocalEngine.mutate()}
-                  onDelete={(mm) => deleteLocalModel.mutate(mm)}
-                />
-              ))}
-            </div>
-          </div>
-
-          {/* 选择模型 */}
-          <div>
-            <Label className="mb-1 block text-xs">{t("voice.local.select")}</Label>
-            {localModels.filter((m) => m.downloaded).length === 0 ? (
-              <div className="flex items-center justify-center rounded-lg border border-dashed px-4 py-6 text-xs text-muted-foreground">
-                {t("voice.local.empty")}
-              </div>
-            ) : (
-              <Select
-                value={localModelId}
-                onValueChange={(v) => {
-                  setLocalModelId(v);
-                  setLocalError(undefined);
-                }}
-              >
-                <SelectTrigger className="h-8 w-full text-xs">
-                  <SelectValue placeholder={t("voice.local.select")} />
-                </SelectTrigger>
-                <SelectContent>
-                  {localModels
-                    .filter((m) => m.downloaded)
-                    .map((m) => (
-                      <SelectItem key={m.id} value={m.id}>
-                        {m.name}
-                        {m.active ? ` · ${t("voice.local.active")}` : ""}
-                      </SelectItem>
+                  </h3>
+                  <div className="flex flex-col gap-2">
+                    {localModels.map((m) => (
+                      <LocalModelRow
+                        key={m.id}
+                        model={m}
+                        status={localStatus}
+                        pending={localPending}
+                        showControls={false}
+                        onDownload={(mm) => downloadLocalModel.mutate(mm)}
+                        onStart={(mm) => startLocalModel.mutate(mm)}
+                        onStop={() => stopLocalEngine.mutate()}
+                        onDelete={(mm) => deleteLocalModel.mutate(mm)}
+                      />
                     ))}
-                </SelectContent>
-              </Select>
+                  </div>
+                </div>
+              </>
             )}
-          </div>
 
-          {!selectedLocal?.downloaded && (
-            <p className="text-xs text-amber-600">{t("voice.local.needModel")}</p>
-          )}
-
-          <LocalVoicePicker
-            model={selectedLocal}
-            clones={clones}
-            voice={localVoice}
-            emotion={localEmotion}
-            instruct={localInstruct}
-            onVoice={setLocalVoice}
-            onEmotion={setLocalEmotion}
-            onInstruct={setLocalInstruct}
-          />
-
-          {selectedLocal?.languageSupported && (
-            <div>
-              <Label className="mb-1 block text-xs">{t("voice.local.language")}</Label>
-              <Select
-                value={localLanguage || "auto"}
-                onValueChange={(v) => setLocalLanguage(v === "auto" ? "" : v)}
-                key={selectedLocal?.id}
-              >
-                <SelectTrigger className="h-8 w-full text-xs">
-                  <SelectValue placeholder="auto" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="auto">auto</SelectItem>
-                  {(selectedLocal.languageCodes ?? []).map((code) => (
-                    <SelectItem key={code} value={code}>
-                      {AUDIOCPP_LANG_LABELS[code] ?? code}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-        </>
-      )}
-
-      {source === "edge" && (
-        <>
-          <p className="text-xs text-muted-foreground">{t("voice.tts.edgeDesc")}</p>
-          <div>
-            <Label className="mb-1 block text-xs">{t("voice.tts.edgeVoice")}</Label>
-            <EdgeVoicePicker value={edgeVoice} onChange={setEdgeVoice} placeholder={t("voice.tts.edgeVoice")} />
-          </div>
-        </>
-      )}
-
-      {source === "compat" && (
-        <>
-          <p className="text-xs text-muted-foreground">{t("voice.compat.desc")}</p>
-
-          {/* 三方服务配置：Base URL + API Key */}
-          <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
-            <div className="grid gap-2 sm:grid-cols-2">
-              <div>
-                <Label htmlFor="tts-provider-base" className="mb-1 block text-xs">
-                  {t("voice.compat.base")}
-                </Label>
-                <Input
-                  id="tts-provider-base"
-                  placeholder="https://api.openai.com/v1"
-                  value={pBase}
-                  onChange={(e) => setPBase(e.target.value)}
-                  className="h-8 text-xs"
-                />
-              </div>
-              <div>
-                <Label htmlFor="tts-provider-key" className="mb-1 block text-xs">
-                  {t("voice.compat.apiKey")}
-                </Label>
-                <Input
-                  id="tts-provider-key"
-                  type="password"
-                  placeholder="sk-…"
-                  value={pKey}
-                  onChange={(e) => setPKey(e.target.value)}
-                  className="h-8 text-xs"
-                />
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                onClick={() => saveProvider.mutate()}
-                disabled={saveProvider.isPending || !pBase.trim()}
-              >
-                {saveProvider.isPending ? (
-                  <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                ) : (
-                  <SaveIcon data-icon="inline-start" />
-                )}
-                {t("voice.compat.save")}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => fetchModels.mutate()}
-                disabled={fetchModels.isPending || !pBase.trim()}
-              >
-                {fetchModels.isPending ? (
-                  <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                ) : (
-                  <RefreshCwIcon data-icon="inline-start" />
-                )}
-                {t("voice.compat.fetchModels")}
-              </Button>
-              {configured && (
-                <Badge variant="secondary" className="gap-1 text-[10px]">
-                  <CircleIcon className="size-2.5 fill-current text-emerald-500" />
-                  {t("voice.compat.configured")}
-                </Badge>
-              )}
-            </div>
-            {(pError || (fetchModels.isError ? String(fetchModels.error) : undefined)) && (
-              <ResultError error={pError ?? String(fetchModels.error)} />
-            )}
-          </div>
-
-          {/* 模型选择（可从 /models 拉取，也可手动输入） */}
-          <div>
-            <Label htmlFor="tts-model" className="mb-1 block text-xs">
-              {t("voice.compat.model")}
-            </Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="tts-model"
-                list="tts-provider-models"
-                placeholder={t("voice.compat.modelPlaceholder")}
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                className="h-8 flex-1 text-xs"
-              />
-              {models.length > 0 && (
-                <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-                  {models.length} {t("voice.compat.modelsCount")}
-                </span>
-              )}
-            </div>
-            {models.length > 0 && (
-              <datalist id="tts-provider-models">
-                {models.map((m) => (
-                  <option key={m} value={m} />
-                ))}
-              </datalist>
-            )}
-          </div>
-
-          {/* 音色 */}
-          <div>
-            <Label className="mb-1 block text-xs">{t("voice.tts.voice")}</Label>
-            <div className="flex flex-wrap gap-1.5">
-              {compatVoices.map((v) => {
-                const isClone = clones.some((c) => c.name === v);
-                return (
-                  <button
-                    key={v}
-                    type="button"
-                    onClick={() => setVoice(v)}
-                    className={cn(
-                      "rounded-full border px-2.5 py-1 text-xs transition-colors",
-                      voice === v
-                        ? "border-primary bg-primary/10 text-primary"
-                        : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
+            {source === "compat" && (
+              <>
+                {/* 服务配置：Base URL + API Key */}
+                <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div>
+                      <Label htmlFor="tts-provider-base" className="mb-1 block text-xs">
+                        {t("voice.compat.base")}
+                      </Label>
+                      <Input
+                        id="tts-provider-base"
+                        placeholder="https://api.openai.com/v1"
+                        value={pBase}
+                        onChange={(e) => setPBase(e.target.value)}
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="tts-provider-key" className="mb-1 block text-xs">
+                        {t("voice.compat.apiKey")}
+                      </Label>
+                      <Input
+                        id="tts-provider-key"
+                        type="password"
+                        placeholder="sk-…"
+                        value={pKey}
+                        onChange={(e) => setPKey(e.target.value)}
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => saveProvider.mutate()}
+                      disabled={saveProvider.isPending || !pBase.trim()}
+                    >
+                      {saveProvider.isPending ? (
+                        <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                      ) : (
+                        <SaveIcon data-icon="inline-start" />
+                      )}
+                      {t("voice.compat.save")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => fetchModels.mutate()}
+                      disabled={fetchModels.isPending || !pBase.trim()}
+                    >
+                      {fetchModels.isPending ? (
+                        <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                      ) : (
+                        <RefreshCwIcon data-icon="inline-start" />
+                      )}
+                      {t("voice.compat.fetchModels")}
+                    </Button>
+                    {configured && (
+                      <Badge variant="secondary" className="gap-1 text-[10px]">
+                        <CircleIcon className="size-2.5 fill-current text-emerald-500" />
+                        {t("voice.compat.configured")}
+                      </Badge>
                     )}
-                  >
-                    {v}
-                    {isClone && <span className="ml-1 text-[9px] text-primary">·{t("voice.clone.badge")}</span>}
-                  </button>
-                );
-              })}
+                  </div>
+                  {(pError || (fetchModels.isError ? String(fetchModels.error) : undefined)) && (
+                    <ResultError error={pError ?? String(fetchModels.error)} />
+                  )}
+                </div>
+              </>
+            )}
+
+            {source === "edge" && (
+              <p className="text-xs text-muted-foreground">{t("voice.tts.edgeDesc")}</p>
+            )}
+          </div>
+        </aside>
+
+        {/* 右侧：配置与生成 */}
+        <main className="min-w-0 flex-1 overflow-y-auto">
+          <div className="mx-auto flex w-full max-w-2xl flex-col gap-5 px-6 py-6">
+            {source === "local" && (
+              <>
+                {/* 当前引擎：状态 + 选择模型 + 启动/停止 */}
+                <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-xs font-medium">
+                      <CpuIcon className="size-3.5 text-primary" />
+                      {t("voice.local.engine")}
+                    </span>
+                    {localStatus?.active ? (
+                      <Badge variant="default" className="gap-1 text-[10px]">
+                        <CircleIcon className="size-2.5 fill-current" />
+                        {t("voice.local.running")}
+                      </Badge>
+                    ) : localStatus?.engineInstalled ? (
+                      <Badge variant="secondary" className="gap-1 text-[10px]">
+                        <CircleIcon className="size-2.5 fill-current" />
+                        {t("voice.local.notStarted")}
+                      </Badge>
+                    ) : null}
+                  </div>
+
+                  <div>
+                    <Label className="mb-1 block text-xs">{t("voice.local.select")}</Label>
+                    {localModels.filter((m) => m.downloaded).length === 0 ? (
+                      <div className="flex items-center justify-center rounded-lg border border-dashed px-4 py-6 text-xs text-muted-foreground">
+                        {t("voice.local.empty")}
+                      </div>
+                    ) : (
+                      <Select
+                        value={localModelId}
+                        onValueChange={(v) => {
+                          setLocalModelId(v);
+                          setLocalError(undefined);
+                        }}
+                      >
+                        <SelectTrigger className="h-8 w-full text-xs">
+                          <SelectValue placeholder={t("voice.local.select")} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {localModels
+                            .filter((m) => m.downloaded)
+                            .map((m) => (
+                              <SelectItem key={m.id} value={m.id}>
+                                {m.name}
+                                {m.active ? ` · ${t("voice.local.active")}` : ""}
+                              </SelectItem>
+                            ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                  </div>
+
+                  {!selectedLocal?.downloaded && (
+                    <p className="text-xs text-amber-600">{t("voice.local.needModel")}</p>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant={localStatus?.active ? "outline" : "default"}
+                      disabled={localPending || !selectedLocal?.downloaded || !localStatus?.engineInstalled}
+                      onClick={() => {
+                        if (localStatus?.active) stopLocalEngine.mutate();
+                        else if (selectedLocal) startLocalModel.mutate(selectedLocal);
+                      }}
+                    >
+                      {localPending ? (
+                        <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                      ) : localStatus?.active ? (
+                        <SquareIcon data-icon="inline-start" />
+                      ) : (
+                        <PlayIcon data-icon="inline-start" />
+                      )}
+                      {localStatus?.active ? t("voice.local.stop") : t("voice.local.start")}
+                    </Button>
+                    {!localStatus?.engineInstalled && (
+                      <Button
+                        variant="link"
+                        size="sm"
+                        className="h-6 px-1 text-xs"
+                        onClick={() => downloadEngine.mutate()}
+                      >
+                        {t("voice.local.downloadEngine")}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+
+                <LocalVoicePicker
+                  model={selectedLocal}
+                  clones={clones}
+                  voice={localVoice}
+                  emotion={localEmotion}
+                  instruct={localInstruct}
+                  onVoice={setLocalVoice}
+                  onEmotion={setLocalEmotion}
+                  onInstruct={setLocalInstruct}
+                />
+
+                {selectedLocal?.languageSupported && (
+                  <div>
+                    <Label className="mb-1 block text-xs">{t("voice.local.language")}</Label>
+                    <Select
+                      value={localLanguage || "auto"}
+                      onValueChange={(v) => setLocalLanguage(v === "auto" ? "" : v)}
+                      key={selectedLocal?.id}
+                    >
+                      <SelectTrigger className="h-8 w-full text-xs">
+                        <SelectValue placeholder="auto" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">auto</SelectItem>
+                        {(selectedLocal.languageCodes ?? []).map((code) => (
+                          <SelectItem key={code} value={code}>
+                            {AUDIOCPP_LANG_LABELS[code] ?? code}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+
+                {localError && <ResultError error={localError} />}
+              </>
+            )}
+
+            {source === "edge" && (
+              <>
+                <div>
+                  <Label className="mb-1 block text-xs">{t("voice.tts.edgeVoice")}</Label>
+                  <EdgeVoicePicker value={edgeVoice} onChange={setEdgeVoice} placeholder={t("voice.tts.edgeVoice")} />
+                </div>
+                {generate.isError && <ResultError error={String(generate.error)} />}
+              </>
+            )}
+
+            {source === "compat" && (
+              <>
+                {/* 模型（可从 /models 拉取，也可手动输入） */}
+                <div>
+                  <Label htmlFor="tts-model" className="mb-1 block text-xs">
+                    {t("voice.compat.model")}
+                  </Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id="tts-model"
+                      list="tts-provider-models"
+                      placeholder={t("voice.compat.modelPlaceholder")}
+                      value={model}
+                      onChange={(e) => setModel(e.target.value)}
+                      className="h-8 flex-1 text-xs"
+                    />
+                    {models.length > 0 && (
+                      <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+                        {models.length} {t("voice.compat.modelsCount")}
+                      </span>
+                    )}
+                  </div>
+                  {models.length > 0 && (
+                    <datalist id="tts-provider-models">
+                      {models.map((m) => (
+                        <option key={m} value={m} />
+                      ))}
+                    </datalist>
+                  )}
+                </div>
+
+                {/* 音色 */}
+                <div>
+                  <Label className="mb-1 block text-xs">{t("voice.tts.voice")}</Label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {compatVoices.map((v) => {
+                      const isClone = clones.some((c) => c.name === v);
+                      return (
+                        <button
+                          key={v}
+                          type="button"
+                          onClick={() => setVoice(v)}
+                          className={cn(
+                            "rounded-full border px-2.5 py-1 text-xs transition-colors",
+                            voice === v
+                              ? "border-primary bg-primary/10 text-primary"
+                              : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
+                          )}
+                        >
+                          {v}
+                          {isClone && <span className="ml-1 text-[9px] text-primary">·{t("voice.clone.badge")}</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {generate.isError && <ResultError error={String(generate.error)} />}
+              </>
+            )}
+
+            {/* 文本录入 */}
+            <div>
+              <Label htmlFor="tts-text" className="mb-1 block text-xs">
+                {t("voice.tts.text")}
+              </Label>
+              <Textarea
+                id="tts-text"
+                rows={6}
+                placeholder={t("voice.tts.textPlaceholder")}
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                className="resize-none"
+              />
+            </div>
+
+            {/* 生成 */}
+            <Button
+              size="lg"
+              onClick={() => generate.mutate()}
+              disabled={!text.trim() || generate.isPending}
+              className="w-full"
+            >
+              {generate.isPending ? (
+                <Loader2Icon data-icon="inline-start" className="animate-spin" />
+              ) : (
+                <SparklesIcon data-icon="inline-start" />
+              )}
+              {generate.isPending ? t("voice.tts.generating") : t("voice.tts.generate")}
+            </Button>
+
+            {/* 结果 */}
+            <div className="flex flex-col items-center gap-6 pb-8 pt-2">
+              {generate.isPending ? (
+                <TtsLoading text={text} />
+              ) : result ? (
+                <div className="w-full max-w-md">
+                  <ResultPanel record={result} label={t("voice.tts.noResult")} />
+                </div>
+              ) : (
+                <ResultEmpty
+                  icon={<AudioLinesIcon className="size-9 text-primary" />}
+                  title={t("voice.tts.generate")}
+                  hint={t("voice.tts.noResult")}
+                />
+              )}
             </div>
           </div>
-        </>
-      )}
-
-      {source === "local" && localError && <ResultError error={localError} />}
-      {source !== "local" && generate.isError && (
-        <ResultError error={String(generate.error)} />
-      )}
-
-      <div>
-        <Label htmlFor="tts-text" className="mb-1 block text-xs">
-          {t("voice.tts.text")}
-        </Label>
-        <Textarea
-          id="tts-text"
-          rows={6}
-          placeholder={t("voice.tts.textPlaceholder")}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          className="resize-none"
-        />
+        </main>
       </div>
-
-      <div className="flex items-center gap-3">
-        <Button onClick={() => generate.mutate()} disabled={!text.trim() || generate.isPending}>
-          {generate.isPending ? (
-            <Loader2Icon data-icon="inline-start" className="animate-spin" />
-          ) : (
-            <ArrowUpIcon data-icon="inline-start" />
-          )}
-          {generate.isPending ? t("voice.tts.generating") : t("voice.tts.generate")}
-        </Button>
-      </div>
-
-      <ResultPanel
-        record={result}
-        label={t("voice.tts.noResult")}
-      />
     </div>
   );
 }
@@ -1808,444 +1955,462 @@ function AsrTab() {
   }, [recorder.error]);
 
   return (
-    <div className="flex flex-col gap-6">
-      {/* Engine picker: whisper.cpp / audio.cpp / OpenAI 兼容 API */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <Label className="mb-1 block text-xs">{t("voice.asr.engine")}</Label>
-          <div className="flex flex-wrap gap-1.5">
-            {(
-              [
-                { key: "whisper", label: t("voice.asrAudiocpp.engineWhisper") },
-                { key: "audiocpp", label: t("voice.asrAudiocpp.engineAcp") },
-                { key: "api", label: t("voice.asr.sourceRemote") },
-              ] as const
-            ).map(({ key, label }) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => switchEngine(key)}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs transition-colors",
-                  engineMode === key
-                    ? "border-primary bg-primary/10 text-primary"
-                    : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-                )}
-              >
-                {key === "whisper" ? (
-                  <ServerIcon className="size-3.5" />
-                ) : key === "audiocpp" ? (
-                  <CpuIcon className="size-3.5" />
-                ) : (
-                  <GlobeIcon className="size-3.5" />
-                )}
-                {label}
-              </button>
-            ))}
-          </div>
+    <div className="flex h-full min-h-0 flex-col">
+      {/* 顶部：推理引擎 */}
+      <div className="shrink-0 border-b px-6 py-3">
+        <Label className="mb-1.5 block text-xs">{t("voice.asr.engine")}</Label>
+        <div className="flex overflow-hidden rounded-lg border">
+          {(
+            [
+              { key: "whisper", label: t("voice.asrAudiocpp.engineWhisper"), icon: <ServerIcon className="size-3.5" /> },
+              { key: "audiocpp", label: t("voice.asrAudiocpp.engineAcp"), icon: <CpuIcon className="size-3.5" /> },
+              { key: "api", label: t("voice.asr.sourceRemote"), icon: <GlobeIcon className="size-3.5" /> },
+            ] as const
+          ).map(({ key, label, icon }) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => switchEngine(key)}
+              className={cn(
+                "flex flex-1 items-center justify-center gap-1.5 px-3 py-2 text-xs transition-colors",
+                engineMode === key
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              {icon}
+              {label}
+            </button>
+          ))}
         </div>
-
-        {/* 人声分离开关：请求 diarize 并按说话人着色/分组展示 */}
-        <button
-          type="button"
-          onClick={() => setSpeakerMode((v) => !v)}
-          title={t("voice.asr.spkSeparate")}
-          className={cn(
-            "flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs transition-colors",
-            speakerMode
-              ? "border-primary bg-primary/10 text-primary"
-              : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-          )}
-        >
-          <UsersIcon className="size-3.5" />
-          {t("voice.asr.spkSeparate")}
-        </button>
+        <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+          {engineMode === "whisper"
+            ? t("voice.asr.desc")
+            : engineMode === "audiocpp"
+              ? t("voice.asrAudiocpp.desc")
+              : t("voice.asr.compatDesc")}
+        </p>
       </div>
 
-      {engineMode === "whisper" && (
-        <>
-          {/* whisper.cpp engine status */}
-          <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
-            <ServerIcon className="size-4 text-muted-foreground" />
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium">{t("voice.asrAudiocpp.engineWhisper")}</p>
-              <p className="text-xs text-muted-foreground">
-                {status?.engine === "none"
-                  ? t("voice.asr.engineNone")
-                  : status?.engine === "whisper-server"
-                    ? t("voice.asr.engineServer")
-                    : t("voice.asr.engineCli")}
-                {status?.engineVersion ? ` · v${status.engineVersion}` : ""}
-                {status ? ` · ${t("voice.asr.port")} ${status.port}` : ""}
-              </p>
-            </div>
-            {!status?.engineInstalled ? (
-              <Button
-                size="sm"
-                disabled={installWhisperEngine.isPending}
-                onClick={() => installWhisperEngine.mutate()}
-              >
-                {installWhisperEngine.isPending ? (
-                  <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                ) : (
-                  <DownloadCloudIcon data-icon="inline-start" />
-                )}
-                {installWhisperEngine.isPending
-                  ? t("voice.asr.installingEngine")
-                  : t("voice.asr.installEngine")}
-              </Button>
-            ) : (
-              <Badge
-                variant={serverRunning ? "default" : "secondary"}
-                className="gap-1 text-[10px]"
-              >
-                {serverRunning ? (
-                  <>
-                    <CircleIcon className="size-2.5 fill-current" />
-                    {t("voice.asr.running")}
-                  </>
-                ) : (
-                  t("voice.asr.notRunning")
-                )}
-              </Badge>
-            )}
-          </div>
-
-          {/* whisper.cpp ASR models */}
-          <div>
-            <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
-              <AudioLinesIcon className="size-4 text-muted-foreground" />
-              {t("voice.asr.models")}
-              <span className="text-xs font-normal text-muted-foreground">
-                {t("voice.asr.modelsHint")}
-              </span>
-            </h3>
-            <div className="flex flex-col gap-2">
-              {models.map((m) => (
-                <AsrModelRow
-                  key={m.id}
-                  model={m}
-                  status={status}
-                  pending={whisperPending}
-                  onDownload={(mm) => downloadModel.mutate(mm)}
-                  onStart={(mm) => startModel.mutate(mm)}
-                  onStop={() => stopEngine.mutate()}
-                />
-              ))}
-            </div>
-          </div>
-        </>
-      )}
-
-      {engineMode === "audiocpp" && (
-        <>
-          <p className="text-xs text-muted-foreground">{t("voice.asrAudiocpp.desc")}</p>
-
-          {/* audio.cpp engine status */}
-          <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
-            <CpuIcon className="size-4 text-muted-foreground" />
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium">{t("voice.asrAudiocpp.engineAcp")}</p>
-              <p className="text-xs text-muted-foreground">
-                {!acpStatus?.engineInstalled
-                  ? t("voice.asrAudiocpp.engineNone")
-                  : `${t("voice.asrAudiocpp.engineReady")}${
-                      acpStatus.binaryPath ? ` · ${acpStatus.binaryPath}` : ""
-                    }`}
-                {acpStatus?.active
-                  ? ` · ${t("voice.local.running")}`
-                  : ` · ${t("voice.local.notStarted")}`}
-              </p>
-            </div>
-            {!acpStatus?.engineInstalled ? (
-              <Button
-                size="sm"
-                disabled={acpDownloadEngine.isPending}
-                onClick={() => acpDownloadEngine.mutate()}
-              >
-                {acpDownloadEngine.isPending ? (
-                  <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                ) : (
-                  <DownloadCloudIcon data-icon="inline-start" />
-                )}
-                {acpDownloadEngine.isPending
-                  ? t("voice.asrAudiocpp.downloadingEngine")
-                  : t("voice.asrAudiocpp.downloadEngine")}
-              </Button>
-            ) : (
-              <Badge variant="default" className="gap-1 text-[10px]">
-                <CircleIcon className="size-2.5 fill-current" />
-                {t("voice.asrAudiocpp.engineReady")}
-              </Badge>
-            )}
-          </div>
-
-          {/* audio.cpp ASR models */}
-          <div>
-            <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
-              <AudioLinesIcon className="size-4 text-muted-foreground" />
-              {t("voice.asrAudiocpp.models")}
-              <span className="text-xs font-normal text-muted-foreground">
-                {t("voice.asrAudiocpp.modelsHint")}
-              </span>
-            </h3>
-            <div className="flex flex-col gap-2">
-              {acpModels.map((m) => (
-                <AsrAudioCppModelRow
-                  key={m.id}
-                  model={m}
-                  status={acpStatus}
-                  pending={acpPending}
-                  onDownload={(mm) => acpDownloadModel.mutate(mm)}
-                  onStart={(mm) => acpStart.mutate(mm)}
-                  onStop={() => acpStop.mutate()}
-                  onDelete={(mm) => acpDelete.mutate(mm)}
-                />
-              ))}
-            </div>
-          </div>
-
-          {/* 底部选择已下载的模型，选中即启用 */}
-          <div>
-            <Label className="mb-1 block text-xs">{t("voice.asrAudiocpp.select")}</Label>
-            {acpModels.filter((m) => m.downloaded).length === 0 ? (
-              <div className="flex items-center justify-center rounded-lg border border-dashed px-4 py-6 text-xs text-muted-foreground">
-                {t("voice.local.empty")}
-              </div>
-            ) : (
-              <Select
-                value={acpModelId}
-                onValueChange={(v) => {
-                  setAcpModelId(v);
-                  setTError(undefined);
-                  const m = acpModels.find((x) => x.id === v);
-                  if (m?.downloaded) acpStart.mutate(m);
-                }}
-              >
-                <SelectTrigger className="h-8 w-full text-xs">
-                  <SelectValue placeholder={t("voice.asrAudiocpp.select")} />
-                </SelectTrigger>
-                <SelectContent>
-                  {acpModels
-                    .filter((m) => m.downloaded)
-                    .map((m) => (
-                      <SelectItem key={m.id} value={m.id}>
-                        {m.name}
-                        {m.active ? ` · ${t("voice.local.active")}` : ""}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-            )}
-            {selectedAcp && !selectedAcp.downloaded && (
-              <p className="mt-1 text-xs text-amber-600">{t("voice.asrAudiocpp.needModel")}</p>
-            )}
-            {acpStatus?.active && selectedAcp && !selectedAcp.active && (
-              <p className="mt-1 text-[11px] text-muted-foreground">
-                {t("voice.asrAudiocpp.selectHint")}
-              </p>
-            )}
-          </div>
-        </>
-      )}
-
-      {engineMode === "api" && (
-        <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="flex items-center gap-1.5 text-xs font-medium">
-              <GlobeIcon className="size-3.5 text-muted-foreground" />
-              {t("voice.asr.providerTitle")}
-            </span>
-            {providerConfigured && (
-              <Badge variant="secondary" className="gap-1 text-[10px]">
-                <CircleIcon className="size-2.5 fill-current text-emerald-500" />
-                {t("voice.compat.configured")}
-              </Badge>
-            )}
-          </div>
-          <p className="text-[11px] text-muted-foreground">{t("voice.asr.compatDesc")}</p>
-
-          <div className="grid gap-2 sm:grid-cols-2">
-            <div>
-              <Label htmlFor="asr-provider-base" className="mb-1 block text-xs">
-                {t("voice.compat.base")}
-              </Label>
-              <Input
-                id="asr-provider-base"
-                placeholder="https://api.openai.com/v1"
-                value={pBase}
-                onChange={(e) => setPBase(e.target.value)}
-                className="h-8 text-xs"
-              />
-            </div>
-            <div>
-              <Label htmlFor="asr-provider-key" className="mb-1 block text-xs">
-                {t("voice.compat.apiKey")}
-              </Label>
-              <Input
-                id="asr-provider-key"
-                type="password"
-                placeholder="sk-…"
-                value={pKey}
-                onChange={(e) => setPKey(e.target.value)}
-                className="h-8 text-xs"
-              />
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              onClick={() => saveProvider.mutate()}
-              disabled={saveProvider.isPending || !pBase.trim()}
-            >
-              {saveProvider.isPending ? (
-                <Loader2Icon data-icon="inline-start" className="animate-spin" />
-              ) : (
-                <SaveIcon data-icon="inline-start" />
-              )}
-              {t("voice.compat.save")}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => fetchModels.mutate()}
-              disabled={fetchModels.isPending || !pBase.trim()}
-            >
-              {fetchModels.isPending ? (
-                <Loader2Icon data-icon="inline-start" className="animate-spin" />
-              ) : (
-                <RefreshCwIcon data-icon="inline-start" />
-              )}
-              {t("voice.compat.fetchModels")}
-            </Button>
-          </div>
-
-          <div>
-            <Label htmlFor="asr-provider-model" className="mb-1 block text-xs">
-              {t("voice.compat.model")}
-            </Label>
-            <div className="flex items-center gap-2">
-              <Input
-                id="asr-provider-model"
-                list="asr-provider-models"
-                placeholder={t("voice.compat.modelPlaceholder")}
-                value={pModel}
-                onChange={(e) => setPModel(e.target.value)}
-                className="h-8 flex-1 text-xs"
-              />
-              {apiModels.length > 0 && (
-                <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-                  {apiModels.length} {t("voice.compat.modelsCount")}
-                </span>
-              )}
-            </div>
-            {apiModels.length > 0 && (
-              <datalist id="asr-provider-models">
-                {apiModels.map((m) => (
-                  <option key={m} value={m} />
-                ))}
-              </datalist>
-            )}
-          </div>
-
-          {(pError || (fetchModels.isError ? String(fetchModels.error) : undefined)) && (
-            <ResultError error={pError ?? String(fetchModels.error)} />
-          )}
-          <p className="text-[11px] text-muted-foreground/80">{t("voice.asr.providerHint")}</p>
-        </div>
-      )}
-
-      {/* Upload audio */}
-      <div>
-        <h3 className="mb-2 text-sm font-medium">{t("voice.asr.uploadTitle")}</h3>
-        <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
-          <div className="flex items-center gap-2">
-            <FileAudioIcon className="size-4 text-muted-foreground" />
-            <Button variant="outline" size="sm" disabled={pick.isPending} onClick={() => pick.mutate()}>
-              {pick.isPending ? <Spinner data-icon="inline-start" /> : <FileAudioIcon data-icon="inline-start" />}
-              {audio ? t("voice.asr.picked") : t("voice.asr.pick")}
-            </Button>
-            {audio && (
-              <Button variant="ghost" size="icon-sm" tooltip={t("voice.remove")} onClick={() => setAudio(null)}>
-                <XIcon className="size-4" />
-              </Button>
-            )}
-          </div>
-          {audio && <PlayAudio url={audio.url} />}
-          <div className="flex items-center gap-3">
-            <Button
-              size="sm"
-              onClick={() => transcribe.mutate({ audioRef: audio!.ref })}
-              disabled={!audio || transcribe.isPending}
-            >
-              {transcribe.isPending ? (
-                <Loader2Icon data-icon="inline-start" className="animate-spin" />
-              ) : (
-                <MicIcon data-icon="inline-start" />
-              )}
-              {transcribe.isPending ? t("voice.asr.transcribing") : t("voice.asr.transcribe")}
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      {/* Microphone recording with live transcription */}
-      <div>
-        <h3 className="mb-2 text-sm font-medium">{t("voice.asr.micTitle")}</h3>
-        <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
-          <div className="flex items-center gap-3">
-            {!recorder.recording ? (
-              <Button onClick={handleMicStart}>
-                <MicIcon data-icon="inline-start" />
-                {t("voice.asr.recordStart")}
-              </Button>
-            ) : (
-              <Button variant="destructive" onClick={handleMicStop}>
-                <SquareIcon data-icon="inline-start" />
-                {t("voice.asr.recordStop")}
-              </Button>
-            )}
-            {recorder.recording && (
+      <div className="flex min-h-0 flex-1">
+        {/* 左侧：引擎设置 */}
+        <aside className="w-[340px] shrink-0 overflow-y-auto border-r p-4">
+          <div className="flex flex-col gap-5">
+            {engineMode === "whisper" && (
               <>
-                <span className="flex items-center gap-1.5 text-xs text-destructive">
-                  <CircleIcon className="size-2.5 animate-pulse fill-current" />
-                  {t("voice.asr.recording")}
-                </span>
-                <span className="flex items-center gap-1 font-mono text-xs text-muted-foreground tabular-nums">
-                  <TimerIcon className="size-3.5" />
-                  {fmtClock(elapsed)}
-                </span>
+                {/* 引擎状态 */}
+                <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
+                  <ServerIcon className="size-4 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">{t("voice.asrAudiocpp.engineWhisper")}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {status?.engine === "none"
+                        ? t("voice.asr.engineNone")
+                        : status?.engine === "whisper-server"
+                          ? t("voice.asr.engineServer")
+                          : t("voice.asr.engineCli")}
+                      {status?.engineVersion ? ` · v${status.engineVersion}` : ""}
+                      {status ? ` · ${t("voice.asr.port")} ${status.port}` : ""}
+                    </p>
+                  </div>
+                  {!status?.engineInstalled ? (
+                    <Button size="sm" disabled={installWhisperEngine.isPending} onClick={() => installWhisperEngine.mutate()}>
+                      {installWhisperEngine.isPending ? (
+                        <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                      ) : (
+                        <DownloadCloudIcon data-icon="inline-start" />
+                      )}
+                      {installWhisperEngine.isPending
+                        ? t("voice.asr.installingEngine")
+                        : t("voice.asr.installEngine")}
+                    </Button>
+                  ) : (
+                    <Badge variant={serverRunning ? "default" : "secondary"} className="gap-1 text-[10px]">
+                      {serverRunning ? (
+                        <>
+                          <CircleIcon className="size-2.5 fill-current" />
+                          {t("voice.asr.running")}
+                        </>
+                      ) : (
+                        t("voice.asr.notRunning")
+                      )}
+                    </Badge>
+                  )}
+                </div>
+
+                {/* whisper.cpp ASR 模型 */}
+                <div>
+                  <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
+                    <AudioLinesIcon className="size-4 text-muted-foreground" />
+                    {t("voice.asr.models")}
+                    <span className="text-xs font-normal text-muted-foreground">
+                      {t("voice.asr.modelsHint")}
+                    </span>
+                  </h3>
+                  <div className="flex flex-col gap-2">
+                    {models.map((m) => (
+                      <AsrModelRow
+                        key={m.id}
+                        model={m}
+                        status={status}
+                        pending={whisperPending}
+                        onDownload={(mm) => downloadModel.mutate(mm)}
+                        onStart={(mm) => startModel.mutate(mm)}
+                        onStop={() => stopEngine.mutate()}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {engineMode === "audiocpp" && (
+              <>
+                {/* 引擎状态 */}
+                <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
+                  <CpuIcon className="size-4 text-muted-foreground" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">{t("voice.asrAudiocpp.engineAcp")}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {!acpStatus?.engineInstalled
+                        ? t("voice.asrAudiocpp.engineNone")
+                        : `${t("voice.asrAudiocpp.engineReady")}${
+                            acpStatus.binaryPath ? ` · ${acpStatus.binaryPath}` : ""
+                          }`}
+                      {acpStatus?.active
+                        ? ` · ${t("voice.local.running")}`
+                        : ` · ${t("voice.local.notStarted")}`}
+                    </p>
+                  </div>
+                  {!acpStatus?.engineInstalled ? (
+                    <Button size="sm" disabled={acpDownloadEngine.isPending} onClick={() => acpDownloadEngine.mutate()}>
+                      {acpDownloadEngine.isPending ? (
+                        <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                      ) : (
+                        <DownloadCloudIcon data-icon="inline-start" />
+                      )}
+                      {acpDownloadEngine.isPending
+                        ? t("voice.asrAudiocpp.downloadingEngine")
+                        : t("voice.asrAudiocpp.downloadEngine")}
+                    </Button>
+                  ) : (
+                    <Badge variant="default" className="gap-1 text-[10px]">
+                      <CircleIcon className="size-2.5 fill-current" />
+                      {t("voice.asrAudiocpp.engineReady")}
+                    </Badge>
+                  )}
+                </div>
+
+                {/* audio.cpp ASR 模型 */}
+                <div>
+                  <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
+                    <AudioLinesIcon className="size-4 text-muted-foreground" />
+                    {t("voice.asrAudiocpp.models")}
+                    <span className="text-xs font-normal text-muted-foreground">
+                      {t("voice.asrAudiocpp.modelsHint")}
+                    </span>
+                  </h3>
+                  <div className="flex flex-col gap-2">
+                    {acpModels.map((m) => (
+                      <AsrAudioCppModelRow
+                        key={m.id}
+                        model={m}
+                        status={acpStatus}
+                        pending={acpPending}
+                        onDownload={(mm) => acpDownloadModel.mutate(mm)}
+                        onStart={(mm) => acpStart.mutate(mm)}
+                        onStop={() => acpStop.mutate()}
+                        onDelete={(mm) => acpDelete.mutate(mm)}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                {/* 选择识别模型（选中即启用） */}
+                <div>
+                  <Label className="mb-1 block text-xs">{t("voice.asrAudiocpp.select")}</Label>
+                  {acpModels.filter((m) => m.downloaded).length === 0 ? (
+                    <div className="flex items-center justify-center rounded-lg border border-dashed px-4 py-6 text-xs text-muted-foreground">
+                      {t("voice.local.empty")}
+                    </div>
+                  ) : (
+                    <Select
+                      value={acpModelId}
+                      onValueChange={(v) => {
+                        setAcpModelId(v);
+                        setTError(undefined);
+                        const m = acpModels.find((x) => x.id === v);
+                        if (m?.downloaded) acpStart.mutate(m);
+                      }}
+                    >
+                      <SelectTrigger className="h-8 w-full text-xs">
+                        <SelectValue placeholder={t("voice.asrAudiocpp.select")} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {acpModels
+                          .filter((m) => m.downloaded)
+                          .map((m) => (
+                            <SelectItem key={m.id} value={m.id}>
+                              {m.name}
+                              {m.active ? ` · ${t("voice.local.active")}` : ""}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                  {selectedAcp && !selectedAcp.downloaded && (
+                    <p className="mt-1 text-xs text-amber-600">{t("voice.asrAudiocpp.needModel")}</p>
+                  )}
+                  {acpStatus?.active && selectedAcp && !selectedAcp.active && (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      {t("voice.asrAudiocpp.selectHint")}
+                    </p>
+                  )}
+                </div>
+              </>
+            )}
+
+            {engineMode === "api" && (
+              <>
+                {/* 服务配置：Base URL + API Key */}
+                <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-xs font-medium">
+                      <GlobeIcon className="size-3.5 text-muted-foreground" />
+                      {t("voice.asr.providerTitle")}
+                    </span>
+                    {providerConfigured && (
+                      <Badge variant="secondary" className="gap-1 text-[10px]">
+                        <CircleIcon className="size-2.5 fill-current text-emerald-500" />
+                        {t("voice.compat.configured")}
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">{t("voice.asr.compatDesc")}</p>
+
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div>
+                      <Label htmlFor="asr-provider-base" className="mb-1 block text-xs">
+                        {t("voice.compat.base")}
+                      </Label>
+                      <Input
+                        id="asr-provider-base"
+                        placeholder="https://api.openai.com/v1"
+                        value={pBase}
+                        onChange={(e) => setPBase(e.target.value)}
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="asr-provider-key" className="mb-1 block text-xs">
+                        {t("voice.compat.apiKey")}
+                      </Label>
+                      <Input
+                        id="asr-provider-key"
+                        type="password"
+                        placeholder="sk-…"
+                        value={pKey}
+                        onChange={(e) => setPKey(e.target.value)}
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => saveProvider.mutate()}
+                      disabled={saveProvider.isPending || !pBase.trim()}
+                    >
+                      {saveProvider.isPending ? (
+                        <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                      ) : (
+                        <SaveIcon data-icon="inline-start" />
+                      )}
+                      {t("voice.compat.save")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => fetchModels.mutate()}
+                      disabled={fetchModels.isPending || !pBase.trim()}
+                    >
+                      {fetchModels.isPending ? (
+                        <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                      ) : (
+                        <RefreshCwIcon data-icon="inline-start" />
+                      )}
+                      {t("voice.compat.fetchModels")}
+                    </Button>
+                  </div>
+                  {(pError || (fetchModels.isError ? String(fetchModels.error) : undefined)) && (
+                    <ResultError error={pError ?? String(fetchModels.error)} />
+                  )}
+                </div>
               </>
             )}
           </div>
-          {recorder.recording && (
-            <>
-              <LevelMeter level={level} />
-              <p className="text-[11px] text-muted-foreground">{t("voice.asr.liveHint")}</p>
-            </>
-          )}
-        </div>
+        </aside>
+
+        {/* 右侧：识别任务与结果 */}
+        <main className="min-w-0 flex-1 overflow-y-auto">
+          <div className="mx-auto flex w-full max-w-2xl flex-col gap-5 px-6 py-6">
+            {engineMode === "api" && (
+              <div>
+                <Label htmlFor="asr-provider-model" className="mb-1 block text-xs">
+                  {t("voice.compat.model")}
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="asr-provider-model"
+                    list="asr-provider-models"
+                    placeholder={t("voice.compat.modelPlaceholder")}
+                    value={pModel}
+                    onChange={(e) => setPModel(e.target.value)}
+                    className="h-8 flex-1 text-xs"
+                  />
+                  {apiModels.length > 0 && (
+                    <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+                      {apiModels.length} {t("voice.compat.modelsCount")}
+                    </span>
+                  )}
+                </div>
+                {apiModels.length > 0 && (
+                  <datalist id="asr-provider-models">
+                    {apiModels.map((m) => (
+                      <option key={m} value={m} />
+                    ))}
+                  </datalist>
+                )}
+                <p className="mt-1 text-[11px] text-muted-foreground/80">{t("voice.asr.providerHint")}</p>
+              </div>
+            )}
+
+            {/* 人声分离开关 */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-medium">{t("voice.asr.spkSeparate")}</span>
+              <button
+                type="button"
+                onClick={() => setSpeakerMode((v) => !v)}
+                aria-pressed={speakerMode}
+                className={cn(
+                  "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
+                  speakerMode ? "border-primary bg-primary" : "border-border bg-muted",
+                )}
+              >
+                <span
+                  className={cn(
+                    "inline-block size-3.5 transform rounded-full bg-background shadow-sm transition-transform",
+                    speakerMode ? "translate-x-[18px]" : "translate-x-[2px]",
+                  )}
+                />
+              </button>
+            </div>
+
+            {/* 上传音频 */}
+            <div>
+              <h3 className="mb-2 text-sm font-medium">{t("voice.asr.uploadTitle")}</h3>
+              <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
+                <div className="flex items-center gap-2">
+                  <FileAudioIcon className="size-4 text-muted-foreground" />
+                  <Button variant="outline" size="sm" disabled={pick.isPending} onClick={() => pick.mutate()}>
+                    {pick.isPending ? <Spinner data-icon="inline-start" /> : <FileAudioIcon data-icon="inline-start" />}
+                    {audio ? t("voice.asr.picked") : t("voice.asr.pick")}
+                  </Button>
+                  {audio && (
+                    <Button variant="ghost" size="icon-sm" tooltip={t("voice.remove")} onClick={() => setAudio(null)}>
+                      <XIcon className="size-4" />
+                    </Button>
+                  )}
+                </div>
+                {audio && <PlayAudio url={audio.url} />}
+                <div className="flex items-center gap-3">
+                  <Button
+                    size="sm"
+                    onClick={() => transcribe.mutate({ audioRef: audio!.ref })}
+                    disabled={!audio || transcribe.isPending}
+                  >
+                    {transcribe.isPending ? (
+                      <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                    ) : (
+                      <MicIcon data-icon="inline-start" />
+                    )}
+                    {transcribe.isPending ? t("voice.asr.transcribing") : t("voice.asr.transcribe")}
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            {/* 麦克风录音 */}
+            <div>
+              <h3 className="mb-2 text-sm font-medium">{t("voice.asr.micTitle")}</h3>
+              <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
+                <div className="flex items-center gap-3">
+                  {!recorder.recording ? (
+                    <Button onClick={handleMicStart}>
+                      <MicIcon data-icon="inline-start" />
+                      {t("voice.asr.recordStart")}
+                    </Button>
+                  ) : (
+                    <Button variant="destructive" onClick={handleMicStop}>
+                      <SquareIcon data-icon="inline-start" />
+                      {t("voice.asr.recordStop")}
+                    </Button>
+                  )}
+                  {recorder.recording && (
+                    <>
+                      <span className="flex items-center gap-1.5 text-xs text-destructive">
+                        <CircleIcon className="size-2.5 animate-pulse fill-current" />
+                        {t("voice.asr.recording")}
+                      </span>
+                      <span className="flex items-center gap-1 font-mono text-xs text-muted-foreground tabular-nums">
+                        <TimerIcon className="size-3.5" />
+                        {fmtClock(elapsed)}
+                      </span>
+                    </>
+                  )}
+                </div>
+                {recorder.recording && (
+                  <>
+                    <LevelMeter level={level} />
+                    <p className="text-[11px] text-muted-foreground">{t("voice.asr.liveHint")}</p>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {(micError || tError || (transcribe.isError ? String(transcribe.error) : undefined) || (liveTranscribe.isError ? String(liveTranscribe.error) : undefined)) && (
+              <ResultError
+                error={micError ?? tError ?? (transcribe.isError ? String(transcribe.error) : String(liveTranscribe.error))}
+              />
+            )}
+
+            {/* 转写结果 */}
+            <div className="pb-8">
+              {plainText || segments.length > 0 ? (
+                <TranscriptViewer
+                  segments={segments}
+                  text={plainText}
+                  engine={meta ?? undefined}
+                  hasSpeakers={hasSpeakers}
+                  speakerMode={speakerMode}
+                  streaming={recorder.recording && liveTranscribe.isPending}
+                  jumpIndex={jumpIndex}
+                  onJump={(i) => setJumpIndex(i)}
+                />
+              ) : (
+                <div className="flex flex-col items-center gap-3 pt-8 text-center">
+                  <div className="flex size-20 items-center justify-center rounded-2xl bg-primary/15">
+                    <MicIcon className="size-9 text-primary" />
+                  </div>
+                  <p className="text-lg font-medium">{t("voice.asr.emptyTitle")}</p>
+                  <p className="max-w-xs text-sm text-muted-foreground">{t("voice.asr.emptyHint")}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </main>
       </div>
-
-      {(micError || tError || (transcribe.isError ? String(transcribe.error) : undefined) || (liveTranscribe.isError ? String(liveTranscribe.error) : undefined)) && (
-        <ResultError
-          error={micError ?? tError ?? (transcribe.isError ? String(transcribe.error) : String(liveTranscribe.error))}
-        />
-      )}
-
-      {(plainText || segments.length > 0) && (
-        <TranscriptViewer
-          segments={segments}
-          text={plainText}
-          engine={meta ?? undefined}
-          hasSpeakers={hasSpeakers}
-          speakerMode={speakerMode}
-          streaming={recorder.recording && liveTranscribe.isPending}
-          jumpIndex={jumpIndex}
-          onJump={(i) => setJumpIndex(i)}
-        />
-      )}
     </div>
   );
 }
@@ -2289,89 +2454,102 @@ function CloneTab() {
   });
 
   return (
-    <div className="flex flex-col gap-5">
-      <p className="text-xs text-muted-foreground">{t("voice.clone.desc")}</p>
+    <div className="flex h-full min-h-0">
+      {/* 左侧：创建克隆 */}
+      <aside className="w-[340px] shrink-0 overflow-y-auto border-r p-4">
+        <div className="flex flex-col gap-5">
+        <p className="text-xs text-muted-foreground">{t("voice.clone.desc")}</p>
 
-      <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
-        <div>
-          <Label htmlFor="clone-name" className="mb-1 block text-xs">
-            {t("voice.clone.name")}
-          </Label>
-          <Input
-            id="clone-name"
-            placeholder={t("voice.clone.namePlaceholder")}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="h-8 text-xs"
-          />
+        <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
+          <div>
+            <Label htmlFor="clone-name" className="mb-1 block text-xs">
+              {t("voice.clone.name")}
+            </Label>
+            <Input
+              id="clone-name"
+              placeholder={t("voice.clone.namePlaceholder")}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="h-8 text-xs"
+            />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" disabled={pick.isPending} onClick={() => pick.mutate()}>
+              {pick.isPending ? <Spinner data-icon="inline-start" /> : <FileAudioIcon data-icon="inline-start" />}
+              {ref ? t("voice.clone.picked") : t("voice.clone.pickRef")}
+            </Button>
+            {ref && (
+              <Button variant="ghost" size="icon-sm" tooltip={t("voice.remove")} onClick={() => setRef(null)}>
+                <XIcon className="size-4" />
+              </Button>
+            )}
+          </div>
+          {ref && <PlayAudio url={ref.url} />}
+
+          <ResultError error={create.isError ? String(create.error) : undefined} />
+
+          <div>
+            <Button onClick={() => create.mutate()} disabled={!name.trim() || !ref || create.isPending}>
+              {create.isPending ? (
+                <Loader2Icon data-icon="inline-start" className="animate-spin" />
+              ) : (
+                <Wand2Icon data-icon="inline-start" />
+              )}
+              {create.isPending ? t("voice.clone.creating") : t("voice.clone.create")}
+            </Button>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" disabled={pick.isPending} onClick={() => pick.mutate()}>
-            {pick.isPending ? <Spinner data-icon="inline-start" /> : <FileAudioIcon data-icon="inline-start" />}
-            {ref ? t("voice.clone.picked") : t("voice.clone.pickRef")}
-          </Button>
-          {ref && (
-            <Button variant="ghost" size="icon-sm" tooltip={t("voice.remove")} onClick={() => setRef(null)}>
-              <XIcon className="size-4" />
-            </Button>
+        </div>
+      </aside>
+
+      {/* 右侧：克隆列表 */}
+      <main className="relative min-w-0 flex-1 overflow-y-auto">
+        <div className="flex h-full min-h-0 items-center justify-center p-8">
+          {clones.length === 0 ? (
+            <ResultEmpty
+              icon={<Wand2Icon className="size-9 text-primary" />}
+              title={t("voice.clone.empty")}
+              hint={t("voice.clone.desc")}
+            />
+          ) : (
+            <div className="w-full max-w-md">
+              <h3 className="mb-2 text-sm font-medium">{t("voice.clone.list")}</h3>
+              <div className="flex flex-col gap-2">
+                {clones.map((c: VoiceClone) => (
+                  <div key={c.id} className="flex items-center gap-3 rounded-lg border bg-card p-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">{c.name}</p>
+                      <p className="mt-0.5 text-[11px] text-muted-foreground">
+                        {c.model ? `· ${c.model}` : ""} {formatTime(c.createdAt)}
+                      </p>
+                    </div>
+                    {c.audioUrl && (
+                      <div className="flex shrink-0 items-center gap-1">
+                        <PlayAudio url={c.audioUrl} className="w-40" />
+                        <AudioDownloadButton
+                          url={c.audioUrl}
+                          filename={audioFileName(c.audioUrl, `clone-${c.name}`)}
+                        />
+                      </div>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      tooltip={t("voice.clone.delete")}
+                      disabled={remove.isPending}
+                      onClick={() => remove.mutate(c.id)}
+                    >
+                      <Trash2Icon className="size-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </div>
-        {ref && <PlayAudio url={ref.url} />}
-
-        <ResultError error={create.isError ? String(create.error) : undefined} />
-
-        <div>
-          <Button onClick={() => create.mutate()} disabled={!name.trim() || !ref || create.isPending}>
-            {create.isPending ? (
-              <Loader2Icon data-icon="inline-start" className="animate-spin" />
-            ) : (
-              <Wand2Icon data-icon="inline-start" />
-            )}
-            {create.isPending ? t("voice.clone.creating") : t("voice.clone.create")}
-          </Button>
-        </div>
-      </div>
-
-      <div>
-        <h3 className="mb-2 text-sm font-medium">{t("voice.clone.list")}</h3>
-        {clones.length === 0 ? (
-          <div className="flex items-center justify-center rounded-lg border border-dashed px-4 py-8 text-xs text-muted-foreground">
-            {t("voice.clone.empty")}
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {clones.map((c: VoiceClone) => (
-              <div key={c.id} className="flex items-center gap-3 rounded-lg border bg-card p-3">
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium">{c.name}</p>
-                  <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    {c.model ? `· ${c.model}` : ""} {formatTime(c.createdAt)}
-                  </p>
-                </div>
-                {c.audioUrl && (
-                  <div className="flex shrink-0 items-center gap-1">
-                    <PlayAudio url={c.audioUrl} className="w-40" />
-                    <AudioDownloadButton
-                      url={c.audioUrl}
-                      filename={audioFileName(c.audioUrl, `clone-${c.name}`)}
-                    />
-                  </div>
-                )}
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  tooltip={t("voice.clone.delete")}
-                  disabled={remove.isPending}
-                  onClick={() => remove.mutate(c.id)}
-                >
-                  <Trash2Icon className="size-4" />
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      </main>
     </div>
   );
 }
@@ -2382,32 +2560,24 @@ export function VoiceScreen() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {/* Three menus: TTS / ASR / Voice clone */}
-      <div className="flex items-center gap-1 px-6 pt-2 pb-3">
-        {TABS.map(({ key, icon, labelKey }) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => setTab(key)}
-            className={cn(
-              "flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs transition-colors",
-              tab === key
-                ? "border-primary bg-primary/10 text-primary"
-                : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-            )}
-          >
-            {icon}
-            {t(labelKey)}
-          </button>
-        ))}
+      {/* 顶部菜单：TTS / ASR / 声音克隆 */}
+      <div className="shrink-0 border-b px-6 pt-2 pb-2">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as VoiceTab)}>
+          <TabsList>
+            {TABS.map(({ key, icon, labelKey }) => (
+              <TabsTrigger key={key} value={key}>
+                {icon}
+                {t(labelKey)}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-6 py-2 pb-12">
-          {tab === "tts" && <TtsTab />}
-          {tab === "asr" && <AsrTab />}
-          {tab === "clone" && <CloneTab />}
-        </div>
+      <div className="min-h-0 flex-1">
+        {tab === "tts" && <TtsTab />}
+        {tab === "asr" && <AsrTab />}
+        {tab === "clone" && <CloneTab />}
       </div>
     </div>
   );

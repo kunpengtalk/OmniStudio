@@ -78,18 +78,19 @@ function OcrEnginePicker({
   ] as const;
   return (
     <div>
-      <Label className="mb-1 block text-xs">{t("ocr.engine.title")}</Label>
-      <div className="flex flex-wrap gap-1.5">
+      <Label className="mb-1.5 block text-xs">{t("ocr.engine.title")}</Label>
+      {/* 与生图页一致的后端切换分段控件 */}
+      <div className="flex overflow-hidden rounded-lg border">
         {options.map(({ key, label, icon }) => (
           <button
             key={key}
             type="button"
             onClick={() => onChange(key)}
             className={cn(
-              "flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs transition-colors",
+              "flex flex-1 items-center justify-center gap-1.5 px-3 py-1.5 text-xs transition-colors",
               value === key
-                ? "border-primary bg-primary/10 text-primary"
-                : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
             )}
           >
             {icon}
@@ -278,7 +279,13 @@ function CopyTextButton({ text }: { text: string }) {
   );
 }
 
-function TesseractTab() {
+function TesseractTab({
+  pickerEngine,
+  onPickerEngine,
+}: {
+  pickerEngine: string;
+  onPickerEngine: (v: string) => void;
+}) {
   const t = useT();
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState("");
@@ -403,15 +410,18 @@ function TesseractTab() {
   const canRun = !!image && !!selectedId && !run.isPending;
 
   return (
-    <div className="flex flex-col gap-5">
-      <p className="text-xs text-muted-foreground">{t("ocr.tess.desc")}</p>
+    <div className="flex h-full min-h-0">
+      {/* 左侧：参数 / 配置面板 */}
+      <aside className="w-[340px] shrink-0 space-y-5 overflow-y-auto border-r p-4">
+        <OcrEnginePicker value={pickerEngine} onChange={onPickerEngine} />
+        <p className="text-[11px] leading-relaxed text-muted-foreground">{t("ocr.tess.desc")}</p>
 
-      {/* 引擎状态 */}
-      <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
-        <CpuIcon className="size-4 text-muted-foreground" />
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-medium">{t("ocr.engine.tesseract")}</p>
-          <p className="text-xs text-muted-foreground">
+        {/* 引擎状态 */}
+        <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
+          <CpuIcon className="size-4 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">{t("ocr.engine.tesseract")}</p>
+            <p className="text-xs text-muted-foreground">
             {!ocrStatus?.tesseractInstalled
               ? t("ocr.tess.engineNone")
               : `${t("ocr.tess.engineReady")}${ocrStatus.tesseractPath ? ` · ${ocrStatus.tesseractPath}` : ""}${ocrStatus.tesseractVersion ? ` · v${ocrStatus.tesseractVersion}` : ""}`}
@@ -529,7 +539,7 @@ function TesseractTab() {
               type="button"
               onClick={() => setPsm(m.value)}
               className={cn(
-                "rounded-full border px-2.5 py-1 text-xs transition-colors",
+                "rounded-md border px-2.5 py-1 text-xs transition-colors",
                 psm === m.value
                   ? "border-primary bg-primary/10 text-primary"
                   : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
@@ -555,84 +565,100 @@ function TesseractTab() {
       />
       {error && <ResultError error={error} />}
 
-      <div className="flex items-center gap-3">
-        <Button onClick={() => run.mutate()} disabled={!canRun}>
-          {run.isPending ? (
-            <Loader2Icon data-icon="inline-start" className="animate-spin" />
-          ) : (
-            <ArrowUpIcon data-icon="inline-start" />
-          )}
-          {run.isPending ? t("ocr.running") : t("ocr.run")}
-        </Button>
-        {!selectedId && <p className="text-xs text-amber-600">{t("ocr.tess.needModel")}</p>}
-      </div>
-
-      {/* 结果 */}
-      <div>
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <span className="flex items-center gap-1.5 text-xs font-medium">
-            <SparklesIcon className="size-3.5 text-primary" />
-            {t("ocr.result")}
-            {result && (
-              <span className="font-normal text-muted-foreground">
-                · {result.modelLabel}
-                {result.lines.length > 0 && (
-                  <>
-                    {" "}· {result.lines.length} {t("ocr.lines")
-                    } ·{" "}
-                    {result.lines.reduce((n, l) => n + l.words.length, 0)} {t("ocr.words")}
-                  </>
-                )}
-              </span>
-            )}
-          </span>
-          {result && <CopyTextButton text={result.text} />}
-        </div>
-
-        {!result ? (
-          <div className="flex items-center justify-center rounded-lg border border-dashed px-4 py-8 text-xs text-muted-foreground">
-            {t("ocr.noResult")}
-          </div>
+      <Button
+        size="lg"
+        className="w-full"
+        onClick={() => run.mutate()}
+        disabled={!canRun}
+      >
+        {run.isPending ? (
+          <Loader2Icon data-icon="inline-start" className="animate-spin" />
         ) : (
-          <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
-            <div className="rounded-md border bg-muted/40 p-2">
-              <div className="mb-1 flex items-center justify-between">
-                <span className="text-[10px] font-medium text-muted-foreground">{t("ocr.text")}</span>
-              </div>
-              <Textarea
-                readOnly
-                value={result.text}
-                className="max-h-72 min-h-28 resize-y font-mono text-xs"
-              />
-            </div>
-            {result.lines.length > 0 && (
-              <div className="max-h-48 overflow-y-auto rounded-md border bg-muted/20">
-                {result.lines.map((l, i) => (
-                  <div
-                    key={i}
-                    className="flex items-start gap-2 border-b border-border/50 px-2 py-1 last:border-0"
-                  >
-                    <span className="mt-0.5 shrink-0 font-mono text-[10px] text-muted-foreground/60 tabular-nums">
-                      {i + 1}
-                    </span>
-                    <span className="min-w-0 flex-1 break-words text-[11px] leading-snug">
-                      {l.text}
-                    </span>
-                    <span className="shrink-0 font-mono text-[10px] text-muted-foreground/60 tabular-nums">
-                      {Math.round(l.conf)}%
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <ArrowUpIcon data-icon="inline-start" />
         )}
-      </div>
+        {run.isPending ? t("ocr.running") : t("ocr.run")}
+      </Button>
+      {!selectedId && <p className="text-xs text-amber-600">{t("ocr.tess.needModel")}</p>}
+      </aside>
+
+      {/* 右侧：结果区 */}
+      <main className="relative min-w-0 flex-1 overflow-y-auto">
+        <div className="flex min-h-full items-center justify-center p-8">
+          {!result ? (
+            <div className="flex flex-col items-center justify-center gap-3 text-center">
+              <div className="flex size-20 items-center justify-center rounded-2xl bg-primary/15">
+                <ScanTextIcon className="size-9 text-primary" />
+              </div>
+              <p className="text-lg font-medium">{t("ocr.result")}</p>
+              <p className="max-w-xs text-sm text-muted-foreground">{t("ocr.noResult")}</p>
+            </div>
+          ) : (
+            <div className="flex w-full max-w-2xl flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-xs font-medium">
+                  <SparklesIcon className="size-3.5 text-primary" />
+                  {t("ocr.result")}
+                  <span className="font-normal text-muted-foreground">
+                    · {result.modelLabel}
+                    {result.lines.length > 0 && (
+                      <>
+                        {" "}· {result.lines.length} {t("ocr.lines")
+                        } ·{" "}
+                        {result.lines.reduce((n, l) => n + l.words.length, 0)} {t("ocr.words")}
+                      </>
+                    )}
+                  </span>
+                </span>
+                <CopyTextButton text={result.text} />
+              </div>
+
+              <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
+                <div className="rounded-md border bg-muted/40 p-2">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="text-[10px] font-medium text-muted-foreground">{t("ocr.text")}</span>
+                  </div>
+                  <Textarea
+                    readOnly
+                    value={result.text}
+                    className="max-h-72 min-h-28 resize-y font-mono text-xs"
+                  />
+                </div>
+                {result.lines.length > 0 && (
+                  <div className="max-h-48 overflow-y-auto rounded-md border bg-muted/20">
+                    {result.lines.map((l, i) => (
+                      <div
+                        key={i}
+                        className="flex items-start gap-2 border-b border-border/50 px-2 py-1 last:border-0"
+                      >
+                        <span className="mt-0.5 shrink-0 font-mono text-[10px] text-muted-foreground/60 tabular-nums">
+                          {i + 1}
+                        </span>
+                        <span className="min-w-0 flex-1 break-words text-[11px] leading-snug">
+                          {l.text}
+                        </span>
+                        <span className="shrink-0 font-mono text-[10px] text-muted-foreground/60 tabular-nums">
+                          {Math.round(l.conf)}%
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </main>
     </div>
   );
 }
 
-function VlmTab() {
+function VlmTab({
+  pickerEngine,
+  onPickerEngine,
+}: {
+  pickerEngine: string;
+  onPickerEngine: (v: string) => void;
+}) {
   const t = useT();
   const queryClient = useQueryClient();
   const router = useRouter();
@@ -789,41 +815,44 @@ function VlmTab() {
     (source === "remote" ? configured : serverRunning && !!selectedModel);
 
   return (
-    <div className="flex flex-col gap-5">
-      <p className="text-xs text-muted-foreground">{t("ocr.vlm.desc")}</p>
+    <div className="flex h-full min-h-0">
+      {/* 左侧：参数 / 配置面板 */}
+      <aside className="w-[340px] shrink-0 space-y-5 overflow-y-auto border-r p-4">
+        <OcrEnginePicker value={pickerEngine} onChange={onPickerEngine} />
+        <p className="text-[11px] leading-relaxed text-muted-foreground">{t("ocr.vlm.desc")}</p>
 
-      {/* 识别来源 */}
-      <div>
-        <Label className="mb-1 block text-xs">{t("ocr.vlm.source")}</Label>
-        <div className="flex flex-wrap gap-1.5">
-          <button
-            type="button"
-            onClick={() => switchSource("local")}
-            className={cn(
-              "flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs transition-colors",
-              source === "local"
-                ? "border-primary bg-primary/10 text-primary"
-                : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-            )}
-          >
-            <ServerIcon className="size-3.5" />
-            {t("ocr.vlm.sourceLocal")}
-          </button>
-          <button
-            type="button"
-            onClick={() => switchSource("remote")}
-            className={cn(
-              "flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-xs transition-colors",
-              source === "remote"
-                ? "border-primary bg-primary/10 text-primary"
-                : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-            )}
-          >
-            <GlobeIcon className="size-3.5" />
-            {t("ocr.vlm.sourceRemote")}
-          </button>
+        {/* 识别来源 */}
+        <div>
+          <Label className="mb-1.5 block text-xs">{t("ocr.vlm.source")}</Label>
+          <div className="flex overflow-hidden rounded-lg border">
+            <button
+              type="button"
+              onClick={() => switchSource("local")}
+              className={cn(
+                "flex flex-1 items-center justify-center gap-1.5 px-3 py-1.5 text-xs transition-colors",
+                source === "local"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              <ServerIcon className="size-3.5" />
+              {t("ocr.vlm.sourceLocal")}
+            </button>
+            <button
+              type="button"
+              onClick={() => switchSource("remote")}
+              className={cn(
+                "flex flex-1 items-center justify-center gap-1.5 border-l px-3 py-1.5 text-xs transition-colors",
+                source === "remote"
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              <GlobeIcon className="size-3.5" />
+              {t("ocr.vlm.sourceRemote")}
+            </button>
+          </div>
         </div>
-      </div>
 
       {source === "remote" ? (
         <div className="flex flex-col gap-3">
@@ -1054,42 +1083,54 @@ function VlmTab() {
       />
       {error && <ResultError error={error} />}
 
-      <div className="flex items-center gap-3">
-        <Button onClick={() => run.mutate()} disabled={!canRun}>
-          {run.isPending ? (
-            <Loader2Icon data-icon="inline-start" className="animate-spin" />
-          ) : (
-            <ArrowUpIcon data-icon="inline-start" />
-          )}
-          {run.isPending ? t("ocr.running") : t("ocr.run")}
-        </Button>
+      <Button
+        size="lg"
+        className="w-full"
+        onClick={() => run.mutate()}
+        disabled={!canRun}
+      >
+        {run.isPending ? (
+          <Loader2Icon data-icon="inline-start" className="animate-spin" />
+        ) : (
+          <ArrowUpIcon data-icon="inline-start" />
+        )}
+        {run.isPending ? t("ocr.running") : t("ocr.run")}
+      </Button>
         {!!image && source === "local" && (!serverRunning || !selectedModel) && (
           <p className="text-xs text-amber-600">{t("ocr.vlm.needServer")}</p>
         )}
         {!!image && source === "remote" && !configured && (
           <p className="text-xs text-amber-600">{t("ocr.vlm.remote.notConfigured")}</p>
         )}
-      </div>
+      </aside>
 
-      {/* 结果 */}
-      <div>
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <span className="flex items-center gap-1.5 text-xs font-medium">
-            <SparklesIcon className="size-3.5 text-primary" />
-            {t("ocr.result")}
-          </span>
-          {result && <CopyTextButton text={result} />}
+      {/* 右侧：结果区 */}
+      <main className="relative min-w-0 flex-1 overflow-y-auto">
+        <div className="flex min-h-full items-center justify-center p-8">
+          {!result ? (
+            <div className="flex flex-col items-center justify-center gap-3 text-center">
+              <div className="flex size-20 items-center justify-center rounded-2xl bg-primary/15">
+                <GlobeIcon className="size-9 text-primary" />
+              </div>
+              <p className="text-lg font-medium">{t("ocr.result")}</p>
+              <p className="max-w-xs text-sm text-muted-foreground">{t("ocr.noResult")}</p>
+            </div>
+          ) : (
+            <div className="flex w-full max-w-2xl flex-col gap-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-xs font-medium">
+                  <SparklesIcon className="size-3.5 text-primary" />
+                  {t("ocr.result")}
+                </span>
+                <CopyTextButton text={result} />
+              </div>
+              <div className="rounded-lg border bg-card p-3">
+                <Textarea readOnly value={result} className="min-h-28 resize-y font-mono text-xs" />
+              </div>
+            </div>
+          )}
         </div>
-        {!result ? (
-          <div className="flex items-center justify-center rounded-lg border border-dashed px-4 py-8 text-xs text-muted-foreground">
-            {t("ocr.noResult")}
-          </div>
-        ) : (
-          <div className="rounded-lg border bg-card p-3">
-            <Textarea readOnly value={result} className="min-h-28 resize-y font-mono text-xs" />
-          </div>
-        )}
-      </div>
+      </main>
     </div>
   );
 }
@@ -1148,14 +1189,15 @@ export function OcrScreen() {
         </button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="min-h-0 flex-1">
         {tab === "docs" ? (
-          <DropZone />
-        ) : (
-          <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-6 py-2 pb-12">
-            <OcrEnginePicker value={engine} onChange={switchEngine} />
-            {engine === "vlm" ? <VlmTab /> : <TesseractTab />}
+          <div className="h-full overflow-y-auto">
+            <DropZone />
           </div>
+        ) : engine === "vlm" ? (
+          <VlmTab pickerEngine={engine} onPickerEngine={switchEngine} />
+        ) : (
+          <TesseractTab pickerEngine={engine} onPickerEngine={switchEngine} />
         )}
       </div>
     </div>

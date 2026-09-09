@@ -1405,6 +1405,70 @@ function GeneralSettings({ form, updateField, saveMutation }: { form: SettingsFo
       </div>
 
       <div>
+        <h3 className="mb-1 text-sm font-medium">{t("settings.webSearch.title")}</h3>
+        <p className="mb-2 text-[11px] text-muted-foreground">{t("settings.webSearch.desc")}</p>
+
+        <label className="mb-3 flex cursor-pointer items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            checked={form.WEB_SEARCH_ENABLED === "1"}
+            onChange={(e) => updateField("WEB_SEARCH_ENABLED", e.target.checked ? "1" : "0")}
+            className="size-3.5 accent-[var(--primary)]"
+          />
+          {t("settings.webSearch.defaultEnabled")}
+        </label>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <Label className="mb-1 text-xs">{t("settings.webSearch.provider")}</Label>
+            <Select
+              value={form.WEB_SEARCH_PROVIDER ?? "duckduckgo"}
+              onValueChange={(v) => updateField("WEB_SEARCH_PROVIDER", v)}
+            >
+              <SelectTrigger className="h-8 w-full text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="bing">{t("settings.webSearch.bing")}</SelectItem>
+                <SelectItem value="duckduckgo">{t("settings.webSearch.duckduckgo")}</SelectItem>
+                <SelectItem value="tavily">{t("settings.webSearch.tavily")}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div>
+            <Label htmlFor="WEB_SEARCH_MAX_RESULTS" className="mb-1 text-xs">
+              {t("settings.webSearch.maxResults")}
+            </Label>
+            <Input
+              id="WEB_SEARCH_MAX_RESULTS"
+              type="text"
+              inputMode="numeric"
+              placeholder="5"
+              value={form.WEB_SEARCH_MAX_RESULTS ?? ""}
+              onChange={(e) => updateField("WEB_SEARCH_MAX_RESULTS", e.target.value)}
+              className="h-8 text-xs"
+            />
+          </div>
+          <div className="sm:col-span-2">
+            <Label htmlFor="WEB_SEARCH_API_KEY" className="mb-1 text-xs">
+              {t("settings.webSearch.apiKey")}
+            </Label>
+            <Input
+              id="WEB_SEARCH_API_KEY"
+              type="password"
+              placeholder="tvly-…"
+              value={form.WEB_SEARCH_API_KEY ?? ""}
+              onChange={(e) => updateField("WEB_SEARCH_API_KEY", e.target.value)}
+              className="h-8 text-xs"
+            />
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              {t("settings.webSearch.apiKeyHint")}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div>
         <h3 className="mb-2 text-sm font-medium">{t("settings.about.title")}</h3>
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="rounded-lg border px-3 py-2">
@@ -1522,7 +1586,13 @@ export function SettingsScreen() {
     ...CLAUDE_TIERS.map((c) => c.key),
     ...LAUNCHER_TOOLS.map((x) => x.key),
   ];
-  const GENERAL_KEYS = ["UPDATE_CHANNEL"];
+  const GENERAL_KEYS = [
+    "UPDATE_CHANNEL",
+    "WEB_SEARCH_ENABLED",
+    "WEB_SEARCH_PROVIDER",
+    "WEB_SEARCH_API_KEY",
+    "WEB_SEARCH_MAX_RESULTS",
+  ];
 
   const pickKeys = (keys: string[]) => {
     const out: Record<string, string> = {};

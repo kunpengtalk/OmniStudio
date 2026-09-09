@@ -7,6 +7,7 @@ import { getSetting } from "./db/settings";
 import { getChatModelName } from "./chat-model";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { recordUsage } from "./stats";
+import { webSearch } from "./web-search";
 import { getStatus, getLastError, startServer } from "./server-manager";
 
 export type ChatMessage = {
@@ -273,7 +274,7 @@ export function getHistory(conversationId: number): ChatMessage[] {
 }
 
 /** Resolve the OpenAI-compatible base URL (without the /v1 suffix). */
-function getChatBaseUrl(): string {
+export function getChatBaseUrl(): string {
   const isLocal = getSetting("SERVER_MODE") === "local";
   if (isLocal) {
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
@@ -289,7 +290,9 @@ function getChatBaseUrl(): string {
  * to reach "running". Startup progress is streamed to the UI via
  * serverStatusChanged, so the frontend can show a progress indicator meanwhile.
  */
-async function ensureServerReady(timeoutMs = 180_000): Promise<{ ok: boolean; error?: string }> {
+export async function ensureServerReady(
+  timeoutMs = 180_000,
+): Promise<{ ok: boolean; error?: string }> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const status = getStatus();
@@ -486,6 +489,7 @@ export async function sendMessage(
   conversationId: number,
   content: string,
   images: string[] = [],
+  opts: { webSearch?: boolean; files?: { name: string; content: string }[] } = {},
 ): Promise<{ ok: boolean; error?: string }> {
   const conv = db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
   if (!conv) return { ok: false, error: "Conversation not found" };
@@ -535,9 +539,63 @@ export async function sendMessage(
   const result = await streamAssistantReply({
     conversationId,
     assistantId: assistant.id,
-    payloadMessages: buildOpenAiMessages(getHistory(conversationId)),
+    payloadMessages: await buildPayloadMessages(conversationId, content, opts),
   });
   return { ok: result.ok, error: result.error };
+}
+
+/**
+ * 组装发给模型的完整 payload：
+ * - 历史消息转 OpenAI 格式；
+ * - 附件文件内容以 text part 追加到最后一条 user 消息（仅注入上下文，不落库）；
+ * - 开启联网检索时，先搜索用户最新提问，把结果作为 system 消息注入（不落库）。
+ */
+async function buildPayloadMessages(
+  conversationId: number,
+  latestQuery: string,
+  opts: { webSearch?: boolean; files?: { name: string; content: string }[] },
+): Promise<{ role: string; content: unknown }[]> {
+  const payloadMessages = buildOpenAiMessages(getHistory(conversationId));
+
+  const files = (opts.files ?? []).filter((f) => f.name && f.content?.trim());
+  if (files.length > 0) {
+    const lastUser = [...payloadMessages].reverse().find((m) => m.role === "user");
+    if (lastUser) {
+      const parts: { type: string; text?: string; image_url?: { url: string } }[] =
+        typeof lastUser.content === "string"
+          ? [{ type: "text", text: lastUser.content }]
+          : (lastUser.content as typeof parts);
+      for (const f of files) {
+        parts.push({
+          type: "text",
+          text: `--- 附件文件：${f.name} ---\n${f.content}\n--- 附件结束 ---`,
+        });
+      }
+      lastUser.content = parts;
+    }
+  }
+
+  if (opts.webSearch && latestQuery.trim()) {
+    const search = await webSearch(latestQuery);
+    if (search.ok && search.results.length > 0) {
+      const context = search.results
+        .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`)
+        .join("\n\n");
+      payloadMessages.unshift({
+        role: "system",
+        content:
+          `联网检索已开启。下面是针对用户最新提问的搜索结果（${search.provider}），` +
+          `请结合这些信息回答，并在回答中适当标注来源链接：\n\n${context}`,
+      });
+    } else if (search.error) {
+      payloadMessages.unshift({
+        role: "system",
+        content: `联网检索失败（${search.error}），请基于你已有的知识回答，并提示用户检索可能不可用。`,
+      });
+    }
+  }
+
+  return payloadMessages;
 }
 
 /** 删除单条消息（连同其附件图片文件）。 */
