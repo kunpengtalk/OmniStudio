@@ -3,8 +3,10 @@ import { useQuery } from "@tanstack/react-query";
 import { rpcClient } from "../lib/rpc";
 import { cn } from "../lib/utils";
 import { useServerStore } from "../stores/server";
+import { useT } from "../stores/ui-lang";
 
 export function StatusPill() {
+  const t = useT();
   const serverStatus = useServerStore((s) => s.status);
 
   const { data, isLoading } = useQuery({
@@ -23,14 +25,14 @@ export function StatusPill() {
   if (isLocal) {
     const label =
       serverStatus === "running"
-        ? "Running"
+        ? t("server.status.running")
         : serverStatus === "downloading"
-          ? "Downloading…"
+          ? t("server.status.downloading")
           : serverStatus === "starting"
-            ? "Starting…"
+            ? t("server.status.starting")
             : serverStatus === "error"
-              ? "Error"
-              : "Stopped";
+              ? t("server.status.error")
+              : t("server.status.stopped");
 
     const dotClass =
       serverStatus === "running"

@@ -2,7 +2,12 @@ import { existsSync, rmSync, readdirSync, readFileSync, writeFileSync } from "fs
 import path from "path";
 import { getModelsBaseDir, safeRepoId, splitRepo, installedModelSize, isModelWeightExt } from "./modelscope";
 import { getSetting, updateSettings } from "./db/settings";
-import type { ModelCategory } from "../shared/modelscope";
+import {
+  fileKind,
+  resolveEngineForModel,
+  type InferenceEngine,
+  type ModelCategory,
+} from "../shared/modelscope";
 
 export type InstalledModel = {
   repo: string;
@@ -166,13 +171,32 @@ export function listInstalledModels(): InstalledModel[] {
   return results;
 }
 
-export function setActiveModel(pathToModel: string): { ok: boolean; error?: string } {
-  if (!existsSync(pathToModel)) return { ok: false, error: "Model file does not exist" };
-  const fileName = path.basename(pathToModel);
-  const name = fileName
+/**
+ * Canonical served model name for a model file: a lowercase slug that is used
+ * both as the server-side model id (--alias / --served-model-name) and what
+ * the UI shows in the model picker.
+ */
+export function slugModelFileName(fileName: string): string {
+  return fileName
     .replace(/\.(gguf|safetensors|bin|pt|pth|ckpt|onnx|ggml)$/i, "")
     .toLowerCase()
     .replace(/[^a-z0-9_.-]/g, "-");
+}
+
+/** Switch the inference engine when the current one cannot load the model file. */
+function ensureEngineForModelFile(pathToModel: string): void {
+  const fileName = path.basename(pathToModel);
+  const current = (getSetting("INFERENCE_ENGINE") as InferenceEngine) || "llama.cpp";
+  const suggested = resolveEngineForModel(fileName, current);
+  if (suggested !== current) {
+    updateSettings({ INFERENCE_ENGINE: suggested });
+  }
+}
+
+export function setActiveModel(pathToModel: string): { ok: boolean; error?: string } {
+  if (!existsSync(pathToModel)) return { ok: false, error: "Model file does not exist" };
+  ensureEngineForModelFile(pathToModel);
+  const name = slugModelFileName(path.basename(pathToModel));
   updateSettings({
     LOCAL_MODEL_PATH: pathToModel,
     LOCAL_MODEL_NAME: name,

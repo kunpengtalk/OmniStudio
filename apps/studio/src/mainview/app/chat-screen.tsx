@@ -26,7 +26,9 @@ import {
 import { useChatStore } from "@stores/chat";
 import { useAppStore } from "@stores/app";
 import { useT } from "@stores/ui-lang";
+import { useServerStore } from "@stores/server";
 import { Markdown } from "@components/markdown";
+import { persistedErrorMessage, serverErrorHint } from "@/mainview/lib/server-error";
 import { cn } from "@/mainview/lib/utils";
 import { chatImageUrl } from "../../shared/server-info";
 
@@ -55,6 +57,11 @@ function MessageBubble({
   content: string;
   images?: string[];
 }) {
+  const t = useT();
+  // 后端把启动失败持久化为 "⚠️ <raw error>"，这里补一行本地化的可操作提示。
+  const rawError = role === "assistant" ? persistedErrorMessage(content) : null;
+  const errorHint = rawError !== null ? serverErrorHint(t, rawError) : null;
+
   if (role === "user") {
     return (
       <div className="flex justify-end">
@@ -79,6 +86,12 @@ function MessageBubble({
             <Loader2Icon className="size-3.5 animate-spin" />
             Thinking…
           </div>
+        )}
+        {errorHint && (
+          <p className="mt-2 flex items-start gap-1.5 rounded-lg bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
+            <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+            <span className="min-w-0 break-words">{errorHint}</span>
+          </p>
         )}
       </div>
     </div>
@@ -159,11 +172,18 @@ function ModelPicker() {
               {localOptions.map((o) => (
                 <SelectItem key={`local-${o.value}`} value={o.value}>
                   <span className="truncate">{o.label}</span>
-                  {o.detail && (
-                    <span className="truncate text-[10px] text-muted-foreground/70">
-                      {o.detail}
-                    </span>
-                  )}
+                  <span className="flex min-w-0 items-center gap-1">
+                    {o.engine && (
+                      <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
+                        {t(`settings.engine.${o.engine}`)}
+                      </span>
+                    )}
+                    {o.detail && (
+                      <span className="truncate text-[10px] text-muted-foreground/70">
+                        {o.detail}
+                      </span>
+                    )}
+                  </span>
                 </SelectItem>
               ))}
             </SelectGroup>
@@ -224,6 +244,7 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
   const t = useT();
   const activeMessages = useChatStore((s) => s.activeMessages);
   const streaming = useChatStore((s) => s.streaming);
+  const serverStatus = useServerStore((s) => s.status);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -232,6 +253,16 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
     queryKey: ["conversation", conversationId],
     queryFn: () => rpcClient.getConversation({ id: conversationId }),
   });
+
+  const settingsQuery = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => rpcClient.getSettings(undefined),
+  });
+  const isRemoteMode = settingsQuery.data?.settings?.SERVER_MODE === "remote";
+
+  const serverStarting =
+    !isRemoteMode && (serverStatus === "starting" || serverStatus === "downloading");
+  const serverFailed = !isRemoteMode && serverStatus === "error";
 
   useEffect(() => {
     useChatStore.getState().setStreaming(false);
@@ -252,6 +283,15 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
       queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
+    },
+    onError: (err: unknown) => {
+      // RPC 失败且没收到 chatDone（后端异常路径）——解除输入锁定并展示错误，避免"发了没反应"。
+      useChatStore.getState().setStreaming(false);
+      useChatStore.getState().finalizeMessage(
+        conversationId,
+        Date.now(),
+        `⚠️ ${err instanceof Error ? err.message : String(err)}`,
+      );
     },
   });
 
@@ -317,6 +357,30 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
 
       <div className="border-t p-4">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
+          {(serverStarting || (sendMutation.isPending && serverFailed)) && (
+            <div
+              className={cn(
+                "flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs",
+                serverFailed
+                  ? "border-destructive/30 bg-destructive/10 text-destructive"
+                  : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+              )}
+            >
+              <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+              <span className="truncate">
+                {serverFailed
+                  ? t("server.startFailed")
+                  : serverStatus === "downloading"
+                    ? t("server.startingModel")
+                    : t("server.waitingForModel")}
+              </span>
+              {serverStarting && (
+                <span className="ml-auto h-1 w-20 shrink-0 overflow-hidden rounded-full bg-amber-500/20">
+                  <span className="block h-full w-1/2 animate-pulse rounded-full bg-amber-500" />
+                </span>
+              )}
+            </div>
+          )}
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2">
               {attachments.map((a) => (

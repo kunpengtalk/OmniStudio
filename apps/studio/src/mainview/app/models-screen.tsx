@@ -44,6 +44,7 @@ import {
   type InferenceEngine,
   type ModelScopeModel,
 } from "@/shared/modelscope";
+import { serverErrorHint } from "@/mainview/lib/server-error";
 import { cn } from "@/mainview/lib/utils";
 
 function formatBytes(bytes: number): string {
@@ -89,13 +90,16 @@ function InstalledModelRow({
   const serverStatus = useServerStore((s) => s.status);
   const kind = fileKind(model.fileName);
   const compatible = engineSupports(engine, kind);
+  const [startError, setStartError] = useState<string | null>(null);
 
   const setActiveMutation = useMutation({
     mutationFn: () => rpcClient.setActiveModel({ path: model.path }),
     onSuccess: () => {
+      setStartError(null);
       queryClient.invalidateQueries({ queryKey: ["installed-models"] });
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
+    onError: (err: unknown) => setStartError(String(err)),
   });
   const deleteMutation = useMutation({
     mutationFn: () => rpcClient.deleteLocalModel({ path: model.path }),
@@ -108,19 +112,27 @@ function InstalledModelRow({
   const startMutation = useMutation({
     mutationFn: async () => {
       if (!model.isActive) {
-        await rpcClient.setActiveModel({ path: model.path });
+        const act = await rpcClient.setActiveModel({ path: model.path });
+        if (!act.ok) throw new Error(act.error || "Failed to activate model");
       }
       const status = useServerStore.getState().status;
-      return status === "running" || status === "starting" || status === "downloading"
-        ? await rpcClient.restartServer()
-        : await rpcClient.startServer();
+      const res =
+        status === "running" || status === "starting" || status === "downloading"
+          ? await rpcClient.restartServer()
+          : await rpcClient.startServer();
+      if (!res.ok) throw new Error(res.error || "Failed to start server");
+      return res;
     },
     onSuccess: () => {
+      setStartError(null);
       queryClient.invalidateQueries({ queryKey: ["installed-models"] });
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
+    onError: (err: unknown) =>
+      setStartError(err instanceof Error ? err.message.replace(/^Error:\s*/i, "") : String(err)),
   });
   const serverBusy = serverStatus === "starting" || serverStatus === "downloading";
+  const startErrorHint = startError ? serverErrorHint(t, startError) : null;
 
   return (
     <div className="flex items-center gap-3 rounded-lg border p-3">
@@ -154,7 +166,7 @@ function InstalledModelRow({
           {!compatible && (
             <span className="inline-flex h-5 items-center gap-1 rounded-full bg-amber-100 px-1.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
               <AlertTriangleIcon className="size-3" />
-              {t("models.incompatible")}
+              {t("models.autoSwitchEngine")}
             </span>
           )}
           {model.isActive && (
@@ -174,6 +186,20 @@ function InstalledModelRow({
         <p className="mt-0.5 text-[11px] text-muted-foreground">
           {formatBytes(model.size)}
         </p>
+        {startError && (
+          <div className="mt-1 space-y-0.5">
+            {startErrorHint && (
+              <p className="flex items-start gap-1 text-[11px] text-destructive">
+                <AlertTriangleIcon className="mt-0.5 size-3 shrink-0" />
+                <span className="min-w-0 break-words">{startErrorHint}</span>
+              </p>
+            )}
+            <p className="flex items-start gap-1 text-[11px] text-destructive/70">
+              <span className="mt-1.5 size-0.5 shrink-0 rounded-full bg-destructive/50" />
+              <span className="min-w-0 break-words">{startError}</span>
+            </p>
+          </div>
+        )}
       </div>
       <div className="flex shrink-0 items-center gap-1">
         <Button
@@ -190,8 +216,7 @@ function InstalledModelRow({
           variant="outline"
           size="sm"
           className="h-7 text-xs"
-          disabled={!compatible || startMutation.isPending || serverBusy}
-          tooltip={!compatible ? t("models.incompatible") : undefined}
+          disabled={startMutation.isPending || serverBusy}
           onClick={() => startMutation.mutate()}
         >
           {startMutation.isPending ? (
@@ -205,8 +230,7 @@ function InstalledModelRow({
           variant={model.isActive ? "default" : "outline"}
           size="sm"
           className="h-7 text-xs"
-          disabled={!compatible || model.isActive || setActiveMutation.isPending}
-          tooltip={!compatible ? t("models.incompatible") : undefined}
+          disabled={model.isActive || setActiveMutation.isPending}
           onClick={() => setActiveMutation.mutate()}
         >
           {setActiveMutation.isPending ? (

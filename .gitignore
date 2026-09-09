@@ -60,4 +60,10 @@ dist/
 # turbo
 .turbo
 
+# requirements doc (kept local only)
+需求文档.md
+
+# build artifacts
+apps/studio/artifacts/
+
 *.local.*

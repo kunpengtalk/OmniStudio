@@ -2,6 +2,7 @@ import type { Subprocess } from "bun";
 import { getModelProfile, type ServerArgs } from "../../shared/model-profiles";
 import { getSetting } from "../db/settings";
 import { markServerStarted } from "../stats";
+import { extractStartupError } from "./errors";
 import type {
   BinaryCheckResult,
   LogListener,
@@ -279,7 +280,10 @@ export class LlamaRuntime implements Runtime {
             self.appendLog(`\n[server exited with code ${code}]\n`);
             self.setStatus("stopped");
           } else {
-            self.lastError = `Process exited with code ${code}`;
+            self.lastError = extractStartupError(
+              self.serverLogs,
+              `Process exited with code ${code ?? 1}`,
+            );
             self.appendLog(`\n[server exited with code ${code}]\n`);
             self.setStatus("error");
           }
@@ -322,12 +326,17 @@ export class LlamaRuntime implements Runtime {
 
       const status = this.getStatus();
       if (status === "starting" || status === "downloading") {
-        this.lastError = "Server failed to become ready within timeout";
+        this.lastError = extractStartupError(
+          this.serverLogs,
+          "Server failed to become ready within timeout",
+        );
         this.setStatus("error");
         return { ok: false, error: this.lastError };
       }
 
-      return this.getStatus() === "running" ? { ok: true } : { ok: false, error: this.lastError };
+      return this.getStatus() === "running"
+        ? { ok: true }
+        : { ok: false, error: extractStartupError(this.serverLogs, this.lastError) };
     } catch (e) {
       this.lastError = String(e);
       this.setStatus("error");

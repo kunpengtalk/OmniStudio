@@ -15,6 +15,7 @@ import { OcrScreen } from "../ocr-screen";
 import { ModelsScreen } from "../models-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { DownloadsButton } from "@components/download-panel";
+import { StatusPill } from "@components/status-pill";
 import { useAppStore } from "@stores/app";
 import { useUILang } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
@@ -93,7 +94,8 @@ export function MainLayout() {
               )}
             >
               <SidebarTrigger className="-ml-1" tooltip="Toggle sidebar" />
-              <div className="ml-auto">
+              <div className="ml-auto flex items-center gap-2">
+                <StatusPill />
                 <DownloadsButton />
               </div>
             </header>

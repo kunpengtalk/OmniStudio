@@ -1,6 +1,7 @@
 import type { Subprocess } from "bun";
 import { getSetting } from "../db/settings";
 import { markServerStarted } from "../stats";
+import { extractStartupError } from "./errors";
 import type {
   BinaryCheckResult,
   LogListener,
@@ -124,26 +125,32 @@ export class SglangRuntime implements Runtime {
     return { found: false };
   }
 
-  private resolveModel(): string {
+  private resolveModel(): { model: string; servedName?: string } {
     const localPath = getSetting("LOCAL_MODEL_PATH");
-    if (localPath) return localPath;
+    if (localPath) {
+      const localName = getSetting("LOCAL_MODEL_NAME");
+      const servedName = localName
+        ? localName.toLowerCase().replace(/[^a-z0-9_.-]/g, "-")
+        : undefined;
+      return { model: localPath, servedName };
+    }
 
     const chatModel = getSetting("CHAT_MODEL");
-    if (chatModel) return chatModel;
+    if (chatModel) return { model: chatModel };
 
     const profileId = getSetting("VLLM_MODEL_PROFILE");
     if (profileId && profileId !== "none") {
       const customHf = getSetting("CUSTOM_HF_MODEL");
-      if (customHf) return customHf.split(":")[0] ?? customHf;
+      if (customHf) return { model: customHf.split(":")[0] ?? customHf };
     }
 
     const customHf = getSetting("CUSTOM_HF_MODEL");
-    if (customHf) return customHf.split(":")[0] ?? customHf;
+    if (customHf) return { model: customHf.split(":")[0] ?? customHf };
 
-    return "";
+    return { model: "" };
   }
 
-  private buildArgs(model: string): string[] {
+  private buildArgs(model: string, servedName?: string): string[] {
     const port = getSetting("SERVER_PORT");
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
     const contextLength = getSetting("SGLANG_CONTEXT_LENGTH") || "8192";
@@ -168,6 +175,8 @@ export class SglangRuntime implements Runtime {
       memFraction,
     ];
 
+    if (servedName) args.push("--served-model-name", servedName);
+
     if (chunkedPrefill && chunkedPrefill !== "0") {
       args.push("--chunked-prefill-size", chunkedPrefill);
     }
@@ -180,7 +189,7 @@ export class SglangRuntime implements Runtime {
       return { ok: false, error: "Server already running" };
     }
 
-    const model = this.resolveModel();
+    const { model, servedName } = this.resolveModel();
     if (!model) {
       return { ok: false, error: "No model configured" };
     }
@@ -190,7 +199,7 @@ export class SglangRuntime implements Runtime {
       return { ok: false, error: "SGLang not found. Install with: pip install sglang" };
     }
 
-    const args = this.buildArgs(model);
+    const args = this.buildArgs(model, servedName);
     this.lastError = "";
     this.setStatus("starting");
 
@@ -216,7 +225,10 @@ export class SglangRuntime implements Runtime {
             self.appendLog(`\n[server exited with code ${code}]\n`);
             self.setStatus("stopped");
           } else {
-            self.lastError = `Process exited with code ${code}`;
+            self.lastError = extractStartupError(
+              self.serverLogs,
+              `Process exited with code ${code ?? 1}`,
+            );
             self.appendLog(`\n[server exited with code ${code}]\n`);
             self.setStatus("error");
           }
@@ -259,12 +271,17 @@ export class SglangRuntime implements Runtime {
 
       const status = this.getStatus();
       if (status === "starting" || status === "downloading") {
-        this.lastError = "Server failed to become ready within timeout";
+        this.lastError = extractStartupError(
+          this.serverLogs,
+          "Server failed to become ready within timeout",
+        );
         this.setStatus("error");
         return { ok: false, error: this.lastError };
       }
 
-      return this.getStatus() === "running" ? { ok: true } : { ok: false, error: this.lastError };
+      return this.getStatus() === "running"
+        ? { ok: true }
+        : { ok: false, error: extractStartupError(this.serverLogs, this.lastError) };
     } catch (e) {
       this.lastError = String(e);
       this.setStatus("error");

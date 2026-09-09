@@ -4,13 +4,20 @@ import type { LanguageModel } from "ai";
 
 import { getSetting, updateSettings } from "./db/settings";
 import { getModelProfile } from "../shared/model-profiles";
-import { fileKind, engineSupports, type InferenceEngine } from "../shared/modelscope";
+import {
+  fileKind,
+  engineSupports,
+  resolveEngineForModel,
+  type InferenceEngine,
+} from "../shared/modelscope";
 import * as ModelStore from "./model-store";
 import { getStatus, restartServer, startServer } from "./server-manager";
 
 /**
  * Resolve the active chat model name.
- * Priority: CHAT_MODEL setting → engine-specific resolution → remote VLLM_MODEL_NAME
+ * Local models always use the canonical served name (slug) so it matches the
+ * server's --alias / --served-model-name; HF references and the remote model
+ * id act as fallbacks when no local file is configured.
  */
 export function getChatModelName(): string {
   const chatModel = getSetting("CHAT_MODEL");
@@ -18,22 +25,12 @@ export function getChatModelName(): string {
 
   const isLocal = getSetting("SERVER_MODE") === "local";
   if (isLocal) {
-    const engine = getSetting("INFERENCE_ENGINE") || "llama.cpp";
+    const localName = getSetting("LOCAL_MODEL_NAME");
+    if (localName) return localName.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
 
-    // llama.cpp: use GGUF alias or HF ref
-    if (engine === "llama.cpp") {
-      const localName = getSetting("LOCAL_MODEL_NAME");
-      if (localName) return localName.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
-      const profileId = getSetting("VLLM_MODEL_PROFILE");
-      const profile = getModelProfile(profileId);
-      return getSetting("CUSTOM_HF_MODEL") || profile?.hfModel || "";
-    }
-
-    // vLLM / SGLang: use HF model ID directly
-    const localPath = getSetting("LOCAL_MODEL_PATH");
-    if (localPath) return localPath;
     const customHf = getSetting("CUSTOM_HF_MODEL");
     if (customHf) return customHf.split(":")[0] ?? customHf;
+
     const profileId = getSetting("VLLM_MODEL_PROFILE");
     const profile = getModelProfile(profileId);
     return profile?.hfModel || "";
@@ -66,11 +63,14 @@ export function getChatModel(): LanguageModel {
 /** 对话模型选项：本地已安装模型或 OpenAI 兼容 API 上的模型。 */
 export type ChatModelOption = {
   type: "local" | "api";
-  /** local 为本地模型文件路径，api 为模型 ID */
+  /** local 为本地模型文件路径（内部定位用），api 为模型 ID */
   value: string;
+  /** 展示用的模型名：本地为启动后的服务名（slug），api 为模型 ID */
   label: string;
   detail?: string;
   isActive: boolean;
+  /** 本地模型将用哪个推理引擎启动（api 选项无此字段） */
+  engine?: InferenceEngine;
 };
 
 /** 从配置的 OpenAI 兼容服务拉取 /v1/models 列表（失败时返回空数组）。 */
@@ -114,9 +114,10 @@ export async function listChatModels(): Promise<{ models: ChatModelOption[] }> {
     models.push({
       type: "local",
       value: m.path,
-      label: m.fileName,
+      label: ModelStore.slugModelFileName(m.fileName),
       detail: m.repo,
       isActive: m.isActive,
+      engine: resolveEngineForModel(m.fileName, engine),
     });
   }
   // 当前配置的本地模型不在已安装列表中时（如内置 profile 或文件被排除出分组），

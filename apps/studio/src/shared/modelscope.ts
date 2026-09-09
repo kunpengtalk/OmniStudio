@@ -24,6 +24,29 @@ export function engineSupports(engine: InferenceEngine, kind: ModelFileKind): bo
   return engine === "vllm" || engine === "sglang";
 }
 
+/** Recommended engine for a model file, when its format makes it unambiguous. */
+export function engineForModelFile(fileName: string): InferenceEngine | null {
+  const kind = fileKind(fileName);
+  if (kind === "gguf") return "llama.cpp";
+  if (kind === "safetensors") return "vllm";
+  return null;
+}
+
+/**
+ * Which engine will actually serve this model file: keep the currently
+ * configured engine when it supports the format, otherwise fall back to the
+ * recommended one. Used both to auto-switch the engine and to show the user
+ * which engine will be used.
+ */
+export function resolveEngineForModel(
+  fileName: string,
+  currentEngine: InferenceEngine,
+): InferenceEngine {
+  const kind = fileKind(fileName);
+  if (engineSupports(currentEngine, kind)) return currentEngine;
+  return engineForModelFile(fileName) ?? currentEngine;
+}
+
 /** Best-effort format hint for a repository id (search results don't list files). */
 export function repoFormatHint(repoId: string): ModelFileKind | "unknown" {
   const id = repoId.toLowerCase();

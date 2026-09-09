@@ -1,0 +1,35 @@
+M1 生图闭环	P0	图片 App 专属界面（image-screen.tsx）	当前 app/ 下无 image-screen.tsx，侧边栏 Image 入口悬空。实现生图工作台：模型选择、提示词、参数、结果与历史列表。参考：ROADMAP.md M1 IMG-01
+M1 生图闭环	P0	生图后端与任务队列	RPC 封装 images/generations，复用 bun/queue.ts 任务队列模式做异步生成、进度上报与失败重试。参考：ROADMAP.md M1 IMG-02
+M1 生图闭环	P0	本地生图引擎接入（ComfyUI / diffusers）	评估并接入本地图像生成后端，SDXL / Kolors 预设模型安装后即可生图。参考：ROADMAP.md M1 IMG-03
+M1 生图闭环	P0	远程生图端点支持	远程模式下直连 OpenAI 兼容 /v1/images/generations。参考：ROADMAP.md M1 IMG-04
+M1 生图闭环	P1	生图参数 UI	提示词 / 负向提示词 / 步数 / CFG / 尺寸 / 采样器。参考：ROADMAP.md M1 IMG-05
+M1 生图闭环	P1	生成历史库	SQLite 记录提示词与参数，输出图落到本地图片目录，内置查看 / 删除 / 保存到下载。参考：ROADMAP.md M1 IMG-06
+M1 生图闭环	P1	生图模型就绪校验	image 分类模型选择 + 未安装时引导下载（SDXL / Kolors 预设）。参考：ROADMAP.md M1 IMG-07
+M2 本地推理引擎	P0	引擎环境检测与安装引导（vllm / sglang）	检测 vllm / sglang 可执行文件与 Python 环境（复用 BinaryCheckResult），缺失时给出安装引导。参考：ROADMAP.md M2 LIE-01
+M2 本地推理引擎	P0	引擎一键安装（虚拟环境 / 预编译包）	pip/uv 虚拟环境或预编译包方案，安装状态写回设置。参考：ROADMAP.md M2 LIE-02
+M2 本地推理引擎	P0	vLLM 运行时实测验证与参数对齐	启动 / 健康检查 / 吞吐验证，参数组装与真实 vLLM 行为对齐并修复差异（runtimes/vllm.ts）。参考：ROADMAP.md M2 LIE-03
+M2 本地推理引擎	P0	SGLang 运行时实测验证与参数对齐	同上，runtimes/sglang.ts。参考：ROADMAP.md M2 LIE-04
+M2 本地推理引擎	P1	引擎启动失败诊断	失败原因可读透传：缺依赖 / 显存不足 / 端口占用 / 模型格式不符。参考：ROADMAP.md M2 LIE-05
+M2 本地推理引擎	P1	引擎状态 UI	设置页展示各引擎版本 / 路径 / 健康度，切换引擎前校验可用性。参考：ROADMAP.md M2 LIE-06
+M3 性能与生命周期	P1	空闲超时自动卸载	服务器空闲 N 分钟后自动卸载模型。参考：ROADMAP.md M3 PERF-01
+M3 性能与生命周期	P1	预填充内存防护与防护层级	验证 llama.cpp --mlock 等能力后设计。参考：ROADMAP.md M3 PERF-02
+M3 性能与生命周期	P1	模型回退路由	默认模型启动失败时回退到备选模型。参考：ROADMAP.md M3 PERF-03
+M3 性能与生命周期	P1	KV 缓存热/冷分层与 SSD 溢出	缓存分层 + SSD 溢出目录，先做能力验证。参考：ROADMAP.md M3 PERF-04
+M3 性能与生命周期	P1	分块预填充 / 预填充优先级设置	按引擎支持情况接入设置。参考：ROADMAP.md M3 PERF-05
+M4 运维增强	P1	日志查看器：日志文件多文件切换	server.log 按天/大小分片，可切换。参考：ROADMAP.md M4 OPS-01
+M4 运维增强	P1	日志查看器：最近 N 条筛选	显式条数筛选。参考：ROADMAP.md M4 OPS-02
+M4 运维增强	P1	基准测试：batch × ctx 扫描矩阵	当前一趟固定 batch，改矩阵扫描。参考：ROADMAP.md M4 OPS-03
+M4 运维增强	P1	基准测试：准确度 / 质量基准	除吞吐外的质量维度。参考：ROADMAP.md M4 OPS-04
+M4 运维增强	P1	服务统计：逐模型显存 / VRAM 占用	/slots 增强，补齐 OMLX 有而我们缺的项。参考：ROADMAP.md M4 OPS-05
+M4 运维增强	P1	服务统计：GPU 温度与显存锁定量	参考：ROADMAP.md M4 OPS-06
+M5 工程与平台	P1	下载任务持久化（重启恢复）	下载队列现为内存态，重启丢失活跃/排队任务。参考：ROADMAP.md M5 ENG-01
+M5 工程与平台	P1	vllm-studio launch <tool> CLI 子命令	集成页命令现在只能预览/复制，落地可执行 CLI。参考：ROADMAP.md M5 ENG-02
+M5 工程与平台	P2	网络页：Anthropic / Claude Code 端点展示	现在并入集成页，未单独列出。参考：ROADMAP.md M5 ENG-03
+M5 工程与平台	P2	TopK / repeat penalty 设为 UI 参数	目前 repeat penalty 取自模型 profile 的 serverArgs。参考：ROADMAP.md M5 ENG-04
+M5 工程与平台	P2	模型库扩展目录选择器	现为手输文本，改目录选择器。参考：ROADMAP.md M5 ENG-05
+M5 工程与平台	P2	Linux 平台支持	README 规划中。参考：ROADMAP.md M5 ENG-06
+M5 工程与平台	P2	Windows 平台支持	README 规划中。参考：ROADMAP.md M5 ENG-07
+M6 远期	P2	菜单栏 / Dock 托盘指标（Electrobun 评估）	先评估 Electrobun 系统托盘 / 菜单栏 API 支持度（bun/menu.ts 仅有应用菜单）。参考：ROADMAP.md M6 FUT-01
+M6 远期	P2	API Key 加密存储与不回显	macOS Keychain / 系统凭据，远端 Key 不回显。参考：ROADMAP.md M6 FUT-02
+M6 远期	P2	日志脱敏	打印前脱敏。参考：ROADMAP.md M6 FUT-03
+M6 远期	P2	本地引擎音频能力评估	语音工作台目前依赖外部 /v1/audio/* 服务。参考：ROADMAP.md M6 FUT-04

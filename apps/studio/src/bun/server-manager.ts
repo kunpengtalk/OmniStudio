@@ -1,6 +1,7 @@
 import { getRuntime, getActiveEngine } from "./runtimes";
 import type { Runtime } from "./runtimes";
 import type { LogListener, StatusListener } from "./runtimes/types";
+import { extractStartupError } from "./runtimes/errors";
 
 export type ServerStatus = "stopped" | "starting" | "downloading" | "running" | "error";
 
@@ -71,7 +72,9 @@ export function getLogs(): string {
 }
 
 export function getLastError(): string {
-  return getBoundRuntime().getLastError();
+  // Prefer a concrete error mined from the live server log; fall back to the
+  // runtime's cached message (which may predate the full log output).
+  return extractStartupError(getLogs(), getBoundRuntime().getLastError());
 }
 
 export function clearLogs() {

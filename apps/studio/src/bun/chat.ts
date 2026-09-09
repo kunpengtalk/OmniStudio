@@ -7,6 +7,7 @@ import { getSetting } from "./db/settings";
 import { getChatModelName } from "./chat-model";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { recordUsage } from "./stats";
+import { getStatus, getLastError, startServer } from "./server-manager";
 
 export type ChatMessage = {
   id: number;
@@ -204,6 +205,32 @@ function getChatBaseUrl(): string {
   return (getSetting("VLLM_API_BASE") || "").replace(/\/+$/, "").replace(/\/v1$/, "");
 }
 
+/**
+ * Ensure the local inference server is ready before sending: auto-start it when
+ * stopped, and wait for an already-triggered start (e.g. from the model picker)
+ * to reach "running". Startup progress is streamed to the UI via
+ * serverStatusChanged, so the frontend can show a progress indicator meanwhile.
+ */
+async function ensureServerReady(timeoutMs = 180_000): Promise<{ ok: boolean; error?: string }> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const status = getStatus();
+    if (status === "running") return { ok: true };
+    if (status === "error") {
+      return { ok: false, error: getLastError() || "Inference server failed to start" };
+    }
+    if (status === "stopped") {
+      // startServer resolves only once the health check passes.
+      const result = await startServer();
+      if (!result.ok) return { ok: false, error: result.error || "Failed to start inference server" };
+      return { ok: true };
+    }
+    // starting / downloading — keep waiting for the status to advance.
+    await Bun.sleep(500);
+  }
+  return { ok: false, error: "Timed out waiting for the inference server to start" };
+}
+
 export async function sendMessage(
   conversationId: number,
   content: string,
@@ -254,6 +281,24 @@ export async function sendMessage(
     .returning({ id: messages.id })
     .get();
   const assistantId = assistant.id;
+
+  // 本地模式下若推理服务器未就绪，先自动启动并等待就绪（进度通过 serverStatusChanged 推送）。
+  if (getSetting("SERVER_MODE") === "local") {
+    const ready = await ensureServerReady();
+    if (!ready.ok) {
+      const errMsg = ready.error || "Inference server not ready";
+      db.update(messages)
+        .set({ content: `⚠️ ${errMsg}` })
+        .where(eq(messages.id, assistantId))
+        .run();
+      db.update(conversations)
+        .set({ updatedAt: Date.now() })
+        .where(eq(conversations.id, conversationId))
+        .run();
+      emitDone({ conversationId, messageId: assistantId, content: "", error: errMsg });
+      return { ok: false, error: errMsg };
+    }
+  }
 
   const apiKey = getSetting("VLLM_API_KEY");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -351,8 +396,16 @@ export async function sendMessage(
     recordUsage(model, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    db.delete(messages).where(eq(messages.id, assistantId)).run();
-    emitDone({ conversationId, messageId: assistantId, content: full, error: msg });
+    // 把失败原因持久化到助手消息，避免刷新会话后错误反馈被清空。
+    db.update(messages)
+      .set({ content: msg ? `⚠️ ${msg}` : "⚠️ Request failed" })
+      .where(eq(messages.id, assistantId))
+      .run();
+    db.update(conversations)
+      .set({ updatedAt: Date.now() })
+      .where(eq(conversations.id, conversationId))
+      .run();
+    emitDone({ conversationId, messageId: assistantId, content: "", error: msg });
     return { ok: false, error: msg };
   }
 
