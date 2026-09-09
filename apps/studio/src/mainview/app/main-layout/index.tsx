@@ -13,7 +13,7 @@ import { ServerStatsScreen } from "../server-stats";
 import { ChatWindow } from "../chat-screen";
 import { VoiceScreen } from "../voice-screen";
 import { ImageScreen } from "../image-screen";
-import { OcrScreen } from "../ocr-screen";
+import { OcrScreen } from "../ocr";
 import { TranslateScreen } from "../translate-screen";
 import { ModelsScreen } from "../models-screen";
 import { ModelDetailScreen } from "../model-detail";
@@ -87,7 +87,7 @@ export function MainLayout() {
   }, [data, setLang]);
 
   return (
-    <SidebarProvider className="h-svh! min-h-0!">
+    <SidebarProvider className="h-full h-svh! min-h-0!">
       {showSidebar && <AppSidebar />}
       <SidebarInset className="min-w-0 overflow-hidden">
         <SidebarConsumer>

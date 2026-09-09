@@ -128,6 +128,13 @@
   * {
     @apply border-border outline-ring/50;
   }
+  /* 用 100% 高度链锁定视口：Electrobun 内嵌 WebKit 可能不支持 svh 单位，
+     若外层容器高度塌缩为 auto，消息列表会把整页撑高、输入框被 body 裁掉 */
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
   body {
     @apply bg-background text-foreground;
     overflow: hidden;

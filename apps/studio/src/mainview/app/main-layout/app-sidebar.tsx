@@ -180,14 +180,15 @@ function OcrRecordList() {
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   return (
-    <SidebarGroup className="min-h-0 flex-1">
+    <SidebarGroup className="min-h-0 flex-1 gap-1">
       <SidebarGroupLabel>
-        {t("apps.ocr")}
-        <SidebarMenuBadge>
-          <Badge variant="secondary" className="h-5 text-[10px]">
-            {total}
-          </Badge>
-        </SidebarMenuBadge>
+        <span className="flex items-center gap-1.5">
+          <ScanTextIcon className="size-3.5" />
+          {t("apps.ocr")}
+        </span>
+        <Badge variant="secondary" className="ml-auto h-5 shrink-0 px-1.5 text-[10px]">
+          {total}
+        </Badge>
       </SidebarGroupLabel>
 
       <SidebarGroupContent className="relative">
@@ -197,11 +198,11 @@ function OcrRecordList() {
         <SidebarInput
           id="ocr-search"
           placeholder={t("nav.search")}
-          className="pl-8"
+          className="h-7 pl-8 text-xs"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
-        <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-4 -translate-y-1/2 opacity-50 select-none" />
+        <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 opacity-50 select-none" />
       </SidebarGroupContent>
 
       <ScrollArea className="min-h-0 flex-1">

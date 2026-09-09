@@ -1,4 +1,4 @@
-import { existsSync, rmSync, readdirSync, statSync } from "fs";
+import { existsSync, rmSync, readdirSync, readFileSync, readlinkSync, statSync } from "fs";
 import path from "path";
 import { Utils } from "electrobun/bun";
 
@@ -581,23 +581,107 @@ function hfSnapshotDir(repo: string): string {
   return path.join(home, ".cache", "huggingface", "hub", name, "snapshots");
 }
 
-function dirHasSafetensors(dir: string): boolean {
+/**
+ * 判断单个缓存文件是否“完整可用”。HF 在下载中途会用 `.incomplete` 后缀标记
+ * 尚未完成的 blob，真正下完才去掉后缀并建立 snapshots 软链。所以：
+ *  - 软链目标带 `.incomplete` → 未下完
+ *  - 软链目标是空文件（0 字节）→ 未下完
+ *  - 软链目标指向不存在的 blob → 悬空，未下完
+ * 只有真正解析到一份非空的完整 blob 才算可用。
+ */
+function cacheFileComplete(p: string): boolean {
   try {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (dirHasSafetensors(p)) return true;
-      } else if (entry.name.endsWith(".safetensors")) {
-        return true;
-      }
-    }
-  } catch {}
-  return false;
+    const st = statSync(p);
+    if (!st.isFile()) return false;
+    if (st.size <= 0) return false;
+    if (p.includes(".incomplete")) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readlinkSafe(p: string): string {
+  try {
+    return readlinkSync(p);
+  } catch {
+    return "";
+  }
+}
+
+/** 读取 .safetensors.index.json，返回其中声明的所有 .safetensors shard 文件名。 */
+function indexJsonShards(file: string): string[] {
+  try {
+    const raw = readFileSync(file, "utf8");
+    const obj = JSON.parse(raw) as { weight_map?: Record<string, string> };
+    const map = obj?.weight_map ?? {};
+    return Array.from(new Set(Object.values(map))).filter((v) =>
+      v.endsWith(".safetensors"),
+    );
+  } catch {
+    return [];
+  }
 }
 
 /**
- * 快速判断某个 MLX 模型权重是否已下载（纯文件系统检查，不发 HTTP、不起 Python）。
- * 只要 HF 缓存里存在任一含有 .safetensors 的 snapshot 即视为已下载。
+ * 严格检查一片 snapshot 是否“完整可用”。
+ *
+ * 仅靠“看看软链完不完整”是不够的：那些压根没开始下载的分片（例如 transformer 的
+ * 大 shard）在 snapshot 里连软链都没有，看起来像“已下载”。所以这里额外读取模型自带
+ * 的 *.safetensors.index.json，把其中声明的所有分片都当作“必需文件”逐一核对：
+ *  1. 每个软链/文件必须解析到完整的非空 blob（非 .incomplete、非悬空、非 0 字节）。
+ *  2. index.json 里声明的每个 .safetensors 分片都必须真实存在且完整。
+ *  满足以上两点且确实含 .safetensors 权重才算下载完成，否则一律视为未完成。
+ */
+function snapshotComplete(dir: string): boolean {
+  // 收集所有 index.json 声明的必需分片。
+  const required = new Set<string>();
+  const present = new Set<string>();
+  let sawSafetensors = false;
+  let sawIndex = false;
+  try {
+    const walk = (d: string): boolean => {
+      for (const entry of readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, entry.name);
+        if (entry.isDirectory()) {
+          if (!walk(p)) return false;
+        } else if (entry.isSymbolicLink() || entry.isFile()) {
+          const complete =
+            entry.isSymbolicLink()
+              ? cacheFileComplete(path.resolve(d, readlinkSafe(p)))
+              : cacheFileComplete(p);
+          if (!complete) return false;
+          if (entry.name.endsWith(".safetensors")) {
+            present.add(entry.name);
+            sawSafetensors = true;
+          } else if (entry.name.endsWith(".safetensors.index.json")) {
+            sawIndex = true;
+            for (const shard of indexJsonShards(p)) required.add(shard);
+          }
+        }
+      }
+      return true;
+    };
+    if (!walk(dir)) return false;
+
+    // 有 index.json 分片声明的模型：每个必需分片都必须已就位。
+    if (sawIndex) {
+      for (const shard of required) {
+        if (!present.has(shard)) return false;
+      }
+    }
+    return sawSafetensors;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 严格判断某个 MLX 模型权重是否已完整下载（纯文件系统检查，不发 HTTP、不起 Python）。
+ * 不只“看到有 .safetensors 就算”，而是要求 snapshot 内每个文件（含软链指向的 blob）
+ * 都完整、非空、未带 .incomplete 后缀，且把 *.safetensors.index.json 中声明的全部分片
+ * 都核对到位。这样能拦截“下载中途失败/残留 .incomplete/缺分片/悬空软链”导致的假完成态，
+ * 避免模型明明没下完却在 start 时挂起重下、甚至报“启动失败”。
  */
 export function isMlxModelDownloaded(modelId: string): boolean {
   const repo = MLX_MODEL_REPOS[modelId];
@@ -608,7 +692,7 @@ export function isMlxModelDownloaded(modelId: string): boolean {
     for (const rev of readdirSync(snapshots)) {
       const revDir = path.join(snapshots, rev);
       if (!statSync(revDir).isDirectory()) continue;
-      if (dirHasSafetensors(revDir)) return true;
+      if (snapshotComplete(revDir)) return true;
     }
   } catch {}
   return false;

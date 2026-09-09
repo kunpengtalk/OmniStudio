@@ -606,7 +606,7 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
     !streaming;
 
   return (
-    <div className="flex min-w-0 flex-1 flex-col">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-6 py-6">
           {!hasMessages ? (
@@ -631,7 +631,7 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
         </div>
       </div>
 
-      <div className="border-t bg-gradient-to-t from-muted/40 to-transparent p-4">
+      <div className="shrink-0 border-t bg-gradient-to-t from-muted/40 to-transparent p-4">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
           {(serverStarting || (sendMutation.isPending && serverFailed)) && (
             <div
@@ -840,7 +840,7 @@ export function ChatWindow() {
   ]);
 
   return (
-    <div className="flex min-w-0 flex-1">
+    <div className="flex min-h-0 min-w-0 flex-1">
       {activeConversationId ? (
         <ChatMessages conversationId={activeConversationId} />
       ) : (

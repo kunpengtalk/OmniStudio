@@ -5,8 +5,10 @@ import { UploadIcon, WifiOffIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
 import { Spinner } from "@ui/spinner";
 import { useRouter } from "@/mainview/stores/router";
+import { useT } from "@/mainview/stores/ui-lang";
 
 export function DropZone() {
+  const t = useT();
   const setRoute = useRouter((s) => s.setRoute);
   const [isDragging, setIsDragging] = useState(false);
   const queryClient = useQueryClient();
@@ -104,58 +106,50 @@ export function DropZone() {
   const isProcessing = addByPath.isPending || addByUpload.isPending;
 
   return (
-    <div className="flex flex-1 flex-col">
-      <div className="flex flex-1 items-center justify-center p-6 pt-0">
-        <div
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onClick={handleClick}
-          className={`flex w-full max-w-sm flex-col items-center gap-3 rounded-xl border-2 border-dashed px-6 py-12 text-center transition-colors ${
-            !connected
-              ? "border-muted-foreground/10"
-              : isDragging
-                ? "border-primary bg-primary/5"
-                : "cursor-pointer border-muted-foreground/20 hover:border-muted-foreground/40"
-          }`}
-        >
-          {!connected ? (
-            <>
-              <div className="flex size-11 items-center justify-center rounded-xl bg-destructive/10">
-                <WifiOffIcon className="size-5 text-destructive" />
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <p className="text-xs font-medium">Server not connected</p>
-                <p className="text-[11px] text-muted-foreground">
-                  Connect to a vLLM server to start uploading documents
-                </p>
-              </div>
-            </>
-          ) : isProcessing ? (
-            <>
-              <Spinner className="size-8 text-primary" />
-              <div className="flex flex-col gap-0.5">
-                <p className="text-xs font-medium">Adding documents…</p>
-                <p className="text-[11px] text-muted-foreground">
-                  Files are being queued for processing
-                </p>
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="flex size-11 items-center justify-center rounded-xl bg-muted">
-                <UploadIcon className="size-5 text-muted-foreground" />
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <p className="text-xs font-medium">Drop PDFs or images here</p>
-                <p className="text-[11px] text-muted-foreground">
-                  Supports PDF, PNG, JPG, WebP, TIFF, BMP, HEIC
-                </p>
-              </div>
-              <p className="text-[11px] font-medium text-primary">Click to browse files</p>
-            </>
-          )}
-        </div>
+    <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+      <div
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onClick={handleClick}
+        className={`flex w-full max-w-sm select-none flex-col items-center gap-3 rounded-xl border-2 border-dashed px-6 py-12 text-center transition-colors ${
+          !connected
+            ? "border-muted-foreground/10"
+            : isDragging
+              ? "border-primary bg-primary/5"
+              : "cursor-pointer border-muted-foreground/20 hover:border-muted-foreground/40"
+        }`}
+      >
+        {!connected ? (
+          <>
+            <div className="flex size-11 items-center justify-center rounded-xl bg-destructive/10">
+              <WifiOffIcon className="size-5 text-destructive" />
+            </div>
+            <div className="flex flex-col gap-0.5">
+              <p className="text-xs font-medium">{t("ocr.drop.offline")}</p>
+              <p className="text-[11px] text-muted-foreground">{t("ocr.drop.offlineDesc")}</p>
+            </div>
+          </>
+        ) : isProcessing ? (
+          <>
+            <Spinner className="size-8 text-primary" />
+            <div className="flex flex-col gap-0.5">
+              <p className="text-xs font-medium">{t("ocr.drop.adding")}</p>
+              <p className="text-[11px] text-muted-foreground">{t("ocr.drop.addingDesc")}</p>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex size-11 items-center justify-center rounded-xl bg-muted">
+              <UploadIcon className="size-5 text-muted-foreground" />
+            </div>
+            <div className="flex flex-col gap-0.5">
+              <p className="text-xs font-medium">{t("ocr.dropTitle")}</p>
+              <p className="text-[11px] text-muted-foreground">{t("ocr.dropDesc")}</p>
+            </div>
+            <p className="text-[11px] font-medium text-primary">{t("ocr.browse")}</p>
+          </>
+        )}
       </div>
     </div>
   );
