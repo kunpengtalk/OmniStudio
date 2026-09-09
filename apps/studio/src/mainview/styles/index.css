@@ -159,3 +159,136 @@
     overflow-x: auto !important;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* AI 生图 — 生成中的动画（小鱼跳跳 + 气泡 + 闪光）                      */
+/* ------------------------------------------------------------------ */
+@keyframes gen-fish-leap {
+  0%,
+  100% {
+    transform: translate(-50%, 0) rotate(0deg);
+  }
+  22% {
+    transform: translate(-50%, -58%) rotate(0deg);
+  }
+  38% {
+    transform: translate(48%, -92%) rotate(18deg);
+  }
+  52% {
+    transform: translate(74%, -14%) rotate(4deg);
+  }
+  68% {
+    transform: translate(-50%, 0) rotate(0deg);
+  }
+}
+@keyframes gen-fish-tail {
+  0%,
+  40%,
+  100% {
+    transform: rotate(0deg);
+  }
+  60% {
+    transform: rotate(24deg);
+  }
+  80% {
+    transform: rotate(-24deg);
+  }
+}
+@keyframes gen-fish-body {
+  0%,
+  100% {
+    transform: scaleX(1);
+  }
+  50% {
+    transform: scaleX(0.92);
+  }
+}
+@keyframes gen-bubble {
+  0% {
+    transform: translateY(0) scale(0.6);
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.9;
+  }
+  100% {
+    transform: translateY(-120px) scale(1.05);
+    opacity: 0;
+  }
+}
+@keyframes gen-spark {
+  0%,
+  100% {
+    opacity: 0;
+    transform: scale(0.4) rotate(0deg);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1) rotate(180deg);
+  }
+}
+@keyframes gen-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+@keyframes gen-canvas {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 0 color-mix(in oklab, var(--primary) 22%, transparent),
+      0 0 40px 0 color-mix(in oklab, var(--primary) 18%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 14px color-mix(in oklab, var(--primary) 0%, transparent),
+      0 0 70px 8px color-mix(in oklab, var(--primary) 30%, transparent);
+  }
+}
+@keyframes gen-ring {
+  0% {
+    transform: scale(0.55);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+.gen-fish {
+  animation: gen-fish-leap 2.4s ease-in-out infinite;
+}
+.gen-fish-tail {
+  transform-origin: 78% 50%;
+  animation: gen-fish-tail 0.7s ease-in-out infinite;
+}
+.gen-fish-body {
+  animation: gen-fish-body 0.7s ease-in-out infinite;
+}
+.gen-bubble {
+  animation: gen-bubble 2.6s ease-in infinite;
+}
+.gen-spark {
+  animation: gen-spark 1.8s ease-in-out infinite;
+}
+.gen-canvas {
+  animation: gen-canvas 2.4s ease-in-out infinite;
+}
+.gen-ring {
+  animation: gen-ring 2.4s ease-out infinite;
+}
+.gen-shimmer {
+  background-image: linear-gradient(
+    100deg,
+    transparent 30%,
+    color-mix(in oklab, var(--foreground) 14%, transparent) 50%,
+    transparent 70%
+  );
+  background-size: 200% 100%;
+  background-attachment: scroll;
+  animation: gen-shimmer 1.6s linear infinite;
+}

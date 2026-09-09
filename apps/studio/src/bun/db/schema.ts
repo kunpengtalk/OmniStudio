@@ -65,6 +65,25 @@ export const messages = sqliteTable("messages", {
   createdAt: int("created_at").$defaultFn(() => Date.now()),
 });
 
+export const imageRecords = sqliteTable("image_records", {
+  id: int("id").primaryKey({ autoIncrement: true }),
+  status: text("status")
+    .$type<"done" | "failed">()
+    .$defaultFn(() => "done")
+    .notNull(),
+  backend: text("backend").$type<"api" | "comfyui" | "mlx">(),
+  model: text("model"),
+  prompt: text("prompt"),
+  negativePrompt: text("negative_prompt"),
+  width: int("width"),
+  height: int("height"),
+  seed: int("seed"),
+  steps: int("steps"),
+  imagePath: text("image_path"),
+  error: text("error"),
+  createdAt: int("created_at").$defaultFn(() => Date.now()),
+});
+
 export const voiceRecords = sqliteTable("voice_records", {
   id: int().primaryKey({ autoIncrement: true }),
   kind: text("kind").$type<"tts" | "asr" | "clone">().notNull(),

@@ -28,6 +28,8 @@ mock.module("./db/settings", () => ({
         : key === "CHAT_MODEL"
           ? "test-model"
           : "",
+  updateSettings: () => {},
+  getAllSettings: () => ({}),
 }));
 mock.module("./chat-model", () => ({ getChatModelName: () => "test-model" }));
 mock.module("./image-server", () => ({

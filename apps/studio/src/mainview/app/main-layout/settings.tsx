@@ -26,6 +26,7 @@ import {
   EyeIcon,
   EyeOffIcon,
   ChevronDownIcon,
+  MinusIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -218,8 +219,19 @@ function inferBaseUrl(form: SettingsFormState): string {
   return (form.VLLM_API_BASE ?? "").replace(/\/+$/, "").replace(/\/v1$/, "");
 }
 
-/** 云服务商的模型条目：id 必填，name/group 可选（兼容旧版纯 id 列表）。 */
-type CloudModelEntry = { id: string; name?: string; group?: string };
+/** 云服务商的模型条目：id 必填，name/group/remark 可选（兼容旧版纯 id 列表）。 */
+type CloudModelEntry = { id: string; name?: string; group?: string; remark?: string };
+
+/** 用户通过「添加服务商」加入的自定义服务商（持久化在 CUSTOM_PROVIDERS）。 */
+type CustomProvider = {
+  id: string;
+  label: string;
+  vendor: string;
+  baseUrl: string;
+  models: string[];
+  /** 简短备注（免费额度 / 需要额外操作等），兼容 REMOTE_PROVIDERS。 */
+  note?: string;
+};
 
 function parseCloudModels(raw: string | undefined): CloudModelEntry[] {
   try {
@@ -268,14 +280,46 @@ function CloudProviderPanel({
   const apiKey = form.VLLM_API_KEY ?? "";
   const modelName = (form.VLLM_MODEL_NAME ?? "").trim();
 
+  // 自定义服务商（「添加服务商」加入，持久化在 CUSTOM_PROVIDERS）
+  const customProviders = useMemo<CustomProvider[]>(() => {
+    try {
+      const arr: unknown = JSON.parse(form.CUSTOM_PROVIDERS ?? "[]");
+      return Array.isArray(arr)
+        ? arr.filter(
+            (x): x is CustomProvider =>
+              !!x &&
+              typeof x === "object" &&
+              typeof (x as Record<string, unknown>).id === "string" &&
+              typeof (x as Record<string, unknown>).label === "string",
+          )
+        : [];
+    } catch {
+      return [];
+    }
+  }, [form.CUSTOM_PROVIDERS]);
+  const setCustomProviders = (list: CustomProvider[]) =>
+    updateField("CUSTOM_PROVIDERS", JSON.stringify(list));
+
+  // 完整服务商列表 = 原厂厂商 + 自定义（旧版内置「自定义」占位项不展示）
+  const allProviders = useMemo<CustomProvider[]>(
+    () => [
+      ...CLOUD_PROVIDERS.filter((p) => p.id !== "custom").map((p) => ({
+        ...p,
+        vendor: p.vendor,
+      })),
+      ...customProviders,
+    ],
+    [customProviders],
+  );
+
   // 优先用保存的 CLOUD_PROVIDER；没有则按 Base URL 反查，避免换窗口后选中态丢失。
   const savedId = form.CLOUD_PROVIDER;
-  const byUrl = CLOUD_PROVIDERS.find((p) => p.baseUrl && p.baseUrl === baseUrl);
-  const selected = CLOUD_PROVIDERS.find((p) => p.id === savedId) ?? byUrl ?? null;
-  const isCustom = !selected || selected.id === "custom";
+  const byUrl = allProviders.find((p) => p.baseUrl && p.baseUrl === baseUrl);
+  const selected = allProviders.find((p) => p.id === savedId) ?? byUrl ?? null;
+  const isCustom = !selected;
 
   const pickProvider = (id: string) => {
-    const p = CLOUD_PROVIDERS.find((x) => x.id === id);
+    const p = allProviders.find((x) => x.id === id);
     if (!p) return;
     updateField("CLOUD_PROVIDER", p.id);
     if (p.baseUrl) updateField("VLLM_API_BASE", p.baseUrl);
@@ -283,6 +327,52 @@ function CloudProviderPanel({
     // 选中正式厂商即视为启用云服务
     if (p.baseUrl) updateField("SERVER_MODE", "remote");
   };
+
+  // 添加服务商
+  const [showAddProvider, setShowAddProvider] = useState(false);
+  const [npLabel, setNpLabel] = useState("");
+  const [npBase, setNpBase] = useState("");
+  const addProvider = () => {
+    const label = npLabel.trim();
+    if (!label) return;
+    const entry: CustomProvider = {
+      id: `custom-${Date.now()}`,
+      label,
+      vendor: "自定义",
+      baseUrl: npBase.trim(),
+      models: [],
+    };
+    setCustomProviders([...customProviders, entry]);
+    updateField("CLOUD_PROVIDER", entry.id);
+    if (entry.baseUrl) {
+      updateField("VLLM_API_BASE", entry.baseUrl);
+      updateField("SERVER_MODE", "remote");
+    }
+    setNpLabel("");
+    setNpBase("");
+    setShowAddProvider(false);
+  };
+
+  // 附加端点（「添加端点」加入，持久化在 CLOUD_ENDPOINTS）
+  const extraEndpoints = useMemo<string[]>(() => {
+    try {
+      const arr: unknown = JSON.parse(form.CLOUD_ENDPOINTS ?? "[]");
+      return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : [];
+    } catch {
+      return [];
+    }
+  }, [form.CLOUD_ENDPOINTS]);
+  const setExtraEndpoints = (list: string[]) =>
+    updateField("CLOUD_ENDPOINTS", JSON.stringify(list));
+
+  // 「获取密钥」入口：跳转服务商站点（取 API 地址的域名）
+  const consoleUrl = (() => {
+    try {
+      return baseUrl ? new URL(baseUrl).origin : "";
+    } catch {
+      return "";
+    }
+  })();
 
   // 云服务商的模型列表（支持 id/name/group）
   const cloudModels = useMemo(() => parseCloudModels(form.CLOUD_MODELS), [form.CLOUD_MODELS]);
@@ -317,17 +407,25 @@ function CloudProviderPanel({
   const [dlgId, setDlgId] = useState("");
   const [dlgName, setDlgName] = useState("");
   const [dlgGroup, setDlgGroup] = useState("");
+  const [dlgRemark, setDlgRemark] = useState("");
   const [dlgMore, setDlgMore] = useState(false);
   const addModel = () => {
     const id = dlgId.trim();
     if (!id || cloudModels.some((m) => m.id === id)) return;
     setCloudModels([
       ...cloudModels,
-      { id, name: dlgName.trim() || undefined, group: dlgGroup.trim() || undefined },
+      {
+        id,
+        name: dlgName.trim() || undefined,
+        group: dlgGroup.trim() || undefined,
+        remark: dlgRemark.trim() || undefined,
+      },
     ]);
     setDlgId("");
     setDlgName("");
     setDlgGroup("");
+    setDlgRemark("");
+    setDlgMore(false);
   };
   const removeModel = (id: string) => setCloudModels(cloudModels.filter((m) => m.id !== id));
 
@@ -335,10 +433,10 @@ function CloudProviderPanel({
   const [vendorSearch, setVendorSearch] = useState("");
   const vendorNeedle = vendorSearch.trim().toLowerCase();
   const filteredProviders = vendorNeedle
-    ? CLOUD_PROVIDERS.filter((p) =>
+    ? allProviders.filter((p) =>
         `${p.label} ${p.vendor}`.toLowerCase().includes(vendorNeedle),
       )
-    : CLOUD_PROVIDERS;
+    : allProviders;
 
   const modelOptions = Array.from(
     new Set([...(selected?.models ?? []), ...cloudModels.map((m) => m.id)]),
@@ -407,9 +505,13 @@ function CloudProviderPanel({
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-xs font-medium">{p.label}</span>
-                    <span className="block truncate text-[10px] opacity-70">{p.vendor}</span>
+                    {p.vendor && (
+                      <span className="block truncate text-[10px] opacity-70">{p.vendor}</span>
+                    )}
                   </span>
-                  {active && <CheckIcon className="size-3.5 shrink-0" />}
+                  {p.id === savedId && (
+                    <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
+                  )}
                 </button>
               );
             })}
@@ -417,17 +519,31 @@ function CloudProviderPanel({
               <p className="py-4 text-center text-[11px] text-muted-foreground">无匹配厂商</p>
             )}
           </div>
+          <Button
+            variant="outline"
+            size="sm"
+            className="w-full border-dashed text-xs"
+            onClick={() => setShowAddProvider(true)}
+          >
+            <PlusIcon data-icon="inline-start" className="size-3.5" />
+            添加服务商
+          </Button>
         </div>
 
         {/* 右栏：选中服务商的详情（名称 + 启用开关 / API 密钥 / API 地址 / 当前模型 / 模型列表） */}
         <div className="flex min-w-0 flex-1 flex-col gap-4">
-          {/* 头部：名称 + 启用开关 */}
-          <div className="flex items-center gap-2">
+          {/* 头部：名称 + 信息 + 启用开关 */}
+          <div className="flex items-center gap-1.5">
             <p className="text-base font-semibold">
               {isCustom ? "自定义服务商" : selected?.label}
             </p>
-            {!isCustom && (
-              <span className="text-[11px] text-muted-foreground">{selected?.vendor}</span>
+            {(selected?.vendor || selected?.note) && (
+              <span
+                className="flex items-center"
+                title={[selected?.vendor, selected?.note].filter(Boolean).join(" · ")}
+              >
+                <InfoIcon className="size-3.5 text-muted-foreground/50" />
+              </span>
             )}
             <button
               type="button"
@@ -452,7 +568,18 @@ function CloudProviderPanel({
           {/* API 密钥 + 检测 */}
           <div className="flex items-end gap-3">
             <div className="min-w-0 flex-1">
-              <Label className="mb-1 block text-xs">API 密钥</Label>
+              <Label className="mb-1 block text-xs">
+                API 密钥
+                {consoleUrl && (
+                  <button
+                    type="button"
+                    className="ml-1.5 font-normal text-primary hover:underline"
+                    onClick={() => void rpcClient.openGatewayDocs({ url: consoleUrl })}
+                  >
+                    获取密钥
+                  </button>
+                )}
+              </Label>
               <div className="relative">
                 <Input
                   type={showKey ? "text" : "password"}
@@ -486,11 +613,7 @@ function CloudProviderPanel({
               onClick={() => testMutation.mutate()}
               disabled={testMutation.isPending || !baseUrl}
             >
-              {testMutation.isPending ? (
-                <Spinner data-icon="inline-start" />
-              ) : (
-                <ZapIcon data-icon="inline-start" />
-              )}
+              {testMutation.isPending ? <Spinner data-icon="inline-start" /> : null}
               检测
             </Button>
           </div>
@@ -515,14 +638,23 @@ function CloudProviderPanel({
             </p>
           )}
 
-          {/* API 地址 */}
+          {/* API 地址 + 添加端点 */}
           <div>
-            <Label className="mb-1 block text-xs">
-              API 地址
-              {!isCustom && (
-                <span className="ml-1 font-normal text-muted-foreground">（自动带出）</span>
-              )}
-            </Label>
+            <div className="mb-1 flex items-center gap-1.5">
+              <Label className="text-xs">
+                API 地址
+                {!isCustom && (
+                  <span className="ml-1 font-normal text-muted-foreground">（自动带出）</span>
+                )}
+              </Label>
+              <button
+                type="button"
+                className="text-xs text-primary hover:underline"
+                onClick={() => setExtraEndpoints([...extraEndpoints, ""])}
+              >
+                添加端点
+              </button>
+            </div>
             {isCustom ? (
               <Input
                 placeholder="https://api.example.com/v1"
@@ -538,6 +670,28 @@ function CloudProviderPanel({
                 <span className="truncate">{baseUrl || selected?.baseUrl}</span>
               </div>
             )}
+            {extraEndpoints.map((ep, i) => (
+              <div key={i} className="mt-1.5 flex items-center gap-2">
+                <Input
+                  value={ep}
+                  placeholder="https://api.example.com/v1"
+                  onChange={(e) => {
+                    const next = [...extraEndpoints];
+                    next[i] = e.target.value;
+                    setExtraEndpoints(next);
+                  }}
+                  className="h-8 min-w-0 flex-1 font-mono text-xs"
+                />
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  className="shrink-0 text-muted-foreground"
+                  onClick={() => setExtraEndpoints(extraEndpoints.filter((_, j) => j !== i))}
+                >
+                  <MinusIcon className="size-3" />
+                </Button>
+              </div>
+            ))}
           </div>
 
           {/* 当前使用的模型 */}
@@ -603,7 +757,7 @@ function CloudProviderPanel({
                   {syncMutation.isPending ? (
                     <Spinner data-icon="inline-start" />
                   ) : (
-                    <RefreshCwIcon data-icon="inline-start" />
+                    <ZapIcon data-icon="inline-start" />
                   )}
                   获取模型列表
                 </Button>
@@ -639,41 +793,55 @@ function CloudProviderPanel({
               </p>
             ) : (
               <div className="flex flex-col gap-1">
-                {cloudModels.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className="flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 transition-colors hover:bg-muted/60"
-                    onClick={() => updateField("VLLM_MODEL_NAME", entry.id)}
-                  >
-                    <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
-                      {entry.id}
-                    </span>
-                    {entry.name && (
-                      <Badge variant="secondary" className="shrink-0 text-[10px]">
-                        {entry.name}
-                      </Badge>
-                    )}
-                    {entry.group && (
-                      <Badge variant="outline" className="shrink-0 text-[10px]">
-                        {entry.group}
-                      </Badge>
-                    )}
-                    {modelName === entry.id && (
-                      <CheckIcon className="size-3.5 shrink-0 text-primary" />
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      className="h-5 w-5 shrink-0 text-muted-foreground"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeModel(entry.id);
-                      }}
+                {cloudModels.map((entry) => {
+                  const hue =
+                    [...entry.id].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7) || 210;
+                  return (
+                    <div
+                      key={entry.id}
+                      title={entry.remark || entry.id}
+                      className="flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 transition-colors hover:bg-muted/60"
+                      onClick={() => updateField("VLLM_MODEL_NAME", entry.id)}
                     >
-                      <XIcon className="size-3" />
-                    </Button>
-                  </div>
-                ))}
+                      <span
+                        className="flex size-5 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold text-white"
+                        style={{ backgroundColor: `hsl(${hue} 55% 45%)` }}
+                      >
+                        {entry.id.charAt(0).toUpperCase()}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-xs">
+                        {entry.name || entry.id}
+                      </span>
+                      {entry.name && entry.name !== entry.id && (
+                        <span className="shrink-0 font-mono text-[10px] text-muted-foreground/60">
+                          {entry.id}
+                        </span>
+                      )}
+                      {entry.group && (
+                        <span
+                          title={entry.group}
+                          className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[8px] font-semibold text-primary"
+                        >
+                          {entry.group.charAt(0)}
+                        </span>
+                      )}
+                      {modelName === entry.id && (
+                        <CheckIcon className="size-3.5 shrink-0 text-primary" />
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="h-5 w-5 shrink-0 text-muted-foreground"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeModel(entry.id);
+                        }}
+                      >
+                        <MinusIcon className="size-3" />
+                      </Button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -735,16 +903,28 @@ function CloudProviderPanel({
                 className="h-8 min-w-0 flex-1 text-xs"
               />
             </div>
+            <div className="flex items-center gap-3">
+              <Label htmlFor="dlg-model-group" className="w-20 shrink-0 text-xs">
+                分组名称
+              </Label>
+              <Input
+                id="dlg-model-group"
+                placeholder="例如 ChatGPT"
+                value={dlgGroup}
+                onChange={(e) => setDlgGroup(e.target.value)}
+                className="h-8 min-w-0 flex-1 text-xs"
+              />
+            </div>
             {dlgMore && (
               <div className="flex items-center gap-3">
-                <Label htmlFor="dlg-model-group" className="w-20 shrink-0 text-xs">
-                  分组名称
+                <Label htmlFor="dlg-model-remark" className="w-20 shrink-0 text-xs">
+                  备注
                 </Label>
                 <Input
-                  id="dlg-model-group"
-                  placeholder="例如 ChatGPT"
-                  value={dlgGroup}
-                  onChange={(e) => setDlgGroup(e.target.value)}
+                  id="dlg-model-remark"
+                  placeholder="备注说明"
+                  value={dlgRemark}
+                  onChange={(e) => setDlgRemark(e.target.value)}
                   className="h-8 min-w-0 flex-1 text-xs"
                 />
               </div>
@@ -765,6 +945,54 @@ function CloudProviderPanel({
             </Button>
             <Button size="sm" onClick={addModel} disabled={!dlgId.trim()}>
               添加模型
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 添加服务商弹框 */}
+      <Dialog open={showAddProvider} onOpenChange={setShowAddProvider}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>添加服务商</DialogTitle>
+            <DialogDescription>
+              填写服务商名称与 OpenAI 兼容 API 地址，保存后出现在左侧列表。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-3">
+              <Label htmlFor="np-label" className="w-20 shrink-0 text-xs">
+                名称 <span className="text-destructive">*</span>
+              </Label>
+              <Input
+                id="np-label"
+                placeholder="例如 我的代理商"
+                value={npLabel}
+                onChange={(e) => setNpLabel(e.target.value)}
+                className="h-8 min-w-0 flex-1 text-xs"
+              />
+            </div>
+            <div className="flex items-center gap-3">
+              <Label htmlFor="np-base" className="w-20 shrink-0 text-xs">
+                API 地址
+              </Label>
+              <Input
+                id="np-base"
+                placeholder="https://api.example.com/v1"
+                value={npBase}
+                onChange={(e) => setNpBase(e.target.value)}
+                className="h-8 min-w-0 flex-1 font-mono text-xs"
+              />
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setShowAddProvider(false)}>
+              取消
+            </Button>
+            <Button size="sm" onClick={addProvider} disabled={!npLabel.trim()}>
+              添加服务商
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1280,6 +1508,8 @@ export function SettingsScreen() {
     "VLLM_API_KEY",
     "VLLM_MODEL_NAME",
     "CLOUD_MODELS",
+    "CUSTOM_PROVIDERS",
+    "CLOUD_ENDPOINTS",
   ];
   const PERFORMANCE_KEYS = [
     ...PERFORMANCE_FIELDS.map((f) => f.key),

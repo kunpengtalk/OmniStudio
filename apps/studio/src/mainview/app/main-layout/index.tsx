@@ -12,6 +12,7 @@ import { ServerLogsScreen } from "./server-logs";
 import { ServerStatsScreen } from "../server-stats";
 import { ChatWindow } from "../chat-screen";
 import { VoiceScreen } from "../voice-screen";
+import { ImageScreen } from "../image-screen";
 import { OcrScreen } from "../ocr-screen";
 import { ModelsScreen } from "../models-screen";
 import { ModelDetailScreen } from "../model-detail";
@@ -45,6 +46,8 @@ const Outlet = () => {
         <OcrScreen />
       ) : activeApp === "voice" ? (
         <VoiceScreen />
+      ) : activeApp === "image" ? (
+        <ImageScreen />
       ) : (
         <ChatWindow />
       );
@@ -55,6 +58,8 @@ const Outlet = () => {
         <OcrScreen />
       ) : activeApp === "voice" ? (
         <VoiceScreen />
+      ) : activeApp === "image" ? (
+        <ImageScreen />
       ) : (
         <ChatWindow />
       );

@@ -26,12 +26,13 @@ import {
 } from "@/shared/modelscope";
 import { cn } from "@/mainview/lib/utils";
 
-const CARD_GRADIENTS = [
-  "from-slate-900 via-slate-800 to-indigo-950",
-  "from-violet-950 via-purple-900 to-fuchsia-950",
-  "from-rose-950 via-rose-900 to-pink-950",
-  "from-blue-950 via-blue-900 to-cyan-950",
-];
+const CAT_ACCENTS: Record<ModelCategory, string> = {
+  chat: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400",
+  tts: "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-400",
+  asr: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
+  image: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
+  other: "bg-muted text-muted-foreground",
+};
 
 const CARD_ICONS: Record<ModelCategory, LucideIcon> = {
   chat: MessageCircleIcon,
@@ -45,13 +46,7 @@ const CARD_ICONS: Record<ModelCategory, LucideIcon> = {
  * 推荐模型展示卡片（模型库只做展示）：
  * 点击进入详情页，下载在详情页/在线模型市场完成。
  */
-function PresetCard({
-  preset,
-  index,
-}: {
-  preset: ChatPreset;
-  index: number;
-}) {
+function PresetCard({ preset }: { preset: ChatPreset }) {
   const t = useT();
   const setSource = useModelDetailStore((s) => s.setSource);
   const setRoute = useRouter((s) => s.setRoute);
@@ -67,33 +62,40 @@ function PresetCard({
     <button
       type="button"
       onClick={openDetail}
-      className={cn(
-        "group relative flex flex-col gap-3 rounded-xl border border-white/10 bg-gradient-to-br p-4 text-left text-white shadow-sm transition-transform hover:-translate-y-0.5",
-        CARD_GRADIENTS[index % CARD_GRADIENTS.length],
-      )}
+      className="group relative flex flex-col gap-3 rounded-lg border bg-card p-4 text-left shadow-sm transition-colors hover:border-muted-foreground/40 hover:bg-accent/40"
     >
       <div className="flex items-start gap-3">
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-white/10">
+        <div
+          className={cn(
+            "flex size-9 shrink-0 items-center justify-center rounded-lg",
+            CAT_ACCENTS[preset.app],
+          )}
+        >
           <CardIcon className="size-5" />
         </div>
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold">{preset.label}</p>
-          <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-white/60">
+          <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
             {preset.description}
           </p>
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
-        <span className="inline-flex h-5 items-center rounded-full bg-white/15 px-2 text-[10px] font-medium">
+        <span
+          className={cn(
+            "inline-flex h-5 items-center rounded-full px-2 text-[10px] font-medium",
+            CAT_ACCENTS[preset.app],
+          )}
+        >
           {t(`models.cat.${preset.app}`)}
         </span>
         {preset.engine && preset.engine !== "all" && (
-          <span className="inline-flex h-5 items-center rounded-full bg-white/15 px-2 text-[10px] font-medium">
+          <span className="inline-flex h-5 items-center rounded-full bg-muted px-2 text-[10px] font-medium text-muted-foreground">
             {t(`settings.engine.${preset.engine}`)}
           </span>
         )}
       </div>
-      <div className="mt-auto flex items-center gap-1 pt-1 text-[11px] text-white/70">
+      <div className="mt-auto flex items-center gap-1 pt-1 text-[11px] text-muted-foreground">
         <SparklesIcon className="size-3" />
         {t("models.viewDetail")}
         <ChevronRightIcon className="size-3.5 transition-transform group-hover:translate-x-0.5" />
@@ -176,8 +178,8 @@ export function ModelsScreen() {
             {t("models.recommended")}
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {filteredPresets.map((preset, i) => (
-              <PresetCard key={preset.repo} preset={preset} index={i} />
+            {filteredPresets.map((preset) => (
+              <PresetCard key={preset.repo} preset={preset} />
             ))}
           </div>
         </div>

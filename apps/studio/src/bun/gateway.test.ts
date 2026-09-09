@@ -59,6 +59,8 @@ mock.module("./db/settings", () => ({
         return "";
     }
   },
+  updateSettings: () => {},
+  getAllSettings: () => ({}),
 }));
 
 // 在所有 mock 注册后动态加载被测模块（静态 import 会被提升到 mock 之前执行）。

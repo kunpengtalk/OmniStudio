@@ -14,6 +14,9 @@ import {
   Trash2Icon,
   PinIcon,
   PinOffIcon,
+  SparklesIcon,
+  Maximize2Icon,
+  LayersIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -42,6 +45,7 @@ import { useRouter } from "@stores/router";
 import { useAppStore, type AppId } from "@stores/app";
 import { useChatStore } from "@stores/chat";
 import { useVoiceStore, type VoiceTab } from "@stores/voice";
+import { useImageStore } from "@stores/image";
 import { useT } from "@stores/ui-lang";
 import { Button } from "@ui/button";
 import {
@@ -582,6 +586,119 @@ function ConversationRecordList({ app }: { app: AppId }) {
   );
 }
 
+function ImageRecordList() {
+  const t = useT();
+  const { tool, setTool, focusRecordId, setFocusRecordId } = useImageStore();
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["image-records"],
+    queryFn: () => rpcClient.listImageRecords(undefined),
+  });
+  const records = data?.records ?? [];
+
+  const pick = (id: number) => {
+    setFocusRecordId(id);
+  };
+
+  return (
+    <SidebarGroup className="min-h-0 flex-1">
+      {/* 生图工具菜单：可切换（放大/批量暂未开放） */}
+      <div className="grid grid-cols-3 gap-1 px-1 pb-1">
+        {(
+          [
+            { key: "generate", icon: <SparklesIcon className="size-4" />, labelKey: "image.tab.generate", soon: false },
+            { key: "upscale", icon: <Maximize2Icon className="size-4" />, labelKey: "image.tab.upscale", soon: true },
+            { key: "batch", icon: <LayersIcon className="size-4" />, labelKey: "image.tab.batch", soon: true },
+          ] as const
+        ).map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            disabled={item.soon}
+            title={item.soon ? t("image.comingSoon") : undefined}
+            onClick={() => {
+              setTool(item.key);
+              setFocusRecordId(null);
+            }}
+            className={cn(
+              "flex flex-col items-center gap-1 rounded-lg px-1 py-2 text-[11px] transition-colors",
+              item.soon && "cursor-not-allowed opacity-45",
+              !item.soon && tool === item.key
+                ? "bg-primary/10 text-primary"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
+            )}
+          >
+            {item.icon}
+            <span className="leading-none">{t(item.labelKey)}</span>
+          </button>
+        ))}
+      </div>
+      <SidebarGroupLabel>
+        <ImageIcon className="size-3.5" />
+        {t("image.history.title")}
+        <SidebarMenuBadge>
+          <Badge variant="secondary" className="h-5 text-[10px]">
+            {records.length}
+          </Badge>
+        </SidebarMenuBadge>
+      </SidebarGroupLabel>
+
+      <ScrollArea className="min-h-0 flex-1">
+        <SidebarMenu className="gap-1">
+          {isLoading ? (
+            <div className="flex justify-center py-6">
+              <Spinner className="size-3.5" />
+            </div>
+          ) : records.length === 0 ? (
+            <div className="py-6 text-center text-xs text-muted-foreground">
+              {t("image.history.empty")}
+            </div>
+          ) : (
+            records.map((r) => (
+              <SidebarMenuItem key={r.id} className="px-1">
+                <button
+                  type="button"
+                  onClick={() => pick(r.id)}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md border p-1.5 text-left transition-colors",
+                    focusRecordId === r.id
+                      ? "border-primary/60 bg-primary/5"
+                      : "hover:bg-muted/60",
+                  )}
+                >
+                  {r.imageUrl ? (
+                    <img
+                      src={r.imageUrl}
+                      alt=""
+                      loading="lazy"
+                      className="size-9 shrink-0 rounded object-cover"
+                    />
+                  ) : (
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded bg-muted">
+                      <ImageIcon className="size-3.5 text-muted-foreground" />
+                    </span>
+                  )}
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="line-clamp-2 text-[11px] leading-snug text-foreground/80">
+                      {r.prompt || t("image.error")}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground/70 tabular-nums">
+                      {new Date(r.createdAt).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  </span>
+                </button>
+              </SidebarMenuItem>
+            ))
+          )}
+        </SidebarMenu>
+      </ScrollArea>
+    </SidebarGroup>
+  );
+}
+
 function AppSwitcher() {
   const t = useT();
   const { activeApp, setActiveApp } = useAppStore();
@@ -646,6 +763,8 @@ export function AppSidebar() {
           <OcrRecordList />
         ) : activeApp === "voice" ? (
           <VoiceRecordList />
+        ) : activeApp === "image" ? (
+          <ImageRecordList />
         ) : (
           <ConversationRecordList app={activeApp} />
         )}

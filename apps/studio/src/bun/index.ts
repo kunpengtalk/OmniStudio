@@ -6,7 +6,7 @@ import { db } from "./db";
 import { join } from "path";
 import { startImageServer } from "./image-server";
 import { setWindowRef } from "./window";
-import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast } from "./rpc";
+import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast } from "./rpc";
 import { APP_NAME } from "./config";
 import { createMenu } from "./menu";
 import { broadcastUpdateStatus, checkForUpdate } from "./updates";
@@ -64,6 +64,7 @@ initServerBroadcast(mainWindow);
 initModelDownloadBroadcast(mainWindow);
 initTTSModelDownloadBroadcast(mainWindow);
 initGatewayBroadcast(mainWindow);
+initMlxInstallBroadcast(mainWindow);
 
 mainWindow.webview.on("dom-ready", () => {
   broadcastUpdateStatus();

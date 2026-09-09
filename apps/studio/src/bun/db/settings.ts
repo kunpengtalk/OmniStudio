@@ -80,6 +80,11 @@ export type SettingsKey =
   | "OCR_PROVIDER_BASE"
   | "OCR_PROVIDER_API_KEY"
   | "OCR_PROVIDER_MODEL"
+  | "IMG_BACKEND"
+  | "IMG_API_BASE"
+  | "IMG_API_KEY"
+  | "IMG_MODEL"
+  | "IMG_COMFY_BASE"
   | "MODEL_DOWNLOADS"
   | "GATEWAY_ENABLED"
   | "GATEWAY_HOST"
@@ -163,6 +168,11 @@ const DEFAULTS: Record<SettingsKey, string> = {
   OCR_PROVIDER_BASE: "",
   OCR_PROVIDER_API_KEY: "",
   OCR_PROVIDER_MODEL: "",
+  IMG_BACKEND: "api",
+  IMG_API_BASE: "",
+  IMG_API_KEY: "",
+  IMG_MODEL: "",
+  IMG_COMFY_BASE: "",
   MODEL_DOWNLOADS: "[]",
   GATEWAY_ENABLED: "1",
   GATEWAY_HOST: "127.0.0.1",

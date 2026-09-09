@@ -39,6 +39,10 @@ import * as TTSLocal from "../tts-local";
 import type { TtsLocalModelInfo, TtsLocalStatus } from "../tts-local";
 import * as Ocr from "../ocr";
 import type { OcrLangModelInfo, OcrStatus, OcrResult, OcrVlmResult, OcrProviderConfig } from "../ocr";
+import * as ImageGen from "../image-gen";
+import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
+import * as MlxGen from "../mlx-gen";
+import type { MlxModelInfo, MlxGenStatus } from "../mlx-gen";
 import type { EdgeVoice } from "../edge-tts";
 import type { ModelCategory } from "../../shared/modelscope";
 
@@ -541,6 +545,55 @@ export type AppRPC = {
         params: { base?: string; apiKey?: string } | undefined;
         response: { models: string[]; error?: string };
       };
+      // AI 生图
+      generateImage: {
+        params: {
+          prompt: string;
+          negativePrompt?: string;
+          width?: number;
+          height?: number;
+          count?: number;
+          seed?: number;
+          steps?: number;
+          model?: string;
+          quantize?: number;
+          config?: Partial<ImageGenConfig>;
+        };
+        response: { records: ImageRecordRow[]; error?: string };
+      };
+      listImageRecords: {
+        params: { limit?: number } | undefined;
+        response: { records: ImageRecordRow[] };
+      };
+      deleteImageRecord: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      getImageGenConfig: {
+        params: undefined;
+        response: { config: ImageGenConfig };
+      };
+      saveImageGenConfig: {
+        params: Partial<ImageGenConfig>;
+        response: { ok: boolean };
+      };
+      listImageGenModels: {
+        params: { backend?: ImageGenBackend; base?: string; apiKey?: string } | undefined;
+        response: { models: string[]; error?: string };
+      };
+      // MLX 本地生图引擎（mflux）
+      getMlxGenStatus: {
+        params: undefined;
+        response: MlxGenStatus;
+      };
+      downloadMlxGenEngine: {
+        params: undefined;
+        response: { ok: boolean; error?: string; version?: string };
+      };
+      listMlxGenModels: {
+        params: undefined;
+        response: { models: MlxModelInfo[] };
+      };
     };
     messages: {};
   }>;
@@ -564,6 +617,9 @@ export type AppRPC = {
       };
       gatewayStatusChanged: {
         status: GatewayStatus;
+      };
+      mlxInstallLog: {
+        text: string;
       };
     };
   }>;
@@ -1378,6 +1434,75 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
           return { models: [], error: e instanceof Error ? e.message : String(e) };
         }
       },
+
+      // AI 生图
+      generateImage: async (params) => {
+        return ImageGen.generateImage(params);
+      },
+
+      listImageRecords: async (params) => {
+        try {
+          return { records: ImageGen.listImageRecords(params?.limit) };
+        } catch (e) {
+          return { records: [] };
+        }
+      },
+
+      deleteImageRecord: async ({ id }) => {
+        return ImageGen.deleteImageRecord(id);
+      },
+
+      getImageGenConfig: async () => {
+        return { config: ImageGen.getImageGenConfig() };
+      },
+
+      saveImageGenConfig: async (config) => {
+        ImageGen.saveImageGenConfig(config);
+        return { ok: true };
+      },
+
+      listImageGenModels: async (params) => {
+        try {
+          const cfg = ImageGen.getImageGenConfig();
+          const backend = params?.backend ?? cfg.backend;
+          const models =
+            backend === "comfyui"
+              ? await ImageGen.listComfyCheckpoints(params?.base ?? cfg.comfyBase)
+              : backend === "mlx"
+                ? MlxGen.MLX_MODELS.map((m) => m.id)
+                : await ImageGen.listImageApiModels(
+                    params?.base ?? cfg.apiBase,
+                    params?.apiKey ?? cfg.apiKey,
+                  );
+          return { models };
+        } catch (e) {
+          return { models: [], error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      // MLX 本地生图引擎（mflux）
+      getMlxGenStatus: async () => {
+        try {
+          return await MlxGen.getMlxGenStatus();
+        } catch {
+          return {
+            supported: process.platform === "darwin" && process.arch === "arm64",
+            pythonFound: false,
+            pythonPath: null,
+            engineInstalled: false,
+            version: null,
+            binDir: null,
+          };
+        }
+      },
+
+      downloadMlxGenEngine: async () => {
+        return MlxGen.downloadMlxEngine();
+      },
+
+      listMlxGenModels: async () => {
+        return { models: MlxGen.MLX_MODELS };
+      },
     },
     messages: {},
   },
@@ -1428,6 +1553,15 @@ export function initGatewayBroadcast(win: BrowserWindowWithRPC) {
   Gateway.onGatewayStatusChange((status) => {
     try {
       win.webview.rpc?.send.gatewayStatusChanged({ status });
+    } catch {}
+  });
+}
+
+/** MLX 引擎安装日志（mflux venv 安装过程），实时推送到前端展示。 */
+export function initMlxInstallBroadcast(win: BrowserWindowWithRPC) {
+  MlxGen.onInstallLog((text) => {
+    try {
+      win.webview.rpc?.send.mlxInstallLog({ text });
     } catch {}
   });
 }

@@ -6,6 +6,7 @@ import { useServerStore } from "../stores/server";
 import { useChatStore } from "../stores/chat";
 import { useModelDownloadStore } from "../stores/model-download";
 import { useGatewayStore } from "../stores/gateway";
+import { useMlxInstallStore } from "../stores/mlx-install";
 
 const knownCompletedIds = new Set<string>();
 
@@ -68,6 +69,13 @@ const rpc = Electroview.defineRPC<AppRPC>({
       },
       gatewayStatusChanged: ({ status }) => {
         useGatewayStore.getState().setStatus(status);
+      },
+      mlxInstallLog: ({ text }) => {
+        useMlxInstallStore.getState().appendLog(text);
+        // 安装完成（成功或失败）后刷新引擎状态；失败的日志形如「mflux 安装失败」。
+        if (text.includes("安装成功") || text.includes("安装失败")) {
+          queryClient.invalidateQueries({ queryKey: ["mlx-gen-status"] });
+        }
       },
     },
   },
