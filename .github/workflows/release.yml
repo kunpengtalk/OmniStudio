@@ -170,21 +170,21 @@ jobs:
         # When the launcher extracts its own CLI tarball with system tar, bsdtar on
         # Windows misparses that path (@ plus drive-letter colon) as a remote
         # user@host:path and the build fails. The launcher uses bin/electrobun.exe
-        # directly when it already exists, so we pre-stage it here.
-        shell: pwsh
+        # directly when it already exists, so we extract it there up front —
+        # from a clean mktemp dir so bsdtar sees a plain local path.
+        shell: bash
         working-directory: apps/studio
         run: |
-          $ErrorActionPreference = 'Stop'
-          $pkgJson = bun -e 'console.log(require.resolve("electrobun/package.json"))'
-          $pkgDir = Split-Path $pkgJson
-          $ver = (Get-Content (Join-Path $pkgDir 'package.json') -Raw | ConvertFrom-Json).version
-          $tar = Join-Path $env:TEMP 'electrobun-cli.tar.gz'
-          curl.exe -sSL -o $tar "https://github.com/blackboardsh/electrobun/releases/download/v$ver/electrobun-cli-win-x64.tar.gz"
-          $dest = Join-Path $env:TEMP "electrobun-cli"
-          Expand-Archive -Path $tar -DestinationPath $dest -Force
-          New-Item -ItemType Directory -Force (Join-Path $pkgDir 'bin') | Out-Null
-          Copy-Item (Join-Path $dest 'electrobun.exe') (Join-Path $pkgDir 'bin' 'electrobun.exe') -Force
-          Write-Output "Pre-staged electrobun CLI v$ver"
+          set -euo pipefail
+          PKG_JSON="$(bun -e 'console.log(require.resolve("electrobun/package.json"))')"
+          PKG_DIR="$(dirname "$PKG_JSON")"
+          VER="$(grep -m1 '"version"' "$PKG_DIR/package.json" | cut -d'"' -f4)"
+          SAFEDIR="$(mktemp -d)"
+          curl -sSL -o "$SAFEDIR/eb-cli.tar.gz" "https://github.com/blackboardsh/electrobun/releases/download/v$VER/electrobun-cli-win-x64.tar.gz"
+          tar -xzf "$SAFEDIR/eb-cli.tar.gz" -C "$SAFEDIR"
+          mkdir -p "$PKG_DIR/bin"
+          cp "$SAFEDIR/electrobun.exe" "$PKG_DIR/bin/electrobun.exe"
+          echo "Pre-staged electrobun CLI v$VER"
 
       - name: Build app
         shell: bash
