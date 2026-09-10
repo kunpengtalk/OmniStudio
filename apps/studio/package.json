@@ -6,6 +6,9 @@
     "url": "git+https://github.com/kunpengtalk/OmniStudio.git",
     "directory": "apps/studio"
   },
+  "bin": {
+    "omni": "./src/cli/omni.ts"
+  },
   "scripts": {
     "start": "vite build && electrobun dev",
     "typecheck": "tsc --noEmit",

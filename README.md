@@ -99,6 +99,24 @@ cd apps/studio && bun run dev
 cd apps/studio && bun run build:dev
 ```
 
+## 💻 omni CLI / 命令行工具
+
+`omni` 是封装后端能力的全局命令行工具——模型管理、对话、推理服务器、统一网关、配置读写，**与桌面应用共享同一个数据库**（模型、设置即时互通）。
+
+```bash
+cd apps/studio && bun link    # 安装全局 omni 命令（放进 ~/.bun/bin）
+omni --help                    # 查看全部命令
+omni help <命令>                # 查看单个命令用法
+
+omni model list                # 列出已安装模型
+omni chat "你好" --reasoning    # 本地/远端对话（自动拉起推理服务器）
+omni serve                     # 推理服务器 + 统一网关一体启动（前台长驻，CTRL+C 退出）
+omni doctor                    # 环境体检
+omni config get INFERENCE_ENGINE
+```
+
+完整手册见 [docs/omni-cli.md](./docs/omni-cli.md)。
+
 ## 🧩 Tech Stack / 技术栈
 
 | Layer 层级 | Technology 技术 |

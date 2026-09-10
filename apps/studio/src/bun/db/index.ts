@@ -1,9 +1,9 @@
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { Database } from "bun:sqlite";
-import { Utils } from "electrobun/bun";
 import { join } from "path";
 import { mkdirSync, existsSync, renameSync } from "fs";
 import * as schema from "./schema";
+import { getDataDir } from "../paths";
 
 const isDev = import.meta.env.NODE_ENV === "development";
 
@@ -14,7 +14,7 @@ if (isDev && !process.env.OMNI_DB_PATH && !process.env.OMNI_DATA_DIR) {
   dbPath = "sqlite.db";
 } else {
   // Ensure data directory exists
-  const dataDir = process.env.OMNI_DATA_DIR ?? Utils.paths.userData;
+  const dataDir = getDataDir();
   if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
   dbPath = process.env.OMNI_DB_PATH ?? join(dataDir, "omni-studio.db");
   for (const legacyName of ["vllm-studio.db", "kunpengtalk-studio.db"]) {
