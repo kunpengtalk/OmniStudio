@@ -60,8 +60,12 @@ dist/
 # turbo
 .turbo
 
-# requirements doc (kept local only)
+# requirement / PRD docs (需求文档) — never commit, keep local only
 需求文档.md
+*需求*
+*PRD*.md
+*prd*.md
+*requirement*.md
 
 # build artifacts
 apps/studio/artifacts/
