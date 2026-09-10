@@ -71,6 +71,13 @@
       "when": 1789905600000,
       "tag": "0009_add_translation_records",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1789012592851,
+      "tag": "0010_dusty_abomination",
+      "breakpoints": true
     }
   ]
 }

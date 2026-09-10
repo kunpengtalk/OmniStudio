@@ -26,6 +26,22 @@ export function getImagesBaseDir(): string {
   return base;
 }
 
+/**
+ * 提示词库媒体素材根目录：seed 数据里的 `/prompt-library/...` 路径指向
+ * vibedesign 仓库 `frontend/public/prompt-library`（图片/视频封面，未打进本应用包）。
+ * 目录不存在时返回 null，由前端渐变占位兜底。
+ */
+export function getPromptLibraryMediaBase(): string | null {
+  const base = path.join(
+    process.env.HOME || "/Users/jwangkun",
+    "ai",
+    "vibedesign",
+    "frontend",
+    "public",
+  );
+  return existsSync(path.join(base, "prompt-library")) ? base : null;
+}
+
 export function getUploadsBaseDir(): string {
   const base = getDataDir("uploads");
   migrateLegacyCwdDir("vllm-studio-uploads", base);
@@ -127,6 +143,19 @@ export function startImageServer() {
 
       if (req.method === "OPTIONS") {
         return new Response(null, { status: 204, headers: CORS_HEADERS });
+      }
+
+      // 提示词库媒体：直接从 vibedesign 的 public 目录读（seed 里的 /prompt-library/... 路径）
+      if (url.pathname.startsWith("/prompt-library/")) {
+        const mediaBase = getPromptLibraryMediaBase();
+        if (!mediaBase) return new Response("Not found", { status: 404 });
+        const mediaPath = path.join(mediaBase, decodeURIComponent(url.pathname));
+        if (!mediaPath.startsWith(mediaBase + path.sep)) {
+          return new Response("Forbidden", { status: 403 });
+        }
+        if (!existsSync(mediaPath)) return new Response("Not found", { status: 404 });
+        const mediaSize = statSync(mediaPath).size;
+        return fileResponse(mediaPath, mediaSize, req.headers.get("range"));
       }
 
       const filePath = path.join(baseDir, decodeURIComponent(url.pathname));

@@ -1,12 +1,11 @@
 import "./canvas-polyfill";
-import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import Electrobun, { Utils } from "electrobun/bun";
 import { BrowserWindow, Updater } from "electrobun/bun";
 import { db } from "./db";
-import { join } from "path";
 import { startImageServer } from "./image-server";
 import { setWindowRef } from "./window";
 import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast } from "./rpc";
+import { seedIfNeeded } from "./prompt-library";
 import { APP_NAME } from "./config";
 import { createMenu } from "./menu";
 import { broadcastUpdateStatus, checkForUpdate } from "./updates";
@@ -32,8 +31,8 @@ async function getMainViewUrl(): Promise<string> {
   return "views://mainview/index.html";
 }
 
-// run migrations
-migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
+// 数据库连接在 ./db 打开时已跑过迁移；这里只做首次提示词种子灌入（幂等）。
+seedIfNeeded();
 
 // serve extracted images over HTTP for the webview
 startImageServer();

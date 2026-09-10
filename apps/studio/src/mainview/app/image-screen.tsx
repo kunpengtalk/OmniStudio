@@ -550,6 +550,14 @@ function GenerateTab() {
   const [quantize, setQuantize] = useState(8); // MLX：加载时量化位数，0 = 不量化
   const [results, setResults] = useState<ImageRecordRow[]>();
 
+  // 提示词库「去试试」带入的草稿：挂载时预填提示词框。
+  const pendingPrompt = useImageStore((s) => s.pendingPrompt);
+  useEffect(() => {
+    if (!pendingPrompt) return;
+    setPrompt(pendingPrompt);
+    useImageStore.getState().setPendingPrompt(null);
+  }, [pendingPrompt]);
+
   // ---------- 后端配置 ----------
   const [backend, setBackend] = useState<ImageGenBackend>("api");
   const [apiBase, setApiBase] = useState("");

@@ -693,6 +693,26 @@ const zh: Record<string, string> = {
   "translate.engine.google": "Google 翻译",
   "translate.engine.free": "免费",
   "translate.engine.switching": "正在切换翻译引擎…",
+  // Prompt 提示词库
+  "apps.prompt": "提示词",
+  "prompt.title": "提示词库",
+  "prompt.kind.image": "生图",
+  "prompt.kind.llm": "大模型",
+  "prompt.kind.video": "视频",
+  "prompt.categories": "分类",
+  "prompt.allCategories": "全部分类",
+  "prompt.search": "搜索提示词…",
+  "prompt.copy": "复制",
+  "prompt.copyFull": "复制提示词",
+  "prompt.copied": "已复制",
+  "prompt.useIt": "去试试",
+  "prompt.viewDetail": "查看完整提示词",
+  "prompt.prev": "上一个",
+  "prompt.next": "下一个",
+  "prompt.loading": "加载中…",
+  "prompt.empty.title": "没有找到提示词",
+  "prompt.empty.search": "换个关键词或筛选条件试试",
+  "prompt.empty.desc": "该分类下暂无提示词",
 };
 
 const en: Record<string, string> = {
@@ -1373,6 +1393,26 @@ const en: Record<string, string> = {
   "translate.engine.google": "Google Translate",
   "translate.engine.free": "Free",
   "translate.engine.switching": "Switching engine…",
+  // Prompt library
+  "apps.prompt": "Prompts",
+  "prompt.title": "Prompt Library",
+  "prompt.kind.image": "Image",
+  "prompt.kind.llm": "LLM",
+  "prompt.kind.video": "Video",
+  "prompt.categories": "Categories",
+  "prompt.allCategories": "All categories",
+  "prompt.search": "Search prompts…",
+  "prompt.copy": "Copy",
+  "prompt.copyFull": "Copy prompt",
+  "prompt.copied": "Copied",
+  "prompt.useIt": "Use it",
+  "prompt.viewDetail": "View full prompt",
+  "prompt.prev": "Previous",
+  "prompt.next": "Next",
+  "prompt.loading": "Loading…",
+  "prompt.empty.title": "No prompts found",
+  "prompt.empty.search": "Try a different keyword or filter",
+  "prompt.empty.desc": "No prompts in this category yet",
 };
 
 const DICTS: Record<UILang, Record<string, string>> = { zh, en };

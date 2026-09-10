@@ -16,6 +16,7 @@ import { VoiceScreen } from "../voice-screen";
 import { ImageScreen } from "../image-screen";
 import { OcrScreen } from "../ocr";
 import { TranslateScreen } from "../translate-screen";
+import { PromptScreen } from "../prompt-screen";
 import { ModelsScreen } from "../models-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { DownloadsButton } from "@components/download-panel";
@@ -34,6 +35,8 @@ const renderActiveApp = (activeApp: AppId): ReactNode => {
       return <ImageScreen />;
     case "translate":
       return <TranslateScreen />;
+    case "prompt":
+      return <PromptScreen />;
     default:
       return <ChatWindow />;
   }

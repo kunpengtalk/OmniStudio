@@ -47,11 +47,20 @@ yarn-error.log*
 .env
 .env*.local
 
+# local SQLite databases (settings & API keys live in these — never commit)
+*.db
+*.sqlite
+*.sqlite3
+apps/studio/sqlite.db
+
 # vercel
 .vercel
 
 # agent sessions
 .zcode
+
+# mimosa security-scan hook artifacts (local only)
+.mimosa
 
 # typescript
 dist/
