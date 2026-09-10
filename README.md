@@ -22,6 +22,31 @@
 
 ---
 
+## 📸 Screenshots / 界面预览
+
+<p align="center">OmniStudio 界面一览 / A quick look at OmniStudio.</p>
+
+<table>
+  <tr>
+    <th align="center">首页 Home</th>
+    <th align="center">模型下载 Model Download</th>
+  </tr>
+  <tr>
+    <td><img src="docs/images/screenshot-home.png" alt="首页 Home" width="100%"/></td>
+    <td><img src="docs/images/screenshot-model-download.png" alt="模型下载 Model Download" width="100%"/></td>
+  </tr>
+  <tr>
+    <th align="center">对话 Chat</th>
+    <th align="center">对话 · 联网检索 Web Search</th>
+  </tr>
+  <tr>
+    <td><img src="docs/images/screenshot-chat.png" alt="对话 Chat" width="100%"/></td>
+    <td><img src="docs/images/screenshot-chat-websearch.png" alt="对话联网检索 Chat with Web Search" width="100%"/></td>
+  </tr>
+</table>
+
+---
+
 ## ✨ Features / 功能特性
 
 ### Model hub 模型市集
@@ -35,7 +60,8 @@
 
 - **Unified runtime 统一运行时** — llama.cpp (default: GGUF from local files or HuggingFace, GPU offload, KV cache quantization, multimodal mmproj), vLLM, and SGLang behind one `Runtime` abstraction with hot engine switching. 三引擎统一抽象，支持热切换；llama.cpp 为默认引擎。
 - **Remote mode 远程模式** — Directly connect any OpenAI-compatible endpoint (base URL / API key / model) with connection testing. 直连任意 OpenAI 兼容端点并测试连接。
-- **Endpoints 服务端点** — Chat Completions `/v1`, `/health`, `/metrics`, one-click copy in settings. 设置页展示端点并一键复制。
+- **Unified gateway 统一网关** — One local endpoint that routes requests to the right backend (local inference server or a cloud OpenAI-compatible API) and speaks three protocols: OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages — including bidirectional tool calling. Optional API-key auth with a copyable key and interactive OpenAPI docs. 本地统一网关：按模型路由到本地 / 云端后端，同时提供 OpenAI Chat / Responses 与 Anthropic Messages 三套协议（含工具调用），可选 API Key 鉴权与在线文档。
+- **Endpoints 服务端点** — Chat Completions `/v1`, Responses, Anthropic Messages, `/health`, `/metrics`, one-click copy in settings. 设置页展示端点并一键复制。
 
 ### Five built-in apps 五个内置应用
 
