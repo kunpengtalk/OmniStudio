@@ -46,6 +46,11 @@ export default {
       ...nativeCopy,
       "src/bun/db/migrations": "bun/db/migrations",
       "src/bun/prompt-library/seed": "bun/prompt-library/seed",
+      // 提示词库内置素材（scripts/bundle-prompt-library-assets.ts 生成）：
+      // 有则打进 webview，作为远程封面加载失败时的离线兜底。
+      ...(existsSync("dist/prompt-library")
+        ? { "dist/prompt-library": "views/mainview/prompt-library" }
+        : {}),
     },
     // Ignore Vite output in watch mode — HMR handles view rebuilds separately
     // @ts-ignore

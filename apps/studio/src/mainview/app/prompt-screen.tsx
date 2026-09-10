@@ -117,10 +117,18 @@ function usePromptNow(item: PromptRow) {
   }
 }
 
-/** 图片/封面：有本地素材则显示，否则渲染渐变占位。 */
+/** 回退到仓库内置素材（随 vite public/ 打进 webview）的相对路径。 */
+function bundledMediaUrl(u: string | null): string | null {
+  if (!u) return null;
+  const i = u.indexOf("/prompt-library/");
+  return i >= 0 ? u.slice(i + 1) : null;
+}
+
+/** 图片/封面：依次尝试 服务端地址（远程/本地）→ 内置素材 → 渐变占位。 */
 function PromptMedia({ item, className }: { item: PromptRow; className?: string }) {
-  const [failed, setFailed] = useState(false);
-  const hasMedia = !!item.image && !failed;
+  const [stage, setStage] = useState<0 | 1 | 2>(0);
+  const src = stage === 0 ? item.image : stage === 1 ? bundledMediaUrl(item.image) : null;
+  const hasMedia = !!src;
   const ratio = item.ratio || "1 / 1";
   return (
     <div
@@ -129,11 +137,11 @@ function PromptMedia({ item, className }: { item: PromptRow; className?: string 
     >
       {hasMedia ? (
         <img
-          src={item.image!}
+          src={src!}
           alt={item.name}
           loading="lazy"
           decoding="async"
-          onError={() => setFailed(true)}
+          onError={() => setStage((s) => (s < 2 ? ((s + 1) as 0 | 1 | 2) : s))}
           className="absolute inset-0 size-full object-cover"
         />
       ) : (

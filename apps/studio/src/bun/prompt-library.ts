@@ -3,19 +3,22 @@ import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { db } from "./db";
 import { prompts as promptsTable, promptCategories as catsTable } from "./db/schema";
-import { IMAGE_SERVER_PORT } from "../shared/server-info";
+import { IMAGE_SERVER_PORT, PROMPT_LIBRARY_MEDIA_ORIGIN } from "../shared/server-info";
+import { getPromptLibraryMediaBase } from "./image-server";
 import type { PromptKind } from "./db/schema";
 
 export type { PromptKind } from "./db/schema";
 
 /**
- * 种子数据里的媒体是 vibedesign 的相对路径（/prompt-library/...），
- * 由本地 image-server（IMAGE_SERVER_PORT）静态服务；这里拼成 webview 可用的绝对地址。
- * 已是绝对地址（http(s)://）的原样返回。
+ * 种子数据里的媒体是 vibedesign 的相对路径（/prompt-library/...）。
+ * 本机存在 vibedesign 素材目录（开发机）时由本地 image-server 静态服务；
+ * 否则直接加载远程源 PROMPT_LIBRARY_MEDIA_ORIGIN（默认 kunpengtalk.com，
+ * 把 vibedesign 的 public/prompt-library 部署到该域即可）。已是绝对地址的原样返回。
  */
 function mediaUrl(v: string | null): string | null {
   if (v && v.startsWith("/prompt-library/")) {
-    return `http://localhost:${IMAGE_SERVER_PORT}${v}`;
+    if (getPromptLibraryMediaBase()) return `http://localhost:${IMAGE_SERVER_PORT}${v}`;
+    return `${PROMPT_LIBRARY_MEDIA_ORIGIN}${v}`;
   }
   return v;
 }
