@@ -32,6 +32,7 @@ import { useServerStore } from "@stores/server";
 import { useT } from "@stores/ui-lang";
 import { fileKind, engineSupports, type InferenceEngine } from "../../../shared/modelscope";
 import { MODEL_PROFILES } from "../../../shared/model-profiles";
+import { DEFAULT_INFERENCE_PORT } from "../../../shared/server-info";
 import {
   CopyButton,
   EmptyResult,
@@ -263,7 +264,7 @@ export function VlmTab({
                 </Label>
                 <Input
                   id="ocr-provider-base"
-                  placeholder="http://localhost:8080/v1"
+                  placeholder={`http://localhost:${DEFAULT_INFERENCE_PORT}/v1`}
                   value={pBase}
                   onChange={(e) => setPBase(e.target.value)}
                   className="h-7 text-xs"

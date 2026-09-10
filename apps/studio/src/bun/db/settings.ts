@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
+import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
 
 export type SettingsKey =
   | "SETUP_COMPLETE"
@@ -110,13 +111,13 @@ export type SettingsKey =
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
-  VLLM_API_BASE: "http://localhost:8080/v1",
+  VLLM_API_BASE: `http://localhost:${DEFAULT_INFERENCE_PORT}/v1`,
   VLLM_API_KEY: "EMPTY",
   VLLM_MODEL_NAME: "",
   VLLM_MODEL_PROFILE: "chandra",
   SERVER_MODE: "local",
   SERVER_HOST: "127.0.0.1",
-  SERVER_PORT: "8080",
+  SERVER_PORT: DEFAULT_INFERENCE_PORT,
   AUTO_START_SERVER: "1",
   MODEL_DIRS: "",
   UPDATE_CHANNEL: "stable",

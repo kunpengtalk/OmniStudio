@@ -10,6 +10,7 @@ import {
   type VoiceRecordRow,
 } from "./voice";
 import { ASR_PRESETS, DEFAULT_ASR_MODEL_FILE } from "../shared/modelscope";
+import { DEFAULT_INFERENCE_PORT } from "../shared/server-info";
 import { runAsrAudioCpp } from "./asr-audiocpp";
 import { getWhisperEngineInfo, resolveWhisperBinary } from "./whisper-engine";
 import {
@@ -289,7 +290,7 @@ function getMainRemoteBaseUrl(): string {
   const isLocal = getSetting("SERVER_MODE") === "local";
   if (isLocal) {
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
-    const port = getSetting("SERVER_PORT") || "8080";
+    const port = getSetting("SERVER_PORT") || DEFAULT_INFERENCE_PORT;
     return `http://${host}:${port}`;
   }
   return (getSetting("VLLM_API_BASE") || "").replace(/\/+$/, "").replace(/\/v1$/, "");
