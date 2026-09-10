@@ -45,6 +45,7 @@ export default {
       "node_modules/@napi-rs/canvas": "bun/node_modules/@napi-rs/canvas",
       ...nativeCopy,
       "src/bun/db/migrations": "bun/db/migrations",
+      "src/bun/prompt-library/seed": "bun/prompt-library/seed",
     },
     // Ignore Vite output in watch mode — HMR handles view rebuilds separately
     // @ts-ignore

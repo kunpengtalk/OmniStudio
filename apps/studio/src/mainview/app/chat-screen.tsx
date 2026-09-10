@@ -442,6 +442,15 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   };
 
+  // 提示词库「去试试」带入的草稿：挂载到会话时预填输入框。
+  const pendingPrompt = useChatStore((s) => s.pendingPrompt);
+  useEffect(() => {
+    if (!pendingPrompt) return;
+    setInput(pendingPrompt);
+    useChatStore.getState().setPendingPrompt(null);
+    requestAnimationFrame(autoResize);
+  }, [pendingPrompt]);
+
   const handleSend = () => {
     const content = input.trim();
     const images = attachments.map((a) => a.ref);

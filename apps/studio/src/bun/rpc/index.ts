@@ -48,6 +48,7 @@ import * as Ocr from "../ocr";
 import type { OcrLangModelInfo, OcrStatus, OcrResult, OcrVlmResult, OcrProviderConfig } from "../ocr";
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
+import * as PromptLib from "../prompt-library";
 import * as MlxGen from "../mlx-gen";
 import type { MlxModelInfo, MlxGenStatus, MlxModelDownloadProgress } from "../mlx-gen";
 import type { EdgeVoice } from "../edge-tts";
@@ -290,6 +291,19 @@ export type AppRPC = {
       deleteTranslationRecord: {
         params: { id: number };
         response: { ok: boolean };
+      };
+      // ---- 提示词库 ----
+      getPromptLibraryStats: {
+        params: undefined;
+        response: { counts: Record<PromptLib.PromptKind, number> };
+      };
+      listPromptCategories: {
+        params: { kind: PromptLib.PromptKind };
+        response: { categories: PromptLib.PromptCategoryRow[] };
+      };
+      listPrompts: {
+        params: PromptLib.PromptListParams;
+        response: { items: PromptLib.PromptRow[]; total: number };
       };
       listChatModels: {
         params: undefined;
@@ -1194,6 +1208,18 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       deleteTranslationRecord: async ({ id }) => {
         return Translate.deleteTranslationRecord(id);
+      },
+
+      getPromptLibraryStats: async () => {
+        return { counts: PromptLib.countPromptsByKind() };
+      },
+
+      listPromptCategories: async ({ kind }) => {
+        return { categories: PromptLib.listCategories(kind) };
+      },
+
+      listPrompts: async (params) => {
+        return PromptLib.listPrompts(params);
       },
 
       listChatModels: async () => {

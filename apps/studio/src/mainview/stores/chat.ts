@@ -8,6 +8,9 @@ interface ChatState {
   streaming: boolean;
   /** 会话内本次运行生成的 token 统计，按消息 id 索引（重新生成/翻译后旧 id 失效被清理）。 */
   messageStats: Record<number, ChatStats>;
+  /** 提示词库「去试试」带过来的草稿，ChatWindow 挂载时读入输入框。 */
+  pendingPrompt: string | null;
+  setPendingPrompt: (prompt: string | null) => void;
   setConversations: (conversations: Conversation[]) => void;
   setActiveConversation: (id: number | null) => void;
   setActiveMessages: (messages: ChatMessage[]) => void;
@@ -39,7 +42,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeMessages: [],
   streaming: false,
   messageStats: {},
+  pendingPrompt: null,
 
+  setPendingPrompt: (prompt) => set({ pendingPrompt: prompt }),
   setConversations: (conversations) => set({ conversations }),
   setActiveConversation: (id) => set({ activeConversationId: id }),
   setActiveMessages: (messages) =>
