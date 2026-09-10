@@ -60,6 +60,8 @@ export const messages = sqliteTable("messages", {
   conversationId: int("conversation_id").notNull(),
   role: text("role").$type<"user" | "assistant">().notNull(),
   content: text("content").notNull(),
+  /** 推理模型的思考过程（reasoning_content），与正文分开存储和展示。 */
+  reasoning: text("reasoning"),
   images: text("images"),
   tokens: int("tokens"),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
@@ -81,6 +83,16 @@ export const imageRecords = sqliteTable("image_records", {
   steps: int("steps"),
   imagePath: text("image_path"),
   error: text("error"),
+  createdAt: int("created_at").$defaultFn(() => Date.now()),
+});
+
+export const translationRecords = sqliteTable("translation_records", {
+  id: int().primaryKey({ autoIncrement: true }),
+  sourceLang: text("source_lang").notNull(),
+  targetLang: text("target_lang").notNull(),
+  text: text("text").notNull(),
+  result: text("result"),
+  model: text("model"),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
 });
 

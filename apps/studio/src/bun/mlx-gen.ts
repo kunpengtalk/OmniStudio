@@ -1,6 +1,6 @@
-import { existsSync, rmSync, readdirSync, readFileSync, readlinkSync, statSync } from "fs";
+import { existsSync, rmSync, readdirSync } from "fs";
 import path from "path";
-import { Utils } from "electrobun/bun";
+import { getDataDir } from "./paths";
 
 /**
  * MLX 本地生图引擎（Apple Silicon）。
@@ -108,7 +108,7 @@ function getSearchPath(): string {
 
 /** mflux venv 根目录（userData/engines/mflux，结构为标准 python venv）。 */
 function getEngineDir(): string {
-  return path.join(Utils.paths.userData, "engines", "mflux");
+  return getDataDir("engines", "mflux");
 }
 
 function getVenvBinDir(): string {
@@ -409,6 +409,37 @@ export function downloadMlxModel(modelId: string): Promise<{ ok: boolean; error?
   return p;
 }
 
+/**
+ * 杀掉同模型的残留下载进程（上一次会话崩溃/被强杀、或外部启动的孤儿进程）。
+ * 它们会占着 HF 缓存锁并和新下载进程争抢同一批 blob，导致新进程报“退出码 2”。
+ * 通过命令行匹配可靠的 `mlx-model.py download <modelId>` 特征，避免误杀无关进程。
+ */
+function killOrphanMlxDownloads(modelId: string): void {
+  try {
+    const scriptName = path.basename(modelHelperScript());
+    const out = Bun.spawnSync(["pgrep", "-f", `${scriptName} download ${modelId}`], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const pids = out.stdout
+      .toString()
+      .split(/\s+/)
+      .map((s) => s.trim())
+      .filter((s) => /^\d+$/.test(s))
+      .map(Number);
+    for (const pid of pids) {
+      // 跳过自己（当前进程不是 python，不会匹配，这里做防御）。
+      if (pid === process.pid) continue;
+      try {
+        process.kill(pid, "SIGKILL");
+        emitLog(`已清理残留的模型下载进程 (PID ${pid})`);
+      } catch {}
+    }
+  } catch {
+    // pgrep 不存在或失败时静默忽略。
+  }
+}
+
 async function doDownloadMlxModel(
   modelId: string,
 ): Promise<{ ok: boolean; error?: string }> {
@@ -419,6 +450,11 @@ async function doDownloadMlxModel(
   }
 
   emitLog(`开始下载模型权重：${model.label} …`);
+
+  // 先清理可能残留的“上一个会话/外部遗留”的同模型下载进程。
+  // 否则两个进程同时写同一份 HF 缓存会互相抢锁，导致本次下载报“退出码 2”等失败。
+  killOrphanMlxDownloads(model.id);
+
   emitProgress({
     modelId,
     fileName: "",
@@ -580,137 +616,69 @@ function hfSnapshotDir(repo: string): string {
   const name = `models--${repo.replace("/", "--")}`;
   return path.join(home, ".cache", "huggingface", "hub", name, "snapshots");
 }
+/** 单个模型的 Python check 结果缓存（避免 3s 轮询时反复起 Python 进程）。 */
+const checkCache = new Map<string, { at: number; ok: boolean }>();
 
-/**
- * 判断单个缓存文件是否“完整可用”。HF 在下载中途会用 `.incomplete` 后缀标记
- * 尚未完成的 blob，真正下完才去掉后缀并建立 snapshots 软链。所以：
- *  - 软链目标带 `.incomplete` → 未下完
- *  - 软链目标是空文件（0 字节）→ 未下完
- *  - 软链目标指向不存在的 blob → 悬空，未下完
- * 只有真正解析到一份非空的完整 blob 才算可用。
- */
-function cacheFileComplete(p: string): boolean {
-  try {
-    const st = statSync(p);
-    if (!st.isFile()) return false;
-    if (st.size <= 0) return false;
-    if (p.includes(".incomplete")) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function readlinkSafe(p: string): string {
-  try {
-    return readlinkSync(p);
-  } catch {
-    return "";
-  }
-}
-
-/** 读取 .safetensors.index.json，返回其中声明的所有 .safetensors shard 文件名。 */
-function indexJsonShards(file: string): string[] {
-  try {
-    const raw = readFileSync(file, "utf8");
-    const obj = JSON.parse(raw) as { weight_map?: Record<string, string> };
-    const map = obj?.weight_map ?? {};
-    return Array.from(new Set(Object.values(map))).filter((v) =>
-      v.endsWith(".safetensors"),
-    );
-  } catch {
-    return [];
-  }
-}
-
-/**
- * 严格检查一片 snapshot 是否“完整可用”。
- *
- * 仅靠“看看软链完不完整”是不够的：那些压根没开始下载的分片（例如 transformer 的
- * 大 shard）在 snapshot 里连软链都没有，看起来像“已下载”。所以这里额外读取模型自带
- * 的 *.safetensors.index.json，把其中声明的所有分片都当作“必需文件”逐一核对：
- *  1. 每个软链/文件必须解析到完整的非空 blob（非 .incomplete、非悬空、非 0 字节）。
- *  2. index.json 里声明的每个 .safetensors 分片都必须真实存在且完整。
- *  满足以上两点且确实含 .safetensors 权重才算下载完成，否则一律视为未完成。
- */
-function snapshotComplete(dir: string): boolean {
-  // 收集所有 index.json 声明的必需分片。
-  const required = new Set<string>();
-  const present = new Set<string>();
-  let sawSafetensors = false;
-  let sawIndex = false;
-  try {
-    const walk = (d: string): boolean => {
-      for (const entry of readdirSync(d, { withFileTypes: true })) {
-        const p = path.join(d, entry.name);
-        if (entry.isDirectory()) {
-          if (!walk(p)) return false;
-        } else if (entry.isSymbolicLink() || entry.isFile()) {
-          const complete =
-            entry.isSymbolicLink()
-              ? cacheFileComplete(path.resolve(d, readlinkSafe(p)))
-              : cacheFileComplete(p);
-          if (!complete) return false;
-          if (entry.name.endsWith(".safetensors")) {
-            present.add(entry.name);
-            sawSafetensors = true;
-          } else if (entry.name.endsWith(".safetensors.index.json")) {
-            sawIndex = true;
-            for (const shard of indexJsonShards(p)) required.add(shard);
-          }
-        }
-      }
-      return true;
-    };
-    if (!walk(dir)) return false;
-
-    // 有 index.json 分片声明的模型：每个必需分片都必须已就位。
-    if (sawIndex) {
-      for (const shard of required) {
-        if (!present.has(shard)) return false;
-      }
-    }
-    return sawSafetensors;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 严格判断某个 MLX 模型权重是否已完整下载（纯文件系统检查，不发 HTTP、不起 Python）。
- * 不只“看到有 .safetensors 就算”，而是要求 snapshot 内每个文件（含软链指向的 blob）
- * 都完整、非空、未带 .incomplete 后缀，且把 *.safetensors.index.json 中声明的全部分片
- * 都核对到位。这样能拦截“下载中途失败/残留 .incomplete/缺分片/悬空软链”导致的假完成态，
- * 避免模型明明没下完却在 start 时挂起重下、甚至报“启动失败”。
- */
-export function isMlxModelDownloaded(modelId: string): boolean {
+/** 用便携的本地检查快速拦截“明显没下完”的情况：连 snapshot 都没有就不用起 Python 了。 */
+function snapshotDirExists(modelId: string): boolean {
   const repo = MLX_MODEL_REPOS[modelId];
   if (!repo) return false;
-  const snapshots = hfSnapshotDir(repo);
-  if (!existsSync(snapshots)) return false;
+  return existsSync(hfSnapshotDir(repo));
+}
+
+/**
+ * 权威判断某个 MLX 模型权重是否已完整下载。
+ *
+ * 拿到“完整”这件事，不能只看 snapshot 里已有的文件是否完好——下载进行到一半时，
+ * 已经下载完的那部分（如 text_encoder）看起来是完好的，但 transformer/vae 还没下，
+ * 绝不能因此误判“已下载”。所以这里直接调用 venv 内的 mlx-model.py check：它通过
+ * mflux 自己的 WeightDefinition + HF 仓库文件树，列出模型**应包含的全部文件**，再以
+ * local_files_only 校验这些文件是否全部就位，返回 OK 才算真正下完。
+ *
+ * 结果带短缓存，避免频繁轮询时反复起 Python。
+ */
+export async function isMlxModelDownloaded(modelId: string): Promise<boolean> {
+  if (!snapshotDirExists(modelId)) return false;
+  const cached = checkCache.get(modelId);
+  if (cached && Date.now() - cached.at < 5000) return cached.ok;
+  const py = enginePython();
+  if (!existsSync(py)) return false;
   try {
-    for (const rev of readdirSync(snapshots)) {
-      const revDir = path.join(snapshots, rev);
-      if (!statSync(revDir).isDirectory()) continue;
-      if (snapshotComplete(revDir)) return true;
-    }
-  } catch {}
-  return false;
+    const proc = Bun.spawnSync(
+      [py, modelHelperScript(), "check", modelId],
+      { stdout: "pipe", stderr: "pipe", timeout: 30_000 },
+    );
+    const out = proc.stdout.toString();
+    const ok = proc.exitCode === 0 && /\bOK\b/.test(out);
+    checkCache.set(modelId, { at: Date.now(), ok });
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/** 失效某个模型的 check 缓存（下载完成/开始后调用）。 */
+function invalidateModelCheck(modelId: string): void {
+  checkCache.delete(modelId);
 }
 
 /** 返回已下载（可生成）的 MLX 模型 id 列表。 */
-export function getDownloadedMlxModelsSync(): string[] {
-  return MLX_MODELS.filter((m) => isMlxModelDownloaded(m.id)).map((m) => m.id);
+export async function getDownloadedMlxModelsSync(): Promise<string[]> {
+  const result: string[] = [];
+  for (const m of MLX_MODELS) {
+    if (await isMlxModelDownloaded(m.id)) result.push(m.id);
+  }
+  return result;
 }
 
-/** 已下载模型快照（带缓存 TTL，避免主进程反复扫描磁盘）。 */
+/** 已下载模型快照（带缓存 TTL，避免主进程反复扫描磁盘/起 Python）。 */
 let downloadedCache: { at: number; ids: string[] } | null = null;
-export function getDownloadedMlxModels(): string[] {
+export async function getDownloadedMlxModels(): Promise<string[]> {
   const now = Date.now();
   if (downloadedCache && now - downloadedCache.at < 3000) {
     return downloadedCache.ids;
   }
-  const ids = getDownloadedMlxModelsSync();
+  const ids = await getDownloadedMlxModelsSync();
   downloadedCache = { at: now, ids };
   return ids;
 }
@@ -718,6 +686,7 @@ export function getDownloadedMlxModels(): string[] {
 /** 主动失效已下载缓存（下载完成后调用）。 */
 export function invalidateDownloadedMlxCache(): void {
   downloadedCache = null;
+  checkCache.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -750,7 +719,7 @@ export async function generateWithMlx(
     return { ok: false, error: "MLX 引擎未安装，请先点击「下载引擎」" };
   }
   // 不再允许生成时自动下载：必须先在「下载模型」里把权重下载好。
-  if (!isMlxModelDownloaded(model.id)) {
+  if (!(await isMlxModelDownloaded(model.id))) {
     return {
       ok: false,
       error: `模型「${model.label}」尚未下载，请先点击「下载模型」（约 ${model.approxSizeGb}GB）`,

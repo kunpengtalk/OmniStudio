@@ -165,6 +165,10 @@ export type AppRPC = {
         params: { url: string };
         response: { ok: boolean };
       };
+      generateGatewayKey: {
+        params: undefined;
+        response: { key: string };
+      };
       getLaunchCommand: {
         params: { path?: string };
         response: { command: string; engine: string };
@@ -265,8 +269,21 @@ export type AppRPC = {
         response: { ok: boolean; error?: string };
       };
       runTranslation: {
-        params: { text: string; sourceLang?: string; targetLang: string };
-        response: { text?: string; error?: string };
+        params: {
+          text: string;
+          sourceLang?: string;
+          targetLang: string;
+          engine?: "model" | "google";
+        };
+        response: { text?: string; id?: number; error?: string };
+      };
+      listTranslationRecords: {
+        params: { limit?: number } | undefined;
+        response: { records: Translate.TranslationRecordRow[] };
+      };
+      deleteTranslationRecord: {
+        params: { id: number };
+        response: { ok: boolean };
       };
       listChatModels: {
         params: undefined;
@@ -633,8 +650,19 @@ export type AppRPC = {
       documentChanged: { id: number };
       serverLog: { text: string };
       serverStatusChanged: { status: ServerStatus };
-      chatChunk: { conversationId: number; messageId: number; delta: string };
-      chatDone: { conversationId: number; messageId: number; content: string; error?: string };
+      chatChunk: {
+        conversationId: number;
+        messageId: number;
+        delta: string;
+        kind?: "reasoning" | "content";
+      };
+      chatDone: {
+        conversationId: number;
+        messageId: number;
+        content: string;
+        reasoning?: string;
+        error?: string;
+      };
       chatStats: ChatStats;
       modelDownloadProgress: {
         repo: string;
@@ -788,6 +816,10 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         } catch {
           return { ok: false };
         }
+      },
+
+      generateGatewayKey: async () => {
+        return { key: Gateway.generateGatewayApiKey() };
       },
 
       getDocuments: async (params) => {
@@ -1048,6 +1080,14 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         } catch (e) {
           return { error: e instanceof Error ? e.message : String(e) };
         }
+      },
+
+      listTranslationRecords: async (params) => {
+        return { records: Translate.listTranslationRecords(params?.limit) };
+      },
+
+      deleteTranslationRecord: async ({ id }) => {
+        return Translate.deleteTranslationRecord(id);
       },
 
       listChatModels: async () => {
@@ -1565,7 +1605,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       getDownloadedMlxModels: async () => {
-        return { downloaded: MlxGen.getDownloadedMlxModels() };
+        return { downloaded: await MlxGen.getDownloadedMlxModels() };
       },
     },
     messages: {},

@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "fs";
 import path from "path";
-import { Utils } from "electrobun/bun";
 import { getSetting, updateSettings } from "./db/settings";
+import { getDataDir } from "./paths";
 import {
   installedModelSize,
   isModelInstalled,
@@ -281,7 +281,7 @@ export type TtsLocalStatus = {
 
 
 function getEnginesDir(): string {
-  return path.join(Utils.paths.userData, "engines", "audiocpp");
+  return getDataDir("engines", "audiocpp");
 }
 
 function getEngineBinDir(): string {

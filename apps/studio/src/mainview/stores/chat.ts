@@ -13,11 +13,17 @@ interface ChatState {
   setActiveMessages: (messages: ChatMessage[]) => void;
   setStreaming: (streaming: boolean) => void;
   setMessageStats: (conversationId: number, messageId: number, stats: ChatStats) => void;
-  appendChunk: (conversationId: number, messageId: number, delta: string) => void;
+  appendChunk: (
+    conversationId: number,
+    messageId: number,
+    delta: string,
+    kind?: "reasoning" | "content",
+  ) => void;
   finalizeMessage: (
     conversationId: number,
     messageId: number,
     content: string,
+    reasoning?: string,
   ) => void;
   /** 删除单条消息（并清理它的统计）。 */
   removeMessage: (conversationId: number, messageId: number) => void;
@@ -53,7 +59,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => ({ messageStats: { ...state.messageStats, [messageId]: stats } }));
   },
 
-  appendChunk: (conversationId, messageId, delta) => {
+  appendChunk: (conversationId, messageId, delta, kind = "content") => {
     if (conversationId !== get().activeConversationId) return;
     set((state) => {
       const last = state.activeMessages[state.activeMessages.length - 1];
@@ -61,28 +67,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return {
           activeMessages: [
             ...state.activeMessages.slice(0, -1),
-            { ...last, content: last.content + delta },
+            kind === "reasoning"
+              ? { ...last, reasoning: (last.reasoning ?? "") + delta }
+              : { ...last, content: last.content + delta },
           ],
         };
       }
       return {
         activeMessages: [
           ...state.activeMessages,
-          { id: messageId, conversationId, role: "assistant" as const, content: delta, createdAt: Date.now() },
+          {
+            id: messageId,
+            conversationId,
+            role: "assistant" as const,
+            content: kind === "reasoning" ? "" : delta,
+            reasoning: kind === "reasoning" ? delta : undefined,
+            createdAt: Date.now(),
+          },
         ],
       };
     });
   },
 
-  finalizeMessage: (conversationId, messageId, content) => {
+  finalizeMessage: (conversationId, messageId, content, reasoning) => {
     if (conversationId !== get().activeConversationId) return;
     set((state) => {
       const exists = state.activeMessages.some((m) => m.id === messageId);
       const messages = exists
-        ? state.activeMessages.map((m) => (m.id === messageId ? { ...m, content } : m))
+        ? state.activeMessages.map((m) =>
+            m.id === messageId
+              ? { ...m, content, reasoning: reasoning || m.reasoning || undefined }
+              : m,
+          )
         : [
             ...state.activeMessages,
-            { id: messageId, conversationId, role: "assistant" as const, content, createdAt: Date.now() },
+            {
+              id: messageId,
+              conversationId,
+              role: "assistant" as const,
+              content,
+              reasoning: reasoning || undefined,
+              createdAt: Date.now(),
+            },
           ];
       return { activeMessages: messages, streaming: false };
     });

@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "fs";
 import path from "path";
-import { Utils } from "electrobun/bun";
 
 import { getSetting, updateSettings } from "./db/settings";
+import { getDataDir } from "./paths";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
 import { ocrLangEntry, OCR_LANG_CATALOG, OCR_TESSDATA_RAW_BASE } from "../shared/ocr";
@@ -179,7 +179,7 @@ export async function getTesseractVersion(bin: string): Promise<string> {
 // ---------------------------------------------------------------------------
 
 function getTessdataDir(): string {
-  return path.join(Utils.paths.userData, "engines", "tessdata");
+  return getDataDir("engines", "tessdata");
 }
 
 function langModelPath(modelId: string): string {

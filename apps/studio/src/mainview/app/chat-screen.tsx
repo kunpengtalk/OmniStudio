@@ -3,6 +3,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpIcon,
   BotIcon,
+  BrainIcon,
+  ChevronDownIcon,
   Loader2Icon,
   ImagePlusIcon,
   PaperclipIcon,
@@ -206,6 +208,58 @@ function MessageActionBar({
   );
 }
 
+/**
+ * 可折叠的思考过程区块：流式阶段展开并跟随滚动，思考结束自动折叠，
+ * 点标题可随时重新展开查看。
+ */
+function ReasoningBlock({ reasoning, streaming }: { reasoning: string; streaming: boolean }) {
+  const t = useT();
+  const [open, setOpen] = useState(streaming);
+  const wasStreaming = useRef(streaming);
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  // 流式 → 结束 时自动折叠。
+  useEffect(() => {
+    if (wasStreaming.current && !streaming) setOpen(false);
+    wasStreaming.current = streaming;
+  }, [streaming]);
+
+  // 展开且流式中时，思考内容跟随滚动。
+  useEffect(() => {
+    if (!open || !streaming) return;
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [reasoning, open, streaming]);
+
+  return (
+    <div className="overflow-hidden rounded-xl border bg-muted/30">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+      >
+        {streaming ? (
+          <Loader2Icon className="size-3 shrink-0 animate-spin" />
+        ) : (
+          <BrainIcon className="size-3 shrink-0" />
+        )}
+        <span className="font-medium">{streaming ? t("chat.thinking") : t("chat.reasoning")}</span>
+        <ChevronDownIcon
+          className={cn("ml-auto size-3.5 shrink-0 transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open && (
+        <div
+          ref={bodyRef}
+          className="max-h-48 overflow-y-auto whitespace-pre-wrap border-t bg-background/40 px-3 py-2 text-xs leading-5 text-muted-foreground"
+        >
+          {reasoning}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MessageBubble({
   message,
   isStreamingMessage,
@@ -214,7 +268,7 @@ function MessageBubble({
   isStreamingMessage: boolean;
 }) {
   const t = useT();
-  const { role, content, images } = message;
+  const { role, content, images, reasoning } = message;
   // 后端把启动失败持久化为 "⚠️ <raw error>"，这里补一行本地化的可操作提示。
   const rawError = role === "assistant" ? persistedErrorMessage(content) : null;
   const errorHint = rawError !== null ? serverErrorHint(t, rawError) : null;
@@ -236,21 +290,26 @@ function MessageBubble({
           <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted">
             <BotIcon className="size-4 text-muted-foreground" />
           </div>
-          <div className="min-w-0 max-w-[85%] flex-1 rounded-2xl rounded-tl-md border bg-card px-4 py-2.5">
-            {content ? (
-              <Markdown content={content} />
-            ) : (
-              <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground">
-                <Loader2Icon className="size-3.5 animate-spin" />
-                Thinking…
-              </div>
-            )}
-            {errorHint && (
+          <div className="flex min-w-0 max-w-[85%] flex-1 flex-col gap-1.5">
+            {reasoning ? (
+              <ReasoningBlock reasoning={reasoning} streaming={isStreamingMessage} />
+            ) : null}
+            <div className="rounded-2xl rounded-tl-md border bg-card px-4 py-2.5">
+              {content ? (
+                <Markdown content={content} />
+              ) : isStreamingMessage ? (
+                <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground">
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                  {t("chat.generating")}
+                </div>
+              ) : null}
+              {errorHint && (
               <p className="mt-2 flex items-start gap-1.5 rounded-lg bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
                 <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
                 <span className="min-w-0 break-words">{errorHint}</span>
               </p>
             )}
+            </div>
           </div>
         </div>
       )}
@@ -497,7 +556,11 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [activeMessages.length, activeMessages[activeMessages.length - 1]?.content]);
+  }, [
+    activeMessages.length,
+    activeMessages[activeMessages.length - 1]?.content,
+    activeMessages[activeMessages.length - 1]?.reasoning,
+  ]);
 
   const sendMutation = useMutation({
     mutationFn: ({

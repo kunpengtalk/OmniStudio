@@ -89,10 +89,12 @@ export type SettingsKey =
   | "GATEWAY_ENABLED"
   | "GATEWAY_HOST"
   | "GATEWAY_PORT"
+  | "GATEWAY_API_KEY"
   | "WEB_SEARCH_ENABLED"
   | "WEB_SEARCH_PROVIDER"
   | "WEB_SEARCH_API_KEY"
-  | "WEB_SEARCH_MAX_RESULTS";
+  | "WEB_SEARCH_MAX_RESULTS"
+  | "TRANSLATION_ENGINE";
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
@@ -181,10 +183,12 @@ const DEFAULTS: Record<SettingsKey, string> = {
   GATEWAY_ENABLED: "1",
   GATEWAY_HOST: "127.0.0.1",
   GATEWAY_PORT: "10000",
-  WEB_SEARCH_ENABLED: "0",
+  GATEWAY_API_KEY: "",
+  WEB_SEARCH_ENABLED: "1",
   WEB_SEARCH_PROVIDER: "bing",
   WEB_SEARCH_API_KEY: "",
   WEB_SEARCH_MAX_RESULTS: "5",
+  TRANSLATION_ENGINE: "model",
 };
 
 export function getSetting(key: SettingsKey): string {

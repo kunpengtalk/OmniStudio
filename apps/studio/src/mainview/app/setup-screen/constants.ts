@@ -26,6 +26,14 @@ export type RemoteProvider = {
 
 export const REMOTE_PROVIDERS: readonly RemoteProvider[] = [
   {
+    id: "omnilabs",
+    label: "OmniLabs",
+    vendor: "OmniLabs 多模态平台",
+    baseUrl: "https://omnilabs.vibeadmin.cn/v1",
+    models: [],
+    note: "统一接入 TTS / ASR / LLM / OCR，32+ 开源模型、44 个免费大模型",
+  },
+  {
     id: "deepseek",
     label: "DeepSeek",
     vendor: "深度求索",

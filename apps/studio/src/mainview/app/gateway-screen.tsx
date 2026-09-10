@@ -9,6 +9,9 @@ import {
   PowerIcon,
   RefreshCwIcon,
   AlertTriangleIcon,
+  KeyIcon,
+  Trash2Icon,
+  SparklesIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -65,6 +68,7 @@ export function GatewayScreen() {
   const liveStatus = useGatewayStore((s) => s.status);
   const [enabled, setEnabled] = useState(true);
   const [port, setPort] = useState("10000");
+  const [apiKey, setApiKey] = useState("");
 
   const { data } = useQuery({
     queryKey: ["gateway-status"],
@@ -80,6 +84,7 @@ export function GatewayScreen() {
     if (settingsData?.settings) {
       setEnabled((settingsData.settings.GATEWAY_ENABLED ?? "1") !== "0");
       setPort(settingsData.settings.GATEWAY_PORT ?? "10000");
+      setApiKey(settingsData.settings.GATEWAY_API_KEY ?? "");
     }
   }, [settingsData]);
 
@@ -92,6 +97,7 @@ export function GatewayScreen() {
         settings: {
           GATEWAY_ENABLED: enabled ? "1" : "0",
           GATEWAY_PORT: port.trim() || "10000",
+          GATEWAY_API_KEY: apiKey.trim(),
         },
       }),
     onSuccess: async () => {
@@ -101,6 +107,22 @@ export function GatewayScreen() {
         throw new Error(res.error || "Failed to restart gateway");
       }
       queryClient.invalidateQueries({ queryKey: ["gateway-status"] });
+    },
+  });
+
+  const generateKeyMutation = useMutation({
+    mutationFn: () => rpcClient.generateGatewayKey(),
+    onSuccess: (res) => {
+      setApiKey(res.key);
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+
+  const clearKeyMutation = useMutation({
+    mutationFn: () => rpcClient.updateSettings({ settings: { GATEWAY_API_KEY: "" } }),
+    onSuccess: () => {
+      setApiKey("");
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
   });
 
@@ -119,6 +141,8 @@ export function GatewayScreen() {
     { labelKey: "settings.gateway.endpoints.docs", path: "/docs" },
     { labelKey: "settings.gateway.endpoints.models", path: "/v1/models" },
     { labelKey: "settings.gateway.endpoints.chat", path: "/v1/chat/completions" },
+    { labelKey: "settings.gateway.endpoints.responses", path: "/v1/responses" },
+    { labelKey: "settings.gateway.endpoints.messages", path: "/v1/messages" },
     { labelKey: "settings.gateway.endpoints.speech", path: "/v1/audio/speech" },
     { labelKey: "settings.gateway.endpoints.transcriptions", path: "/v1/audio/transcriptions" },
     { labelKey: "settings.gateway.endpoints.image", path: "/v1/images/generations" },
@@ -247,6 +271,71 @@ export function GatewayScreen() {
           </div>
         </div>
 
+        {/* API Key */}
+        <div className="flex flex-col gap-2 rounded-lg border p-4">
+          <div className="flex items-center gap-2">
+            <KeyIcon className="size-4 text-muted-foreground" />
+            <h3 className="text-sm font-medium">{t("settings.gateway.apiKey.title")}</h3>
+            {apiKey ? (
+              <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                {t("settings.gateway.apiKey.enabled")}
+              </span>
+            ) : (
+              <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                {t("settings.gateway.apiKey.placeholder")}
+              </span>
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground">{t("settings.gateway.apiKey.desc")}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={t("settings.gateway.apiKey.placeholder")}
+              className="h-8 min-w-52 flex-1 font-mono text-xs"
+              spellCheck={false}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs"
+              disabled={generateKeyMutation.isPending}
+              onClick={() => generateKeyMutation.mutate()}
+            >
+              {generateKeyMutation.isPending ? (
+                <Loader2Icon data-icon="inline-start" className="animate-spin" />
+              ) : (
+                <SparklesIcon data-icon="inline-start" className="size-3" />
+              )}
+              {t("settings.gateway.apiKey.generate")}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs"
+              disabled={!apiKey || clearKeyMutation.isPending}
+              onClick={() => clearKeyMutation.mutate()}
+            >
+              <Trash2Icon data-icon="inline-start" className="size-3" />
+              {t("settings.gateway.apiKey.clear")}
+            </Button>
+            <Button
+              size="sm"
+              className="h-8 text-xs"
+              disabled={saveRestartMutation.isPending}
+              onClick={() => saveRestartMutation.mutate()}
+            >
+              {saveRestartMutation.isPending ? (
+                <Loader2Icon data-icon="inline-start" className="animate-spin" />
+              ) : (
+                <CheckIcon data-icon="inline-start" className="size-3" />
+              )}
+              {t("common.save")}
+            </Button>
+          </div>
+          <p className="text-[11px] text-muted-foreground/70">{t("settings.gateway.apiKey.hint")}</p>
+        </div>
+
         {/* Endpoints */}
         <div>
           <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
@@ -259,7 +348,8 @@ export function GatewayScreen() {
               <EndpointRow key={e.path} label={t(e.labelKey)} url={`${url}${e.path}`} onCopy={copy} />
             ))}
           </div>
-          <p className="mt-2 text-[11px] text-muted-foreground/70">{t("settings.gateway.endpoints.hint")}</p>
+          <p className="mt-2 text-[11px] text-muted-foreground/70">{t("settings.gateway.protocol.hint")}</p>
+          <p className="mt-1 text-[11px] text-muted-foreground/70">{t("settings.gateway.endpoints.hint")}</p>
         </div>
       </div>
     </ScrollArea>

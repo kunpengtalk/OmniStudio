@@ -102,21 +102,45 @@ def _resolve(name):
 
 def run_check(name):
     repo, defs = _resolve(name)
-    patterns = list(defs.get_download_patterns())
-    for td in defs.get_tokenizers():
-        for p in td.download_patterns:
-            if p not in patterns:
-                patterns.append(p)
-    from huggingface_hub import snapshot_download
+    import os
 
-    # local_files_only=True：只读本地 HF 缓存，不走网络，速度快。
+    from huggingface_hub import hf_hub_download
+
+    # 拿到模型**应包含的全部文件**清单（路径 + 字节数）。
+    # 注意：不能用 snapshot_download(local_files_only=True) —— 它只"返回本地已有的部分"，
+    # 模型还没下完时也不会报错，会让 check 误报 OK。必须逐个文件校验。
     try:
-        snapshot_download(
-            repo_id=repo, allow_patterns=patterns, local_files_only=True
-        )
-        print("OK")
+        targets = _targets(repo, defs)
     except Exception:
-        print("NOT_DOWNLOADED")
+        # 拿不到清单（离线/网络异常）时保守视为未下载。
+        print("NOT_DOWNLOADED", flush=True)
+        return 0
+    if not targets:
+        print("NOT_DOWNLOADED", flush=True)
+        return 0
+
+    for path, size in targets:
+        try:
+            local = hf_hub_download(
+                repo_id=repo, filename=path, local_files_only=True
+            )
+        except Exception:
+            # 该文件未完整缓存（缺失、仍是 .incomplete、或悬空软链）。
+            print("NOT_DOWNLOADED", flush=True)
+            return 0
+        # 兜底：确认落盘的是完整 blob（非 .incomplete）且大小吻合。
+        if not local or ".incomplete" in local:
+            print("NOT_DOWNLOADED", flush=True)
+            return 0
+        try:
+            if os.path.getsize(local) != size:
+                print("NOT_DOWNLOADED", flush=True)
+                return 0
+        except Exception:
+            print("NOT_DOWNLOADED", flush=True)
+            return 0
+
+    print("OK", flush=True)
     return 0
 
 

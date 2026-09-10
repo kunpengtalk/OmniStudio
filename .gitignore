@@ -66,4 +66,8 @@ dist/
 # build artifacts
 apps/studio/artifacts/
 
+# python (mlx-model helper)
+__pycache__/
+*.pyc
+
 *.local.*

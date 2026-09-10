@@ -15,6 +15,8 @@ export type ChatMessage = {
   conversationId: number;
   role: "user" | "assistant";
   content: string;
+  /** 推理模型的思考过程，与正文分开存储和展示（旧消息无此字段）。 */
+  reasoning?: string | null;
   images?: string[];
   tokens?: number | null;
   createdAt: number;
@@ -44,12 +46,15 @@ type ChunkListener = (payload: {
   conversationId: number;
   messageId: number;
   delta: string;
+  /** 增量所属区块：思考过程 / 正式回答。缺省为正文。 */
+  kind?: "reasoning" | "content";
 }) => void;
 
 type DoneListener = (payload: {
   conversationId: number;
   messageId: number;
   content: string;
+  reasoning?: string;
   error?: string;
 }) => void;
 
@@ -72,16 +77,11 @@ export function onChatStats(cb: (payload: ChatStats) => void): () => void {
   return () => statsListeners.delete(cb);
 }
 
-function emitChunk(payload: { conversationId: number; messageId: number; delta: string }) {
+function emitChunk(payload: Parameters<ChunkListener>[0]) {
   for (const cb of chunkListeners) cb(payload);
 }
 
-function emitDone(payload: {
-  conversationId: number;
-  messageId: number;
-  content: string;
-  error?: string;
-}) {
+function emitDone(payload: Parameters<DoneListener>[0]) {
   for (const cb of doneListeners) cb(payload);
 }
 
@@ -313,6 +313,36 @@ export async function ensureServerReady(
 }
 
 /**
+ * 构建携带当前时间的系统消息：模型自身不知道"今天是哪天"，不注入的话
+ * 涉及"今天/最新/最近"的问题会按训练数据里的旧日期回答（如报出两年前的股价）。
+ * 每次推理请求都注入在最前面，所有模型生效；仅注入 payload，不落库。
+ */
+function currentTimeSystemMessage(): { role: string; content: string } {
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const date = now.toLocaleDateString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "long",
+    timeZone: tz,
+  });
+  const time = now.toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: tz,
+  });
+  return {
+    role: "system",
+    content:
+      `系统信息：当前日期时间是 ${date} ${time}（时区 ${tz}）。` +
+      `回答涉及"今天、现在、本周、最新、最近"等时间相关内容时，必须以该当前时间为准，` +
+      `不要根据训练数据推断日期，也不要猜测当前时间。`,
+  };
+}
+
+/**
  * 流式执行一次模型推理并把结果写到已插入的 assistant 消息行。
  * 供发消息 / 重新生成 / 翻译 共用；结束后按 API usage（缺失时估算）发出 chatStats。
  */
@@ -363,18 +393,22 @@ async function streamAssistantReply(opts: {
 
   const payload = {
     model,
-    messages: payloadMessages,
+    messages: [currentTimeSystemMessage(), ...payloadMessages],
     stream: true,
   };
 
   let full = "";
   let reasoning = "";
-  let sawReasoning = false;
 
-  const append = (delta: string) => {
+  const appendContent = (delta: string) => {
     if (!delta) return;
     full += delta;
-    emitChunk({ conversationId, messageId: assistantId, delta });
+    emitChunk({ conversationId, messageId: assistantId, delta, kind: "content" });
+  };
+  const appendReasoning = (delta: string) => {
+    if (!delta) return;
+    reasoning += delta;
+    emitChunk({ conversationId, messageId: assistantId, delta, kind: "reasoning" });
   };
 
   const startedAt = performance.now();
@@ -416,16 +450,13 @@ async function streamAssistantReply(opts: {
         const json = JSON.parse(payloadLine);
         const delta = json.choices?.[0]?.delta ?? {};
         if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) {
-          reasoning += delta.reasoning_content;
-          sawReasoning = true;
-          append(delta.reasoning_content);
+          appendReasoning(delta.reasoning_content);
         }
         if (typeof delta.content === "string" && delta.content.length > 0) {
-          if (sawReasoning && full.length === reasoning.length) {
-            // first content token after reasoning — insert a separator
-            append("\n\n");
-          }
-          append(delta.content);
+          // 部分推理模型的 content 开头带残留的思考标签，剥掉避免混进正文。
+          let content = delta.content;
+          if (full.length === 0) content = content.replace(/^\s*<\/?think[\s>]*>/, "").trimStart();
+          appendContent(content);
         }
         if (json.usage) usage = json.usage;
       } catch {
@@ -446,24 +477,19 @@ async function streamAssistantReply(opts: {
     }
     if (buffer.trim()) consumeLine(buffer);
 
-    if (sawReasoning && full.length === reasoning.length) {
-      // only reasoning was emitted — mark it as the answer
-      append("\n");
-    }
-
     recordUsage(model, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     // 把失败原因持久化到助手消息，避免刷新会话后错误反馈被清空。
     db.update(messages)
-      .set({ content: msg ? `⚠️ ${msg}` : "⚠️ Request failed" })
+      .set({ content: msg ? `⚠️ ${msg}` : "⚠️ Request failed", reasoning: reasoning || null })
       .where(eq(messages.id, assistantId))
       .run();
     db.update(conversations)
       .set({ updatedAt: Date.now() })
       .where(eq(conversations.id, conversationId))
       .run();
-    emitDone({ conversationId, messageId: assistantId, content: "", error: msg });
+    emitDone({ conversationId, messageId: assistantId, content: "", reasoning: reasoning || undefined, error: msg });
     return { ok: false, error: msg, content: "" };
   }
 
@@ -472,7 +498,7 @@ async function streamAssistantReply(opts: {
   const tokensPerSec = Math.round((tokens / (elapsedMs / 1000)) * 10) / 10;
 
   db.update(messages)
-    .set({ content: full, tokens })
+    .set({ content: full, reasoning: reasoning || null, tokens })
     .where(eq(messages.id, assistantId))
     .run();
   db.update(conversations)
@@ -481,7 +507,7 @@ async function streamAssistantReply(opts: {
     .run();
 
   emitChatStats({ conversationId, messageId: assistantId, tokens, tokensPerSec, elapsedMs });
-  emitDone({ conversationId, messageId: assistantId, content: full });
+  emitDone({ conversationId, messageId: assistantId, content: full, reasoning: reasoning || undefined });
   return { ok: true, content: full };
 }
 
@@ -544,11 +570,75 @@ export async function sendMessage(
   return { ok: result.ok, error: result.error };
 }
 
+/** 去掉常见请求语气词，作为改写失败时的兜底搜索词。 */
+function cleanSearchQuery(raw: string): string {
+  let q = raw.trim();
+  // 语气词与动词可组合出现（"请帮我联网查一下…"），循环剥离直到稳定。
+  const filler =
+    /^(?:请|麻烦|帮我|帮忙|给我|你|您)?\s*(?:联网|上网|网上)?\s*(?:搜索|查询|查一下|搜一下|查下|查|搜|找|问)?\s*(?:一下|下)?\s*/;
+  let prev = "";
+  while (q !== prev) {
+    prev = q;
+    q = q.replace(filler, "").trim();
+  }
+  q = q.replace(/^(?:please\s+)?(?:help\s+me\s+)?(?:look\s+up|search\s+for|find|check)\s+/i, "").trim();
+  return q || raw;
+}
+
+/**
+ * 把用户的自然语言消息改写成适合搜索引擎的简短关键词。
+ * 整句直接搜索时，搜索引擎容易匹配句首词返回不相关结果
+ * （如"帮我联网查下小米的股票价格"会返回"帮"的字典条目），
+ * 所以先让当前模型提取关键词（短的非流式调用）；失败时回退到去掉语气词的原句。
+ */
+async function rewriteSearchQuery(latestQuery: string): Promise<string> {
+  const raw = latestQuery.trim();
+  const fallback = cleanSearchQuery(raw);
+  const model = getChatModelName();
+  const base = getChatBaseUrl();
+  if (!raw || !model || !base) return fallback;
+
+  const apiKey = getSetting("VLLM_API_KEY");
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (apiKey && apiKey !== "EMPTY") headers.Authorization = `Bearer ${apiKey}`;
+
+  try {
+    const res = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        stream: false,
+        max_tokens: 80,
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是搜索查询改写器。把用户的消息改写成适合网页搜索引擎的简短关键词" +
+              "（保留实体、数字、时间，去掉请求语气词）。只输出关键词本身，不要解释。",
+          },
+          { role: "user", content: raw },
+        ],
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return fallback;
+    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const rewritten = (json.choices?.[0]?.message?.content ?? "")
+      .trim()
+      .replace(/^["'""''\s]+|["'""''\s]+$/g, "");
+    if (!rewritten || rewritten.length > 100 || rewritten === raw) return fallback;
+    return rewritten;
+  } catch {
+    return fallback;
+  }
+}
+
 /**
  * 组装发给模型的完整 payload：
  * - 历史消息转 OpenAI 格式；
  * - 附件文件内容以 text part 追加到最后一条 user 消息（仅注入上下文，不落库）；
- * - 开启联网检索时，先搜索用户最新提问，把结果作为 system 消息注入（不落库）。
+ * - 开启联网检索时，先改写查询词再搜索用户最新提问，把结果作为 system 消息注入（不落库）。
  */
 async function buildPayloadMessages(
   conversationId: number,
@@ -576,7 +666,8 @@ async function buildPayloadMessages(
   }
 
   if (opts.webSearch && latestQuery.trim()) {
-    const search = await webSearch(latestQuery);
+    const searchQuery = await rewriteSearchQuery(latestQuery);
+    const search = await webSearch(searchQuery);
     if (search.ok && search.results.length > 0) {
       const context = search.results
         .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`)
@@ -584,7 +675,7 @@ async function buildPayloadMessages(
       payloadMessages.unshift({
         role: "system",
         content:
-          `联网检索已开启。下面是针对用户最新提问的搜索结果（${search.provider}），` +
+          `联网检索已开启。下面是针对用户最新提问的搜索结果（${search.provider}，搜索词：${searchQuery}），` +
           `请结合这些信息回答，并在回答中适当标注来源链接：\n\n${context}`,
       });
     } else if (search.error) {

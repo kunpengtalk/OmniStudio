@@ -438,13 +438,16 @@ function CloudProviderPanel({
       )
     : allProviders;
 
-  const modelOptions = Array.from(
-    new Set([...(selected?.models ?? []), ...cloudModels.map((m) => m.id)]),
-  );
-  const modelIsKnown = modelOptions.includes(modelName);
+  // 模型列表 = 已保存的云端模型 ∪ 厂商预设模型（点击行即设为当前模型，勾选标记当前项）
+  const displayModels = useMemo(() => {
+    const merged = new Map<string, CloudModelEntry>(cloudModels.map((m) => [m.id, m]));
+    for (const id of selected?.models ?? []) if (!merged.has(id)) merged.set(id, { id });
+    return Array.from(merged.values());
+  }, [cloudModels, selected]);
+  const removableIds = new Set(cloudModels.map((m) => m.id));
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
@@ -456,16 +459,16 @@ function CloudProviderPanel({
           </p>
         </div>
         {!isLocal && (
-          <span className="flex shrink-0 items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+          <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
             <CheckIcon className="size-3.5" /> 云服务已启用
           </span>
         )}
       </div>
 
-      {/* 三栏：厂商列表 / 配置表单 / 新增模型 */}
-      <div className="flex items-stretch gap-5">
-        {/* 左栏：厂商列表（带搜索） */}
-        <div className="flex w-52 shrink-0 flex-col gap-2">
+      {/* 两栏：厂商源列表 / 配置详情 */}
+      <div className="flex items-stretch gap-6">
+        {/* 左栏：厂商列表（macOS 源列表风格，带搜索） */}
+        <div className="flex w-64 shrink-0 flex-col gap-2.5">
           <div className="relative">
             <Label htmlFor="cloud-provider-search" className="sr-only">
               搜索厂商
@@ -475,11 +478,11 @@ function CloudProviderPanel({
               placeholder="搜索厂商"
               value={vendorSearch}
               onChange={(e) => setVendorSearch(e.target.value)}
-              className="h-7 pl-7 text-[11px]"
+              className="h-8 rounded-lg pl-8 text-xs"
             />
-            <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 opacity-50" />
+            <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 opacity-50" />
           </div>
-          <div className="flex max-h-[520px] flex-col gap-0.5 overflow-y-auto pr-1">
+          <div className="flex max-h-[560px] flex-col gap-0.5 overflow-y-auto rounded-xl bg-muted/40 p-1.5">
             {filteredProviders.map((p) => {
               const isCustomOpt = p.id === "custom";
               const active = isCustom ? isCustomOpt : selected?.id === p.id;
@@ -489,7 +492,7 @@ function CloudProviderPanel({
                   type="button"
                   onClick={() => pickProvider(p.id)}
                   className={cn(
-                    "flex items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors",
+                    "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
                     active
                       ? "bg-primary/10 text-primary"
                       : "text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -497,16 +500,16 @@ function CloudProviderPanel({
                 >
                   <span
                     className={cn(
-                      "flex size-6 shrink-0 items-center justify-center rounded-md text-[10px] font-semibold",
+                      "flex size-8 shrink-0 items-center justify-center rounded-lg text-xs font-semibold",
                       active ? "bg-primary/15" : "bg-muted",
                     )}
                   >
-                    {isCustomOpt ? <PlusIcon className="size-3.5" /> : p.label.charAt(0)}
+                    {isCustomOpt ? <PlusIcon className="size-4" /> : p.label.charAt(0)}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-xs font-medium">{p.label}</span>
+                    <span className="block truncate text-[13px] font-medium">{p.label}</span>
                     {p.vendor && (
-                      <span className="block truncate text-[10px] opacity-70">{p.vendor}</span>
+                      <span className="block truncate text-[11px] opacity-60">{p.vendor}</span>
                     )}
                   </span>
                   {p.id === savedId && (
@@ -516,13 +519,13 @@ function CloudProviderPanel({
               );
             })}
             {filteredProviders.length === 0 && (
-              <p className="py-4 text-center text-[11px] text-muted-foreground">无匹配厂商</p>
+              <p className="py-6 text-center text-xs text-muted-foreground">无匹配厂商</p>
             )}
           </div>
           <Button
             variant="outline"
             size="sm"
-            className="w-full border-dashed text-xs"
+            className="w-full border-dashed"
             onClick={() => setShowAddProvider(true)}
           >
             <PlusIcon data-icon="inline-start" className="size-3.5" />
@@ -530,21 +533,26 @@ function CloudProviderPanel({
           </Button>
         </div>
 
-        {/* 右栏：选中服务商的详情（名称 + 启用开关 / API 密钥 / API 地址 / 当前模型 / 模型列表） */}
-        <div className="flex min-w-0 flex-1 flex-col gap-4">
-          {/* 头部：名称 + 信息 + 启用开关 */}
-          <div className="flex items-center gap-1.5">
-            <p className="text-base font-semibold">
-              {isCustom ? "自定义服务商" : selected?.label}
-            </p>
-            {(selected?.vendor || selected?.note) && (
-              <span
-                className="flex items-center"
-                title={[selected?.vendor, selected?.note].filter(Boolean).join(" · ")}
-              >
-                <InfoIcon className="size-3.5 text-muted-foreground/50" />
-              </span>
-            )}
+        {/* 右栏：选中服务商的详情（头部 + 连接配置分组卡片 / 模型列表卡片） */}
+        <div className="flex min-w-0 flex-1 flex-col gap-5">
+          {/* 头部：大图标 + 名称 + 厂商信息 + 启用开关 */}
+          <div className="flex items-center gap-3.5">
+            <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted text-base font-semibold">
+              {isCustom ? <PlusIcon className="size-5" /> : selected?.label.charAt(0)}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-base font-semibold">
+                {isCustom ? "自定义服务商" : selected?.label}
+              </p>
+              {(selected?.vendor || selected?.note) && (
+                <p
+                  className="truncate text-xs text-muted-foreground"
+                  title={[selected?.vendor, selected?.note].filter(Boolean).join(" · ")}
+                >
+                  {[selected?.vendor, selected?.note].filter(Boolean).join(" · ")}
+                </p>
+              )}
+            </div>
             <button
               type="button"
               role="switch"
@@ -565,7 +573,10 @@ function CloudProviderPanel({
             </button>
           </div>
 
-          {/* API 密钥 + 检测 */}
+          {/* 连接配置：分组卡片（API 密钥 / API 地址 / 当前模型） */}
+          <div className="divide-y rounded-xl border bg-card shadow-sm">
+            {/* API 密钥 + 检测 */}
+            <div className="px-4 py-3.5">
           <div className="flex items-end gap-3">
             <div className="min-w-0 flex-1">
               <Label className="mb-1 block text-xs">
@@ -620,7 +631,7 @@ function CloudProviderPanel({
           {(testMutation.isSuccess || testMutation.isError) && (
             <p
               className={cn(
-                "flex items-center gap-1.5 text-xs",
+                "mt-2 flex items-center gap-1.5 text-xs",
                 testMutation.data?.connected
                   ? "text-emerald-600 dark:text-emerald-400"
                   : "text-destructive",
@@ -638,8 +649,10 @@ function CloudProviderPanel({
             </p>
           )}
 
-          {/* API 地址 + 添加端点 */}
-          <div>
+            </div>
+
+            {/* API 地址 + 添加端点 */}
+            <div className="px-4 py-3.5">
             <div className="mb-1 flex items-center gap-1.5">
               <Label className="text-xs">
                 API 地址
@@ -693,59 +706,18 @@ function CloudProviderPanel({
               </div>
             ))}
           </div>
-
-          {/* 当前使用的模型 */}
-          <div>
-            <Label className="mb-1 block text-xs">当前模型</Label>
-            {modelOptions.length > 0 ? (
-              <>
-                <Select
-                  value={modelIsKnown ? modelName : "__manual__"}
-                  onValueChange={(v) => {
-                    if (v !== "__manual__") updateField("VLLM_MODEL_NAME", v);
-                  }}
-                >
-                  <SelectTrigger className="h-8 w-full text-xs">
-                    <SelectValue placeholder="选择模型" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {modelOptions.map((m) => (
-                      <SelectItem key={m} value={m}>
-                        {m}
-                      </SelectItem>
-                    ))}
-                    <SelectItem value="__manual__">手动输入…</SelectItem>
-                  </SelectContent>
-                </Select>
-                {!modelIsKnown && (
-                  <Input
-                    placeholder="e.g. deepseek-chat"
-                    value={modelName}
-                    onChange={(e) => updateField("VLLM_MODEL_NAME", e.target.value)}
-                    className="mt-1.5 h-8 font-mono text-xs"
-                  />
-                )}
-              </>
-            ) : (
-              <Input
-                placeholder="e.g. deepseek-chat"
-                value={modelName}
-                onChange={(e) => updateField("VLLM_MODEL_NAME", e.target.value)}
-                className="h-8 font-mono text-xs"
-              />
-            )}
           </div>
 
           {!isCustom && selected?.note && (
-            <p className="rounded-md bg-muted/60 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+            <p className="rounded-lg bg-muted/60 px-3 py-2 text-[11px] text-muted-foreground">
               {selected.note}
             </p>
           )}
 
           {/* 模型列表：获取模型列表 + 新增 */}
-          <div className="flex flex-col gap-2 border-t pt-3">
-            <div className="flex items-center gap-2">
-              <p className="text-xs font-medium">模型</p>
+          <div className="rounded-xl border bg-card shadow-sm">
+            <div className="flex items-center gap-2 border-b px-4 py-2.5">
+              <p className="text-[13px] font-medium">模型</p>
               <div className="ml-auto flex items-center gap-2">
                 <Button
                   variant="ghost"
@@ -772,6 +744,7 @@ function CloudProviderPanel({
               </div>
             </div>
 
+            <div className="flex flex-col gap-2 p-3">
             {syncMutation.isSuccess && !syncMutation.data?.ok && (
               <p className="flex items-start gap-1 text-[11px] text-destructive">
                 <XCircleIcon className="mt-0.5 size-3 shrink-0" />
@@ -787,26 +760,21 @@ function CloudProviderPanel({
               </p>
             )}
 
-            {cloudModels.length === 0 ? (
+            {displayModels.length === 0 ? (
               <p className="rounded-md border border-dashed px-3 py-4 text-center text-[11px] text-muted-foreground">
                 暂无模型，点「获取模型列表」拉取，或点「+」手动添加
               </p>
             ) : (
               <div className="flex flex-col gap-1">
-                {cloudModels.map((entry) => {
-                  const hue =
-                    [...entry.id].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7) || 210;
+                {displayModels.map((entry) => {
                   return (
                     <div
                       key={entry.id}
                       title={entry.remark || entry.id}
-                      className="flex cursor-pointer items-center gap-2 rounded-md border px-3 py-1.5 transition-colors hover:bg-muted/60"
+                      className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 transition-colors hover:bg-muted/60"
                       onClick={() => updateField("VLLM_MODEL_NAME", entry.id)}
                     >
-                      <span
-                        className="flex size-5 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold text-white"
-                        style={{ backgroundColor: `hsl(${hue} 55% 45%)` }}
-                      >
+                      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[9px] font-semibold text-muted-foreground">
                         {entry.id.charAt(0).toUpperCase()}
                       </span>
                       <span className="min-w-0 flex-1 truncate text-xs">
@@ -828,22 +796,25 @@ function CloudProviderPanel({
                       {modelName === entry.id && (
                         <CheckIcon className="size-3.5 shrink-0 text-primary" />
                       )}
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        className="h-5 w-5 shrink-0 text-muted-foreground"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          removeModel(entry.id);
-                        }}
-                      >
-                        <MinusIcon className="size-3" />
-                      </Button>
+                      {removableIds.has(entry.id) && (
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="h-5 w-5 shrink-0 text-muted-foreground"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeModel(entry.id);
+                          }}
+                        >
+                          <MinusIcon className="size-3" />
+                        </Button>
+                      )}
                     </div>
                   );
                 })}
               </div>
             )}
+            </div>
           </div>
         </div>
       </div>
@@ -1422,7 +1393,7 @@ function GeneralSettings({ form, updateField, saveMutation }: { form: SettingsFo
           <div>
             <Label className="mb-1 text-xs">{t("settings.webSearch.provider")}</Label>
             <Select
-              value={form.WEB_SEARCH_PROVIDER ?? "duckduckgo"}
+              value={form.WEB_SEARCH_PROVIDER ?? "bing"}
               onValueChange={(v) => updateField("WEB_SEARCH_PROVIDER", v)}
             >
               <SelectTrigger className="h-8 w-full text-xs">
@@ -1432,6 +1403,7 @@ function GeneralSettings({ form, updateField, saveMutation }: { form: SettingsFo
                 <SelectItem value="bing">{t("settings.webSearch.bing")}</SelectItem>
                 <SelectItem value="duckduckgo">{t("settings.webSearch.duckduckgo")}</SelectItem>
                 <SelectItem value="tavily">{t("settings.webSearch.tavily")}</SelectItem>
+                <SelectItem value="brave">{t("settings.webSearch.brave")}</SelectItem>
               </SelectContent>
             </Select>
           </div>

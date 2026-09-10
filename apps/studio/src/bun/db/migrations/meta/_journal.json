@@ -57,6 +57,20 @@
       "when": 1788957798073,
       "tag": "0007_add_image_records",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1789819200000,
+      "tag": "0008_add_message_reasoning",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1789905600000,
+      "tag": "0009_add_translation_records",
+      "breakpoints": true
     }
   ]
 }

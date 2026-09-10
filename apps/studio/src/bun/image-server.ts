@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, renameSync, statSync } from "fs";
 import path from "path";
-import { Utils } from "electrobun/bun";
 import { IMAGE_SERVER_PORT } from "../shared/server-info";
+import { getDataDir } from "./paths";
 
 // Dev builds run with the process CWD inside the app bundle, which electrobun
 // regenerates on every rebuild — a CWD-relative data dir (and the audio/images
@@ -19,7 +19,7 @@ function migrateLegacyCwdDir(legacyName: string, dest: string): void {
 }
 
 export function getImagesBaseDir(): string {
-  const base = path.join(Utils.paths.userData, "images");
+  const base = getDataDir("images");
   migrateLegacyCwdDir("vllm-studio-images", base);
   migrateLegacyCwdDir("kunpengtalk-studio-images", base);
   migrateLegacyCwdDir("omni-studio-images", base);
@@ -27,7 +27,7 @@ export function getImagesBaseDir(): string {
 }
 
 export function getUploadsBaseDir(): string {
-  const base = path.join(Utils.paths.userData, "uploads");
+  const base = getDataDir("uploads");
   migrateLegacyCwdDir("vllm-studio-uploads", base);
   migrateLegacyCwdDir("kunpengtalk-studio-uploads", base);
   migrateLegacyCwdDir("omni-studio-uploads", base);

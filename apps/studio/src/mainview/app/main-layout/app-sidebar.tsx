@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  MessageSquareIcon,
   MicIcon,
   ImageIcon,
   ScanTextIcon,
@@ -48,6 +47,9 @@ import { useChatStore } from "@stores/chat";
 import { useVoiceStore, type VoiceTab } from "@stores/voice";
 import { useImageStore } from "@stores/image";
 import { useT } from "@stores/ui-lang";
+import { useTranslateStore } from "@stores/translate";
+import type { TranslationRecordRow } from "@/bun/translate";
+import { translationLangShort } from "@/shared/translate";
 import { Button } from "@ui/button";
 import {
   Dialog,
@@ -62,15 +64,6 @@ import { cn } from "@/mainview/lib/utils";
 const PAGE_SIZE = 30;
 const RING_SIZE = 14;
 const RING_STROKE = 2;
-
-const APP_IDS: AppId[] = ["chat", "voice", "image", "ocr", "translate"];
-const APP_ICONS: Record<AppId, React.ReactNode> = {
-  chat: <MessageSquareIcon className="size-4" />,
-  voice: <MicIcon className="size-4" />,
-  image: <ImageIcon className="size-4" />,
-  ocr: <ScanTextIcon className="size-4" />,
-  translate: <LanguagesIcon className="size-4" />,
-};
 
 function DocStatusDot({
   status,
@@ -702,57 +695,157 @@ function ImageRecordList() {
   );
 }
 
-function TranslateSidebarGroup() {
+function formatRecordTime(ts: number): string {
+  return new Date(ts).toLocaleString([], {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function TranslateRecordList() {
   const t = useT();
+  const queryClient = useQueryClient();
+  const activeRecord = useTranslateStore((s) => s.activeRecord);
+  const selectRecord = useTranslateStore((s) => s.selectRecord);
+  const clearActive = useTranslateStore((s) => s.clearActive);
+  const [confirmDelete, setConfirmDelete] = useState<TranslationRecordRow | null>(null);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["translation-records"],
+    queryFn: () => rpcClient.listTranslationRecords(undefined),
+  });
+  const records = data?.records ?? [];
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => rpcClient.deleteTranslationRecord({ id }),
+    onSuccess: (_res, id) => {
+      setConfirmDelete(null);
+      if (activeRecord?.id === id) clearActive();
+      queryClient.invalidateQueries({ queryKey: ["translation-records"] });
+    },
+  });
+
   return (
     <SidebarGroup className="min-h-0 flex-1">
       <SidebarGroupLabel>
-        <LanguagesIcon className="size-3.5" />
-        {t("apps.translate")}
+        <span className="flex items-center gap-1.5">
+          <LanguagesIcon className="size-3.5" />
+          {t("translate.history.title")}
+        </span>
+        <SidebarMenuBadge>
+          <Badge variant="secondary" className="h-5 text-[10px]">
+            {records.length}
+          </Badge>
+        </SidebarMenuBadge>
       </SidebarGroupLabel>
-      <div className="px-3 py-8 text-center text-xs text-muted-foreground">
-        {t("translate.sidebarHint")}
-      </div>
-    </SidebarGroup>
-  );
-}
 
-function AppSwitcher() {
-  const t = useT();
-  const { activeApp, setActiveApp } = useAppStore();
-  const setRoute = useRouter((s) => s.setRoute);
+      <ScrollArea className="min-h-0 flex-1">
+        <SidebarMenu className="gap-1">
+          {isLoading ? (
+            <div className="flex justify-center py-6">
+              <Spinner className="size-3.5" />
+            </div>
+          ) : records.length === 0 ? (
+            <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+              {t("translate.history.empty")}
+            </div>
+          ) : (
+            records.map((r) => (
+              <SidebarMenuItem key={r.id} className="group/translate px-1">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => selectRecord(r)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") selectRecord(r);
+                  }}
+                  className={cn(
+                    "flex w-full cursor-pointer flex-col gap-1 rounded-md border p-1.5 text-left outline-none transition-colors",
+                    activeRecord?.id === r.id
+                      ? "border-primary/60 bg-primary/5"
+                      : "hover:bg-muted/60 focus-visible:bg-muted/60",
+                  )}
+                >
+                  <span className="flex items-center gap-1.5">
+                    <span className="shrink-0 text-[10px] font-semibold tracking-wide text-primary/70 tabular-nums">
+                      {translationLangShort(r.sourceLang)} → {translationLangShort(r.targetLang)}
+                    </span>
+                    <span className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground/70">
+                      {formatRecordTime(r.createdAt)}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={deleteMutation.isPending}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmDelete(r);
+                      }}
+                      title={t("common.delete")}
+                      className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-destructive group-hover/translate:opacity-100"
+                    >
+                      <Trash2Icon className="size-3.5" />
+                    </button>
+                  </span>
+                  <span
+                    className="line-clamp-2 text-[11px] leading-snug text-foreground/80"
+                    title={r.text}
+                  >
+                    {r.text}
+                  </span>
+                  {r.result && (
+                    <span
+                      className="line-clamp-1 text-[10px] leading-snug text-muted-foreground"
+                      title={r.result}
+                    >
+                      {r.result}
+                    </span>
+                  )}
+                </div>
+              </SidebarMenuItem>
+            ))
+          )}
+        </SidebarMenu>
+      </ScrollArea>
 
-  const handleSelect = (app: AppId) => {
-    setActiveApp(app);
-    useChatStore.getState().setActiveConversation(null);
-    useChatStore.getState().setActiveMessages([]);
-    useChatStore.getState().setStreaming(false);
-    setRoute({ path: "index" });
-  };
-
-  return (
-    <SidebarGroup className="gap-0.5 px-0 py-0">
-      <div className="grid grid-cols-5 gap-1">
-        {APP_IDS.map((app) => {
-          const isActive = activeApp === app;
-          return (
-            <button
-              key={app}
-              type="button"
-              onClick={() => handleSelect(app)}
-              className={cn(
-                "flex flex-col items-center gap-1 rounded-lg px-1 py-2 text-[11px] transition-colors",
-                isActive
-                  ? "bg-primary/10 text-primary"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              {APP_ICONS[app]}
-              <span className="truncate leading-none">{t(`apps.${app}`)}</span>
-            </button>
-          );
-        })}
-      </div>
+      {confirmDelete && (
+        <Dialog
+          open={!!confirmDelete}
+          onOpenChange={(open) => {
+            if (!open) setConfirmDelete(null);
+          }}
+        >
+          <DialogContent className="max-w-sm">
+            <DialogHeader>
+              <DialogTitle>{t("translate.history.deleteTitle")}</DialogTitle>
+              <DialogDescription>{t("translate.history.deleteDesc")}</DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setConfirmDelete(null)}
+              >
+                {t("common.cancel")}
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                disabled={deleteMutation.isPending}
+                onClick={() => deleteMutation.mutate(confirmDelete.id)}
+              >
+                {deleteMutation.isPending ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <Trash2Icon className="size-3.5" />
+                )}
+                {t("common.delete")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </SidebarGroup>
   );
 }
@@ -763,7 +856,7 @@ export function AppSidebar() {
   const { setRoute } = useRouter();
 
   return (
-    <SidebarRoot collapsible="offcanvas" side="left" className="border-r">
+    <SidebarRoot collapsible="none" side="left" className="border-r">
       <div className="electrobun-webkit-app-region-drag h-8 w-full shrink-0" />
 
       <SidebarHeader>
@@ -772,8 +865,6 @@ export function AppSidebar() {
             <span className="font-semibold tracking-tight">{t("chat.aimStudio")}</span>
           </SidebarMenuItem>
         </SidebarMenu>
-
-        <AppSwitcher />
       </SidebarHeader>
 
       <SidebarContent>
@@ -784,7 +875,7 @@ export function AppSidebar() {
         ) : activeApp === "image" ? (
           <ImageRecordList />
         ) : activeApp === "translate" ? (
-          <TranslateSidebarGroup />
+          <TranslateRecordList />
         ) : (
           <ConversationRecordList app={activeApp} />
         )}

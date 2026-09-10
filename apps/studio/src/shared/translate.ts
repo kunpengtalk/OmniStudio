@@ -45,3 +45,10 @@ export function translationLangLabel(code: string): string {
   const lang = TRANSLATION_LANGUAGES.find((l) => l.code === code);
   return lang ? `${lang.label} (${lang.nativeLabel})` : code;
 }
+
+/** 语言代码缩写（用于历史记录列表的语言对徽标）：zh-CN → ZH、auto → AUTO。 */
+export function translationLangShort(code: string): string {
+  if (code === TRANSLATION_SOURCE_AUTO) return "AUTO";
+  const base = code.split("-")[0] ?? code;
+  return base.toUpperCase();
+}

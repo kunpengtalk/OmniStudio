@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "fs";
 import path from "path";
-import { Utils } from "electrobun/bun";
 import { WHISPER_CPP_RELEASE_TAG, WHISPER_CPP_REPO } from "../shared/whispercpp";
+import { getDataDir } from "./paths";
 
 /**
  * whisper.cpp 本地识别引擎（whisper-cli / whisper-server）的一键安装。
@@ -21,7 +21,7 @@ export type WhisperEngineInfo = {
 };
 
 function getEnginesDir(): string {
-  return path.join(Utils.paths.userData, "engines", "whispercpp");
+  return getDataDir("engines", "whispercpp");
 }
 
 /** 引擎安装根目录：conda 布局为 bin/ + lib/；Linux/Windows 资产直接在根下。 */

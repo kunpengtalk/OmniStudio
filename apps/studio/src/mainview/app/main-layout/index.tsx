@@ -3,8 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronLeftIcon } from "lucide-react";
 import { DocumentView } from "./document-view";
 
+import { AppRail } from "./app-rail";
 import { AppSidebar } from "./app-sidebar";
-import { SidebarConsumer, SidebarInset, SidebarProvider, SidebarTrigger } from "@ui/sidebar";
+import { SidebarInset, SidebarProvider } from "@ui/sidebar";
 import { rpcClient } from "@lib/rpc";
 import { useRouter } from "@stores/router";
 import { SettingsScreen } from "./settings";
@@ -22,7 +23,6 @@ import { StatusPill } from "@components/status-pill";
 import { ErrorBoundary } from "@components/error-boundary";
 import { useAppStore, type AppId } from "@stores/app";
 import { useUILang } from "@stores/ui-lang";
-import { cn } from "@/mainview/lib/utils";
 
 const renderActiveApp = (activeApp: AppId): ReactNode => {
   switch (activeApp) {
@@ -88,35 +88,25 @@ export function MainLayout() {
 
   return (
     <SidebarProvider className="h-full h-svh! min-h-0!">
+      <AppRail />
       {showSidebar && <AppSidebar />}
       <SidebarInset className="min-w-0 overflow-hidden">
-        <SidebarConsumer>
-          {(state) => (
-            <header
-              className={cn(
-                "electrobun-webkit-app-region-drag flex shrink-0 items-center gap-2 px-4 pb-2 transition-[padding] will-change-[padding]",
-                state === "collapsed" ? "pt-8" : "pt-4",
-              )}
+        <header className="electrobun-webkit-app-region-drag flex shrink-0 items-center gap-2 px-4 pt-4 pb-2">
+          {!showSidebar && (
+            <button
+              type="button"
+              onClick={() => setRoute({ path: "chat" })}
+              className="flex items-center gap-1.5 text-sm font-semibold tracking-tight text-muted-foreground transition-colors hover:text-foreground"
             >
-              {showSidebar ? (
-                <SidebarTrigger className="-ml-1" tooltip="Toggle sidebar" />
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setRoute({ path: "chat" })}
-                  className="flex items-center gap-1.5 text-sm font-semibold tracking-tight text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  <ChevronLeftIcon className="size-4" />
-                  OmniStudio
-                </button>
-              )}
-              <div className="ml-auto flex items-center gap-2">
-                <StatusPill />
-                <DownloadsButton />
-              </div>
-            </header>
+              <ChevronLeftIcon className="size-4" />
+              OmniStudio
+            </button>
           )}
-        </SidebarConsumer>
+          <div className="ml-auto flex items-center gap-2">
+            <StatusPill />
+            <DownloadsButton />
+          </div>
+        </header>
 
         <Outlet />
       </SidebarInset>

@@ -12,7 +12,8 @@ import { useMlxModelDownloadStore } from "../stores/mlx-model-download";
 const knownCompletedIds = new Set<string>();
 
 const rpc = Electroview.defineRPC<AppRPC>({
-  maxRequestTime: 600_000,
+  // 大模型下载（MLX 本地生图可达 30+ GB）耗时可能远超普通请求，放宽上限到 60 分钟。
+  maxRequestTime: 3_600_000,
   handlers: {
     requests: {},
     messages: {
@@ -29,14 +30,15 @@ const rpc = Electroview.defineRPC<AppRPC>({
       serverStatusChanged: ({ status }) => {
         useServerStore.getState().setStatus(status);
       },
-      chatChunk: ({ conversationId, messageId, delta }) => {
-        useChatStore.getState().appendChunk(conversationId, messageId, delta);
+      chatChunk: ({ conversationId, messageId, delta, kind }) => {
+        useChatStore.getState().appendChunk(conversationId, messageId, delta, kind ?? "content");
       },
-      chatDone: ({ conversationId, messageId, content, error }) => {
+      chatDone: ({ conversationId, messageId, content, reasoning, error }) => {
         useChatStore.getState().finalizeMessage(
           conversationId,
           messageId,
           content || (error ? `⚠️ ${error}` : ""),
+          reasoning,
         );
         queryClient.invalidateQueries({ queryKey: ["conversations"] });
         queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });

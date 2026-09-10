@@ -118,6 +118,40 @@ async function duckDuckGoSearch(query: string, maxResults: number): Promise<WebS
   return results;
 }
 
+/** Brave Search API（每月 2000 次免费额度，需在 brave.com/search/api 申请 Key）。 */
+async function braveSearch(
+  query: string,
+  maxResults: number,
+  apiKey: string,
+): Promise<WebSearchResult[]> {
+  if (!apiKey) throw new Error("Brave API key is not configured");
+  const res = await fetch(
+    `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`,
+    {
+      headers: {
+        Accept: "application/json",
+        "X-Subscription-Token": apiKey,
+      },
+      signal: AbortSignal.timeout(15_000),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Brave HTTP ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
+  const json = (await res.json()) as {
+    web?: { results?: { title?: string; url?: string; description?: string }[] };
+  };
+  return (json.web?.results ?? [])
+    .filter((r) => r.url)
+    .slice(0, maxResults)
+    .map((r) => ({
+      title: r.title ?? r.url ?? "",
+      url: r.url ?? "",
+      snippet: r.description ?? "",
+    }));
+}
+
 /** Tavily 搜索 API（需要免费申请的 API Key）。 */
 async function tavilySearch(
   query: string,
@@ -157,7 +191,10 @@ export async function webSearch(
   opts?: { provider?: string; maxResults?: number; apiKey?: string },
 ): Promise<WebSearchOutcome> {
   const config = getSearchConfig();
-  const provider = opts?.provider ?? config.provider;
+  const requested = opts?.provider ?? config.provider;
+  // 未知值一律回落到 bing，且返回的 provider 反映实际使用的服务。
+  const provider =
+    requested === "tavily" || requested === "duckduckgo" || requested === "brave" ? requested : "bing";
   const maxResults = opts?.maxResults ?? config.maxResults;
   const apiKey = opts?.apiKey ?? config.apiKey;
   const trimmed = query.trim();
@@ -169,7 +206,9 @@ export async function webSearch(
         ? await tavilySearch(trimmed, maxResults, apiKey)
         : provider === "duckduckgo"
           ? await duckDuckGoSearch(trimmed, maxResults)
-          : await bingSearch(trimmed, maxResults);
+          : provider === "brave"
+            ? await braveSearch(trimmed, maxResults, apiKey)
+            : await bingSearch(trimmed, maxResults);
     return { ok: results.length > 0, provider, results, error: results.length === 0 ? "No results" : undefined };
   } catch (e) {
     return {

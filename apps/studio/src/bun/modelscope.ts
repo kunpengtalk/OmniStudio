@@ -1,7 +1,7 @@
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "fs";
 import path from "path";
-import { Utils } from "electrobun/bun";
 import { isModelWeightExt, safeRepoId } from "../shared/modelscope";
+import { getDataDir } from "./paths";
 
 export { isModelWeightExt, safeRepoId };
 
@@ -47,7 +47,7 @@ function fileKind(name: string): ModelScopeFile["kind"] {
  * together with the downloaded models. Always use userData so data survives.
  */
 export function getModelsBaseDir(): string {
-  const base = path.join(Utils.paths.userData, "models");
+  const base = getDataDir("models");
   migrateLegacyCwdDir("vllm-studio-models", base);
   migrateLegacyCwdDir("kunpengtalk-studio-models", base);
   migrateLegacyCwdDir("omni-studio-models", base);

@@ -10,8 +10,11 @@ import {
   TrashIcon,
   ImageIcon,
   ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
   CircleIcon,
   CpuIcon,
+  HistoryIcon,
   Maximize2Icon,
   LayersIcon,
   PaletteIcon,
@@ -19,6 +22,16 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
+import { ScrollArea } from "@ui/scroll-area";
+import { Spinner } from "@ui/spinner";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@ui/dialog";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { Textarea } from "@ui/textarea";
@@ -317,6 +330,207 @@ function Bubble({ style }: { style: CSSProperties }) {
 }
 
 // ---------------------------------------------------------------------------
+// 最近成功生成的图片条（结果区底部）+ 更多入口
+// ---------------------------------------------------------------------------
+
+const RECENT_COUNT = 6;
+
+function RecentStrip({
+  records,
+  onOpenHistory,
+}: {
+  records: ImageRecordRow[];
+  onOpenHistory: () => void;
+}) {
+  const t = useT();
+  const setFocusRecordId = useImageStore((s) => s.setFocusRecordId);
+  const recent = records.filter((r) => r.status === "done" && r.imageUrl).slice(0, RECENT_COUNT);
+  if (recent.length === 0) return null;
+  return (
+    <div className="flex shrink-0 items-center gap-3 border-t bg-card/40 px-6 py-3">
+      <span className="flex shrink-0 items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+        <HistoryIcon className="size-3.5" />
+        {t("image.recent.title")}
+      </span>
+      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
+        {recent.map((r) => (
+          <button
+            key={r.id}
+            type="button"
+            title={r.prompt ?? undefined}
+            onClick={() => setFocusRecordId(r.id)}
+            className="size-14 shrink-0 overflow-hidden rounded-lg border transition hover:border-primary/60 hover:ring-2 hover:ring-primary/30"
+          >
+            <img
+              src={r.imageUrl!}
+              alt={r.prompt ?? ""}
+              loading="lazy"
+              className="size-full object-cover"
+            />
+          </button>
+        ))}
+      </div>
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-7 shrink-0 gap-1 text-[11px]"
+        onClick={onOpenHistory}
+      >
+        {t("image.recent.more")}
+        <ChevronRightIcon className="size-3.5" />
+      </Button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 全部历史页：所有生成过的图片 + 提示词
+// ---------------------------------------------------------------------------
+
+function HistoryCard({ record, onDelete }: { record: ImageRecordRow; onDelete: () => void }) {
+  const t = useT();
+  return (
+    <div className="group flex flex-col gap-2">
+      <div className="relative aspect-square overflow-hidden rounded-xl border bg-muted/40">
+        <img
+          src={record.imageUrl!}
+          alt={record.prompt ?? ""}
+          loading="lazy"
+          className="size-full object-cover"
+        />
+        {record.width && record.height && (
+          <span className="absolute left-2 top-2 rounded-md bg-black/55 px-1.5 py-0.5 text-[9px] font-medium tabular-nums text-white">
+            {record.width}×{record.height}
+          </span>
+        )}
+        <div className="absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+          <Button
+            variant="secondary"
+            size="icon-sm"
+            tooltip={t("image.result.download")}
+            onClick={() => downloadImage(record.imageUrl!, record)}
+            className="bg-black/50 text-white hover:bg-black/70"
+          >
+            <DownloadIcon className="size-3.5" />
+          </Button>
+          <Button
+            variant="secondary"
+            size="icon-sm"
+            tooltip={t("image.result.delete")}
+            onClick={onDelete}
+            className="bg-black/50 text-white hover:bg-black/70"
+          >
+            <TrashIcon className="size-3.5" />
+          </Button>
+        </div>
+      </div>
+      <p
+        className="line-clamp-2 min-h-8 text-[11px] leading-snug text-foreground/85"
+        title={record.prompt ?? undefined}
+      >
+        {record.prompt || t("image.error")}
+      </p>
+      <p className="-mt-1 flex items-center gap-1 text-[10px] tabular-nums text-muted-foreground">
+        <span className="truncate">{formatTime(record.createdAt)}</span>
+        {record.model && (
+          <>
+            <span className="shrink-0">·</span>
+            <span className="truncate">{record.model}</span>
+          </>
+        )}
+      </p>
+    </div>
+  );
+}
+
+function HistoryScreen() {
+  const t = useT();
+  const setView = useImageStore((s) => s.setView);
+  const queryClient = useQueryClient();
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["image-records"],
+    queryFn: () => rpcClient.listImageRecords(undefined),
+  });
+  const [toDelete, setToDelete] = useState<ImageRecordRow | null>(null);
+  const del = useMutation({
+    mutationFn: (id: number) => rpcClient.deleteImageRecord({ id }),
+    onSuccess: () => {
+      setToDelete(null);
+      queryClient.invalidateQueries({ queryKey: ["image-records"] });
+    },
+  });
+  const records = (data?.records ?? []).filter((r) => r.status === "done" && r.imageUrl);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center gap-2.5 border-b px-5 py-3">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          tooltip={t("common.back")}
+          onClick={() => setView("generate")}
+        >
+          <ChevronLeftIcon className="size-4" />
+        </Button>
+        <h1 className="text-sm font-semibold">{t("image.history.title")}</h1>
+        <Badge variant="secondary" className="h-5 text-[10px]">
+          {records.length}
+        </Badge>
+      </div>
+
+      {isLoading ? (
+        <div className="flex flex-1 items-center justify-center">
+          <Spinner className="size-4" />
+        </div>
+      ) : records.length === 0 ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
+          <div className="flex size-20 items-center justify-center rounded-2xl bg-primary/15">
+            <ImageIcon className="size-9 text-primary" />
+          </div>
+          <p className="text-lg font-medium">{t("image.history.empty")}</p>
+        </div>
+      ) : (
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="grid grid-cols-2 gap-x-5 gap-y-6 p-5 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+            {records.map((r) => (
+              <HistoryCard key={r.id} record={r} onDelete={() => setToDelete(r)} />
+            ))}
+          </div>
+        </ScrollArea>
+      )}
+
+      <Dialog open={!!toDelete} onOpenChange={(open) => !open && setToDelete(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("image.history.deleteTitle")}</DialogTitle>
+            <DialogDescription>{t("image.history.deleteDesc")}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setToDelete(null)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={del.isPending}
+              onClick={() => toDelete && del.mutate(toDelete.id)}
+            >
+              {del.isPending ? (
+                <Loader2Icon data-icon="inline-start" className="animate-spin" />
+              ) : (
+                <TrashIcon data-icon="inline-start" />
+              )}
+              {t("common.delete")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 生图 Tab
 // ---------------------------------------------------------------------------
 
@@ -324,6 +538,7 @@ function GenerateTab() {
   const t = useT();
   const queryClient = useQueryClient();
   const focusRecordId = useImageStore((s) => s.focusRecordId);
+  const setView = useImageStore((s) => s.setView);
 
   const [prompt, setPrompt] = useState("");
   const [negative, setNegative] = useState("");
@@ -422,6 +637,13 @@ function GenerateTab() {
     queryKey: ["mlx-downloaded-models"],
     queryFn: () => rpcClient.getDownloadedMlxModels(),
     enabled: backend === "mlx",
+    // 下载可能超过 RPC 超时（十几分钟 vs 大模型几十 GB），进度/完成消息也未必可靠，
+    // 这里兜底轮询：只要有下载在进行，就每 2s 拉一次“已下载模型”，
+    // 确保真正下完后 UI 能及时把“下载中”切到“已下载”标识。
+    refetchInterval: (q) => {
+      const dl = useMlxModelDownloadStore.getState().progress?.stage === "downloading";
+      return dl ? 2000 : false;
+    },
   });
   const mlxDownloaded = new Set(mlxDownloadedData?.downloaded ?? []);
   const modelProgress = useMlxModelDownloadStore((s) => s.progress);
@@ -1057,7 +1279,7 @@ function GenerateTab() {
       </aside>
 
       {/* 右侧：结果区 */}
-      <main className="relative min-w-0 flex-1 overflow-hidden">
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
         {/* 右上角：当前结果的悬浮预览卡 */}
         {latest && latest.imageUrl && (
           <div className="absolute right-5 top-5 z-20 w-44 overflow-hidden rounded-xl border bg-card/95 shadow-lg backdrop-blur">
@@ -1090,7 +1312,7 @@ function GenerateTab() {
           </div>
         )}
 
-        <div className="flex h-full min-h-0 items-center justify-center p-8 pt-16">
+        <div className="flex min-h-0 flex-1 items-center justify-center p-8 pt-16">
           {generate.isPending ? (
             <GenLoading prompt={prompt} />
           ) : results?.length ? (
@@ -1109,6 +1331,9 @@ function GenerateTab() {
             </div>
           )}
         </div>
+
+        {/* 底部：最近成功生成的图片 + 更多（全部历史） */}
+        <RecentStrip records={recordsData?.records ?? []} onOpenHistory={() => setView("history")} />
       </main>
     </div>
   );
@@ -1121,6 +1346,10 @@ function GenerateTab() {
 export function ImageScreen() {
   const t = useT();
   const tool = useImageStore((s) => s.tool);
+  const view = useImageStore((s) => s.view);
+
+  // 「更多」进入的全部历史页（含所有图片与提示词）。
+  if (view === "history") return <HistoryScreen />;
 
   if (tool === "upscale" || tool === "batch") {
     return (
