@@ -71,6 +71,13 @@
       "when": 1789905600000,
       "tag": "0009_add_translation_records",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1789992000000,
+      "tag": "0010_add_agent_events",
+      "breakpoints": true
     }
   ]
 }

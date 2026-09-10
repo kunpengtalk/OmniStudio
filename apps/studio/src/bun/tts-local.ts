@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, appendFileSync } from "fs";
 import path from "path";
 import { getSetting, updateSettings } from "./db/settings";
 import { getDataDir } from "./paths";
@@ -8,6 +8,16 @@ import {
   localModelPath,
 } from "./modelscope";
 import { AUDIOCPP_REPO, AUDIOCPP_ENGINE_VERSION } from "../shared/audiocpp";
+
+/** 通话 TTS 调试日志（便于排查无声问题）。 */
+const CALL_TTS_LOG = "/tmp/omni-voicecall.log";
+function callTtsLog(line: string): void {
+  try {
+    appendFileSync(CALL_TTS_LOG, `[${new Date().toISOString()}] ${line}\n`);
+  } catch {
+    // 日志失败不影响主流程
+  }
+}
 import {
   getAudioBaseDir,
   insertVoiceRecord,
@@ -548,7 +558,9 @@ function buildMergedArgs(
   }
 
   const lang = languageCode(opts.language);
-  if (lang && entry.languageSupported !== false) args.push("--language", lang);
+  // Qwen3-TTS 运行时自行从文本检测语言，不接受 --language（会报 unsupported language）。
+  const supportsLangFlag = entry.languageSupported !== false && entry.family !== "qwen3_tts";
+  if (lang && supportsLangFlag) args.push("--language", lang);
 
   return args;
 }
@@ -623,6 +635,79 @@ export async function runTTSLocal(input: {
     audioPath: `audio/${outName}`,
   });
   return voiceRecordToRow(record);
+}
+
+/** 通话可用的本地 TTS 模型，按优先级排序（支持中文且已下载 → 逐个兜底）。 */
+function callLocalCandidates(): TtsLocalModel[] {
+  const downloaded = AUDIOCPP_TTS_CATALOG.filter(
+    (m) => !m.requiresVoiceRef && isModelDownloaded(m),
+  );
+  const supportsZh = (m: TtsLocalModel) => m.languages.some((l) => l.includes("中文"));
+  const activeId = getSetting("TTS_LOCAL_MODEL");
+  const active = downloaded.find((m) => m.id === activeId);
+  const ordered: TtsLocalModel[] = [];
+  if (active && supportsZh(active)) ordered.push(active);
+  for (const id of ["qwen3-tts-1.7b-customvoice", "moss-tts-nano-100m"]) {
+    const m = downloaded.find((x) => x.id === id);
+    if (m && !ordered.includes(m)) ordered.push(m);
+  }
+  for (const m of downloaded) {
+    if (supportsZh(m) && !ordered.includes(m)) ordered.push(m);
+  }
+  for (const m of downloaded) {
+    if (!ordered.includes(m)) ordered.push(m);
+  }
+  return ordered;
+}
+
+/** 用指定模型合成一句（失败返回 null，不抛错）。 */
+async function synthesizeCallOne(
+  entry: TtsLocalModel,
+  text: string,
+  bin: string,
+): Promise<Buffer | null> {
+  const outName = `call-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.wav`;
+  const outPath = path.join(getAudioBaseDir(), outName);
+  const args = buildMergedArgs(entry, text.trim(), outPath, {
+    voice: entry.defaultVoice ?? undefined,
+    language: languageCode(getSetting("ASR_LANG")) || undefined,
+  });
+
+  const proc = Bun.spawn([bin, ...args], { stdout: "pipe", stderr: "pipe" });
+  const stderr =
+    proc.stderr && typeof proc.stderr !== "number"
+      ? await new Response(proc.stderr).text()
+      : "";
+  const code = await proc.exited;
+  if (code !== 0 || !existsSync(outPath) || statSync(outPath).size < 1000) {
+    const size = existsSync(outPath) ? statSync(outPath).size : 0;
+    rmSync(outPath, { force: true });
+    callTtsLog(`synthesize ${entry.id} FAILED code=${code} size=${size} stderr=${stderr.trim().slice(-300)}`);
+    return null;
+  }
+  const buffer = Buffer.from(await Bun.file(outPath).arrayBuffer());
+  rmSync(outPath, { force: true });
+  callTtsLog(`synthesize ${entry.id} OK ${buffer.byteLength}B (${text.length} chars)`);
+  return buffer;
+}
+
+/**
+ * 通话逐句本地合成（不落库）：先用已下载的本地 audio.cpp TTS 模型逐个尝试，
+ * 全部失败才返回 null（由调用方回退到远程 provider / Edge）。
+ * 本地合成无网络往返，首字延迟远低于远程。
+ */
+export async function synthesizeCallLocal(text: string): Promise<Buffer | null> {
+  const bin = await resolveBinary();
+  if (!bin) return null;
+  for (const entry of callLocalCandidates()) {
+    try {
+      const buf = await synthesizeCallOne(entry, text, bin);
+      if (buf) return buf;
+    } catch {
+      // 该模型异常，尝试下一个可用模型。
+    }
+  }
+  return null;
 }
 
 // 清理遗留的模型目录辅助（删除已下载模型文件）。

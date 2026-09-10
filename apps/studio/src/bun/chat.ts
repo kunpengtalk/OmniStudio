@@ -350,6 +350,14 @@ async function streamAssistantReply(opts: {
   conversationId: number;
   assistantId: number;
   payloadMessages: { role: string; content: unknown }[];
+  /** 外部中断信号（实时语音通话的抢话打断），中断时保留已生成的部分并正常收尾。 */
+  signal?: AbortSignal;
+  /** 正文增量回调（不含思考过程），供逐句 TTS 等场景使用。 */
+  onDelta?: (delta: string) => void;
+  /** 附加在时间系统提示词之前的场景系统提示词（如语音通话助手）。 */
+  extraSystem?: string;
+  /** 关闭模型思考模式（llama.cpp Qwen3 等支持），用于要求直接回答的场景。 */
+  disableThinking?: boolean;
 }): Promise<{ ok: boolean; error?: string; content: string }> {
   const { conversationId, assistantId, payloadMessages } = opts;
 
@@ -393,8 +401,14 @@ async function streamAssistantReply(opts: {
 
   const payload = {
     model,
-    messages: [currentTimeSystemMessage(), ...payloadMessages],
+    messages: [
+      ...(opts.extraSystem ? [{ role: "system", content: opts.extraSystem }] : []),
+      currentTimeSystemMessage(),
+      ...payloadMessages,
+    ],
     stream: true,
+    // llama.cpp / Qwen3 等支持：通话等场景要求直接回答，不打思考草稿。
+    ...(opts.disableThinking ? { chat_template_kwargs: { enable_thinking: false } } : {}),
   };
 
   let full = "";
@@ -404,6 +418,7 @@ async function streamAssistantReply(opts: {
     if (!delta) return;
     full += delta;
     emitChunk({ conversationId, messageId: assistantId, delta, kind: "content" });
+    opts.onDelta?.(delta);
   };
   const appendReasoning = (delta: string) => {
     if (!delta) return;
@@ -413,12 +428,15 @@ async function streamAssistantReply(opts: {
 
   const startedAt = performance.now();
   let usage: { prompt_tokens?: number; completion_tokens?: number } | undefined;
+  const requestSignal = opts.signal
+    ? AbortSignal.any([AbortSignal.timeout(600_000), opts.signal])
+    : AbortSignal.timeout(600_000);
   try {
     const res = await fetch(`${base}/v1/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(600_000),
+      signal: requestSignal,
     });
 
     if (!res.ok) {
@@ -480,6 +498,19 @@ async function streamAssistantReply(opts: {
     recordUsage(model, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    // 被外部中断（语音通话抢话打断）：保留已生成的部分内容，不当作错误处理。
+    if (opts.signal?.aborted) {
+      db.update(messages)
+        .set({ content: full, reasoning: reasoning || null })
+        .where(eq(messages.id, assistantId))
+        .run();
+      db.update(conversations)
+        .set({ updatedAt: Date.now() })
+        .where(eq(conversations.id, conversationId))
+        .run();
+      emitDone({ conversationId, messageId: assistantId, content: full, reasoning: reasoning || undefined });
+      return { ok: true, content: full };
+    }
     // 把失败原因持久化到助手消息，避免刷新会话后错误反馈被清空。
     db.update(messages)
       .set({ content: msg ? `⚠️ ${msg}` : "⚠️ Request failed", reasoning: reasoning || null })
@@ -566,6 +597,62 @@ export async function sendMessage(
     conversationId,
     assistantId: assistant.id,
     payloadMessages: await buildPayloadMessages(conversationId, content, opts),
+  });
+  return { ok: result.ok, error: result.error };
+}
+
+/**
+ * 供实时语音通话使用：与 sendMessage 相同的流式回复，但支持外部中断
+ * （AbortSignal，用于抢话打断）与逐字回调（用于逐句 TTS）。
+ * 用户消息由调用方先行落库（这样能拿到真实消息 id 即时展示），因此这里不再插入。
+ */
+export async function streamChatTurn(opts: {
+  conversationId: number;
+  content: string;
+  signal?: AbortSignal;
+  onDelta?: (delta: string) => void;
+  extraSystem?: string;
+  disableThinking?: boolean;
+}): Promise<{ ok: boolean; error?: string }> {
+  const { conversationId, content } = opts;
+  const model = getChatModelName();
+  if (!model) {
+    emitDone({ conversationId, messageId: Date.now(), content: "", error: "No model configured" });
+    return { ok: false, error: "No model configured" };
+  }
+  const base = getChatBaseUrl();
+  if (!base) {
+    emitDone({
+      conversationId,
+      messageId: Date.now(),
+      content: "",
+      error: "No inference server configured",
+    });
+    return { ok: false, error: "No inference server configured" };
+  }
+
+  // 首条消息时用开头做会话标题（与 sendMessage 保持一致）。
+  if (getHistory(conversationId).length === 1) {
+    db.update(conversations)
+      .set({ title: content.trim().slice(0, 40) || "New conversation" })
+      .where(eq(conversations.id, conversationId))
+      .run();
+  }
+
+  const assistant = db
+    .insert(messages)
+    .values({ conversationId, role: "assistant", content: "" })
+    .returning({ id: messages.id })
+    .get();
+
+  const result = await streamAssistantReply({
+    conversationId,
+    assistantId: assistant.id,
+    payloadMessages: await buildPayloadMessages(conversationId, content, {}),
+    signal: opts.signal,
+    onDelta: opts.onDelta,
+    extraSystem: opts.extraSystem,
+    disableThinking: opts.disableThinking,
   });
   return { ok: result.ok, error: result.error };
 }

@@ -48,6 +48,7 @@ import type { AsrModelItem, AsrSegment, AsrStatus } from "../../bun/asr";
 import type { AsrAudioCppModelInfo, AsrAudioCppStatus } from "../../bun/asr-audiocpp";
 import { TranscriptViewer, mergeSegments, fmtClock } from "./voice-asr-result";
 import { AUDIOCPP_REPO, AUDIOCPP_LANG_LABELS } from "@/shared/audiocpp";
+import { DEFAULT_ASR_MODEL_FILE } from "@/shared/modelscope";
 import type { TtsLocalModelInfo, TtsLocalStatus } from "../../bun/tts-local";
 import type { VoiceClone, VoiceRecordRow } from "../../bun/voice";
 import { cn } from "@/mainview/lib/utils";
@@ -196,12 +197,14 @@ function SettingsValues() {
   const [settings, setSettings] = useState<{
     ttsModel: string;
     asrModel: string;
+    asrLang: string;
     ttsVoice: string;
     edgeVoice: string;
     asrEngine: string;
   }>({
     ttsModel: "",
     asrModel: "",
+    asrLang: "zh",
     ttsVoice: "alloy",
     edgeVoice: "zh-CN-XiaoxiaoNeural",
     asrEngine: "whisper",
@@ -216,6 +219,7 @@ function SettingsValues() {
       setSettings({
         ttsModel: data.settings.TTS_MODEL ?? "",
         asrModel: data.settings.ASR_MODEL ?? "",
+        asrLang: data.settings.ASR_LANG || "zh",
         ttsVoice: data.settings.TTS_VOICE ?? "alloy",
         edgeVoice: data.settings.TTS_EDGE_VOICE ?? "zh-CN-XiaoxiaoNeural",
         asrEngine: data.settings.ASR_ENGINE ?? "whisper",
@@ -1401,6 +1405,11 @@ function AsrModelRow({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <p className="text-sm font-medium">{model.label}</p>
+          {model.fileName === DEFAULT_ASR_MODEL_FILE && (
+            <Badge variant="secondary" className="text-[10px]">
+              {t("voice.asr.default")}
+            </Badge>
+          )}
           {running && (
             <Badge variant="default" className="gap-1 text-[10px]">
               <CircleIcon className="size-2.5 fill-current" />
@@ -1590,6 +1599,7 @@ function AsrTab() {
   const t = useT();
   const queryClient = useQueryClient();
   const settings = SettingsValues();
+  const [asrLang, setAsrLang] = useState(settings.asrLang);
   const [audio, setAudio] = useState<{ ref: string; url: string } | null>(null);
   const [meta, setMeta] = useState<string | null>(null);
   const [tError, setTError] = useState<string | undefined>();
@@ -2038,6 +2048,40 @@ function AsrTab() {
                   )}
                 </div>
 
+                {/* 识别语言：默认中文，避免短句中文被 whisper 误判成英文 */}
+                <div>
+                  <Label className="mb-1.5 block text-xs">{t("voice.asr.lang")}</Label>
+                  <Select
+                    value={asrLang}
+                    onValueChange={(v) => {
+                      setAsrLang(v);
+                      void rpcClient.updateSettings({ settings: { ASR_LANG: v } });
+                    }}
+                  >
+                    <SelectTrigger className="h-8 w-full text-xs">
+                      <SelectValue placeholder={t("voice.asr.langAuto")} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(
+                        [
+                          { v: "auto", label: t("voice.asr.langAuto") },
+                          { v: "zh", label: t("voice.asr.langZh") },
+                          { v: "en", label: t("voice.asr.langEn") },
+                          { v: "ja", label: t("voice.asr.langJa") },
+                          { v: "ko", label: t("voice.asr.langKo") },
+                        ] as const
+                      ).map((o) => (
+                        <SelectItem key={o.v} value={o.v}>
+                          {o.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                    {t("voice.asr.langHint")}
+                  </p>
+                </div>
+
                 {/* whisper.cpp ASR 模型 */}
                 <div>
                   <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
@@ -2048,17 +2092,23 @@ function AsrTab() {
                     </span>
                   </h3>
                   <div className="flex flex-col gap-2">
-                    {models.map((m) => (
-                      <AsrModelRow
-                        key={m.id}
-                        model={m}
-                        status={status}
-                        pending={whisperPending}
-                        onDownload={(mm) => downloadModel.mutate(mm)}
-                        onStart={(mm) => startModel.mutate(mm)}
-                        onStop={() => stopEngine.mutate()}
-                      />
-                    ))}
+                    {[...models]
+                      .sort(
+                        (a, b) =>
+                          Number(b.fileName === DEFAULT_ASR_MODEL_FILE) -
+                          Number(a.fileName === DEFAULT_ASR_MODEL_FILE),
+                      )
+                      .map((m) => (
+                        <AsrModelRow
+                          key={m.id}
+                          model={m}
+                          status={status}
+                          pending={whisperPending}
+                          onDownload={(mm) => downloadModel.mutate(mm)}
+                          onStart={(mm) => startModel.mutate(mm)}
+                          onStop={() => stopEngine.mutate()}
+                        />
+                      ))}
                   </div>
                 </div>
               </>

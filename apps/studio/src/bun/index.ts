@@ -1,3 +1,5 @@
+// 必须最先导入：把 userData 目录写进 OMNI_DATA_DIR，供 ./db 定位数据库。
+import "./user-data";
 import "./canvas-polyfill";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import Electrobun, { Utils } from "electrobun/bun";
@@ -14,6 +16,7 @@ import { isConfigured, getSetting } from "./db/settings";
 import * as ServerManager from "./server-manager";
 import * as Gateway from "./gateway";
 import { stopAsr } from "./asr";
+import { getAgentWorkspace } from "./agent";
 
 // Check if Vite dev server is running for HMR
 async function getMainViewUrl(): Promise<string> {
@@ -35,8 +38,17 @@ async function getMainViewUrl(): Promise<string> {
 // run migrations
 migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
 
+// 确保 Agent 的默认工作区存在（~/.omnistudio/workspace），用当前用户权限创建。
+getAgentWorkspace();
+
 // serve extracted images over HTTP for the webview
-startImageServer();
+try {
+  startImageServer();
+} catch (e) {
+  // 已有一个实例占用端口（EADDRINUSE）时，图片由那个实例继续服务；
+  // 这里不能因为一个可降级的服务让整个主进程启动即崩溃。
+  console.warn("Image server failed to start (port already in use?)", e);
+}
 createMenu();
 
 const mainWindow = new BrowserWindow({

@@ -433,7 +433,11 @@ function ConversationRecordList({ app }: { app: AppId }) {
       {/* 顶部一行：标题 + 浅色数量标识 + 新建对话按钮（最右侧，后面无数字） */}
       <SidebarGroupLabel>
         <span className="flex items-center gap-1.5">
-          {t("chat.chats")}
+          {app === "voicecall"
+            ? t("voicecall.history")
+            : app === "agent"
+              ? t("agent.sessions")
+              : t("chat.chats")}
           <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">
             {conversations.length}
           </Badge>

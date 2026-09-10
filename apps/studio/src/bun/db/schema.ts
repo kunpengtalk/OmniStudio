@@ -67,6 +67,27 @@ export const messages = sqliteTable("messages", {
   createdAt: int("created_at").$defaultFn(() => Date.now()),
 });
 
+/**
+ * Agent 运行轨迹（工具调用、状态变更）。会话正文仍落在 messages 里，
+ * 这里只记录"Agent 做了什么"，用于 UI 展示工具调用过程与审计。
+ */
+export const agentEvents = sqliteTable("agent_events", {
+  id: int().primaryKey({ autoIncrement: true }),
+  conversationId: int("conversation_id").notNull(),
+  /** 事件归属的助手消息（一次运行对应一条 assistant 消息）。 */
+  messageId: int("message_id"),
+  kind: text("kind")
+    .$type<"status" | "tool_start" | "tool_end" | "error">()
+    .notNull(),
+  toolName: text("tool_name"),
+  /** JSON 序列化的工具入参。 */
+  args: text("args"),
+  /** 工具输出 / 状态描述。 */
+  output: text("output"),
+  isError: int("is_error").notNull().default(0),
+  createdAt: int("created_at").$defaultFn(() => Date.now()),
+});
+
 export const imageRecords = sqliteTable("image_records", {
   id: int("id").primaryKey({ autoIncrement: true }),
   status: text("status")
