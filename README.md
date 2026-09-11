@@ -30,20 +30,26 @@
 
 <table>
   <tr>
-    <th align="center">首页</th>
-    <th align="center">模型下载</th>
+    <th align="center">模型云服务</th>
+    <th align="center">集成 · 编码工具</th>
   </tr>
   <tr>
-    <td><img src="docs/images/screenshot-home.png" alt="首页" width="100%"/></td>
-    <td><img src="docs/images/screenshot-model-download.png" alt="模型下载" width="100%"/></td>
+    <td><img src="docs/images/screenshot-cloud-service.png" alt="模型云服务" width="100%"/></td>
+    <td><img src="docs/images/screenshot-integrations.png" alt="编码工具集成" width="100%"/></td>
   </tr>
   <tr>
-    <th align="center">对话</th>
-    <th align="center">对话 · 联网检索</th>
+    <th align="center">语音 · 实时对话</th>
+    <th align="center">语音合成 TTS</th>
   </tr>
   <tr>
-    <td><img src="docs/images/screenshot-chat.png" alt="对话" width="100%"/></td>
-    <td><img src="docs/images/screenshot-chat-websearch.png" alt="对话联网检索" width="100%"/></td>
+    <td><img src="docs/images/screenshot-voice.png" alt="语音实时对话" width="100%"/></td>
+    <td><img src="docs/images/screenshot-tts.png" alt="语音合成 TTS" width="100%"/></td>
+  </tr>
+  <tr>
+    <th align="center" colspan="2">模型选择 · 引导向导</th>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/images/screenshot-model-chooser.png" alt="模型选择引导向导" width="100%" style="max-width:640px; margin:0 auto; display:block;"/></td>
   </tr>
 </table>
 
@@ -53,33 +59,33 @@
 
 ### 模型市集
 
-- **搜索与浏览** — 基于 ModelScope 的模型搜索，支持仓库文件列表与详情页（参数、大小、下载量、许可证、标签）。
-- **全格式下载** — 支持 GGUF（llama.cpp）、safetensors（vLLM / SGLang）、bin / pt / ckpt / onnx 等权重格式；可单文件或整仓下载，audio.cpp 的 GGUF 模型走 HuggingFace 源。
-- **下载管理** — 队列并发下载、暂停 / 继续 / 取消、断点续传（HTTP 206）、收藏，以及多目录模型存储。
+- **搜索与浏览** — 基于 ModelScope 的模型搜索，仓库文件列表与详情页（参数、大小、下载量、许可证、标签）。
+- **全格式下载** — GGUF（llama.cpp）、safetensors（vLLM / SGLang）、bin / pt / ckpt / onnx 等权重；单文件或整仓下载，audio.cpp 的 GGUF 走 HuggingFace 源。
+- **下载管理** — 队列并发下载、暂停 / 继续 / 取消、断点续传（HTTP 206）、收藏、多目录存储。
 - **能力分类** — 按 Chat / TTS / ASR / Image / Other 自动识别并持久化分类，以徽章与筛选呈现。
 
-### 推理引擎
+### 模型服务
 
-- **统一运行时** — llama.cpp（默认引擎：GGUF 本地文件或 HuggingFace，GPU 卸载、KV 缓存量化、多模态 mmproj）、vLLM、SGLang 三引擎统一抽象，支持热切换。
-- **远程模式** — 直连任意 OpenAI 兼容端点（Base URL / API Key / 模型），内置连接测试。
-- **统一网关** — 本地单一端点按模型路由到本地推理服务或云端 API，同时提供 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三套协议（含双向工具调用）；可选 API Key 鉴权，内置交互式 OpenAPI 文档。
-- **服务端点** — Chat Completions `/v1`、Responses、Anthropic Messages、`/health`、`/metrics`，设置页一键复制。
+- **首次引导** — 内置 Qwen3.5 4B / 9B / 35B-A3B 与 Qwen3.6 27B 一键模型，选中后自动下载并部署，选完即用；也支持手动输入 HuggingFace GGUF 自定义模型。
+- **云端模型服务** — 内置十余家国内主流 OpenAI 兼容厂商预设（DeepSeek、通义千问、智谱 GLM、Kimi、豆包、文心一言、腾讯混元、MiniMax、讯飞星火、零一万物、阶跃星辰、硅基流动、OpenRouter 等）；选择厂商后只需填 API Key，Base URL 自动带出，支持连通检测与在线拉取模型列表。
+- **三引擎统一运行时** — llama.cpp（默认：GGUF 本地文件或 HuggingFace，GPU 卸载、KV 缓存量化、多模态 mmproj）、vLLM、SGLang 统一抽象、热切换；也可直连任意 OpenAI 兼容端点（远程模式）。
+- **统一网关** — 本地单一端点按模型名路由到本地推理服务或云端 API，同时提供 Chat Completions / Responses / Anthropic Messages 三套协议（含双向工具调用）；可选 API Key 鉴权，内置交互式 OpenAPI 文档，端点 `/v1`、`/health`、`/metrics` 设置页一键复制。
 
 ### 五大内置应用
 
-- **对话** — 流式回复 + 推理过程展示、图片多模态输入、联网检索（Bing / DuckDuckGo / Tavily，结果注入上下文并标注来源）、文本附件（白名单格式注入上下文）；自动标题、按应用隔离会话、用量统计。
-- **语音** — TTS 多来源（audio.cpp 本地引擎、Edge-TTS、OpenAI 兼容 TTS）+ 声音克隆库 + 多引擎 ASR（whisper.cpp / audio.cpp / OpenAI 兼容转写），记录库内嵌播放器。
-- **OCR 文档识别** — 双引擎：本地 Tesseract（多语言 LSTM 语言包、词级 / 行级包围盒）与 VLM（推理服务器上的 Chandra / GLM-OCR / LightOnOCR 类模型）；上传 PDF / 图片输出结构化 Markdown（GFM 表格、KaTeX 公式、代码块、图注、按包围盒裁剪的图片区域），带文档队列与检索，提取页为双栏布局。
-- **图片** — 经云端 OpenAI 兼容 API、ComfyUI 或 Apple Silicon 上的本地 MLX（mflux）引擎生图；MLX 权重在生成前预下载并实时显示进度。
+- **对话** — 流式回复 + 推理过程展示、图片多模态输入、联网检索（Bing / DuckDuckGo / Tavily，结果注入上下文并标注来源）、文本附件；自动标题、按应用隔离会话、用量统计。
+- **语音** — TTS 多来源（audio.cpp 本地引擎、Edge-TTS、OpenAI 兼容 TTS）+ 声音克隆库 + 多引擎 ASR（whisper.cpp / audio.cpp / OpenAI 兼容转写）；实时聆听对话（云端 / 本地），记录库内嵌播放器。
+- **OCR 文档识别** — 双引擎：本地 Tesseract（多语言 LSTM 语言包、词级 / 行级包围盒）与 VLM（Chandra / GLM-OCR / LightOnOCR）；上传 PDF / 图片输出结构化 Markdown（GFM 表格、KaTeX 公式、代码块、图注、按包围盒裁剪的图片区域），带文档队列与检索。
+- **图片** — 经云端 OpenAI 兼容 API、ComfyUI 或 Apple Silicon 上的本地 MLX（mflux）引擎生图；MLX 权重生成前预下载并实时显示进度。
 - **翻译** — 经当前对话模型在 22 种语言间互译，支持源语言自动检测、语言交换与一键复制。
 
 ### 运维与遥测
 
-- **实时仪表盘** — 吞吐 / 速度（tok/s）、请求数、活跃模型、内存 / CPU 负载、服务运行时长、模型磁盘占用，每 2 秒轮询。
-- **基准测试** — 上下文长度扫描（1K–200K），记录 TTFT / TPOT / TPS，结果以表格与图表呈现，支持本地或远程服务。
+- **实时仪表盘** — 吞吐 / 速度（tok/s）、请求数、活跃模型、内存 / CPU 负载、运行时长、模型磁盘占用，每 2 秒轮询。
+- **基准测试** — 上下文长度扫描（1K–200K），记录 TTFT / TPOT / TPS，以表格与图表呈现，支持本地或远程服务。
 - **日志查看** — 实时滚动、ANSI 着色、自动滚动与截断保护、复制 / 清空。
-- **CLI 集成** — 为 Claude Code（本地 / 云端，Opus–Sonnet–Haiku 模型映射）、Codex、OpenCode、OpenClaw、Hermes、Pi、Copilot CLI 生成启动命令并绑定默认模型。
-- **更新与多语言** — 稳定 / 测试更新通道与应用内更新、安装引导向导、中英界面语言、SQLite 会话持久化。
+- **编码工具集成** — 为 Claude Code（本地 / 云端，Opus–Sonnet–Haiku 三档映射）、Codex、OpenCode、OpenClaw、Hermes、Pi、Copilot CLI 一键生成启动命令并绑定默认模型。
+- **更新与多语言** — 稳定 / 测试更新通道与应用内更新、安装引导向导、中英界面、SQLite 会话持久化。
 
 ## 🚀 快速开始
 
