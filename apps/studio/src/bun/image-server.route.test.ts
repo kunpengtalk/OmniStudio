@@ -21,7 +21,8 @@ mock.module("electrobun/bun", () => ({
   },
 }));
 
-const { startImageServer, getPromptLibraryMediaBase } = await import("./image-server");
+const { startImageServer, getPromptLibraryMediaBase, getPromptLibraryCacheBase } =
+  await import("./image-server");
 const { IMAGE_SERVER_PORT } = await import("../shared/server-info");
 
 // 应用本身也监听 19782；若正在运行端口被占，则跳过冒烟测试（避免误报）。
@@ -41,6 +42,7 @@ const get = async (p: string) => {
 
 afterAll(() => {
   rmSync(mediaPublic, { recursive: true, force: true });
+  rmSync(getPromptLibraryCacheBase(), { recursive: true, force: true });
 });
 
 test("mediaBase 指向 vibedesign public 目录", () => {
@@ -61,6 +63,16 @@ if (serverReady) {
   test("缺失文件与被禁路径返回非 200", async () => {
     expect((await get("/prompt-library/nonexistent.png")).status).toBe(404);
     expect((await get("/prompt-library/../etc/passwd")).status).not.toBe(200);
+  });
+
+  test("本地下载缓存目录也能被 /prompt-library 路由命中", async () => {
+    const cacheDir = getPromptLibraryCacheBase();
+    mkdirSync(join(cacheDir, "awesome"), { recursive: true });
+    writeFileSync(join(cacheDir, "awesome", "case1.jpg"), "CACHE-JPG");
+    // vibedesign 目录里没有，但缓存里有 -> 由缓存兜底
+    expect((await get("/prompt-library/awesome/case1.jpg")).body).toBe("CACHE-JPG");
+    // 两个目录都没有 -> 404
+    expect((await get("/prompt-library/awesome/case999.jpg")).status).toBe(404);
   });
 } else {
   test("image-server 端口被占用，跳过路由冒烟测试", () => {

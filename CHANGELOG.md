@@ -4,6 +4,35 @@ All notable changes are documented here. 所有重要变更记录于此。
 
 Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and the project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/).
 
+## [0.0.5-canary.0] - 2026-09-11
+
+### Added / 新增
+
+- **提示词库 ·「我的提示词」（My Prompts）**：新增「我的」分区，支持手动新建提示词、从「广场」一键「加入我的提示词」；按 `source_key` 记录来源并防重复导入 / 判断「已加入」；支持自定义分类（空值统一归「未分类」）；卡片 / 详情浮层与广场复用同一行模型。新表 `user_prompts`（迁移 `0013_uneven_lester`）。
+- **提示词库 · 广场浏览增强**：广场支持按来源（image / video 题库来源）筛选 chips、滚动到底部自动加载更多（广场 / 我的 共用）；封面图「云端直链 → 加载失败惰性下载本地缓存 → 渐变占位」三级兜底。
+- **图片 App · MLX 常驻生图 Worker**：本地生图改为常驻 worker（`mlx-worker.py`，模型加载一次、反复生成，通常几秒出图）；界面分步展示「启动 / 加载 / 生成 n/N / 完成」阶段事件（`onMlxGenPhase`），可一键停止释放显存。
+- **图片 App · MLX 下载进度持久化**：模型权重下载进度全程磁盘持久化（`userData/mlx-downloads/<modelId>.json`），界面据此展示「继续下载（已下载 X%）」，重启不丢进度。
+- **语音 TTS · OpenAI 兼容服务多行配置**：配置面板改为多行表单（配置地址 / API 密钥 / 音频模型下拉）；内置主流服务商预设（OmniLabs / OpenAI / 豆包 / 通义千问 / DeepSeek / 智谱 / Kimi / 腾讯混元 / 百度千帆 / 讯飞星火 / MiniMax / 硅基流动 / OpenRouter），选厂商自动带出地址；地址默认填线上 OmniLabs（`omnilabs.vibeadmin.cn`）；音频模型改为可搜索下拉（内置 + 「获取模型」拉取的 `/v1/models`）。
+- **语音 TTS · 参考音频（声音克隆）**：右侧按模型能力显示「参考音频」——支持参考音频的模型可上传（内联 base64 进 `/v1/audio/speech` 的 `reference_audio` 字段），不支持的自动收起；提供「此模型支持参考音频」开关手动覆盖（默认跟随自动检测，可一键「恢复自动」）；OmniLabs 线上地址默认视为支持。
+
+### Changed / 变更
+
+- **提示词库 · 媒体分发**：封面 / 视频媒体改为优先本地缓存、否则走 Image2Hub 镜像云端直链（`mediaUrl` / `promptMediaCloudUrl` / `promptLibraryLocalUrl`）；下载内容做魔数校验确认确为图片，少数特例回退到从案例页解析真实媒体地址。
+- **语音 TTS 右侧**：移除对云端模型不适用的静态音色 chips（alloy/echo/…），改为自由文本音色输入 + 按模型的参考音频上传；参考音频落库 `voice_records.ref_audio_path`。
+
+### Fixed / 修复
+
+- **网关 · /v1/models 自引用死循环**：当 TTS Provider 地址被填成网关自身（如 `http://127.0.0.1:10001`）时，`/v1/models` 聚合会递归调用自身、挂起 ~10s 后断连；新增 `isSelfBase()` 防护，聚合 / 转发时跳过指向网关自身的 Provider。
+
+### Internal / 内部
+
+- DB：新增 `user_prompts` 表（迁移 `0013_uneven_lester`）。
+- RPC：新增「我的提示词」CRUD、MLX 常驻 worker 启停 / 阶段事件 / 下载进度相关方法；`runTTS` 新增 `referenceAudioRef` 参数。
+- 新增 `shared/tts-reference-audio.ts`（参考音频字段名常量 + 能力检测，前后端共用）、`voice-provider-presets.ts`（音频服务商预设）、`bun/user-prompt.ts`（我的提示词数据层）、`stores/mlx-model-run.ts`（常驻生图前端状态）。
+- 设置：`TTS_PROVIDER_BASE` / `ASR_PROVIDER_BASE` 默认值改为线上 OmniLabs 地址。
+
+---
+
 ## [0.0.4-canary.0] - 2026-09-10
 
 ### Added / 新增

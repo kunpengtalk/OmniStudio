@@ -186,6 +186,25 @@ function cloudAuthHeaders(): Record<string, string> {
   return apiKey && apiKey !== "EMPTY" ? { Authorization: `Bearer ${apiKey}` } : {};
 }
 
+/**
+ * 判断上游地址是否指向网关自身。
+ * 网关会代理 /v1/models、/v1/chat/completions、/v1/audio/* 等端点，
+ * 若云端 / TTS / ASR Provider 误配置为网关自身地址，聚合与代理会对自身无限递归，
+ * 请求永远等不到返回。识别为自身时上层应跳过该上游。
+ */
+function isSelfBase(base: string): boolean {
+  if (!base || !boundPort) return false;
+  try {
+    const u = new URL(base);
+    if ((u.port || (u.protocol === "https:" ? "443" : "80")) !== String(boundPort)) return false;
+    const host = u.hostname.toLowerCase();
+    const selfHost = boundHost.toLowerCase();
+    return host === selfHost || host === "localhost" || host === "127.0.0.1" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
 /** 把上游响应的错误转发为标准 OpenAI 风格错误。 */
 async function forwardUpstreamError(res: Response, fallback: string): Promise<Response> {
   const body = await res.text().catch(() => "");
@@ -275,7 +294,9 @@ export function resetModelRouteCaches(): void {
  */
 async function resolveChatBackend(model: string): Promise<ChatBackend> {
   const localRunning = ServerManager.getStatus() === "running";
-  const cloud = cloudChatBase();
+  // 云端配成网关自身地址时按“未配置云端”处理，避免对话请求对自身无限递归。
+  const rawCloud = cloudChatBase();
+  const cloud = rawCloud && !isSelfBase(rawCloud) ? rawCloud : "";
   const local: ChatBackend = { kind: "local", base: getUpstreamBase(), headers: authHeaders() };
 
   if (model) {
@@ -1320,9 +1341,9 @@ async function handleSpeech(req: Request): Promise<Response> {
     }
   }
 
-  // 3) 三方 TTS Provider（TTS 页配置）
+  // 3) 三方 TTS Provider（TTS 页配置）；指向网关自身时跳过（避免自递归）。
   const provider = getTTSProviderConfig();
-  if (provider.base) {
+  if (provider.base && !isSelfBase(provider.base)) {
     try {
       const res = await fetch(`${provider.base.replace(/\/+$/, "")}/audio/speech`, {
         method: "POST",
@@ -1421,9 +1442,9 @@ async function handleTranscriptions(req: Request): Promise<Response> {
     }
   }
 
-  // 2) 远端 ASR Provider
+  // 2) 远端 ASR Provider（指向网关自身时跳过，避免自递归）
   const provider = Asr.getASRProviderConfig();
-  if ((provider.base ?? "").trim()) {
+  if ((provider.base ?? "").trim() && !isSelfBase(provider.base)) {
     try {
       const res = await proxyAsr(body, contentType, provider.base.replace(/\/+$/, ""), "/v1/audio/transcriptions");
       if (res.ok) {
@@ -1453,13 +1474,17 @@ async function handleListModels(): Promise<Response> {
 
   const ttsProvider = getTTSProviderConfig();
   const asrProvider = Asr.getASRProviderConfig();
+  // 防自引用：云端 / TTS Provider 指向网关自身时跳过拉取，
+  // 否则 /v1/models 会对自身无限递归（网关自己也提供 /v1/models）。
+  const cloudIsSelf = cloud ? isSelfBase(cloud) : false;
+  const ttsIsSelf = ttsProvider.base ? isSelfBase(ttsProvider.base) : false;
 
   const [localModels, cloudModels, ttsStatus, asrStatus, ttsProviderModels] = await Promise.all([
     localRunning ? fetchModelsFromBase(getUpstreamBase(), authHeaders()) : Promise.resolve([] as UpstreamModel[]),
-    cloud ? fetchModelsFromBase(cloud, cloudAuthHeaders()) : Promise.resolve([] as UpstreamModel[]),
+    cloud && !cloudIsSelf ? fetchModelsFromBase(cloud, cloudAuthHeaders()) : Promise.resolve([] as UpstreamModel[]),
     TTSLocal.getTtsLocalStatus().catch(() => null),
     Asr.getAsrStatus().catch(() => null),
-    ttsProvider.base
+    ttsProvider.base && !ttsIsSelf
       ? listProviderModels(ttsProvider.base, ttsProvider.apiKey).catch(() => [] as string[])
       : Promise.resolve([] as string[]),
   ]);

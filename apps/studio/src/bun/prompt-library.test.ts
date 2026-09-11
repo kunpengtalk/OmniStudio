@@ -82,4 +82,64 @@ describe("prompt-library", () => {
     const withMode = items.filter((i) => i.mode);
     expect(withMode.length).toBeGreaterThan(0);
   });
+
+  test("图片带 mediaKey（原始相对路径），供前端下载兜底", () => {
+    const { items } = PromptLib.listPrompts({ kind: "image", limit: 30 });
+    const withImg = items.filter((i) => i.image && i.image.startsWith("http"));
+    expect(withImg.length).toBeGreaterThan(0);
+    expect(withImg.every((i) => i.mediaKey?.startsWith("prompt-library/"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 云端 URL 解析器（纯函数，不依赖网络）
+// ---------------------------------------------------------------------------
+
+describe("promptMediaCloudUrl", () => {
+  const { promptMediaCloudUrl } = PromptLib;
+
+  test("绝对地址原样返回", () => {
+    expect(promptMediaCloudUrl("https://static.atlascloud.ai/prompt/a.mp4")).toBe(
+      "https://static.atlascloud.ai/prompt/a.mp4",
+    );
+  });
+
+  test("awesome 案例图 -> jsDelivr CDN", () => {
+    expect(promptMediaCloudUrl("/prompt-library/awesome/case544.jpg")).toBe(
+      "https://cdn.jsdelivr.net/gh/freestylefly/awesome-gpt-image-2@main/data/images/case544.jpg",
+    );
+  });
+
+  test("Image2Hub 镜像目录 -> image2hub.netlify.app/assets", () => {
+    expect(promptMediaCloudUrl("/prompt-library/app-icons/bichon-shop.webp")).toBe(
+      "https://image2hub.netlify.app/assets/app-icons/bichon-shop.webp",
+    );
+    expect(promptMediaCloudUrl("/prompt-library/posters/foo.jpg")).toBe(
+      "https://image2hub.netlify.app/assets/posters/foo.jpg",
+    );
+  });
+
+  test("H3 数字 case -> railway posters", () => {
+    expect(
+      promptMediaCloudUrl("/prompt-library/video/sky/x-2097561594540773563.jpg"),
+    ).toBe("https://h3-field-notes-production.up.railway.app/posters/x/2097561594540773563.jpg");
+    // 具名 case 走 posters/{k}/{name}.jpg 尽力推导
+    expect(
+      promptMediaCloudUrl("/prompt-library/video/sky/x-endfolding-rainy-bar-comparison.jpg"),
+    ).toBe(
+      "https://h3-field-notes-production.up.railway.app/posters/x/x-endfolding-rainy-bar-comparison.jpg",
+    );
+  });
+
+  test("God 案例封面 jpg 镜像名 -> jsDelivr webp", () => {
+    expect(promptMediaCloudUrl("/prompt-library/video/god/03-night-comic.jpg")).toBe(
+      "https://cdn.jsdelivr.net/gh/LIUFelix2004/God-minmax-H3@main/assets/previews/03-night-comic.webp",
+    );
+  });
+
+  test("xianyu / 未知目录解析不出", () => {
+    expect(promptMediaCloudUrl("/prompt-library/video/xianyu/prompt-abc.jpg")).toBeNull();
+    expect(promptMediaCloudUrl("/prompt-library/unknown/x.png")).toBeNull();
+    expect(promptMediaCloudUrl(null)).toBeNull();
+  });
 });

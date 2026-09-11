@@ -54,8 +54,9 @@ import { useT } from "@stores/ui-lang";
 import { useImageStore } from "@stores/image";
 import { useMlxInstallStore } from "@stores/mlx-install";
 import { useMlxModelDownloadStore } from "@stores/mlx-model-download";
+import { useMlxModelRunStore } from "@stores/mlx-model-run";
 import type { ImageGenBackend, ImageRecordRow } from "../../bun/image-gen";
-import type { MlxModelInfo, MlxGenStatus } from "../../bun/mlx-gen";
+import type { MlxModelInfo, MlxGenStatus, MlxGenPhase } from "../../bun/mlx-gen";
 import { cn } from "@/mainview/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -657,6 +658,51 @@ function GenerateTab() {
   });
   const mlxDownloaded = new Set(mlxDownloadedData?.downloaded ?? []);
   const modelProgress = useMlxModelDownloadStore((s) => s.progress);
+  // 持久化的断点进度：模型未下完时展示「继续下载（已下载 X%）」，点击从断点续传。
+  const { data: mlxStatesData } = useQuery({
+    queryKey: ["mlx-download-states"],
+    queryFn: () => rpcClient.getMlxModelDownloadStates(),
+    enabled: backend === "mlx",
+  });
+  const mlxStates = mlxStatesData?.states ?? [];
+  const resumeState = mlxStates.find((s) => s.modelId === model.trim());
+  // 有断点记录且确实没下完 → 按钮变「继续下载（已下载 X%）」，点击从断点续传。
+  const showResume =
+    !!resumeState &&
+    resumeState.doneBytes > 0 &&
+    resumeState.allBytes > 0 &&
+    resumeState.percent > 0;
+
+  // ---------- 常驻生图模型（启动一次、反复生成；展示启动/生成分步） ----------
+  const { data: mlxActiveData, refetch: refetchMlxActive } = useQuery({
+    queryKey: ["mlx-active-model"],
+    queryFn: () => rpcClient.getMlxActiveModel(),
+    enabled: backend === "mlx",
+  });
+  const mlxActive = mlxActiveData?.active ?? null;
+  const activeForModel = mlxActive?.modelId === model.trim();
+  const runPhase = useMlxModelRunStore((s) => s.phase);
+  // 启动中/加载中：worker 已起但模型尚未 loaded（此期间 active 查询还是 null）。
+  const runStartingThis =
+    !!runPhase &&
+    (runPhase.phase === "starting" || runPhase.phase === "loading") &&
+    runPhase.modelId === model.trim() &&
+    !activeForModel;
+  const startModelMut = useMutation({
+    mutationFn: () => rpcClient.startMlxModel({ modelId: model.trim(), quantize }),
+    onSuccess: (r) => {
+      if (!r.ok) setConfigError(r.error);
+      else setConfigError(undefined);
+      void refetchMlxActive();
+    },
+    onError: (e) => setConfigError(String(e)),
+  });
+  const stopModelMut = useMutation({
+    mutationFn: () => rpcClient.stopMlxModel(),
+    onSuccess: () => {
+      void refetchMlxActive();
+    },
+  });
   const downloading = modelProgress?.stage === "downloading";
   const downloadingThis =
     downloading && !!modelProgress && modelProgress.modelId === model && mlxStatus?.engineInstalled;
@@ -935,31 +981,118 @@ function GenerateTab() {
                       </Badge>
                     ) : (
                       <>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={!model.trim() || downloadMlxModelMut.isPending}
-                          onClick={() => {
-                            setConfigError(undefined);
-                            useMlxModelDownloadStore.getState().reset();
-                            downloadMlxModelMut.mutate();
-                          }}
-                        >
-                          {downloadMlxModelMut.isPending ? (
-                            <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                          ) : (
-                            <DownloadCloudIcon data-icon="inline-start" />
-                          )}
-                          {downloadMlxModelMut.isPending
-                            ? t("image.mlx.downloadingModel")
-                            : t("image.mlx.downloadModel")}
-                        </Button>
-                        {model.trim() && (
+                        {(() => {
+                          return (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={!model.trim() || downloadMlxModelMut.isPending}
+                                onClick={() => {
+                                  setConfigError(undefined);
+                                  useMlxModelDownloadStore.getState().reset();
+                                  downloadMlxModelMut.mutate();
+                                }}
+                              >
+                                {downloadMlxModelMut.isPending ? (
+                                  <Loader2Icon
+                                    data-icon="inline-start"
+                                    className="animate-spin"
+                                  />
+                                ) : (
+                                  <DownloadCloudIcon data-icon="inline-start" />
+                                )}
+                                {downloadMlxModelMut.isPending
+                                  ? t("image.mlx.downloadingModel")
+                                  : showResume
+                                    ? `${t("image.mlx.resumeDownload")}（${t("image.mlx.resumePartial").replace(
+                                        "{percent}",
+                                        String(Math.max(1, resumeState!.percent)),
+                                      )}）`
+                                    : t("image.mlx.downloadModel")}
+                              </Button>
+                              {showResume && (
+                                <div className="flex flex-col gap-1">
+                                  <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
+                                    <div
+                                      className="h-full rounded-full bg-primary/80"
+                                      style={{
+                                        width: `${Math.min(100, resumeState!.percent)}%`,
+                                      }}
+                                    />
+                                  </div>
+                                  <p className="text-[10px] leading-relaxed tabular-nums text-amber-600/80 dark:text-amber-400/80">
+                                    {t("image.mlx.resumeHint")
+                                      .replace("{done}", formatBytes(resumeState!.doneBytes))
+                                      .replace("{all}", formatBytes(resumeState!.allBytes))}
+                                  </p>
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
+                        {model.trim() && !showResume && (
                           <p className="text-[10px] leading-relaxed text-amber-600/80 dark:text-amber-400/80">
                             {t("image.mlx.modelNeedDownload")}
                           </p>
                         )}
                       </>
+                    )}
+                  </div>
+                )}
+
+                {/* 启动常驻模型：加载一次进内存，之后生图不再重载权重（分步展示进度） */}
+                {mlxStatus?.engineInstalled && model.trim() && (
+                  <div className="mt-1 flex flex-col gap-1.5">
+                    {runStartingThis ? (
+                      <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                        <Loader2Icon className="size-3 animate-spin text-primary" />
+                        <span>
+                          {t("image.mlx.modelStarting").replace(
+                            "{sec}",
+                            String(runPhase?.seconds ?? 0),
+                          )}
+                        </span>
+                      </div>
+                    ) : activeForModel ? (
+                      <div className="flex items-center justify-between gap-2">
+                        <Badge
+                          variant="secondary"
+                          className="w-fit gap-1 text-[10px] font-normal text-emerald-600 dark:text-emerald-400"
+                        >
+                          <CircleIcon className="size-2 fill-current" />
+                          {t("image.mlx.modelStarted")}
+                          {mlxActive?.quantize ? ` · ${mlxActive.quantize}-bit` : ""}
+                        </Badge>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 text-[11px] text-muted-foreground"
+                          disabled={stopModelMut.isPending}
+                          onClick={() => stopModelMut.mutate()}
+                        >
+                          {t("image.mlx.modelStop")}
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={
+                            startModelMut.isPending ||
+                            downloading ||
+                            !mlxDownloaded.has(model.trim())
+                          }
+                          onClick={() => startModelMut.mutate()}
+                        >
+                          <CpuIcon data-icon="inline-start" className="size-3.5" />
+                          {t("image.mlx.modelStart")}
+                        </Button>
+                        <span className="text-[10px] text-muted-foreground">
+                          {t("image.mlx.modelStartHint")}
+                        </span>
+                      </div>
                     )}
                   </div>
                 )}
@@ -1278,7 +1411,20 @@ function GenerateTab() {
             ) : (
               <SparklesIcon data-icon="inline-start" />
             )}
-            {generate.isPending ? t("image.generating") : t("image.generate")}
+            {generate.isPending ? (
+              runPhase?.phase === "generating" &&
+              runPhase.modelId === model.trim() &&
+              runPhase.step != null &&
+              runPhase.total != null ? (
+                t("image.mlx.generatingStep")
+                  .replace("{step}", String(runPhase.step))
+                  .replace("{total}", String(runPhase.total))
+              ) : (
+                t("image.generating")
+              )
+            ) : (
+              t("image.generate")
+            )}
           </Button>
           {backend === "mlx" && !canGenerate && !mlxModelReady && mlxStatus?.engineInstalled && (
             <p className="text-center text-[10px] text-amber-600/80 dark:text-amber-400/80">

@@ -10,6 +10,7 @@ import { useModelDownloadStore } from "../stores/model-download";
 import { useGatewayStore } from "../stores/gateway";
 import { useMlxInstallStore } from "../stores/mlx-install";
 import { useMlxModelDownloadStore } from "../stores/mlx-model-download";
+import { useMlxModelRunStore } from "../stores/mlx-model-run";
 import { useRouter } from "../stores/router";
 
 const knownCompletedIds = new Set<string>();
@@ -119,9 +120,18 @@ const rpc = Electroview.defineRPC<AppRPC>({
       },
       mlxModelDownloadProgress: (p) => {
         useMlxModelDownloadStore.getState().setProgress(p);
-        // 下载结束（成功/失败）后刷新「已下载模型」列表，UI 的下载按钮/徽章随之更新。
+        // 下载结束（成功/失败）后刷新「已下载模型」列表和「继续下载」状态，
+        // UI 的下载按钮/徽章随之更新。
         if (p.stage !== "downloading") {
           queryClient.invalidateQueries({ queryKey: ["mlx-downloaded-models"] });
+          queryClient.invalidateQueries({ queryKey: ["mlx-download-states"] });
+        }
+      },
+      mlxGenPhase: (p) => {
+        useMlxModelRunStore.getState().setPhase(p);
+        // 阶段进入终态（已加载 / 空闲 / 出错）时刷新「已启动模型」查询。
+        if (p.phase === "loaded" || p.phase === "idle" || p.phase === "error") {
+          queryClient.invalidateQueries({ queryKey: ["mlx-active-model"] });
         }
       },
       navigate: ({ path }) => {

@@ -180,3 +180,31 @@ export const prompts = sqliteTable("prompts", {
   featured: int("featured").notNull().default(0),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
 });
+
+// ---------------------------------------------------------------------------
+// 我的提示词（用户自建 / 从广场加入，按 source_key 记录来源）
+// ---------------------------------------------------------------------------
+
+export const userPrompts = sqliteTable("user_prompts", {
+  id: int().primaryKey({ autoIncrement: true }),
+  kind: text("kind").$type<PromptKind>().notNull(),
+  /** 分类名（自定义，空值归「未分类」）。 */
+  category: text("category").notNull().default(""),
+  name: text("name").notNull(),
+  prompt: text("prompt").notNull(),
+  /** 一句话介绍。 */
+  summary: text("summary"),
+  /** CSS aspect-ratio，例如 "1 / 1"。 */
+  ratio: text("ratio"),
+  /** 示例图：广场导入存原始路径 /prompt-library/...，手动新建可留空或填 URL。 */
+  image: text("image"),
+  /** 从广场导入时对应的 prompts.key；唯一，用于防重复导入 + 「已加入」判断。 */
+  sourceKey: text("source_key").unique(),
+  createdAt: int("created_at").$defaultFn(() => Date.now()),
+  updatedAt: int("updated_at")
+    .$defaultFn(() => Date.now())
+    .$onUpdateFn(() => Date.now()),
+});
+
+export type UserPromptRow = typeof userPrompts.$inferSelect;
+

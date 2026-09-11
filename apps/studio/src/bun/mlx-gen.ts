@@ -1,4 +1,11 @@
-import { existsSync, rmSync, readdirSync } from "fs";
+import {
+  existsSync,
+  rmSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+} from "fs";
 import path from "path";
 import { getDataDir } from "./paths";
 
@@ -449,24 +456,71 @@ async function doDownloadMlxModel(
     return { ok: false, error: "MLX 引擎未安装，请先点击「下载引擎」" };
   }
 
+  // 已完整下载 → 直接成功（顺带清掉可能残留的进度记录）。
+  if (await isMlxModelDownloaded(model.id)) {
+    clearDownloadState(model.id);
+    emitLog(`模型 ${model.label} 已完整下载，无需重复下载。`);
+    return { ok: true };
+  }
+
   emitLog(`开始下载模型权重：${model.label} …`);
 
   // 先清理可能残留的“上一个会话/外部遗留”的同模型下载进程。
   // 否则两个进程同时写同一份 HF 缓存会互相抢锁，导致本次下载报“退出码 2”等失败。
   killOrphanMlxDownloads(model.id);
 
+  // 断点续传：先从持久化进度恢复起始值，进度条接着走而不是从 0 重新开始。
+  const prev = readDownloadState(model.id);
+  let singleRun = {
+    repo: "",
+    allBytes: prev?.allBytes ?? 0,
+    curFile: "",
+    curStart: 0,
+    curSize: 0,
+    curReceived: 0,
+    doneBytes: prev?.doneBytes ?? 0,
+    filesDone: prev?.filesDone ?? 0,
+    filesTotal: 0,
+    stage: "downloading" as "downloading" | "done" | "error",
+    error: "",
+  };
+
+  function snapshotState(): MlxModelDownloadState {
+    const all = singleRun.allBytes || 1;
+    const done = singleRun.doneBytes + Math.min(singleRun.curReceived, singleRun.curSize);
+    return {
+      modelId: model.id,
+      doneBytes: Math.min(done, singleRun.allBytes || done),
+      allBytes: singleRun.allBytes,
+      filesDone: singleRun.filesDone,
+      filesTotal: singleRun.filesTotal,
+      percent: Math.min(100, Math.round((done / all) * 100)),
+      updatedAt: Date.now(),
+    };
+  }
+
+  // 进度续存：关键节点（文件完成/失败）强制写，进行中 2s 节流，避免高频写盘。
+  let lastPersistAt = 0;
+  const persist = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastPersistAt < 2000) return;
+    lastPersistAt = now;
+    writeDownloadState(snapshotState());
+  };
+
   emitProgress({
     modelId,
     fileName: "",
     received: 0,
     total: 0,
-    doneBytes: 0,
-    allBytes: 0,
-    filesDone: 0,
+    doneBytes: singleRun.doneBytes,
+    allBytes: singleRun.allBytes,
+    filesDone: singleRun.filesDone,
     filesTotal: 0,
-    percent: 0,
+    percent: snapshotState().percent,
     stage: "downloading",
   });
+  persist(true);
 
   const proc = Bun.spawn(
     [py, modelHelperScript(), "download", model.id],
@@ -509,6 +563,7 @@ async function doDownloadMlxModel(
       } else if (line.startsWith("DONE ")) {
         st.filesDone += 1;
         st.doneBytes = st.curStart + st.curSize;
+        persist();
         emitProgress(buildProgress(st, "downloading"));
       } else if (line.startsWith("OK")) {
         st.stage = "done";
@@ -516,25 +571,13 @@ async function doDownloadMlxModel(
       } else if (line.startsWith("ERROR ")) {
         st.error = line.slice(6);
         st.stage = "error";
+        persist(true);
         emitProgress(buildProgress(st, "error"));
       }
     }
   })();
 
   // tqdm 字节进度（stderr）→ 更新当前文件 received
-  let singleRun = {
-    repo: "",
-    allBytes: 0,
-    curFile: "",
-    curStart: 0,
-    curSize: 0,
-    curReceived: 0,
-    doneBytes: 0,
-    filesDone: 0,
-    filesTotal: 0,
-    stage: "downloading" as "downloading" | "done" | "error",
-    error: "",
-  };
   const stderrTail: string[] = [];
   const stderrReader = proc.stderr.getReader();
   const stderrDec = new TextDecoder();
@@ -555,6 +598,7 @@ async function doDownloadMlxModel(
         if (b && singleRun.curSize > 0) {
           // tqdm 报的是当前文件内已接收字节，回写后再广播，前端进度条才会动。
           singleRun.curReceived = Math.min(b.current, singleRun.curSize);
+          persist();
           emitProgress(buildProgress(singleRun, "downloading"));
         }
       }
@@ -589,6 +633,7 @@ async function doDownloadMlxModel(
   const [code] = await Promise.all([proc.exited, parser]);
   const done = singleRun.stage === "done" || code === 0 && !singleRun.error;
   if (done && singleRun.stage !== "error") {
+    clearDownloadState(model.id);
     emitLog(`模型 ${model.label} 下载完成。`);
     emitProgress({ ...buildProgress(singleRun, "done"), percent: 100 });
     return { ok: true };
@@ -597,8 +642,10 @@ async function doDownloadMlxModel(
     singleRun.error ||
     stderrTail.slice(-5).join(" | ") ||
     `模型权重下载失败（退出码 ${code}）`;
+  // 保存失败现场（已下载多少/剩多少），下次点「继续下载」从这里接着下。
+  persist(true);
   emitLog(`模型 ${model.label} 下载失败：${err}`);
-  emitProgress({ ...buildProgress(singleRun, "error"), percent: 0 });
+  emitProgress(buildProgress(singleRun, "error"));
   return { ok: false, error: err };
 }
 
@@ -690,11 +737,387 @@ export function invalidateDownloadedMlxCache(): void {
 }
 
 // ---------------------------------------------------------------------------
+// 下载进度持久化（断点续传 / 「继续下载」）
+// ---------------------------------------------------------------------------
+
+export type MlxModelDownloadState = {
+  modelId: string;
+  /** 已下载字节（含当前文件已接收部分）。 */
+  doneBytes: number;
+  /** 仓库总字节。 */
+  allBytes: number;
+  filesDone: number;
+  filesTotal: number;
+  /** 整体百分比 0-100。 */
+  percent: number;
+  updatedAt: number;
+};
+
+/** 进度记录目录（userData/mlx-downloads/<modelId>.json），全程磁盘持久化。 */
+function downloadStateDir(): string {
+  return getDataDir("mlx-downloads");
+}
+
+function downloadStatePath(modelId: string): string {
+  return path.join(downloadStateDir(), `${modelId}.json`);
+}
+
+function readDownloadState(modelId: string): MlxModelDownloadState | null {
+  try {
+    const j = JSON.parse(
+      readFileSync(downloadStatePath(modelId), "utf8"),
+    ) as MlxModelDownloadState;
+    if (!j || typeof j.doneBytes !== "number") return null;
+    return j;
+  } catch {
+    return null;
+  }
+}
+
+function writeDownloadState(st: MlxModelDownloadState): void {
+  try {
+    mkdirSync(downloadStateDir(), { recursive: true });
+    writeFileSync(downloadStatePath(st.modelId), JSON.stringify(st), "utf8");
+  } catch {
+    // 进度持久化失败不阻塞下载本身。
+  }
+}
+
+function clearDownloadState(modelId: string): void {
+  try {
+    rmSync(downloadStatePath(modelId), { force: true });
+  } catch {}
+}
+
+/** 各模型最近一次持久化的下载进度（UI 据此展示「继续下载（已下载 X%）」）。 */
+export async function getMlxModelDownloadStates(): Promise<MlxModelDownloadState[]> {
+  const dir = downloadStateDir();
+  if (!existsSync(dir)) return [];
+  const out: MlxModelDownloadState[] = [];
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith(".json")) continue;
+    const modelId = f.slice(0, -".json".length);
+    if (!MLX_MODELS.some((m) => m.id === modelId)) continue;
+    // 已完整下载的残留记录直接清掉，不给 UI 留错误状态。
+    if (await isMlxModelDownloaded(modelId)) {
+      clearDownloadState(modelId);
+      continue;
+    }
+    const st = readDownloadState(modelId);
+    if (st) out.push(st);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// 常驻生图 worker（启动一次模型、反复生成；当前支持 Z-Image 系列）
+//
+// 一次性 CLI 每次生图都要新起进程并重新加载权重 + 即时量化（几十秒到一分钟），
+// UI 上表现为“点了生图半天没反应”。worker 把模型加载一次常驻内存，
+// 之后的生图直接走内存模型，几秒出图；启动/加载/生成各阶段通过
+// onMlxGenPhase 推送，UI 分步展示。
+// ---------------------------------------------------------------------------
+
+export type MlxGenPhase = {
+  modelId: string;
+  /** idle | starting | loading | loaded | generating | error */
+  phase: "idle" | "starting" | "loading" | "loaded" | "generating" | "error";
+  /** 加载/生成已耗时（秒）。 */
+  seconds?: number;
+  /** 当前扩散步 / 总步数。 */
+  step?: number;
+  total?: number;
+  message?: string;
+};
+
+type MlxGenPhaseCallback = (p: MlxGenPhase) => void;
+const phaseListeners = new Set<MlxGenPhaseCallback>();
+
+/** 订阅生图阶段事件（「启动/加载/生成 n/N」分步展示用）。 */
+export function onMlxGenPhase(cb: MlxGenPhaseCallback): () => void {
+  phaseListeners.add(cb);
+  return () => phaseListeners.delete(cb);
+}
+
+function emitPhase(p: MlxGenPhase): void {
+  for (const cb of phaseListeners) {
+    try {
+      cb(p);
+    } catch {}
+  }
+}
+
+/** spawn 配置 { stdout/stderr: "pipe", stdin: "pipe" } 时的子进程形态。 */
+type PipeProc = {
+  stdout: ReadableStream<Uint8Array>;
+  stderr: ReadableStream<Uint8Array>;
+  stdin: {
+    write: (chunk: Uint8Array) => number | Promise<number>;
+    flush?: () => void;
+  };
+  exited: Promise<number>;
+  exitCode: number | null;
+  kill: () => void;
+};
+
+type ActiveWorker = {
+  modelId: string;
+  quantize: number;
+  proc: PipeProc;
+  pendingLoad: { resolve: (r: { ok: boolean; error?: string }) => void } | null;
+  pendingGen: { resolve: (r: { ok: boolean; error?: string }) => void } | null;
+};
+
+let activeWorker: ActiveWorker | null = null;
+
+function mlxWorkerScript(): string {
+  return path.join(import.meta.dir, "mlx-worker.py");
+}
+
+/** 当前已启动（常驻）的模型；没有则 null。 */
+export function getMlxActiveModel(): { modelId: string; quantize: number } | null {
+  if (!activeWorker || activeWorker.proc.exitCode !== null) return null;
+  return { modelId: activeWorker.modelId, quantize: activeWorker.quantize };
+}
+
+function handleWorkerLine(line: string): void {
+  const w = activeWorker;
+  if (!w) return;
+  let obj: { type?: string; phase?: string; seconds?: number; message?: string };
+  try {
+    obj = JSON.parse(line);
+  } catch {
+    return;
+  }
+  switch (obj.type) {
+    case "phase":
+      if (obj.phase === "loading") {
+        emitPhase({ modelId: w.modelId, phase: "loading", seconds: obj.seconds ?? 0 });
+      } else if (obj.phase === "generating") {
+        emitPhase({ modelId: w.modelId, phase: "generating" });
+      }
+      break;
+    case "loaded": {
+      emitPhase({ modelId: w.modelId, phase: "loaded", seconds: obj.seconds });
+      const l = w.pendingLoad;
+      w.pendingLoad = null;
+      l?.resolve({ ok: true });
+      break;
+    }
+    case "done": {
+      const g = w.pendingGen;
+      w.pendingGen = null;
+      g?.resolve({ ok: true });
+      break;
+    }
+    case "error": {
+      const err = obj.message ?? "worker 错误";
+      if (w.pendingLoad) {
+        const l = w.pendingLoad;
+        w.pendingLoad = null;
+        l.resolve({ ok: false, error: err });
+      } else if (w.pendingGen) {
+        const g = w.pendingGen;
+        w.pendingGen = null;
+        g.resolve({ ok: false, error: err });
+      }
+      emitPhase({ modelId: w.modelId, phase: "error", message: err });
+      break;
+    }
+  }
+}
+
+function pumpWorkerStreams(): void {
+  const w = activeWorker;
+  if (!w) return;
+  const dec = new TextDecoder();
+  let buf = "";
+  (async () => {
+    const reader = w.proc.stdout.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line.trim()) handleWorkerLine(line.trim());
+      }
+    }
+  })();
+  const edec = new TextDecoder();
+  let ebuf = "";
+  (async () => {
+    const reader = w.proc.stderr.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      ebuf += edec.decode(value, { stream: true });
+      const lines = ebuf.split("\r");
+      ebuf = lines.pop() ?? "";
+      for (const line of lines) {
+        // mflux 的 tqdm 步进条：`33%|██▌ | 3/9 [..]` → “生成中 3/9”
+        const m = line.match(/(\d+)\s*\/\s*(\d+)/);
+        if (m) {
+          emitPhase({
+            modelId: w.modelId,
+            phase: "generating",
+            step: Number(m[1]),
+            total: Number(m[2]),
+          });
+        }
+      }
+    }
+  })();
+}
+
+async function workerSend(obj: Record<string, unknown>): Promise<void> {
+  const w = activeWorker;
+  if (!w) throw new Error("worker 未运行");
+  await w.proc.stdin.write(new TextEncoder().encode(JSON.stringify(obj) + "\n"));
+  w.proc.stdin.flush?.();
+}
+
+/**
+ * 启动并加载模型到常驻 worker（模型驻留内存，之后生图不再重载权重，大幅提速）。
+ * 同一模型已启动 → 直接返回 already；切换模型/量化会自动停掉旧 worker。
+ */
+export async function startMlxModel(
+  modelId: string,
+  quantize = 8,
+): Promise<{ ok: boolean; error?: string; already?: boolean }> {
+  if (!(process.platform === "darwin" && process.arch === "arm64")) {
+    return { ok: false, error: "MLX 引擎仅支持 Apple Silicon (arm64) 的 macOS" };
+  }
+  const model = findMlxModel(modelId) ?? MLX_MODELS[0]!;
+  const py = enginePython();
+  if (!existsSync(py)) {
+    return { ok: false, error: "MLX 引擎未安装，请先点击「下载引擎」" };
+  }
+  if (!(await isMlxModelDownloaded(model.id))) {
+    return { ok: false, error: `模型「${model.label}」尚未下载，请先点「下载模型」` };
+  }
+  const q = quantize > 0 ? quantize : 0;
+  const cur = getMlxActiveModel();
+  if (cur && cur.modelId === model.id && cur.quantize === q) {
+    return { ok: true, already: true };
+  }
+  await stopMlxModel();
+
+  emitLog(`启动模型：${model.label}${q ? `（量化 ${q}）` : ""}…`);
+  emitPhase({ modelId: model.id, phase: "starting" });
+  let proc: PipeProc;
+  try {
+    proc = Bun.spawn([py, mlxWorkerScript()], {
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "pipe",
+    }) as unknown as PipeProc;
+  } catch (e) {
+    const err = `启动 worker 失败：${e instanceof Error ? e.message : e}`;
+    emitPhase({ modelId: model.id, phase: "error", message: err });
+    return { ok: false, error: err };
+  }
+  activeWorker = {
+    modelId: model.id,
+    quantize: q,
+    proc,
+    pendingLoad: null,
+    pendingGen: null,
+  };
+  pumpWorkerStreams();
+  const loadResult = new Promise<{ ok: boolean; error?: string }>((resolve) => {
+    activeWorker!.pendingLoad = { resolve };
+  });
+  // worker 在加载完成前意外退出 → 兜底报错而不是永远 pending。
+  void proc.exited.then((code) => {
+    const w = activeWorker;
+    if (w && w.pendingLoad) {
+      w.pendingLoad.resolve({ ok: false, error: `worker 进程提前退出（退出码 ${code}）` });
+      w.pendingLoad = null;
+    }
+  });
+  try {
+    await workerSend({ msg: "load", model: model.id, quantize: q });
+  } catch (e) {
+    return { ok: false, error: `发送加载指令失败：${e instanceof Error ? e.message : e}` };
+  }
+  const r = await loadResult;
+  if (r.ok) {
+    emitLog(`模型 ${model.label} 已加载完成，可快速生图。`);
+  } else {
+    emitLog(`模型 ${model.label} 加载失败：${r.error}`);
+  }
+  return r;
+}
+
+/** 停止常驻 worker，释放显存/内存。 */
+export async function stopMlxModel(): Promise<{ ok: boolean }> {
+  const w = activeWorker;
+  activeWorker = null;
+  if (!w) return { ok: true };
+  const modelId = w.modelId;
+  try {
+    await w.proc.stdin.write(new TextEncoder().encode('{"msg":"quit"}\n'));
+    w.proc.stdin.flush?.();
+  } catch {}
+  const t = setTimeout(() => {
+    try {
+      w.proc.kill();
+    } catch {}
+  }, 3000);
+  try {
+    await w.proc.exited;
+  } catch {}
+  clearTimeout(t);
+  emitPhase({ modelId, phase: "idle" });
+  return { ok: true };
+}
+
+/** 走常驻 worker 生成（模型已加载，通常几秒出图）。 */
+function generateViaWorker(params: MlxGenerateParams): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    const w = activeWorker;
+    if (!w) {
+      resolve({ ok: false, error: "worker 未运行" });
+      return;
+    }
+    let settled = false;
+    const settle = (r: { ok: boolean; error?: string }) => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+    const timeout = setTimeout(() => {
+      if (w.pendingGen) w.pendingGen = null;
+      settle({ ok: false, error: "worker 生成超时（超过 30 分钟），已终止等待" });
+    }, 30 * 60_000);
+    w.pendingGen = {
+      resolve: (r) => {
+        clearTimeout(timeout);
+        settle(r);
+      },
+    };
+    workerSend({
+      msg: "generate",
+      prompt: params.prompt,
+      width: params.width,
+      height: params.height,
+      steps: params.steps,
+      seed: params.seed ?? 42,
+      guidance: null,
+      negative_prompt: "",
+      output: params.outputPath,
+    }).catch((e) => settle({ ok: false, error: `发送生成指令失败：${e instanceof Error ? e.message : e}` }));
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 生成
 // ---------------------------------------------------------------------------
 
-/** 当前进行中的 MLX 生成进程（防重复启动）。 */
-let activeGenerate: Promise<number> | null = null;
+/** 当前进行中的 MLX 生成（防重复启动；CLI 或 worker 路径共用此锁）。 */
+let activeGenerate: Promise<unknown> | null = null;
 
 export type MlxGenerateParams = {
   modelId: string;
@@ -728,6 +1151,16 @@ export async function generateWithMlx(
   // 全局只允许一个生成进程，避免连点/多窗口时像之前那样堆一堆 mflux 进程互抢。
   if (activeGenerate) {
     return { ok: false, error: "上一次生图仍在进行中，请稍候或等它完成" };
+  }
+
+  // 常驻 worker 已启动同模型 → 直接走内存中的模型生成，不再新起进程重载权重。
+  const worker = getMlxActiveModel();
+  if (worker && worker.modelId === model.id) {
+    const w = generateViaWorker(params);
+    activeGenerate = w.finally(() => {
+      activeGenerate = null;
+    });
+    return w;
   }
 
   const args: string[] = [];

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ImageIcon,
   CopyIcon,
@@ -13,18 +13,25 @@ import {
   BotIcon,
   Loader2Icon,
   ClipboardListIcon,
+  PlusIcon,
+  PencilIcon,
+  Trash2Icon,
+  BookMarkedIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { Input } from "@ui/input";
 import { Button } from "@ui/button";
 import { Spinner } from "@ui/spinner";
+import { Textarea } from "@ui/textarea";
+import { Label } from "@ui/label";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from "@ui/dialog";
 import { ScrollArea } from "@ui/scroll-area";
 import { Badge } from "@ui/badge";
@@ -34,6 +41,7 @@ import { useAppStore } from "@stores/app";
 import { useChatStore } from "@stores/chat";
 import { useImageStore } from "@stores/image";
 import type { PromptKind, PromptRow } from "../../bun/prompt-library";
+import type { UserPromptView } from "../../bun/user-prompt";
 import { cn } from "@/mainview/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -46,7 +54,7 @@ const KINDS: { kind: PromptKind; icon: React.ReactNode; labelKey: string }[] = [
   { kind: "video", icon: <FilmIcon className="size-4" />, labelKey: "prompt.kind.video" },
 ];
 
-/** 来源筛选 chips（image / video 有题库来源；llm 无）。 */
+/** 广场来源筛选 chips（image / video 有题库来源；llm 无）。 */
 const SOURCE_FILTERS: Record<PromptKind, { id: string; label: string }[]> = {
   image: [
     { id: "all", label: "全部题库" },
@@ -117,31 +125,36 @@ function usePromptNow(item: PromptRow) {
   }
 }
 
-/** 回退到仓库内置素材（随 vite public/ 打进 webview）的相对路径。 */
-function bundledMediaUrl(u: string | null): string | null {
-  if (!u) return null;
-  const i = u.indexOf("/prompt-library/");
-  return i >= 0 ? u.slice(i + 1) : null;
-}
-
-/** 图片/封面：依次尝试 服务端地址（远程/本地）→ 内置素材 → 渐变占位。 */
+/** 图片/封面：云端直链 → 加载失败时惰性下载到本地缓存 → 渐变占位。 */
 function PromptMedia({ item, className }: { item: PromptRow; className?: string }) {
-  const [stage, setStage] = useState<0 | 1 | 2>(0);
-  const src = stage === 0 ? item.image : stage === 1 ? bundledMediaUrl(item.image) : null;
-  const hasMedia = !!src;
+  const [src, setSrc] = useState<string | null>(item.image);
+  const [triedLocal, setTriedLocal] = useState(false);
   const ratio = item.ratio || "1 / 1";
   return (
     <div
       className={cn("relative w-full overflow-hidden bg-muted/60", className)}
       style={{ aspectRatio: ratio }}
     >
-      {hasMedia ? (
+      {src ? (
         <img
-          src={src!}
+          src={src}
           alt={item.name}
           loading="lazy"
           decoding="async"
-          onError={() => setStage((s) => (s < 2 ? ((s + 1) as 0 | 1 | 2) : s))}
+          onError={() => {
+            if (triedLocal) {
+              setSrc(null);
+              return;
+            }
+            setTriedLocal(true);
+            if (item.mediaKey) {
+              void rpcClient.ensurePromptMedia({ path: item.mediaKey }).then((res) => {
+                setSrc(res?.url ?? null);
+              });
+            } else {
+              setSrc(null);
+            }
+          }}
           className="absolute inset-0 size-full object-cover"
         />
       ) : (
@@ -164,10 +177,18 @@ function PromptMedia({ item, className }: { item: PromptRow; className?: string 
 }
 
 // ---------------------------------------------------------------------------
-// 卡片
+// 卡片（广场 / 我的 共用；extraActions 为操作区尾部附加按钮）
 // ---------------------------------------------------------------------------
 
-function PromptCard({ item, onOpen }: { item: PromptRow; onOpen: () => void }) {
+function PromptCard({
+  item,
+  onOpen,
+  extraActions,
+}: {
+  item: PromptRow;
+  onOpen: () => void;
+  extraActions?: React.ReactNode;
+}) {
   const t = useT();
   const hasMedia = item.kind !== "llm";
 
@@ -197,6 +218,11 @@ function PromptCard({ item, onOpen }: { item: PromptRow; onOpen: () => void }) {
         </button>
 
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          {item.sourceKey && (
+            <Badge variant="outline" className="text-[10px] font-normal text-muted-foreground">
+              {t("prompt.fromPlaza")}
+            </Badge>
+          )}
           {item.subcategory && (
             <Badge variant="secondary" className="text-[10px] font-normal">
               {item.subcategory}
@@ -230,14 +256,43 @@ function PromptCard({ item, onOpen }: { item: PromptRow; onOpen: () => void }) {
             {t("prompt.useIt")}
             <ArrowRightIcon data-icon="inline-end" className="size-3.5" />
           </Button>
+          {extraActions}
         </div>
       </div>
     </article>
   );
 }
 
+/** 「加入我的提示词」按钮（广场卡片 / 详情浮层用）。 */
+function JoinMineButton({
+  added,
+  busy,
+  onClick,
+}: {
+  added: boolean;
+  busy?: boolean;
+  onClick: () => void;
+}) {
+  const t = useT();
+  return (
+    <Button
+      size="icon-sm"
+      variant={added ? "secondary" : "outline"}
+      disabled={added || busy}
+      tooltip={added ? t("prompt.added") : t("prompt.addToMine")}
+      onClick={onClick}
+    >
+      {busy ? (
+        <Loader2Icon className="size-3.5 animate-spin" />
+      ) : (
+        <BookMarkedIcon className="size-3.5" />
+      )}
+    </Button>
+  );
+}
+
 // ---------------------------------------------------------------------------
-// 详情浮层（左右切换 + 复制 / 去试试）
+// 详情浮层（左右切换 + 复制 / 去试试 / 附加操作）
 // ---------------------------------------------------------------------------
 
 function PromptDetailDialog({
@@ -245,11 +300,13 @@ function PromptDetailDialog({
   index,
   onClose,
   onStep,
+  footerExtra,
 }: {
   items: PromptRow[];
   index: number;
   onClose: () => void;
   onStep: (delta: number) => void;
+  footerExtra?: React.ReactNode;
 }) {
   const t = useT();
   const item = items[index];
@@ -306,6 +363,11 @@ function PromptDetailDialog({
                       {item.sourceLabel}
                     </Badge>
                   )}
+                  {item.sourceKey && (
+                    <Badge variant="outline" className="text-[10px] font-normal text-muted-foreground">
+                      {t("prompt.fromPlaza")}
+                    </Badge>
+                  )}
                   {item.kind === "video" && (
                     <span className="text-[10px] text-muted-foreground">
                       {item.mode}
@@ -334,6 +396,7 @@ function PromptDetailDialog({
                 {t("prompt.useIt")}
                 <ArrowRightIcon data-icon="inline-end" className="size-3.5" />
               </Button>
+              {footerExtra}
             </div>
           </div>
         </div>
@@ -343,10 +406,20 @@ function PromptDetailDialog({
 }
 
 // ---------------------------------------------------------------------------
-// 主界面
+// 提示词广场（内置精选题库）
 // ---------------------------------------------------------------------------
 
-export function PromptScreen() {
+function PlazaView({
+  addedKeys,
+  joinPending,
+  onJoin,
+  onOpenViewer,
+}: {
+  addedKeys: Set<string>;
+  joinPending: boolean;
+  onJoin: (item: PromptRow) => void;
+  onOpenViewer: (items: PromptRow[], index: number) => void;
+}) {
   const t = useT();
   const { kind, category, source, search, setSource, setSearch } = usePromptStore();
 
@@ -383,46 +456,6 @@ export function PromptScreen() {
   const items = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data]);
   const total = data?.pages[0]?.total ?? 0;
 
-  // 滚动到底部自动加载更多
-  const sentinelRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = sentinelRef.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting && hasNextPage && !isFetchingNextPage) {
-          fetchNextPage();
-        }
-      },
-      { threshold: 0.1 },
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
-
-  // 详情浮层：在当前已加载列表内左右切换
-  const [viewerIndex, setViewerIndex] = useState<number | null>(null);
-  const closeViewer = () => setViewerIndex(null);
-  const step = (delta: number) => {
-    setViewerIndex((i) =>
-      i == null || items.length === 0 ? i : (i + delta + items.length) % items.length,
-    );
-  };
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (viewerIndex == null) return;
-      if (e.key === "Escape") closeViewer();
-      else if (e.key === "ArrowLeft") step(-1);
-      else if (e.key === "ArrowRight") step(1);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [viewerIndex]);
-  // 过滤条件变化后关闭浮层
-  useEffect(() => {
-    setViewerIndex(null);
-  }, [kind, category, source, debouncedSearch]);
-
   const { data: catsData } = useQuery({
     queryKey: ["prompt-categories", kind],
     queryFn: () => rpcClient.listPromptCategories({ kind }),
@@ -430,8 +463,6 @@ export function PromptScreen() {
   const activeCatIntro =
     category === "all" ? undefined : catsData?.categories.find((c) => c.name === category)?.intro;
 
-  const kindCount = stats?.counts[kind];
-  const activeKind = KINDS.find((k) => k.kind === kind) ?? KINDS[0]!;
   const sourceFilters = SOURCE_FILTERS[kind] ?? [];
   const chip = (active: boolean) =>
     cn(
@@ -442,15 +473,15 @@ export function PromptScreen() {
     );
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* 工具栏：标题 + 副标题 + 来源/搜索 */}
+    <>
+      {/* 工具栏：标题 + 来源/搜索 */}
       <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b px-4 py-2.5">
         <div className="flex items-center gap-1.5">
           <ClipboardListIcon className="size-4 text-muted-foreground" />
-          <span className="text-sm font-semibold">{t("prompt.title")}</span>
+          <span className="text-sm font-semibold">{t("prompt.plaza")}</span>
           <span className="text-xs text-muted-foreground">
             {t(`prompt.kind.${kind}`)}
-            {kindCount ? ` · ${total > 0 ? `${items.length} / ${total}` : kindCount}` : ""}
+            {total > 0 ? ` · ${items.length} / ${total}` : stats ? ` · ${stats.counts[kind]}` : ""}
           </span>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-1.5">
@@ -507,7 +538,7 @@ export function PromptScreen() {
           ) : items.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 py-20 text-center">
               <div className="flex size-16 items-center justify-center rounded-2xl bg-primary/10">
-                {activeKind.icon}
+                {KINDS.find((k) => k.kind === kind)?.icon}
               </div>
               <p className="text-sm font-medium text-foreground">{t("prompt.empty.title")}</p>
               <p className="max-w-xs text-xs text-muted-foreground">
@@ -518,10 +549,201 @@ export function PromptScreen() {
             <>
               <div className="columns-1 gap-4 sm:columns-2 xl:columns-3 2xl:columns-4">
                 {items.map((item, i) => (
-                  <PromptCard key={item.id} item={item} onOpen={() => setViewerIndex(i)} />
+                  <PromptCard
+                    key={`plaza-${item.id}`}
+                    item={item}
+                    onOpen={() => onOpenViewer(items, i)}
+                    extraActions={
+                      <JoinMineButton
+                        added={addedKeys.has(item.key)}
+                        busy={joinPending}
+                        onClick={() => onJoin(item)}
+                      />
+                    }
+                  />
                 ))}
               </div>
-              <div ref={sentinelRef} className="h-4" />
+              <InfiniteSentinel
+                hasNextPage={hasNextPage}
+                isFetchingNextPage={isFetchingNextPage}
+                onLoadMore={fetchNextPage}
+              />
+              {isFetchingNextPage && (
+                <div className="flex justify-center py-3">
+                  <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </ScrollArea>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 我的提示词（用户自建 + 从广场加入）
+// ---------------------------------------------------------------------------
+
+function MyView({
+  onOpenViewer,
+}: {
+  onOpenViewer: (items: PromptRow[], index: number) => void;
+}) {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const { kind, category, search, setSearch, openCreate, setTab } = usePromptStore();
+
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const [deleteTarget, setDeleteTarget] = useState<UserPromptView | null>(null);
+
+  const { data: stats } = useQuery({
+    queryKey: ["my-prompt-stats"],
+    queryFn: () => rpcClient.getMyPromptStats(),
+  });
+
+  const { data, isLoading, isFetchingNextPage, hasNextPage, fetchNextPage } = useInfiniteQuery({
+    queryKey: ["my-prompts", kind, category, debouncedSearch],
+    queryFn: async ({ pageParam = 0 }) => {
+      return rpcClient.listMyPrompts({
+        kind,
+        category: category === "all" ? undefined : category,
+        search: debouncedSearch || undefined,
+        limit: PAGE_SIZE,
+        offset: pageParam * PAGE_SIZE,
+      });
+    },
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) => {
+      const loaded = allPages.reduce((n, p) => n + p.items.length, 0);
+      return loaded < lastPage.total ? allPages.length : undefined;
+    },
+  });
+
+  const items = useMemo(() => data?.pages.flatMap((p) => p.items) ?? [], [data]);
+  const total = data?.pages[0]?.total ?? 0;
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => rpcClient.deleteMyPrompt({ id }),
+    onSuccess: () => {
+      setDeleteTarget(null);
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["my-prompts"] }),
+        queryClient.invalidateQueries({ queryKey: ["my-prompt-categories"] }),
+        queryClient.invalidateQueries({ queryKey: ["my-prompt-stats"] }),
+        queryClient.invalidateQueries({ queryKey: ["my-prompt-keys"] }),
+      ]);
+    },
+  });
+
+  return (
+    <>
+      {/* 工具栏：标题 + 新建 + 搜索 */}
+      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b px-4 py-2.5">
+        <div className="flex items-center gap-1.5">
+          <ClipboardListIcon className="size-4 text-muted-foreground" />
+          <span className="text-sm font-semibold">{t("prompt.mine")}</span>
+          <span className="text-xs text-muted-foreground">
+            {t(`prompt.kind.${kind}`)}
+            {total > 0 ? ` · ${items.length} / ${total}` : stats ? ` · ${stats.counts[kind]}` : ""}
+          </span>
+        </div>
+        <div className="ml-auto flex flex-wrap items-center gap-1.5">
+          <Button size="sm" onClick={() => openCreate(kind)}>
+            <PlusIcon data-icon="inline-start" className="size-3.5" />
+            {t("prompt.new")}
+          </Button>
+          <div className="relative">
+            <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t("prompt.search")}
+              className="h-8 w-52 pl-8 text-xs"
+            />
+            {search && (
+              <button
+                type="button"
+                aria-label={t("common.cancel")}
+                onClick={() => setSearch("")}
+                className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              >
+                <XIcon className="size-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* 卡片瀑布流 */}
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="p-4">
+          {isLoading ? (
+            <div className="flex justify-center py-16">
+              <Spinner className="size-5" />
+            </div>
+          ) : items.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-3 py-20 text-center">
+              <div className="flex size-16 items-center justify-center rounded-2xl bg-primary/10">
+                {KINDS.find((k) => k.kind === kind)?.icon}
+              </div>
+              <p className="text-sm font-medium text-foreground">{t("prompt.mine.empty.title")}</p>
+              <p className="max-w-xs text-xs text-muted-foreground">
+                {debouncedSearch ? t("prompt.empty.search") : t("prompt.mine.empty.desc")}
+              </p>
+              {!debouncedSearch && (
+                <div className="mt-1 flex items-center gap-2">
+                  <Button variant="outline" size="sm" onClick={() => openCreate(kind)}>
+                    <PlusIcon data-icon="inline-start" className="size-3.5" />
+                    {t("prompt.mine.empty.create")}
+                  </Button>
+                  <Button size="sm" onClick={() => setTab("plaza")}>
+                    {t("prompt.mine.empty.goPlaza")}
+                  </Button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <>
+              <div className="columns-1 gap-4 sm:columns-2 xl:columns-3 2xl:columns-4">
+                {items.map((item, i) => (
+                  <PromptCard
+                    key={`mine-${item.id}`}
+                    item={item}
+                    onOpen={() => onOpenViewer(items, i)}
+                    extraActions={
+                      <>
+                        <Button
+                          size="icon-sm"
+                          variant="outline"
+                          tooltip={t("prompt.edit")}
+                          onClick={() => usePromptStore.getState().openEdit(item)}
+                        >
+                          <PencilIcon className="size-3.5" />
+                        </Button>
+                        <Button
+                          size="icon-sm"
+                          variant="outline"
+                          tooltip={t("prompt.delete")}
+                          onClick={() => setDeleteTarget(item)}
+                        >
+                          <Trash2Icon className="size-3.5 text-destructive" />
+                        </Button>
+                      </>
+                    }
+                  />
+                ))}
+              </div>
+              <InfiniteSentinel
+                hasNextPage={hasNextPage}
+                isFetchingNextPage={isFetchingNextPage}
+                onLoadMore={fetchNextPage}
+              />
               {isFetchingNextPage && (
                 <div className="flex justify-center py-3">
                   <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
@@ -532,9 +754,343 @@ export function PromptScreen() {
         </div>
       </ScrollArea>
 
-      {viewerIndex != null && items[viewerIndex] && (
-        <PromptDetailDialog items={items} index={viewerIndex} onClose={closeViewer} onStep={step} />
+      {/* 删除确认 */}
+      <Dialog open={!!deleteTarget} onOpenChange={(open) => !open && setDeleteTarget(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{t("prompt.deleteConfirm.title")}</DialogTitle>
+            <DialogDescription>{t("prompt.deleteConfirm.desc")}</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setDeleteTarget(null)}>
+              {t("prompt.cancel")}
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={deleteMutation.isPending}
+              onClick={() => deleteTarget && deleteMutation.mutate(deleteTarget.id)}
+            >
+              {deleteMutation.isPending ? (
+                <Loader2Icon data-icon="inline-start" className="size-3.5 animate-spin" />
+              ) : (
+                <Trash2Icon data-icon="inline-start" className="size-3.5" />
+              )}
+              {t("prompt.delete")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 新建 / 编辑表单（由侧边栏「新建」或我的卡片「编辑」触发）
+// ---------------------------------------------------------------------------
+
+function PromptEditDialog() {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const editor = usePromptStore((s) => s.editor);
+  const closeEditor = usePromptStore((s) => s.closeEditor);
+  const currentKind = usePromptStore((s) => s.kind);
+  const isEdit = editor?.mode === "edit";
+
+  const [kind, setKind] = useState<PromptKind>("image");
+  const [category, setCategory] = useState("");
+  const [name, setName] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [summary, setSummary] = useState("");
+  const [ratio, setRatio] = useState("");
+
+  useEffect(() => {
+    if (!editor) return;
+    if (editor.mode === "edit") {
+      setKind(editor.item.kind);
+      setCategory(editor.item.category === "未分类" ? "" : editor.item.category);
+      setName(editor.item.name);
+      setPrompt(editor.item.prompt);
+      setSummary(editor.item.summary ?? "");
+      setRatio(editor.item.ratio ?? "");
+    } else {
+      setKind(editor.kind ?? currentKind);
+      setCategory("");
+      setName("");
+      setPrompt("");
+      setSummary("");
+      setRatio("");
+    }
+  }, [editor, currentKind]);
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      if (editor?.mode === "edit") {
+        return rpcClient.updateMyPrompt({
+          id: editor.item.id,
+          patch: { kind, category, name, prompt, summary, ratio },
+        });
+      }
+      return rpcClient.createMyPrompt({ kind, category, name, prompt, summary, ratio });
+    },
+    onSuccess: () => {
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["my-prompts"] }),
+        queryClient.invalidateQueries({ queryKey: ["my-prompt-categories"] }),
+        queryClient.invalidateQueries({ queryKey: ["my-prompt-stats"] }),
+      ]);
+      closeEditor();
+    },
+  });
+
+  const canSave = name.trim().length > 0 && prompt.trim().length > 0;
+
+  return (
+    <Dialog open={!!editor} onOpenChange={(open) => !open && !mutation.isPending && closeEditor()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{isEdit ? t("prompt.edit") : t("prompt.new")}</DialogTitle>
+        </DialogHeader>
+        <div className="flex flex-col gap-3">
+          {/* 类型（大类型） */}
+          <div className="flex items-center gap-3">
+            <Label htmlFor="pe-kind" className="w-16 shrink-0 text-xs">
+              {t("prompt.form.kind")}
+            </Label>
+            <div id="pe-kind" className="flex items-center gap-0.5 rounded-lg bg-muted p-0.5">
+              {KINDS.map((k) => (
+                <button
+                  key={k.kind}
+                  type="button"
+                  onClick={() => setKind(k.kind)}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                    kind === k.kind
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {k.icon}
+                  {t(k.labelKey)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 分类（自定义） */}
+          <div className="flex items-center gap-3">
+            <Label htmlFor="pe-category" className="w-16 shrink-0 text-xs">
+              {t("prompt.form.category")}
+            </Label>
+            <Input
+              id="pe-category"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              placeholder={t("prompt.form.categoryPlaceholder")}
+              className="h-8 flex-1 text-xs"
+            />
+          </div>
+
+          {/* 名称 */}
+          <div className="flex items-center gap-3">
+            <Label htmlFor="pe-name" className="w-16 shrink-0 text-xs">
+              {t("prompt.form.name")}
+            </Label>
+            <Input
+              id="pe-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={t("prompt.form.namePlaceholder")}
+              className="h-8 flex-1 text-xs"
+            />
+          </div>
+
+          {/* 简介 */}
+          <div className="flex items-center gap-3">
+            <Label htmlFor="pe-summary" className="w-16 shrink-0 text-xs">
+              {t("prompt.form.summary")}
+            </Label>
+            <Input
+              id="pe-summary"
+              value={summary}
+              onChange={(e) => setSummary(e.target.value)}
+              placeholder={t("prompt.form.summaryPlaceholder")}
+              className="h-8 flex-1 text-xs"
+            />
+          </div>
+
+          {/* 比例（图片/视频才有） */}
+          {kind !== "llm" && (
+            <div className="flex items-center gap-3">
+              <Label htmlFor="pe-ratio" className="w-16 shrink-0 text-xs">
+                {t("prompt.form.ratio")}
+              </Label>
+              <Input
+                id="pe-ratio"
+                value={ratio}
+                onChange={(e) => setRatio(e.target.value)}
+                placeholder={t("prompt.form.ratioPlaceholder")}
+                className="h-8 flex-1 text-xs"
+              />
+            </div>
+          )}
+
+          {/* 提示词 */}
+          <div className="flex gap-3">
+            <Label htmlFor="pe-prompt" className="w-16 shrink-0 pt-1 text-xs">
+              {t("prompt.form.prompt")}
+            </Label>
+            <Textarea
+              id="pe-prompt"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              rows={8}
+              placeholder={t("prompt.form.promptPlaceholder")}
+              className="min-h-0 flex-1 resize-none text-xs"
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={closeEditor} disabled={mutation.isPending}>
+            {t("prompt.cancel")}
+          </Button>
+          <Button size="sm" onClick={() => mutation.mutate()} disabled={!canSave || mutation.isPending}>
+            {mutation.isPending ? (
+              <Loader2Icon data-icon="inline-start" className="size-3.5 animate-spin" />
+            ) : null}
+            {t("prompt.save")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 主界面
+// ---------------------------------------------------------------------------
+
+/** 滚动到底部自动加载更多（广场 / 我的 共用）。 */
+function InfiniteSentinel({
+  hasNextPage,
+  isFetchingNextPage,
+  onLoadMore,
+}: {
+  hasNextPage: boolean;
+  isFetchingNextPage: boolean;
+  onLoadMore: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && hasNextPage && !isFetchingNextPage) {
+          onLoadMore();
+        }
+      },
+      { threshold: 0.1 },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasNextPage, isFetchingNextPage, onLoadMore]);
+  return <div ref={ref} className="h-4" />;
+}
+
+type Viewer = { kind: "plaza" | "mine"; items: PromptRow[]; index: number } | null;
+
+export function PromptScreen() {
+  const queryClient = useQueryClient();
+  const { tab, setTab, setKind } = usePromptStore();
+
+  // 「已加入我的提示词」集合 + 加入动作（卡片与详情浮层共用）
+  const { data: keysData } = useQuery({
+    queryKey: ["my-prompt-keys"],
+    queryFn: () => rpcClient.listMyPromptSourceKeys(),
+  });
+  const addedKeys = useMemo(() => new Set(keysData?.keys ?? []), [keysData]);
+
+  const joinMutation = useMutation({
+    mutationFn: (sourceId: number) => rpcClient.importMyPromptFromPlaza({ sourceId }),
+    onSuccess: async (res) => {
+      if (!res.item) return;
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["my-prompt-keys"] }),
+        queryClient.invalidateQueries({ queryKey: ["my-prompt-stats"] }),
+        queryClient.invalidateQueries({ queryKey: ["my-prompts"] }),
+        queryClient.invalidateQueries({ queryKey: ["my-prompt-categories"] }),
+      ]);
+      setTab("mine");
+      setKind(res.item.kind);
+      setViewer({ kind: "mine", items: [res.item], index: 0 });
+    },
+  });
+
+  const handleJoin = (item: PromptRow) => {
+    if (addedKeys.has(item.key) || joinMutation.isPending) return;
+    joinMutation.mutate(item.id);
+  };
+
+  const [viewer, setViewer] = useState<Viewer>(null);
+  const closeViewer = () => setViewer(null);
+  const openPlazaViewer = (items: PromptRow[], index: number) =>
+    setViewer({ kind: "plaza", items, index });
+  const openMineViewer = (items: PromptRow[], index: number) =>
+    setViewer({ kind: "mine", items, index });
+  const step = (delta: number) =>
+    setViewer((v) =>
+      v && v.items.length > 0
+        ? { ...v, index: (v.index + delta + v.items.length) % v.items.length }
+        : v,
+    );
+
+  // 键盘导航：Escape / ← / →
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!viewer) return;
+      if (e.key === "Escape") closeViewer();
+      else if (e.key === "ArrowLeft") step(-1);
+      else if (e.key === "ArrowRight") step(1);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [viewer]);
+
+  const viewerItem = viewer ? viewer.items[viewer.index] : undefined;
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {tab === "plaza" ? (
+        <PlazaView
+          addedKeys={addedKeys}
+          joinPending={joinMutation.isPending}
+          onJoin={handleJoin}
+          onOpenViewer={openPlazaViewer}
+        />
+      ) : (
+        <MyView onOpenViewer={openMineViewer} />
       )}
+
+      {viewer && (
+        <PromptDetailDialog
+          items={viewer.items}
+          index={viewer.index}
+          onClose={closeViewer}
+          onStep={step}
+          footerExtra={
+            viewer.kind === "plaza" && viewerItem ? (
+              <JoinMineButton
+                added={addedKeys.has(viewerItem.key)}
+                busy={joinMutation.isPending}
+                onClick={() => handleJoin(viewerItem)}
+              />
+            ) : undefined
+          }
+        />
+      )}
+
+      <PromptEditDialog />
     </div>
   );
 }

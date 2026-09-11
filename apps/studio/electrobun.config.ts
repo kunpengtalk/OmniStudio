@@ -46,6 +46,12 @@ export default {
       ...nativeCopy,
       "src/bun/db/migrations": "bun/db/migrations",
       "src/bun/prompt-library/seed": "bun/prompt-library/seed",
+      // MLX 生图模型下载/校验脚本：mlx-gen.ts 以 import.meta.dir 同目录相对路径
+      // 调用它；不打进 bundle 时主进程 spawpython 跑不到文件，python 以「文件
+      // 不存在」退出（退出码 2），模型的 check/download 会全部误报失败。
+      "src/bun/mlx-model.py": "bun/mlx-model.py",
+      // 常驻生图 worker（模型加载一次、反复生成），同样以同目录相对路径调用。
+      "src/bun/mlx-worker.py": "bun/mlx-worker.py",
       // 提示词库内置素材（scripts/bundle-prompt-library-assets.ts 生成）：
       // 有则打进 webview，作为远程封面加载失败时的离线兜底。
       ...(existsSync("dist/prompt-library")

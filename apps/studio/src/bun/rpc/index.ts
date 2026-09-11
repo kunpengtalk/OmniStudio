@@ -49,8 +49,15 @@ import type { OcrLangModelInfo, OcrStatus, OcrResult, OcrVlmResult, OcrProviderC
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
 import * as PromptLib from "../prompt-library";
+import * as Up from "../user-prompt";
 import * as MlxGen from "../mlx-gen";
-import type { MlxModelInfo, MlxGenStatus, MlxModelDownloadProgress } from "../mlx-gen";
+import type {
+  MlxModelInfo,
+  MlxGenStatus,
+  MlxModelDownloadProgress,
+  MlxModelDownloadState,
+  MlxGenPhase,
+} from "../mlx-gen";
 import type { EdgeVoice } from "../edge-tts";
 import type { ModelCategory } from "../../shared/modelscope";
 
@@ -305,6 +312,43 @@ export type AppRPC = {
         params: PromptLib.PromptListParams;
         response: { items: PromptLib.PromptRow[]; total: number };
       };
+      ensurePromptMedia: {
+        params: { path: string };
+        response: { url: string | null };
+      };
+      // ---- 我的提示词 ----
+      listMyPrompts: {
+        params: Up.MyPromptListParams;
+        response: { items: Up.UserPromptView[]; total: number };
+      };
+      listMyPromptCategories: {
+        params: undefined;
+        response: { categories: { name: string; intro: string | null; count: number }[] };
+      };
+      listMyPromptSourceKeys: {
+        params: undefined;
+        response: { keys: string[] };
+      };
+      getMyPromptStats: {
+        params: undefined;
+        response: { counts: Record<Up.PromptKind, number> };
+      };
+      createMyPrompt: {
+        params: Up.MyPromptInput;
+        response: { item: Up.UserPromptView };
+      };
+      importMyPromptFromPlaza: {
+        params: { sourceId: number };
+        response: { item?: Up.UserPromptView; already?: boolean };
+      };
+      updateMyPrompt: {
+        params: { id: number; patch: Up.MyPromptPatch };
+        response: { item: Up.UserPromptView | null };
+      };
+      deleteMyPrompt: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
       listChatModels: {
         params: undefined;
         response: { models: ChatModelOption[] };
@@ -492,7 +536,13 @@ export type AppRPC = {
         response: { files: { ref: string; url: string }[] };
       };
       runTTS: {
-        params: { text: string; voice?: string; model?: string; base?: string };
+        params: {
+          text: string;
+          voice?: string;
+          model?: string;
+          base?: string;
+          referenceAudioRef?: string;
+        };
         response: { record: VoiceRecordRow };
       };
       runASR: {
@@ -758,6 +808,26 @@ export type AppRPC = {
         params: undefined;
         response: { downloaded: string[] };
       };
+      /** 各模型持久化的下载进度（UI 据此展示「继续下载（已下载 X%）」）。 */
+      getMlxModelDownloadStates: {
+        params: undefined;
+        response: { states: MlxModelDownloadState[] };
+      };
+      /** 启动常驻生图 worker（加载模型到内存，之后生图快）。 */
+      startMlxModel: {
+        params: { modelId: string; quantize?: number };
+        response: { ok: boolean; error?: string; already?: boolean };
+      };
+      /** 停止常驻 worker，释放内存。 */
+      stopMlxModel: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      /** 当前已启动（常驻）的模型，无则 null。 */
+      getMlxActiveModel: {
+        params: undefined;
+        response: { active: { modelId: string; quantize: number } | null };
+      };
     };
     messages: {};
   }>;
@@ -808,6 +878,8 @@ export type AppRPC = {
         text: string;
       };
       mlxModelDownloadProgress: MlxModelDownloadProgress;
+      /** 生图阶段事件：启动/加载/生成 n/N/完成。 */
+      mlxGenPhase: MlxGenPhase;
       /** CLI（`omi`）请求跳转到某个页面：models / settings / server / stats / chat / index。 */
       navigate: { path: string };
     };
@@ -1232,6 +1304,42 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       listPrompts: async (params) => {
         return PromptLib.listPrompts(params);
+      },
+
+      ensurePromptMedia: async ({ path }) => {
+        return { url: await PromptLib.ensurePromptMedia(path) };
+      },
+
+      listMyPrompts: async (params) => {
+        return Up.listMyPrompts(params);
+      },
+
+      listMyPromptCategories: async () => {
+        return { categories: Up.listMyPromptCategories() };
+      },
+
+      listMyPromptSourceKeys: async () => {
+        return { keys: Up.listMyPromptSourceKeys() };
+      },
+
+      getMyPromptStats: async () => {
+        return { counts: Up.countMyPromptsByKind() };
+      },
+
+      createMyPrompt: async (params) => {
+        return { item: Up.createMyPrompt(params) };
+      },
+
+      importMyPromptFromPlaza: async ({ sourceId }) => {
+        return Up.importMyPromptFromPlaza(sourceId);
+      },
+
+      updateMyPrompt: async ({ id, patch }) => {
+        return { item: Up.updateMyPrompt(id, patch) };
+      },
+
+      deleteMyPrompt: async ({ id }) => {
+        return Up.deleteMyPrompt(id);
       },
 
       listChatModels: async () => {
@@ -1841,6 +1949,22 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       getDownloadedMlxModels: async () => {
         return { downloaded: await MlxGen.getDownloadedMlxModels() };
       },
+
+      getMlxModelDownloadStates: async () => {
+        return { states: await MlxGen.getMlxModelDownloadStates() };
+      },
+
+      startMlxModel: async ({ modelId, quantize }) => {
+        return MlxGen.startMlxModel(modelId, quantize);
+      },
+
+      stopMlxModel: async () => {
+        return MlxGen.stopMlxModel();
+      },
+
+      getMlxActiveModel: async () => {
+        return { active: MlxGen.getMlxActiveModel() };
+      },
     },
     messages: {},
   },
@@ -1982,6 +2106,12 @@ export function initMlxModelDownloadBroadcast(win: BrowserWindowWithRPC) {
   MlxGen.onMlxModelProgress((p) => {
     try {
       win.webview.rpc?.send.mlxModelDownloadProgress(p);
+    } catch {}
+  });
+  // 生图阶段事件（启动/加载/生成 n/N）实时推送到前端。
+  MlxGen.onMlxGenPhase((p) => {
+    try {
+      win.webview.rpc?.send.mlxGenPhase(p);
     } catch {}
   });
 }

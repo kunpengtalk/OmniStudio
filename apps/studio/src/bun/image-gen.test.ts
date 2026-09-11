@@ -22,7 +22,11 @@ mock.module("./db/settings", () => ({
   updateSettings: () => {},
   getAllSettings: () => ({}),
 }));
-mock.module("./image-server", () => ({ getImagesBaseDir: () => `/tmp/img-${process.pid}` }));
+mock.module("./image-server", () => ({
+  getImagesBaseDir: () => `/tmp/img-${process.pid}`,
+  getPromptLibraryCacheBase: () => `/tmp/pl-cache-${process.pid}`,
+  promptLibraryLocalUrl: (rel: string) => `http://localhost:1/prompt-library/${rel}`,
+}));
 // 补全 server-info 的全部导出：replace mock 会在同进程内泄漏给其他测试文件
 // （如 prompt-library.test 的 IMAGE_SERVER_PORT 导入），缺导出会直接报错。
 mock.module("../shared/server-info", () => ({

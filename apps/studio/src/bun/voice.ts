@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
 import path from "path";
 import { desc, eq } from "drizzle-orm";
 import { db } from "./db";
@@ -6,6 +6,7 @@ import { voiceRecords } from "./db/schema";
 import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
+import { TTS_REFERENCE_AUDIO_FIELD } from "../shared/tts-reference-audio";
 import { edgeSynthesize } from "./edge-tts";
 import { synthesizeCallLocal } from "./tts-local";
 
@@ -231,14 +232,24 @@ async function synthesizeOpenAiAudio(input: {
   model?: string;
   base?: string;
   apiKey?: string;
+  referenceAudioRef?: string;
 }): Promise<Buffer> {
   const provider = getTTSProviderConfig();
   const base = input.base?.trim() || provider.base || getBaseUrl();
   if (!base) throw new Error("No inference server configured");
 
   const model = input.model?.trim() || provider.model || getSetting("TTS_MODEL") || undefined;
-  const voice = input.voice?.trim() || getSetting("TTS_VOICE") || "alloy";
+  const hasRef = !!input.referenceAudioRef;
+  // 有参考音频时，参考音频即音色来源，不再回退到默认 alloy 音色。
+  const voice = input.voice?.trim() || (hasRef ? "" : getSetting("TTS_VOICE") || "alloy");
   const apiKey = input.apiKey?.trim() || provider.apiKey || getSetting("VLLM_API_KEY");
+
+  let referenceAudioB64: string | undefined;
+  if (hasRef) {
+    const abs = resolveAudioPath(input.referenceAudioRef!);
+    if (!abs || !existsSync(abs)) throw new Error("Reference audio not found");
+    referenceAudioB64 = readFileSync(abs).toString("base64");
+  }
 
   const res = await fetch(`${normalizeApiBase(base)}/audio/speech`, {
     method: "POST",
@@ -249,8 +260,9 @@ async function synthesizeOpenAiAudio(input: {
     body: JSON.stringify({
       model,
       input: input.text,
-      voice,
+      ...(voice ? { voice } : {}),
       response_format: "mp3",
+      ...(referenceAudioB64 ? { [TTS_REFERENCE_AUDIO_FIELD]: referenceAudioB64 } : {}),
     }),
     signal: AbortSignal.timeout(120_000),
   });
@@ -283,6 +295,7 @@ export async function runTTS(input: {
   model?: string;
   base?: string;
   apiKey?: string;
+  referenceAudioRef?: string;
 }): Promise<VoiceRecordRow> {
   const buf = await synthesizeOpenAiAudio(input);
   const dir = getAudioBaseDir();
@@ -291,12 +304,14 @@ export async function runTTS(input: {
   await Bun.write(path.join(dir, name), buf);
 
   const ref = `audio/${name}`;
+  const hasRef = !!input.referenceAudioRef;
   const record = insertVoiceRecord({
     kind: "tts",
     model: input.model?.trim() || getSetting("TTS_MODEL") || null,
-    voice: input.voice?.trim() || getSetting("TTS_VOICE") || "alloy",
+    voice: input.voice?.trim() || (hasRef ? "" : getSetting("TTS_VOICE") || "alloy"),
     text: input.text,
     audioPath: ref,
+    refAudioPath: input.referenceAudioRef ?? null,
   });
   return voiceRecordToRow(record);
 }

@@ -29,7 +29,7 @@ export function getImagesBaseDir(): string {
 /**
  * 提示词库媒体素材根目录：seed 数据里的 `/prompt-library/...` 路径指向
  * vibedesign 仓库 `frontend/public/prompt-library`（图片/视频封面，未打进本应用包）。
- * 目录不存在时返回 null，由前端渐变占位兜底。
+ * 目录不存在时返回 null，由本地缓存 / 云端直链兜底。
  */
 export function getPromptLibraryMediaBase(): string | null {
   const base = path.join(
@@ -40,6 +40,19 @@ export function getPromptLibraryMediaBase(): string | null {
     "public",
   );
   return existsSync(path.join(base, "prompt-library")) ? base : null;
+}
+
+/**
+ * 提示词库媒体本地缓存目录：云端直链加载失败时由 `ensurePromptMedia` 惰性
+ * 下载到这里，之后 `/prompt-library/...` 路由直接读缓存（离线也能看）。
+ */
+export function getPromptLibraryCacheBase(): string {
+  return path.join(getDataDir("prompt-media"), "prompt-library");
+}
+
+/** 提示词库媒体相对路径（如 `awesome/case544.jpg`）对应的本地缓存 URL。 */
+export function promptLibraryLocalUrl(rel: string): string {
+  return `http://localhost:${IMAGE_SERVER_PORT}/prompt-library/${rel}`;
 }
 
 export function getUploadsBaseDir(): string {
@@ -145,17 +158,21 @@ export function startImageServer() {
         return new Response(null, { status: 204, headers: CORS_HEADERS });
       }
 
-      // 提示词库媒体：直接从 vibedesign 的 public 目录读（seed 里的 /prompt-library/... 路径）
+      // 提示词库媒体：优先 vibedesign 的 public 目录，其次本地下载缓存
+      // （seed 里的 /prompt-library/... 路径；缓存目录见 getPromptLibraryCacheBase）
       if (url.pathname.startsWith("/prompt-library/")) {
-        const mediaBase = getPromptLibraryMediaBase();
-        if (!mediaBase) return new Response("Not found", { status: 404 });
-        const mediaPath = path.join(mediaBase, decodeURIComponent(url.pathname));
-        if (!mediaPath.startsWith(mediaBase + path.sep)) {
-          return new Response("Forbidden", { status: 403 });
+        const rel = decodeURIComponent(url.pathname.slice("/prompt-library/".length));
+        for (const mediaBase of [getPromptLibraryMediaBase(), getPromptLibraryCacheBase()]) {
+          if (!mediaBase) continue;
+          const mediaPath = path.join(mediaBase, rel);
+          if (!mediaPath.startsWith(mediaBase + path.sep)) {
+            return new Response("Forbidden", { status: 403 });
+          }
+          if (!existsSync(mediaPath)) continue;
+          const mediaSize = statSync(mediaPath).size;
+          return fileResponse(mediaPath, mediaSize, req.headers.get("range"));
         }
-        if (!existsSync(mediaPath)) return new Response("Not found", { status: 404 });
-        const mediaSize = statSync(mediaPath).size;
-        return fileResponse(mediaPath, mediaSize, req.headers.get("range"));
+        return new Response("Not found", { status: 404 });
       }
 
       const filePath = path.join(baseDir, decodeURIComponent(url.pathname));

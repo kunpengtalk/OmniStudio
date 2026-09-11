@@ -36,6 +36,8 @@ mock.module("./chat-model", () => ({ getChatModelName: () => "test-model" }));
 mock.module("./image-server", () => ({
   chatImageDir: () => "/tmp",
   getImagesBaseDir: () => "/tmp",
+  getPromptLibraryCacheBase: () => join("/tmp", `pl-cache-${process.pid}`),
+  promptLibraryLocalUrl: (rel: string) => `http://localhost:1/prompt-library/${rel}`,
   // 同一批测试在同一进程共享 mock 注册表，image-server.route.test 也会 import
   // ./image-server；补上它需要的导出，避免该文件的冒烟测试被这个桩污染。
   getPromptLibraryMediaBase: () => {

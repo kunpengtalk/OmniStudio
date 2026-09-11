@@ -34,7 +34,9 @@ import { Spinner } from "@ui/spinner";
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@ui/select";
@@ -49,9 +51,15 @@ import type { AsrAudioCppModelInfo, AsrAudioCppStatus } from "../../bun/asr-audi
 import { TranscriptViewer, mergeSegments, fmtClock } from "./voice-asr-result";
 import { AUDIOCPP_REPO, AUDIOCPP_LANG_LABELS } from "@/shared/audiocpp";
 import { DEFAULT_ASR_MODEL_FILE } from "@/shared/modelscope";
+import { detectReferenceAudioSupport } from "@/shared/tts-reference-audio";
 import type { TtsLocalModelInfo, TtsLocalStatus } from "../../bun/tts-local";
 import type { VoiceClone, VoiceRecordRow } from "../../bun/voice";
 import { cn } from "@/mainview/lib/utils";
+import {
+  DEFAULT_VOICE_BASE_URL,
+  VOICE_PROVIDER_PRESETS,
+  matchVoiceProvider,
+} from "./voice-provider-presets";
 
 const TABS: { key: VoiceTab; icon: React.ReactNode; labelKey: string }[] = [
   { key: "tts", icon: <AudioLinesIcon className="size-4" />, labelKey: "voice.tab.tts" },
@@ -83,6 +91,112 @@ function ResultError({ error }: { error?: string }) {
     <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-xs text-destructive">
       {error}
     </div>
+  );
+}
+
+/**
+ * 音频模型下拉：内置(服务商预设已知模型) + 已获取(/v1/models 拉取) 分组，
+ * 支持关键字搜索；当前值不在列表中时也展示，保留手填能力。
+ */
+function AudioModelSelect({
+  value,
+  onChange,
+  placeholder,
+  builtin,
+  fetched,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  /** 服务商预设的内置模型 ID */
+  builtin: string[];
+  /** 从 /v1/models 拉取的模型 ID */
+  fetched: string[];
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const keyword = query.trim().toLowerCase();
+  const matches = (m: string) => !keyword || m.toLowerCase().includes(keyword);
+
+  const builtinList = [...new Set(builtin)].filter(matches);
+  const fetchedList = [...new Set(fetched)].filter((m) => !builtin.includes(m) && matches(m));
+
+  const closeAndReset = (next: boolean) => {
+    setOpen(next);
+    if (!next) setQuery("");
+  };
+
+  return (
+    <Select
+      value={value || undefined}
+      open={open}
+      onOpenChange={closeAndReset}
+      onValueChange={(v) => {
+        onChange(v);
+        closeAndReset(false);
+      }}
+    >
+      <SelectTrigger className="h-8 w-full text-xs">
+        <SelectValue placeholder={placeholder} />
+      </SelectTrigger>
+      <SelectContent position="popper" sideOffset={6} className="max-w-80">
+        <div
+          className="sticky top-0 z-10 bg-popover p-1.5 pb-1"
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                closeAndReset(false);
+              }
+            }}
+            placeholder={t("chat.modelSearch")}
+            autoFocus
+            className="h-7 text-xs"
+          />
+        </div>
+        {value && !builtin.includes(value) && !fetched.includes(value) && (
+          <SelectGroup>
+            <SelectItem value={value}>
+              <span className="truncate">{value}</span>
+              <span className="truncate text-[10px] text-muted-foreground/70">
+                {t("settings.integrations.currentValue")}
+              </span>
+            </SelectItem>
+          </SelectGroup>
+        )}
+        {builtinList.length > 0 && (
+          <SelectGroup>
+            <SelectLabel>{t("voice.compat.builtin")}</SelectLabel>
+            {builtinList.map((m) => (
+              <SelectItem key={`builtin-${m}`} value={m}>
+                <span className="truncate">{m}</span>
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        )}
+        {fetchedList.length > 0 && (
+          <SelectGroup>
+            <SelectLabel>{t("voice.compat.fetched")}</SelectLabel>
+            {fetchedList.map((m) => (
+              <SelectItem key={`fetched-${m}`} value={m}>
+                <span className="truncate">{m}</span>
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        )}
+        {builtinList.length === 0 && fetchedList.length === 0 && (
+          <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+            {query ? t("chat.modelNoMatch") : t("chat.modelEmpty")}
+          </div>
+        )}
+      </SelectContent>
+    </Select>
   );
 }
 
@@ -749,15 +863,31 @@ function TtsTab() {
   const [pBase, setPBase] = useState("");
   const [pKey, setPKey] = useState("");
   const [pError, setPError] = useState<string>();
+  const [presetId, setPresetId] = useState("");
+  // 参考音频：已选文件（ref 传给后端 / url 前端预览）+ 是否手动覆盖“该模型支持参考音频”（null=跟随自动检测）。
+  const [refAudio, setRefAudio] = useState<{ ref: string; url: string } | null>(null);
+  const [refOverride, setRefOverride] = useState<boolean | null>(null);
   const syncedRef = useRef(false);
   useEffect(() => {
     if (provider && !syncedRef.current) {
       syncedRef.current = true;
-      setPBase(provider.base);
+      // 地址留空时回退到线上 OmniLabs 默认地址，避免空着。
+      setPBase(provider.base || DEFAULT_VOICE_BASE_URL);
       setPKey(provider.apiKey);
       setModel((m) => m || provider.model);
+      setPresetId(matchVoiceProvider(provider.base || DEFAULT_VOICE_BASE_URL)?.id ?? "");
     }
   }, [provider]);
+
+  // 选择内置服务商：自动带出 Base URL；有内置 TTS 模型且当前为空时自动选中。
+  const pickProvider = (id: string) => {
+    setPresetId(id);
+    const p = VOICE_PROVIDER_PRESETS.find((x) => x.id === id);
+    if (!p) return;
+    setPBase(p.baseUrl);
+    setPError(undefined);
+    if (p.ttsModels.length > 0) setModel((m) => m || p.ttsModels[0]!);
+  };
 
   const saveProvider = useMutation({
     mutationFn: () =>
@@ -789,15 +919,28 @@ function TtsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [configured]);
 
-  const { data: httpVoicesData } = useQuery({
-    queryKey: ["tts-http-voices"],
-    queryFn: () => rpcClient.listTTSHttpVoices(),
-  });
-  const compatVoices = [
-    ...(httpVoicesData?.voices ?? []).map((v) => v.id),
-    ...clones.map((c) => c.name),
-  ];
   const models = fetchModels.data?.models ?? [];
+
+  // 参考音频能力：跟随自动检测，可被手动开关覆盖。base 用当前配置地址（留空回退线上默认）。
+  const compatBase = pBase || DEFAULT_VOICE_BASE_URL;
+  const supportsRef = refOverride ?? detectReferenceAudioSupport(model, compatBase);
+
+  // 换模型 / 换地址时重置手动覆盖，重新跟随自动检测。
+  useEffect(() => {
+    setRefOverride(null);
+  }, [model, compatBase]);
+
+  // 选择参考音频文件（复用 ASR / 克隆页的 openFileDialog → stageAudio 模式）。
+  const pickRef = useMutation({
+    mutationFn: async () => {
+      const { paths } = await rpcClient.openFileDialog({
+        allowedFileTypes: "mp3,wav,m4a,aac,flac,ogg,opus,webm,wma,mp4",
+      });
+      if (paths.length === 0) return;
+      const { files } = await rpcClient.stageAudio({ paths });
+      if (files[0]) setRefAudio(files[0]);
+    },
+  });
 
   // ---------- Generate ----------
   const generate = useMutation({
@@ -814,7 +957,9 @@ function TtsTab() {
       }
       return source === "edge"
         ? rpcClient.runTTSEdge({ text, voice: edgeVoice })
-        : rpcClient.runTTS({ text, voice, model: model.trim() || undefined });
+        : supportsRef && refAudio
+          ? rpcClient.runTTS({ text, model: model.trim() || undefined, referenceAudioRef: refAudio.ref })
+          : rpcClient.runTTS({ text, model: model.trim() || undefined, voice: voice.trim() || undefined });
     },
     onSuccess: ({ record }) => {
       setResult(record);
@@ -825,7 +970,9 @@ function TtsTab() {
       } else if (source === "local") {
         if (localModelId) void rpcClient.updateSettings({ settings: { TTS_MODEL: localModelId } });
       } else if (source === "compat") {
-        const toSave: Record<string, string> = { TTS_VOICE: voice };
+        // 用参考音频合成时，音色来源是参考音频本身，不要回写默认 alloy。
+        const toSave: Record<string, string> = {};
+        if (!(supportsRef && refAudio)) toSave.TTS_VOICE = voice;
         if (model.trim()) toSave.TTS_MODEL = model.trim();
         void rpcClient.updateSettings({ settings: toSave });
       }
@@ -931,36 +1078,114 @@ function TtsTab() {
 
             {source === "compat" && (
               <>
-                {/* 服务配置：Base URL + API Key */}
+                {/* 服务配置：服务商 + Base URL + API Key + 模型 */}
                 <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <div>
-                      <Label htmlFor="tts-provider-base" className="mb-1 block text-xs">
-                        {t("voice.compat.base")}
-                      </Label>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-1.5 text-xs font-medium">
+                      <GlobeIcon className="size-3.5 text-muted-foreground" />
+                      {t("voice.compat.providerTitle")}
+                    </span>
+                    {configured && (
+                      <Badge variant="secondary" className="gap-1 text-[10px]">
+                        <CircleIcon className="size-2.5 fill-current text-emerald-500" />
+                        {t("voice.compat.configured")}
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">{t("voice.compat.desc")}</p>
+
+                  {/* 服务商预设：选中自动带出地址 */}
+                  <div>
+                    <Label className="mb-1 block text-xs">{t("voice.compat.provider")}</Label>
+                    <Select value={presetId} onValueChange={pickProvider}>
+                      <SelectTrigger className="h-8 w-full text-xs">
+                        <SelectValue placeholder={t("voice.compat.providerPlaceholder")} />
+                      </SelectTrigger>
+                      <SelectContent position="popper" sideOffset={6}>
+                        {VOICE_PROVIDER_PRESETS.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            <span className="truncate">{p.label}</span>
+                            {p.note && (
+                              <span className="truncate text-[10px] text-muted-foreground/70">
+                                {p.note}
+                              </span>
+                            )}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* 第一行：服务地址 */}
+                  <div>
+                    <Label htmlFor="tts-provider-base" className="mb-1 block text-xs">
+                      {t("voice.compat.base")}
+                    </Label>
+                    <div className="flex items-center gap-2">
                       <Input
                         id="tts-provider-base"
                         placeholder="https://api.openai.com/v1"
                         value={pBase}
                         onChange={(e) => setPBase(e.target.value)}
-                        className="h-8 text-xs"
+                        className="h-8 flex-1 text-xs"
                       />
-                    </div>
-                    <div>
-                      <Label htmlFor="tts-provider-key" className="mb-1 block text-xs">
-                        {t("voice.compat.apiKey")}
-                      </Label>
-                      <Input
-                        id="tts-provider-key"
-                        type="password"
-                        placeholder="sk-…"
-                        value={pKey}
-                        onChange={(e) => setPKey(e.target.value)}
-                        className="h-8 text-xs"
-                      />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => fetchModels.mutate()}
+                        disabled={fetchModels.isPending || !pBase.trim()}
+                        className="shrink-0"
+                      >
+                        {fetchModels.isPending ? (
+                          <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                        ) : (
+                          <RefreshCwIcon data-icon="inline-start" />
+                        )}
+                        {t("voice.compat.fetchModels")}
+                      </Button>
                     </div>
                   </div>
-                  <div className="flex flex-wrap items-center gap-2">
+
+                  {/* 第二行：密钥 */}
+                  <div>
+                    <Label htmlFor="tts-provider-key" className="mb-1 block text-xs">
+                      {t("voice.compat.apiKey")}
+                    </Label>
+                    <Input
+                      id="tts-provider-key"
+                      type="password"
+                      placeholder="sk-…"
+                      value={pKey}
+                      onChange={(e) => setPKey(e.target.value)}
+                      className="h-8 text-xs"
+                    />
+                  </div>
+
+                  {/* 第三行：模型（内置 + 已获取） */}
+                  <div>
+                    <Label className="mb-1 block text-xs">{t("voice.compat.model")}</Label>
+                    <div className="flex items-center gap-2">
+                      <div className="min-w-0 flex-1">
+                        <AudioModelSelect
+                          value={model}
+                          onChange={setModel}
+                          placeholder={t("voice.compat.modelPlaceholder")}
+                          builtin={
+                            VOICE_PROVIDER_PRESETS.find((p) => p.id === presetId)?.ttsModels ?? []
+                          }
+                          fetched={models}
+                        />
+                      </div>
+                      {models.length > 0 && (
+                        <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+                          {models.length} {t("voice.compat.modelsCount")}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 保存 */}
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
                     <Button
                       size="sm"
                       onClick={() => saveProvider.mutate()}
@@ -973,25 +1198,6 @@ function TtsTab() {
                       )}
                       {t("voice.compat.save")}
                     </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => fetchModels.mutate()}
-                      disabled={fetchModels.isPending || !pBase.trim()}
-                    >
-                      {fetchModels.isPending ? (
-                        <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                      ) : (
-                        <RefreshCwIcon data-icon="inline-start" />
-                      )}
-                      {t("voice.compat.fetchModels")}
-                    </Button>
-                    {configured && (
-                      <Badge variant="secondary" className="gap-1 text-[10px]">
-                        <CircleIcon className="size-2.5 fill-current text-emerald-500" />
-                        {t("voice.compat.configured")}
-                      </Badge>
-                    )}
                   </div>
                   {(pError || (fetchModels.isError ? String(fetchModels.error) : undefined)) && (
                     <ResultError error={pError ?? String(fetchModels.error)} />
@@ -1148,59 +1354,85 @@ function TtsTab() {
 
             {source === "compat" && (
               <>
-                {/* 模型（可从 /models 拉取，也可手动输入） */}
-                <div>
-                  <Label htmlFor="tts-model" className="mb-1 block text-xs">
-                    {t("voice.compat.model")}
-                  </Label>
-                  <div className="flex items-center gap-2">
-                    <Input
-                      id="tts-model"
-                      list="tts-provider-models"
-                      placeholder={t("voice.compat.modelPlaceholder")}
-                      value={model}
-                      onChange={(e) => setModel(e.target.value)}
-                      className="h-8 flex-1 text-xs"
-                    />
-                    {models.length > 0 && (
-                      <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-                        {models.length} {t("voice.compat.modelsCount")}
+                {/* 参考音频（按模型能力显示：支持可上传，不支持不显示）+ 手动覆盖开关 */}
+                <div className="flex flex-col gap-2">
+                  {supportsRef && (
+                    <div className="rounded-lg border p-3">
+                      <Label className="mb-1 block text-xs">{t("voice.tts.refAudio")}</Label>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={pickRef.isPending}
+                          onClick={() => pickRef.mutate()}
+                        >
+                          {pickRef.isPending ? (
+                            <Spinner data-icon="inline-start" />
+                          ) : (
+                            <FileAudioIcon data-icon="inline-start" />
+                          )}
+                          {refAudio ? t("voice.clone.picked") : t("voice.clone.pickRef")}
+                        </Button>
+                        {refAudio && (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            tooltip={t("voice.remove")}
+                            onClick={() => setRefAudio(null)}
+                          >
+                            <XIcon className="size-4" />
+                          </Button>
+                        )}
+                      </div>
+                      {refAudio && (
+                        <div className="mt-2">
+                          <PlayAudio url={refAudio.url} />
+                        </div>
+                      )}
+                      <p className="mt-2 text-[11px] text-muted-foreground">
+                        {t("voice.tts.refAudioHint")}
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="flex items-center gap-2 text-xs">
+                    <Label className="flex cursor-pointer items-center gap-2">
+                      <input
+                        type="checkbox"
+                        className="size-3.5"
+                        checked={supportsRef}
+                        onChange={(e) => setRefOverride(e.target.checked)}
+                      />
+                      {t("voice.tts.refAudioToggle")}
+                    </Label>
+                    {refOverride === null ? (
+                      <span className="text-[10px] text-muted-foreground">
+                        {t("voice.tts.refAudioAuto")}
                       </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setRefOverride(null)}
+                        className="text-[10px] text-primary underline"
+                      >
+                        {t("voice.tts.refAudioReset")}
+                      </button>
                     )}
                   </div>
-                  {models.length > 0 && (
-                    <datalist id="tts-provider-models">
-                      {models.map((m) => (
-                        <option key={m} value={m} />
-                      ))}
-                    </datalist>
-                  )}
                 </div>
 
-                {/* 音色 */}
+                {/* 音色（自由输入，适配任意云端模型的音色名） */}
                 <div>
-                  <Label className="mb-1 block text-xs">{t("voice.tts.voice")}</Label>
-                  <div className="flex flex-wrap gap-1.5">
-                    {compatVoices.map((v) => {
-                      const isClone = clones.some((c) => c.name === v);
-                      return (
-                        <button
-                          key={v}
-                          type="button"
-                          onClick={() => setVoice(v)}
-                          className={cn(
-                            "rounded-full border px-2.5 py-1 text-xs transition-colors",
-                            voice === v
-                              ? "border-primary bg-primary/10 text-primary"
-                              : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-                          )}
-                        >
-                          {v}
-                          {isClone && <span className="ml-1 text-[9px] text-primary">·{t("voice.clone.badge")}</span>}
-                        </button>
-                      );
-                    })}
-                  </div>
+                  <Label htmlFor="tts-voice" className="mb-1 block text-xs">
+                    {t("voice.tts.voice")}
+                  </Label>
+                  <Input
+                    id="tts-voice"
+                    value={voice}
+                    onChange={(e) => setVoice(e.target.value)}
+                    placeholder={t("voice.tts.voiceNamePlaceholder")}
+                    className="h-8 text-xs"
+                  />
                 </div>
 
                 {generate.isError && <ResultError error={String(generate.error)} />}
@@ -1784,6 +2016,7 @@ function AsrTab() {
   const [pKey, setPKey] = useState("");
   const [pModel, setPModel] = useState("");
   const [pError, setPError] = useState<string>();
+  const [presetId, setPresetId] = useState("");
   const providerSynced = useRef(false);
 
   const { data: providerData } = useQuery({
@@ -1795,11 +2028,23 @@ function AsrTab() {
   useEffect(() => {
     if (provider && !providerSynced.current) {
       providerSynced.current = true;
-      setPBase(provider.base);
+      // 地址留空时回退到线上 OmniLabs 默认地址，避免空着。
+      setPBase(provider.base || DEFAULT_VOICE_BASE_URL);
       setPKey(provider.apiKey);
       setPModel(provider.model);
+      setPresetId(matchVoiceProvider(provider.base || DEFAULT_VOICE_BASE_URL)?.id ?? "");
     }
   }, [provider]);
+
+  // 选择内置服务商：自动带出 Base URL；有内置 ASR 模型且当前为空时自动选中。
+  const pickProvider = (id: string) => {
+    setPresetId(id);
+    const p = VOICE_PROVIDER_PRESETS.find((x) => x.id === id);
+    if (!p) return;
+    setPBase(p.baseUrl);
+    setPError(undefined);
+    if (p.asrModels.length > 0) setPModel((m) => m || p.asrModels[0]!);
+  };
 
   const saveProvider = useMutation({
     mutationFn: () =>
@@ -2222,7 +2467,7 @@ function AsrTab() {
 
             {engineMode === "api" && (
               <>
-                {/* 服务配置：Base URL + API Key */}
+                {/* 服务配置：服务商 + Base URL + API Key + 模型 */}
                 <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
                   <div className="flex items-center justify-between gap-2">
                     <span className="flex items-center gap-1.5 text-xs font-medium">
@@ -2238,35 +2483,98 @@ function AsrTab() {
                   </div>
                   <p className="text-[11px] text-muted-foreground">{t("voice.asr.compatDesc")}</p>
 
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <div>
-                      <Label htmlFor="asr-provider-base" className="mb-1 block text-xs">
-                        {t("voice.compat.base")}
-                      </Label>
+                  {/* 服务商预设：选中自动带出地址 */}
+                  <div>
+                    <Label className="mb-1 block text-xs">{t("voice.compat.provider")}</Label>
+                    <Select value={presetId} onValueChange={pickProvider}>
+                      <SelectTrigger className="h-8 w-full text-xs">
+                        <SelectValue placeholder={t("voice.compat.providerPlaceholder")} />
+                      </SelectTrigger>
+                      <SelectContent position="popper" sideOffset={6}>
+                        {VOICE_PROVIDER_PRESETS.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            <span className="truncate">{p.label}</span>
+                            {p.note && (
+                              <span className="truncate text-[10px] text-muted-foreground/70">
+                                {p.note}
+                              </span>
+                            )}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* 第一行：服务地址 */}
+                  <div>
+                    <Label htmlFor="asr-provider-base" className="mb-1 block text-xs">
+                      {t("voice.compat.base")}
+                    </Label>
+                    <div className="flex items-center gap-2">
                       <Input
                         id="asr-provider-base"
                         placeholder="https://api.openai.com/v1"
                         value={pBase}
                         onChange={(e) => setPBase(e.target.value)}
-                        className="h-8 text-xs"
+                        className="h-8 flex-1 text-xs"
                       />
-                    </div>
-                    <div>
-                      <Label htmlFor="asr-provider-key" className="mb-1 block text-xs">
-                        {t("voice.compat.apiKey")}
-                      </Label>
-                      <Input
-                        id="asr-provider-key"
-                        type="password"
-                        placeholder="sk-…"
-                        value={pKey}
-                        onChange={(e) => setPKey(e.target.value)}
-                        className="h-8 text-xs"
-                      />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => fetchModels.mutate()}
+                        disabled={fetchModels.isPending || !pBase.trim()}
+                        className="shrink-0"
+                      >
+                        {fetchModels.isPending ? (
+                          <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                        ) : (
+                          <RefreshCwIcon data-icon="inline-start" />
+                        )}
+                        {t("voice.compat.fetchModels")}
+                      </Button>
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2">
+                  {/* 第二行：密钥 */}
+                  <div>
+                    <Label htmlFor="asr-provider-key" className="mb-1 block text-xs">
+                      {t("voice.compat.apiKey")}
+                    </Label>
+                    <Input
+                      id="asr-provider-key"
+                      type="password"
+                      placeholder="sk-…"
+                      value={pKey}
+                      onChange={(e) => setPKey(e.target.value)}
+                      className="h-8 text-xs"
+                    />
+                  </div>
+
+                  {/* 第三行：模型（内置 + 已获取） */}
+                  <div>
+                    <Label className="mb-1 block text-xs">{t("voice.compat.model")}</Label>
+                    <div className="flex items-center gap-2">
+                      <div className="min-w-0 flex-1">
+                        <AudioModelSelect
+                          value={pModel}
+                          onChange={setPModel}
+                          placeholder={t("voice.compat.modelPlaceholder")}
+                          builtin={
+                            VOICE_PROVIDER_PRESETS.find((p) => p.id === presetId)?.asrModels ?? []
+                          }
+                          fetched={apiModels}
+                        />
+                      </div>
+                      {apiModels.length > 0 && (
+                        <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+                          {apiModels.length} {t("voice.compat.modelsCount")}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 保存 */}
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
                     <Button
                       size="sm"
                       onClick={() => saveProvider.mutate()}
@@ -2278,19 +2586,6 @@ function AsrTab() {
                         <SaveIcon data-icon="inline-start" />
                       )}
                       {t("voice.compat.save")}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => fetchModels.mutate()}
-                      disabled={fetchModels.isPending || !pBase.trim()}
-                    >
-                      {fetchModels.isPending ? (
-                        <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                      ) : (
-                        <RefreshCwIcon data-icon="inline-start" />
-                      )}
-                      {t("voice.compat.fetchModels")}
                     </Button>
                   </div>
                   {(pError || (fetchModels.isError ? String(fetchModels.error) : undefined)) && (
@@ -2305,37 +2600,6 @@ function AsrTab() {
         {/* 右侧：识别任务与结果 */}
         <main className="min-w-0 flex-1 overflow-y-auto">
           <div className="mx-auto flex w-full max-w-2xl flex-col gap-5 px-6 py-6">
-            {engineMode === "api" && (
-              <div>
-                <Label htmlFor="asr-provider-model" className="mb-1 block text-xs">
-                  {t("voice.compat.model")}
-                </Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="asr-provider-model"
-                    list="asr-provider-models"
-                    placeholder={t("voice.compat.modelPlaceholder")}
-                    value={pModel}
-                    onChange={(e) => setPModel(e.target.value)}
-                    className="h-8 flex-1 text-xs"
-                  />
-                  {apiModels.length > 0 && (
-                    <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
-                      {apiModels.length} {t("voice.compat.modelsCount")}
-                    </span>
-                  )}
-                </div>
-                {apiModels.length > 0 && (
-                  <datalist id="asr-provider-models">
-                    {apiModels.map((m) => (
-                      <option key={m} value={m} />
-                    ))}
-                  </datalist>
-                )}
-                <p className="mt-1 text-[11px] text-muted-foreground/80">{t("voice.asr.providerHint")}</p>
-              </div>
-            )}
-
             {/* 人声分离开关 */}
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-medium">{t("voice.asr.spkSeparate")}</span>
