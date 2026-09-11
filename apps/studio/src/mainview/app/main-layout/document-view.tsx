@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
+  ChevronLeftIcon,
   FileTextIcon,
   Loader2Icon,
   XCircleIcon,
@@ -113,6 +114,11 @@ export function DocumentView({ id: documentId }: { id: number }) {
     () => completedPages.some((p) => p.markdown?.trim()),
     [completedPages],
   );
+  // raw 为空（如纯文本识别记录）时禁用 Raw/HTML 页签，避免点开一片空白。
+  const rawAvailable = useMemo(
+    () => completedPages.some((p) => p.raw?.trim()),
+    [completedPages],
+  );
 
   // Auto-switch to raw tab when markdown is unavailable (raw-only mode)
   const effectiveTab = !markdownAvailable && tab === "markdown" ? "html" : tab;
@@ -152,6 +158,16 @@ export function DocumentView({ id: documentId }: { id: number }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex max-w-full items-center justify-between gap-2 border-b px-3 pb-1.5">
         <div className="flex min-w-0 items-center gap-2">
+          {/* 返回上一个界面（OCR 识别页等）；route "chat" 会按当前 activeApp 渲染。 */}
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="shrink-0"
+            onClick={() => setRoute({ path: "chat" })}
+            tooltip="Back"
+          >
+            <ChevronLeftIcon />
+          </Button>
           <FileTextIcon className="size-4 shrink-0 text-muted-foreground" />
           <span className="truncate text-xs font-medium">{doc.name}</span>
           <Badge
@@ -315,7 +331,9 @@ export function DocumentView({ id: documentId }: { id: number }) {
               <TabsTrigger value="markdown" disabled={!markdownAvailable}>
                 Markdown
               </TabsTrigger>
-              <TabsTrigger value="html">{rawLanguage === "html" ? "HTML" : "Raw"}</TabsTrigger>
+              <TabsTrigger value="html" disabled={!rawAvailable}>
+                {rawLanguage === "html" ? "HTML" : "Raw"}
+              </TabsTrigger>
             </TabsList>
             {isStillProcessing && doc.totalPages && doc.totalPages > 1 && (
               <Badge variant="secondary" className="gap-1.5 text-[10px]">

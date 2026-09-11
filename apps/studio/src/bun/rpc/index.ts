@@ -1,5 +1,5 @@
 import { BrowserView, BrowserWindow, RPCSchema, Updater, Utils } from "electrobun/bun";
-import { asc, eq, desc, like, sql } from "drizzle-orm";
+import { asc, eq, desc, like, sql, inArray } from "drizzle-orm";
 import path from "path";
 import { existsSync, rmSync, copyFileSync, mkdirSync, appendFileSync } from "fs";
 
@@ -90,6 +90,12 @@ export type DocumentMeta = {
   processedPages: number | null;
   createdAt: number | null;
   processingStartedAt: number | null;
+  /** 文件类别（决定侧边栏左侧图标：图片缩略图 / PDF 图标 / 通用图标）。仅列表接口返回。 */
+  kind?: "image" | "pdf" | "other";
+  /** 图片缩略图 URL（仅图片类且位于图片服务目录内，否则 null）。仅列表接口返回。 */
+  thumbUrl?: string | null;
+  /** 首页识别内容首行预览（列表标题用；无内容为 null）。仅列表接口返回。 */
+  preview?: string | null;
 };
 
 export type DocumentFull = DocumentMeta & {
@@ -718,6 +724,11 @@ export type AppRPC = {
         params: undefined;
         response: { ok: boolean };
       };
+      /** 一键安装 tesseract 引擎（brew install，日志经 tesseractInstallLog 推送）。 */
+      installTesseractEngine: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
       deleteOcrModel: {
         params: { modelId: string };
         response: { ok: boolean };
@@ -761,6 +772,31 @@ export type AppRPC = {
       };
       stopPpOcr: {
         params: undefined;
+        response: { ok: boolean };
+      };
+      /** 下载指定档位的 PP-OCRv6 模型（det+rec，缺哪个下哪个；分片断点续传）。 */
+      downloadPpOcrModels: {
+        params: { modelSize: PpOcrModelSize };
+        response: { ok: boolean; canceled?: boolean; error?: string };
+      };
+      /** 取消进行中的模型下载（保留分片，可后续续传）。 */
+      cancelPpOcrModelDownload: {
+        params: { modelSize: PpOcrModelSize };
+        response: { ok: boolean };
+      };
+      /** 清空指定档位的未完成分片（重新下载前把半成品清掉）。 */
+      deletePpOcrPartialModels: {
+        params: { modelSize: PpOcrModelSize };
+        response: { ok: boolean };
+      };
+      /** 清理引擎残留（删除虚拟环境，保留已下载模型），装坏后可重置重装。 */
+      cleanupPpOcrEngine: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      /** 删除指定档位的全部模型文件（含半成品分片），可重新下载。 */
+      deletePpOcrModels: {
+        params: { modelSize: PpOcrModelSize };
         response: { ok: boolean };
       };
       runPpOcr: {
@@ -906,6 +942,10 @@ export type AppRPC = {
       /** PaddleOCR 引擎安装日志 / 阶段（下载模型 / 加载 / 就绪 / 错误），实时推送。 */
       ppOcrInstallLog: { text: string };
       ppOcrPhase: { phase: PpOcr.PpOcrPhase; message: string };
+      /** PaddleOCR 模型文件下载进度（字节 + 估算速度），模型卡实时进度条。 */
+      ppOcrModelProgress: PpOcr.PpOcrModelProgress;
+      /** Tesseract 引擎一键安装（brew install）日志，实时推送。 */
+      tesseractInstallLog: { text: string };
       /** CLI（`omi`）请求跳转到某个页面：models / settings / server / stats / chat / index。 */
       navigate: { path: string };
     };
@@ -1086,12 +1126,61 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         const total = countResult?.count ?? 0;
 
         const docs = baseQuery.orderBy(desc(documents.createdAt)).limit(limit).offset(offset).all();
+        if (docs.length === 0) return { documents: [], total };
+
+        // 首页内容预览：识别记录的文件名常是 UUID，用识别文本做标题更有辨识度。
+        const firstPages = db
+          .select({ documentId: pages.documentId, markdown: pages.markdown })
+          .from(pages)
+          .where(
+            inArray(
+              pages.documentId,
+              docs.map((d) => d.id),
+            ),
+          )
+          .orderBy(asc(pages.pageNumber))
+          .all();
+        const previewByDoc = new Map<number, string>();
+        for (const p of firstPages) {
+          if (previewByDoc.has(p.documentId) || !p.markdown) continue;
+          const firstLine =
+            p.markdown
+              .split("\n")
+              .map((l) => l.trim())
+              .find((l) => l.length > 0) ?? "";
+          previewByDoc.set(
+            p.documentId,
+            firstLine.replace(/^[#>\s]+/, "").replace(/[*`]/g, "").trim().slice(0, 60),
+          );
+        }
+
+        // 缩略图：图片类文档且位于图片服务目录内 → 直接给可加载的 URL；PDF 用图标。
+        const imagesBase = getImagesBaseDir();
+        const kindOf = (d: (typeof docs)[number]): "image" | "pdf" | "other" => {
+          if (d.type === "application/pdf" || /\.pdf$/i.test(d.path)) return "pdf";
+          if (
+            d.type.startsWith("image/") ||
+            /\.(png|jpe?g|webp|bmp|tiff?|gif|heic|heif)$/i.test(d.path)
+          )
+            return "image";
+          return "other";
+        };
 
         return {
-          documents: docs.map((d) => ({
-            ...d,
-            name: path.basename(d.path),
-          })),
+          documents: docs.map((d) => {
+            const kind = kindOf(d);
+            const thumbUrl =
+              kind === "image" && d.path.startsWith(imagesBase + path.sep)
+                ? chatImageUrl(path.relative(imagesBase, d.path))
+                : null;
+            return {
+              ...d,
+              name: path.basename(d.path),
+              kind,
+              thumbUrl,
+              preview: previewByDoc.get(d.id) ?? null,
+            };
+          }),
           total,
         };
       },
@@ -1849,6 +1938,14 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         }
       },
 
+      installTesseractEngine: async () => {
+        try {
+          return await Ocr.installTesseractEngine();
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
       deleteOcrModel: async ({ modelId }) => {
         return Ocr.deleteOcrModel(modelId);
       },
@@ -1909,6 +2006,14 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
             phase: "idle",
             phaseMessage: "",
             modelSize: "medium",
+            installInterrupted: false,
+            models: (["medium"] as const).map((size) => ({
+              size,
+              models: {
+                det: { ready: false, partialBytes: 0, totalBytes: 0 },
+                rec: { ready: false, partialBytes: 0, totalBytes: 0 },
+              },
+            })),
           };
         }
       },
@@ -1933,6 +2038,46 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         try {
           await PpOcr.stopPpOcr();
           return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      downloadPpOcrModels: async ({ modelSize }) => {
+        try {
+          return await PpOcr.downloadPpOcrModels(modelSize);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      cancelPpOcrModelDownload: async ({ modelSize }) => {
+        try {
+          return PpOcr.cancelPpOcrModelDownload(modelSize);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      deletePpOcrPartialModels: async ({ modelSize }) => {
+        try {
+          return PpOcr.deletePpOcrPartialModels(modelSize);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      cleanupPpOcrEngine: async () => {
+        try {
+          return await PpOcr.cleanupPpOcrEngine();
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      deletePpOcrModels: async ({ modelSize }) => {
+        try {
+          return await PpOcr.deletePpOcrModels(modelSize);
         } catch (e) {
           return { ok: false, error: e instanceof Error ? e.message : String(e) };
         }
@@ -2195,7 +2340,7 @@ export function initMlxModelDownloadBroadcast(win: BrowserWindowWithRPC) {
   });
 }
 
-/** PaddleOCR 引擎安装日志 / 阶段，实时推送到前端。 */
+/** PaddleOCR 引擎安装日志 / 阶段 / 模型下载进度，实时推送到前端。 */
 export function initPpOcrBroadcast(win: BrowserWindowWithRPC) {
   PpOcr.onPpOcrInstallLog((text) => {
     try {
@@ -2205,6 +2350,20 @@ export function initPpOcrBroadcast(win: BrowserWindowWithRPC) {
   PpOcr.onPpOcrPhase((phase, message) => {
     try {
       win.webview.rpc?.send.ppOcrPhase({ phase, message });
+    } catch {}
+  });
+  PpOcr.onPpOcrModelProgress((p) => {
+    try {
+      win.webview.rpc?.send.ppOcrModelProgress(p);
+    } catch {}
+  });
+}
+
+/** Tesseract 引擎一键安装日志，实时推送到前端。 */
+export function initTessInstallBroadcast(win: BrowserWindowWithRPC) {
+  Ocr.onTesseractInstallLog((text) => {
+    try {
+      win.webview.rpc?.send.tesseractInstallLog({ text });
     } catch {}
   });
 }

@@ -54,10 +54,12 @@ import { cn } from "@/mainview/lib/utils";
 import { DEFAULT_INFERENCE_PORT } from "@/shared/server-info";
 import { ServerStatsScreen } from "../server-stats";
 import { ServerLogsScreen } from "./server-logs";
+import { ModelDetailScreen } from "../model-detail";
 import { ModelsScreen } from "../models-screen";
 import { LocalModelsScreen } from "../local-models-screen";
 import { MarketScreen } from "../market-screen";
 import { GatewayScreen } from "../gateway-screen";
+import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detail";
 
 type SettingsFormState = Record<string, string>;
 
@@ -1570,6 +1572,16 @@ export function SettingsScreen() {
   const [activeTab, setActiveTab] = useState<SettingsTab>("network");
   const [form, setForm] = useState<SettingsFormState>({});
   const queryClient = useQueryClient();
+  // 设置页内原地打开的模型详情：不切换全局路由，左侧分类菜单保持可见。
+  const [detail, setDetail] = useState<ModelDetailSource | null>(null);
+  const openDetail = (source: ModelDetailSource) => {
+    useModelDetailStore.getState().setSource(source);
+    setDetail(source);
+  };
+  const pickTab = (tab: SettingsTab) => {
+    setActiveTab(tab);
+    setDetail(null);
+  };
 
   const { data } = useQuery({
     queryKey: ["settings"],
@@ -1675,7 +1687,7 @@ export function SettingsScreen() {
           <button
             key={tab.key}
             type="button"
-            onClick={() => setActiveTab(tab.key)}
+            onClick={() => pickTab(tab.key)}
             className={cn(
               "flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs transition-colors",
               activeTab === tab.key
@@ -1689,18 +1701,22 @@ export function SettingsScreen() {
         ))}
       </div>
 
-      {/* Right content */}
-      {activeTab === "model" ? (
+      {/* Right content: detail (opened in place) takes precedence over tab content */}
+      {detail ? (
         <div className="min-w-0 flex-1">
-          <LocalModelsScreen />
+          <ModelDetailScreen onBack={() => setDetail(null)} />
+        </div>
+      ) : activeTab === "model" ? (
+        <div className="min-w-0 flex-1">
+          <LocalModelsScreen onOpenDetail={openDetail} />
         </div>
       ) : activeTab === "store" ? (
         <div className="min-w-0 flex-1">
-          <ModelsScreen />
+          <ModelsScreen onOpenDetail={openDetail} />
         </div>
       ) : activeTab === "market" ? (
         <div className="min-w-0 flex-1">
-          <MarketScreen />
+          <MarketScreen onOpenDetail={openDetail} />
         </div>
       ) : activeTab === "gateway" ? (
         <div className="min-w-0 flex-1">

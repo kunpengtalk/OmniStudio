@@ -81,13 +81,16 @@ def _load_model(req):
             from paddleocr import PaddleOCR
         except ImportError as e:  # noqa: BLE001
             raise RuntimeError("未找到 paddleocr，请先在应用里「下载引擎」") from e
-        # 用本地模型目录加载（完全离线）；行方向分类保留（应对扫描件旋转）。
+        # 用本地模型目录加载（完全离线）。use_textline_orientation 必须关：
+        # 开启时 paddle 需要第三个模型（PP-LCNet_x1_0_textline_ori），我们没有
+        # 预下载，paddle 会在构造时自行联网拉取 —— 网络不通就永远挂起，worker
+        # 无任何输出，界面无限「识别中…」。det + rec 已覆盖常规识别。
         _engine = PaddleOCR(
             text_detection_model_dir=det_dir,
             text_recognition_model_dir=rec_dir,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
-            use_textline_orientation=True,
+            use_textline_orientation=False,
         )
         _engine_size = model_size
     finally:
@@ -111,6 +114,12 @@ def _recognize(req):
     lines = []
     for res in results:
         d = res.json if hasattr(res, "json") else res
+        if isinstance(d, str):
+            d = json.loads(d)
+        # paddleocr 3.x：json 顶层是 {"res": {...}}，rec_texts 等真实数据
+        # 嵌在 res 下 —— 直接在顶层取会拿到 None，识别结果全空。
+        if isinstance(d, dict) and isinstance(d.get("res"), dict):
+            d = d["res"]
         texts = d.get("rec_texts") or []
         scores = d.get("rec_scores") or []
         boxes = d.get("rec_boxes") or []

@@ -17,6 +17,7 @@ import { Badge } from "@ui/badge";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { useT } from "@stores/ui-lang";
+import { useTessInstallStore } from "@stores/tess-install";
 import { cn } from "@/mainview/lib/utils";
 import { OCR_PSM_MODES } from "../../../shared/ocr";
 import type { OcrLangModelInfo, OcrLine, OcrStatus } from "../../../bun/ocr";
@@ -137,9 +138,11 @@ function LangModelRow({
 export function TesseractTab({
   image,
   onImageChange,
+  engineSwitcher,
 }: {
   image: StagedImage | null;
   onImageChange: (img: StagedImage | null) => void;
+  engineSwitcher?: React.ReactNode;
 }) {
   const t = useT();
   const queryClient = useQueryClient();
@@ -273,9 +276,22 @@ export function TesseractTab({
       setError(undefined);
       setResult(r.result);
       void rpcClient.updateSettings({ settings: { OCR_PSM: psm } });
+      // 识别记录已入库（saveOcrRecord），刷新侧边栏「OCR 记录」列表。
+      void queryClient.invalidateQueries({ queryKey: ["documents"] });
     },
     onError: (e) => setError(String(e)),
   });
+
+  // 一键安装 tesseract 引擎（brew install，日志实时推到 tess-install store）。
+  const installEngine = useMutation({
+    mutationFn: () => rpcClient.installTesseractEngine(),
+    onSuccess: (r) => {
+      setError(r.ok ? undefined : (r.error ?? t("ocr.tess.engineNone")));
+      void queryClient.invalidateQueries({ queryKey: ["ocr-status"] });
+    },
+    onError: (e) => setError(String(e)),
+  });
+  const tessLogs = useTessInstallStore((s) => s.logs);
 
   const blocked = !image
     ? t("ocr.error.empty")
@@ -304,6 +320,7 @@ export function TesseractTab({
 
   const panel = (
     <>
+      {engineSwitcher}
       <PanelSection title={t("ocr.engine.tesseract")} hint={t("ocr.tess.desc")}>
         <StatusCard
           icon={<CpuIcon className="size-4" />}
@@ -323,20 +340,41 @@ export function TesseractTab({
           }
           action={
             engineReady ? undefined : (
-              <Button
-                size="xs"
-                variant="outline"
-                onClick={() => {
-                  void navigator.clipboard?.writeText("brew install tesseract");
-                  setCopyCmd(true);
-                  setTimeout(() => setCopyCmd(false), 1500);
-                }}
-              >
-                {copyCmd ? t("ocr.tess.cmdCopied") : t("ocr.tess.copyCmd")}
-              </Button>
+              <>
+                <Button
+                  size="xs"
+                  className="shrink-0 whitespace-nowrap"
+                  disabled={installEngine.isPending}
+                  onClick={() => installEngine.mutate()}
+                >
+                  {installEngine.isPending ? (
+                    <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                  ) : (
+                    <DownloadCloudIcon data-icon="inline-start" />
+                  )}
+                  {installEngine.isPending ? t("ocr.tess.installing") : t("ocr.tess.install")}
+                </Button>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  className="shrink-0 whitespace-nowrap"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText("brew install tesseract");
+                    setCopyCmd(true);
+                    setTimeout(() => setCopyCmd(false), 1500);
+                  }}
+                >
+                  {copyCmd ? t("ocr.tess.cmdCopied") : t("ocr.tess.copyCmd")}
+                </Button>
+              </>
             )
           }
         />
+        {tessLogs.length > 0 ? (
+          <pre className="mt-2 max-h-32 overflow-y-auto rounded-lg border bg-background px-2.5 py-2 font-mono text-[10px] leading-relaxed whitespace-pre-wrap break-words select-text">
+            {tessLogs.join("\n")}
+          </pre>
+        ) : null}
       </PanelSection>
 
       <PanelSection

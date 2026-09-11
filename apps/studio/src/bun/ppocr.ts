@@ -1,11 +1,12 @@
-import { existsSync, mkdirSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import path from "path";
 
 import { getSetting, updateSettings } from "./db/settings";
 import { getDataDir } from "./paths";
 import { getImagesBaseDir } from "./image-server";
 import { convertFileToImages } from "./vllm";
-import { resolveOcrImage, type OcrLine, type OcrResult } from "./ocr";
+import { downloadHttpFile, type DownloadProgress } from "./modelscope";
+import { resolveOcrImage, saveOcrRecord, type OcrLine, type OcrResult } from "./ocr";
 import type { PpOcrModelSize } from "../shared/ocr";
 
 /**
@@ -45,6 +46,43 @@ export type PpOcrStatus = {
   phase: PpOcrPhase;
   phaseMessage: string;
   modelSize: PpOcrModelSize;
+  /** 上次「下载引擎」中途中断（标记文件残留且引擎未装好）。 */
+  installInterrupted: boolean;
+  /** 三个档位的模型就绪/半成品状态（det + rec）。 */
+  models: PpOcrModelState[];
+};
+
+export type PpOcrModelState = {
+  size: PpOcrModelSize;
+  models: {
+    det: { ready: boolean; partialBytes: number; totalBytes: number };
+    rec: { ready: boolean; partialBytes: number; totalBytes: number };
+  };
+};
+
+export type PpOcrModelKind = "det" | "rec";
+
+export type PpOcrModel = {
+  kind: PpOcrModelKind;
+  /** 官方模型名（= 本地目录名）。 */
+  name: string;
+  /** 官方 BOS 直链（{name}_infer.tar）。 */
+  url: string;
+  /** tar 解压后产物字节数（已实测，用于进度展示）。 */
+  sizeBytes: number;
+};
+
+/** 下载进度事件：单个模型文件的字节进度 + 估算速度。 */
+export type PpOcrModelProgress = {
+  size: PpOcrModelSize;
+  model: string;
+  kind: PpOcrModelKind;
+  progress: {
+    received: number;
+    total: number | null;
+    percent: number | null;
+    speed: number;
+  };
 };
 
 export type PpOcrRecognizedLine = {
@@ -96,6 +134,29 @@ function emitPhase(phase: PpOcrPhase, message = ""): void {
       cb(phase, message);
     } catch {}
   }
+}
+
+// --- 模型下载进度事件（主进程转发到前端，模型卡实时进度条） ---
+
+const modelProgressListeners = new Set<(p: PpOcrModelProgress) => void>();
+
+export function onPpOcrModelProgress(cb: (p: PpOcrModelProgress) => void): () => void {
+  modelProgressListeners.add(cb);
+  return () => modelProgressListeners.delete(cb);
+}
+
+function emitModelProgress(p: PpOcrModelProgress): void {
+  for (const cb of modelProgressListeners) {
+    try {
+      cb(p);
+    } catch {}
+  }
+}
+
+function formatBytesH(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
+  return `${Math.round(n / 1e3)} KB`;
 }
 
 /** 逐行读取子进程输出并转发到安装日志。 */
@@ -194,8 +255,21 @@ async function getPpOcrVersion(): Promise<string | null> {
   }
 }
 
-function normalizeModelSize(v?: string): PpOcrModelSize {
-  return v === "tiny" || v === "small" || v === "medium" ? v : "medium";
+function normalizeModelSize(_v?: string): PpOcrModelSize {
+  // 只保留 medium 一档（tiny / small 已下线），历史设置值一律归一到 medium。
+  return "medium";
+}
+
+function ppOcrModelStateOf(model: PpOcrModel): {
+  ready: boolean;
+  partialBytes: number;
+  totalBytes: number;
+} {
+  return {
+    ready: isModelDirReady(model),
+    partialBytes: scanPartialBytes(model),
+    totalBytes: model.sizeBytes,
+  };
 }
 
 export async function getPpOcrStatus(): Promise<PpOcrStatus> {
@@ -203,6 +277,7 @@ export async function getPpOcrStatus(): Promise<PpOcrStatus> {
   const version = await getPpOcrVersion();
   const engineInstalled = version !== null && existsSync(venvBinary("python3"));
   const active = getActiveWorker();
+  const sizes = ["medium"] as const;
   return {
     pythonFound: !!pythonPath,
     pythonPath,
@@ -213,6 +288,17 @@ export async function getPpOcrStatus(): Promise<PpOcrStatus> {
     phase: active && active.proc.exitCode === null ? currentPhase : "idle",
     phaseMessage: currentPhaseMessage,
     modelSize: normalizeModelSize(getSetting("PPOCR_MODEL_SIZE")),
+    installInterrupted: !engineInstalled && existsSync(installMarkerPath()),
+    models: sizes.map((size) => {
+      const models = ppOcrCatalog(size);
+      return {
+        size,
+        models: {
+          det: ppOcrModelStateOf(models.det),
+          rec: ppOcrModelStateOf(models.rec),
+        },
+      };
+    }),
   };
 }
 
@@ -220,7 +306,81 @@ export async function getPpOcrStatus(): Promise<PpOcrStatus> {
 // 一键安装引擎（uv venv + pip，默认源失败自动换清华镜像）
 // ---------------------------------------------------------------------------
 
-export async function downloadPpOcrEngine(): Promise<{
+/** 「下载引擎」进行中的标记文件；重启后残留且引擎未装好 → 提示安装中断。 */
+function installMarkerPath(): string {
+  return path.join(getEngineDir(), ".installing");
+}
+
+/**
+ * 一键安装 paddleocr + paddlepaddle 引擎。全程日志经 onPpOcrInstallLog 广播；
+ * 安装期间写 .installing 标记，结束（成功/失败）删除 —— 重启后靠标记识别「上次安装中断」。
+ */
+let engineInstallInFlight: Promise<{ ok: boolean; error?: string; version?: string }> | null = null;
+
+export function downloadPpOcrEngine(): Promise<{
+  ok: boolean;
+  error?: string;
+  version?: string;
+}> {
+  // 防重入：双击/并发调用复用同一次安装。
+  if (engineInstallInFlight) return engineInstallInFlight;
+  engineInstallInFlight = (async () => {
+    try {
+      // 上次安装被中断（.installing 标记跨重启残留）→ venv 状态不可信，
+      // 自动清掉残留后重装；models/（已下模型 + 断点分片）保留。
+      if (existsSync(installMarkerPath())) {
+        emitLog("检测到上次安装中断，自动清理残留虚拟环境后重装（已下载模型保留）…");
+        cleanVenvKeepModels();
+      }
+      mkdirSync(getEngineDir(), { recursive: true });
+      writeFileSync(installMarkerPath(), String(Date.now()));
+    } catch {
+      // 标记写失败不影响安装
+    }
+    try {
+      return await doDownloadPpOcrEngine();
+    } finally {
+      try {
+        rmSync(installMarkerPath(), { force: true });
+      } catch {}
+      engineInstallInFlight = null;
+    }
+  })();
+  return engineInstallInFlight;
+}
+
+/** 清掉引擎目录里的虚拟环境残留；models/（已下模型 + 下载分片）保留，
+ * 断点续传不受影响。中断重装 / 手动清理时调用。 */
+function cleanVenvKeepModels(): void {
+  try {
+    for (const entry of readdirSync(getEngineDir())) {
+      if (entry === "models") continue;
+      rmSync(path.join(getEngineDir(), entry), { recursive: true, force: true });
+    }
+  } catch {
+    // ignore：清不干净时 uv venv --clear 会兜底重建
+  }
+}
+
+/** 清理引擎（删除虚拟环境，保留已下载模型），装坏后可重置重装。 */
+export async function cleanupPpOcrEngine(): Promise<{ ok: boolean; error?: string }> {
+  if (engineInstallInFlight) {
+    return { ok: false, error: "引擎正在安装中，请等安装结束后再清理" };
+  }
+  try {
+    await stopPpOcr();
+  } catch {
+    // worker 未运行时忽略
+  }
+  cleanVenvKeepModels();
+  try {
+    rmSync(installMarkerPath(), { force: true });
+  } catch {}
+  emitLog("已清理 PaddleOCR 引擎残留（已下载的模型保留），可重新点「下载引擎」安装");
+  return { ok: true };
+}
+
+async function doDownloadPpOcrEngine(): Promise<{
   ok: boolean;
   error?: string;
   version?: string;
@@ -255,8 +415,11 @@ export async function downloadPpOcrEngine(): Promise<{
   // ---- 创建 venv ----
   if (!existsSync(enginePython)) {
     if (uv) {
-      emitLog(`$ uv venv --python ${python} ${engineDir}`);
-      const venv = Bun.spawnSync([uv, "venv", "--python", python, engineDir], {
+      // --clear：engineDir 已被上面的 mkdirSync 预先创建（写 .installing 标记），
+      // 且失败重试时目录里可能残留半成品 —— 不带 --clear，uv 会因「目录已存在」
+      // 直接拒绝创建虚拟环境，安装永远无法重试。
+      emitLog(`$ uv venv --clear --python ${python} ${engineDir}`);
+      const venv = Bun.spawnSync([uv, "venv", "--clear", "--python", python, engineDir], {
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -267,8 +430,8 @@ export async function downloadPpOcrEngine(): Promise<{
         };
       }
     } else {
-      emitLog(`$ ${python} -m venv ${engineDir}`);
-      const venv = Bun.spawnSync([python, "-m", "venv", engineDir], {
+      emitLog(`$ ${python} -m venv --clear ${engineDir}`);
+      const venv = Bun.spawnSync([python, "-m", "venv", "--clear", engineDir], {
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -279,6 +442,11 @@ export async function downloadPpOcrEngine(): Promise<{
         };
       }
     }
+    // venv 的 --clear 会连带删掉 .installing 标记，这里补写 —— 后续 pip 安装
+    // 耗时最长，重启后的「安装中断」检测主要靠它。
+    try {
+      writeFileSync(installMarkerPath(), String(Date.now()));
+    } catch {}
   }
 
   // ---- 安装 paddleocr + paddlepaddle（CPU 版；默认源失败自动换清华镜像重试） ----
@@ -309,6 +477,330 @@ export async function downloadPpOcrEngine(): Promise<{
   const version = await getPpOcrVersion();
   emitLog(version ? `安装成功：paddleocr ${version}` : "安装成功");
   return { ok: true, version: version ?? undefined };
+}
+
+// ---------------------------------------------------------------------------
+// PP-OCRv6 模型下载（自管理：进度 + 断点续传 + 取消 + 跨重启记忆）
+//
+// 模型由应用自己下载到 <dataDir>/engines/paddleocr/models/，worker 只按本地
+// 目录加载（text_detection_model_dir / text_recognition_model_dir），完全离线、
+// 不触发 paddle 内部下载。单个模型 = 一份官方 tar（BOS 直链），断点续传由
+// downloadHttpFile 的 .partN 分片自动完成：中断/取消保留分片，下次调用
+// 从已有字节续传 —— 即「记忆断点续传」。
+// ---------------------------------------------------------------------------
+
+const PPOCR_MODEL_BASE =
+  "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0";
+
+/** 单个模型的信息（下载地址 + 已实测产物字节）。 */
+function ppOcrModel(size: string, kind: PpOcrModelKind, sizeBytes: number): PpOcrModel {
+  const name = `PP-OCRv6_${size}_${kind}`;
+  return { kind, name, url: `${PPOCR_MODEL_BASE}/${name}_infer.tar`, sizeBytes };
+}
+
+const PPOCR_MODEL_CATALOG: Record<PpOcrModelSize, { det: PpOcrModel; rec: PpOcrModel }> = {
+  medium: {
+    det: ppOcrModel("medium", "det", 62_227_968),
+    rec: ppOcrModel("medium", "rec", 76_851_200),
+  },
+};
+
+function ppOcrCatalog(size: PpOcrModelSize): { det: PpOcrModel; rec: PpOcrModel } {
+  return PPOCR_MODEL_CATALOG[size] ?? PPOCR_MODEL_CATALOG.medium;
+}
+
+function getModelsDir(): string {
+  return getDataDir("engines", "paddleocr", "models");
+}
+
+function getModelDir(name: string): string {
+  return path.join(getModelsDir(), name);
+}
+
+function getDownloadsDir(): string {
+  return path.join(getModelsDir(), "downloads");
+}
+
+/** 模型目录是否已就绪（inference.json/pdmodel + pdiparams + yml 三件套齐）。 */
+function isModelDirReady(model: PpOcrModel): boolean {
+  const dir = getModelDir(model.name);
+  const hasProgram =
+    existsSync(path.join(dir, "inference.json")) || existsSync(path.join(dir, "inference.pdmodel"));
+  return (
+    hasProgram &&
+    existsSync(path.join(dir, "inference.pdiparams")) &&
+    existsSync(path.join(dir, "inference.yml"))
+  );
+}
+
+/** 扫描 downloads 目录的 .tar / .partN 残留，返回已下载字节数（半成品进度）。 */
+function scanPartialBytes(model: PpOcrModel): number {
+  const dir = getDownloadsDir();
+  let total = 0;
+  try {
+    for (const n of readdirSync(dir)) {
+      if (n === `${model.name}.tar` || n.startsWith(`${model.name}.tar.part`)) {
+        total += statSync(path.join(dir, n)).size;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return total;
+}
+
+/** 解压官方 tar（唯一内层 {name}_infer/ 目录拍平到目标模型目录，幂等可重入）。 */
+function extractModelTar(model: PpOcrModel, tarPath: string): void {
+  const destDir = getModelDir(model.name);
+  const tmp = path.join(getModelsDir(), `.tmp-${model.name}-${Date.now()}`);
+  mkdirSync(tmp, { recursive: true });
+  try {
+    const proc = Bun.spawnSync(["tar", "-xf", tarPath, "-C", tmp], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (proc.exitCode !== 0) {
+      throw new Error(
+        proc.stderr.toString().slice(0, 300).trim() || `tar 解压失败（退出码 ${proc.exitCode}）`,
+      );
+    }
+    // 先清掉上次解压的半成品，保证幂等（Windows 下 rename 到已存在文件会失败）。
+    rmSync(destDir, { recursive: true, force: true });
+    mkdirSync(destDir, { recursive: true });
+    const entries = readdirSync(tmp);
+    const inner =
+      entries.length === 1 && statSync(path.join(tmp, entries[0]!)).isDirectory()
+        ? path.join(tmp, entries[0]!)
+        : tmp;
+    for (const f of readdirSync(inner)) {
+      renameSync(path.join(inner, f), path.join(destDir, f));
+    }
+  } finally {
+    try {
+      rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function isAbortError(e: unknown): boolean {
+  if (e instanceof Error && (e.name === "AbortError" || /abort/i.test(e.message))) return true;
+  return e instanceof DOMException && e.name === "AbortError";
+}
+
+/** 进行中的单模型下载（并行防重 + 等待复用）。 */
+const modelDownloadPromises = new Map<
+  string,
+  Promise<{ ok: boolean; canceled?: boolean; error?: string; already?: boolean }>
+>();
+const activeModelDownloads = new Map<string, AbortController>();
+
+/** 下载单个模型（已就绪直接返回；进行中则等待同一个 promise，避免重复下载）。 */
+function downloadPpOcrModel(
+  size: PpOcrModelSize,
+  model: PpOcrModel,
+): Promise<{ ok: boolean; canceled?: boolean; error?: string; already?: boolean }> {
+  if (isModelDirReady(model)) return Promise.resolve({ ok: true, already: true });
+  const inflight = modelDownloadPromises.get(model.name);
+  if (inflight) return inflight;
+
+  const p = doDownloadPpOcrModel(size, model).finally(() => {
+    modelDownloadPromises.delete(model.name);
+    activeModelDownloads.delete(model.name);
+  });
+  modelDownloadPromises.set(model.name, p);
+  return p;
+}
+
+async function doDownloadPpOcrModel(
+  size: PpOcrModelSize,
+  model: PpOcrModel,
+): Promise<{ ok: boolean; canceled?: boolean; error?: string; already?: boolean }> {
+  const dir = getDownloadsDir();
+  mkdirSync(dir, { recursive: true });
+  const tarPath = path.join(dir, `${model.name}.tar`);
+  const controller = new AbortController();
+  activeModelDownloads.set(model.name, controller);
+
+  const started = scanPartialBytes(model);
+  emitLog(`下载模型：${model.name}（${formatBytesH(model.sizeBytes)}）${started > 0 ? `，已下载 ${formatBytesH(started)} 续传` : ""}…`);
+  emitModelProgress({
+    size,
+    model: model.name,
+    kind: model.kind,
+    progress: { received: started, total: model.sizeBytes, percent: (started / model.sizeBytes) * 100, speed: 0 },
+  });
+
+  let last = { time: Date.now(), received: started };
+  const onProgress = (p: DownloadProgress) => {
+    const now = Date.now();
+    const speed =
+      p.received >= last.received
+        ? (p.received - last.received) / Math.max(1, (now - last.time) / 1000)
+        : 0;
+    last = { time: now, received: p.received };
+    emitModelProgress({
+      size,
+      model: model.name,
+      kind: model.kind,
+      progress: {
+        received: p.received,
+        total: model.sizeBytes,
+        percent: p.total ? (p.received / model.sizeBytes) * 100 : null,
+        speed,
+      },
+    });
+  };
+
+  try {
+    const { size: downloaded } = await downloadHttpFile(
+      model.url,
+      tarPath,
+      onProgress,
+      controller.signal,
+    );
+    if (downloaded < model.sizeBytes) {
+      throw new Error(`下载不完整（${downloaded}/${model.sizeBytes} 字节）`);
+    }
+    emitLog(`模型下载完成，解压 ${model.name}…`);
+    extractModelTar(model, tarPath);
+    if (!isModelDirReady(model)) throw new Error("模型解压后校验失败，请重新下载");
+    try {
+      rmSync(tarPath, { force: true });
+    } catch {
+      // ignore
+    }
+    emitLog(`模型就绪：${model.name}`);
+    emitModelProgress({
+      size,
+      model: model.name,
+      kind: model.kind,
+      progress: { received: downloaded, total: downloaded, percent: 100, speed: 0 },
+    });
+    return { ok: true };
+  } catch (e) {
+    if (isAbortError(e) || controller.signal.aborted) {
+      emitLog(`已取消下载：${model.name}（分片已保留，可继续）`);
+      emitModelProgress({
+        size,
+        model: model.name,
+        kind: model.kind,
+        progress: {
+          received: scanPartialBytes(model),
+          total: model.sizeBytes,
+          percent: null,
+          speed: 0,
+        },
+      });
+      return { ok: false, canceled: true };
+    }
+    const err = e instanceof Error ? e.message : String(e);
+    emitLog(`模型下载失败：${model.name}：${err}`);
+    emitModelProgress({
+      size,
+      model: model.name,
+      kind: model.kind,
+      progress: {
+        received: scanPartialBytes(model),
+        total: model.sizeBytes,
+        percent: null,
+        speed: 0,
+      },
+    });
+    return { ok: false, error: err };
+  }
+}
+
+/** 下载指定档位的检测 + 识别两个模型（缺哪个下哪个），等待全部完成。 */
+export async function downloadPpOcrModels(
+  size: PpOcrModelSize,
+): Promise<{ ok: boolean; canceled?: boolean; error?: string }> {
+  const models = ppOcrCatalog(size);
+  const results = await Promise.all([
+    downloadPpOcrModel(size, models.det),
+    downloadPpOcrModel(size, models.rec),
+  ]);
+  if (results.some((r) => r.canceled)) return { ok: false, canceled: true, error: "下载已取消" };
+  const failed = results.find((r) => !r.ok && !r.already);
+  return failed ? { ok: false, error: failed.error ?? "模型下载失败" } : { ok: true };
+}
+
+/** 取消指定档位的进行中下载（保留分片，可后续续传）。 */
+export function cancelPpOcrModelDownload(size: PpOcrModelSize): { ok: boolean } {
+  const models = ppOcrCatalog(size);
+  for (const m of [models.det, models.rec]) {
+    const c = activeModelDownloads.get(m.name);
+    if (c) {
+      try {
+        c.abort();
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return { ok: true };
+}
+
+/** 清空指定档位的未完成分片（重新下载前把半成品清掉）。 */
+export function deletePpOcrPartialModels(size: PpOcrModelSize): { ok: boolean } {
+  const models = ppOcrCatalog(size);
+  const dir = getDownloadsDir();
+  for (const m of [models.det, models.rec]) {
+    if (isModelDirReady(m)) continue;
+    const c = activeModelDownloads.get(m.name);
+    if (c) {
+      try {
+        c.abort();
+      } catch {
+        // ignore
+      }
+    }
+    try {
+      for (const n of readdirSync(dir)) {
+        if (n === `${m.name}.tar` || n.startsWith(`${m.name}.tar.part`)) {
+          rmSync(path.join(dir, n), { force: true });
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return { ok: true };
+}
+
+/** 删除指定档位的全部模型文件（已就绪 + 半成品分片），可重新下载。 */
+export async function deletePpOcrModels(size: PpOcrModelSize): Promise<{ ok: boolean }> {
+  try {
+    await stopPpOcr();
+  } catch {
+    // worker 未运行时忽略
+  }
+  cancelPpOcrModelDownload(size);
+  const models = ppOcrCatalog(size);
+  for (const m of [models.det, models.rec]) {
+    try {
+      rmSync(getModelDir(m.name), { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+  // 模型目录已删，这里顺带清掉残留的 tar / .partN 分片。
+  return deletePpOcrPartialModels(size);
+}
+
+/** 确保档位模型已就绪；缺则自动下载（进度经 onPpOcrModelProgress 上报）。 */
+async function ensurePpOcrModels(size: PpOcrModelSize): Promise<void> {
+  const models = ppOcrCatalog(size);
+  const missing = [models.det, models.rec].filter((m) => !isModelDirReady(m));
+  if (missing.length === 0) return;
+  emitPhase("downloading", `正在下载 PP-OCRv6 ${size} 模型（${missing.length}/2）…`);
+  const r = await downloadPpOcrModels(size);
+  if (!r.ok) {
+    emitPhase("idle", "");
+    throw new Error(r.canceled ? "模型下载已取消" : (r.error ?? "模型下载失败"));
+  }
+  emitPhase("ready", "");
 }
 
 // ---------------------------------------------------------------------------
@@ -461,6 +953,12 @@ export async function startPpOcr(
   if (!(await getPpOcrVersion())) {
     return { ok: false, error: "PaddleOCR 引擎未安装完整，请重新点击「下载引擎」" };
   }
+  // 模型缺失时自动下载（进度实时上报），下载完才启动 worker。
+  try {
+    await ensurePpOcrModels(size);
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
   const cur = getActiveWorker();
   if (cur && cur.modelSize === size) {
     return { ok: true, already: true };
@@ -507,15 +1005,35 @@ export async function startPpOcr(
     activeWorker!.pendingLoad = { resolve };
   });
   try {
-    await workerSend({ msg: "load", modelSize: size });
+    const models = ppOcrCatalog(size);
+    await workerSend({
+      msg: "load",
+      modelSize: size,
+      detDir: getModelDir(models.det.name),
+      recDir: getModelDir(models.rec.name),
+    });
   } catch (e) {
     return { ok: false, error: `发送加载指令失败：${e instanceof Error ? e.message : e}` };
   }
-  const r = await loadResult;
+  // 加载超时兜底：worker 构造期间若被 paddle 内部行为卡死（典型：运行时
+  // 联网拉取缺失模型而网络不通），没有任何回复会永远 pending —— 界面无限
+  // 「识别中…」。超时则杀掉 worker 报错，用户可重试。
+  let loadTimer: ReturnType<typeof setTimeout> | undefined;
+  const r = await Promise.race([
+    loadResult,
+    new Promise<{ ok: boolean; error?: string }>((resolve) => {
+      loadTimer = setTimeout(
+        () => resolve({ ok: false, error: "模型加载超时（5 分钟），已停止引擎，请重试" }),
+        300_000,
+      );
+    }),
+  ]);
+  if (loadTimer) clearTimeout(loadTimer);
   if (r.ok) {
     emitLog(`PaddleOCR（PP-OCRv6 ${size}）已就绪，可开始识别。`);
   } else {
     emitLog(`PaddleOCR 启动失败：${r.error}`);
+    await stopPpOcr();
   }
   return r;
 }
@@ -547,8 +1065,24 @@ function recognizeViaWorker(imagePath: string): Promise<PpOcrRecognitionResult> 
   if (!w) throw new Error("worker 未运行，请先启动 PaddleOCR 引擎");
   const id = opSeq++;
   return new Promise<PpOcrRecognitionResult>((resolve, reject) => {
-    w.pending.set(id, { resolve, reject });
+    // 识别超时兜底：predict 卡死时杀掉 worker 并报错，避免界面无限「识别中…」。
+    const timer = setTimeout(() => {
+      if (!w.pending.delete(id)) return;
+      reject(new Error("识别超时（3 分钟），已停止引擎，请重试"));
+      void stopPpOcr();
+    }, 180_000);
+    w.pending.set(id, {
+      resolve: (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      reject: (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    });
     workerSend({ id, msg: "recognize", imagePath }).catch((e) => {
+      clearTimeout(timer);
       w.pending.delete(id);
       reject(e);
     });
@@ -606,6 +1140,7 @@ export async function runPpOcr(input: {
         words: [],
       };
     });
+    saveOcrRecord({ imagePath: abs, markdown: result.text, raw: result.text });
     return {
       text: result.text,
       engine: "paddleocr",

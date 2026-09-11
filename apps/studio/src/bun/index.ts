@@ -6,7 +6,7 @@ import { BrowserWindow, Updater } from "electrobun/bun";
 import { db } from "./db";
 import { startImageServer } from "./image-server";
 import { setWindowRef } from "./window";
-import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initPpOcrBroadcast } from "./rpc";
+import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initPpOcrBroadcast, initTessInstallBroadcast } from "./rpc";
 import { seedIfNeeded } from "./prompt-library";
 import { APP_NAME } from "./config";
 import { createMenu } from "./menu";
@@ -80,6 +80,7 @@ initGatewayBroadcast(mainWindow);
 initMlxInstallBroadcast(mainWindow);
 initMlxModelDownloadBroadcast(mainWindow);
 initPpOcrBroadcast(mainWindow);
+initTessInstallBroadcast(mainWindow);
 
 mainWindow.webview.on("dom-ready", () => {
   broadcastUpdateStatus();

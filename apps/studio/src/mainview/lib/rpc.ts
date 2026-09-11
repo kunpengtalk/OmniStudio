@@ -12,6 +12,8 @@ import { useMlxInstallStore } from "../stores/mlx-install";
 import { useMlxModelDownloadStore } from "../stores/mlx-model-download";
 import { useMlxModelRunStore } from "../stores/mlx-model-run";
 import { usePpOcrInstallStore } from "../stores/ppocr-install";
+import { usePpOcrDownloadStore } from "../stores/ppocr-download";
+import { useTessInstallStore } from "../stores/tess-install";
 import { useRouter } from "../stores/router";
 
 const knownCompletedIds = new Set<string>();
@@ -142,9 +144,23 @@ const rpc = Electroview.defineRPC<AppRPC>({
           queryClient.invalidateQueries({ queryKey: ["ppocr-status"] });
         }
       },
+      tesseractInstallLog: ({ text }) => {
+        useTessInstallStore.getState().appendLog(text);
+        // 安装完成（成功或失败）后刷新引擎状态。
+        if (text.includes("安装成功") || text.includes("安装失败")) {
+          queryClient.invalidateQueries({ queryKey: ["ocr-status"] });
+        }
+      },
       ppOcrPhase: ({ phase, message }) => {
         // 阶段进入终态（就绪 / 空闲 / 出错）时刷新引擎状态查询。
         if (phase === "ready" || phase === "idle" || phase === "error") {
+          queryClient.invalidateQueries({ queryKey: ["ppocr-status"] });
+        }
+      },
+      ppOcrModelProgress: ({ model, progress }) => {
+        usePpOcrDownloadStore.getState().setProgress(model, progress);
+        // 下载结束（100% 或取消）后刷新模型状态，进度条随之消失、徽章更新。
+        if (progress.percent === 100 || progress.percent === null) {
           queryClient.invalidateQueries({ queryKey: ["ppocr-status"] });
         }
       },
