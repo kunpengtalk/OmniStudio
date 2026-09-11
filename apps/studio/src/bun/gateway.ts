@@ -974,6 +974,33 @@ function responsesUsage(usage?: { prompt_tokens?: number; completion_tokens?: nu
   };
 }
 
+/** Responses 风格的函数工具（type/name/parameters 扁平）→ Chat Completions 风格（function 嵌套）。 */
+function responsesToolsToOAI(tools: unknown): { type: string; function: Record<string, unknown> }[] | undefined {
+  if (!Array.isArray(tools)) return undefined;
+  const out: { type: string; function: Record<string, unknown> }[] = [];
+  for (const t of tools) {
+    if (!t || typeof t !== "object") continue;
+    const tool = t as Record<string, any>;
+    if (tool.type !== "function") continue; // web_search 等内置工具 Chat Completions 上游不支持，丢弃
+    const fn: Record<string, unknown> = { name: tool.name };
+    if (tool.description !== undefined) fn.description = tool.description;
+    if (tool.parameters !== undefined) fn.parameters = tool.parameters;
+    if (tool.strict !== undefined) fn.strict = tool.strict;
+    out.push({ type: "function", function: fn });
+  }
+  return out.length ? out : undefined;
+}
+
+/** Responses 风格的 tool_choice（对象 {type,name}）→ Chat Completions 风格（function 嵌套）。 */
+function responsesToolChoiceToOAI(choice: unknown): unknown {
+  if (!choice || typeof choice !== "object") return choice;
+  const c = choice as Record<string, any>;
+  if (c.type === "function" && typeof c.name === "string") {
+    return { type: "function", function: { name: c.name } };
+  }
+  return choice;
+}
+
 async function handleResponses(req: Request): Promise<Response> {
   let body: Record<string, any>;
   try {
@@ -992,9 +1019,12 @@ async function handleResponses(req: Request): Promise<Response> {
   if (typeof maxTokens === "number") params.max_tokens = maxTokens;
   if (typeof body.temperature === "number") params.temperature = body.temperature;
   if (typeof body.top_p === "number") params.top_p = body.top_p;
-  // 工具调用：Responses 与 Chat Completions 的 tools / tool_choice 形状一致，直接透传。
-  if (Array.isArray(body.tools) && body.tools.length) params.tools = body.tools;
-  if (body.tool_choice !== undefined) params.tool_choice = body.tool_choice;
+  // 工具调用：Responses 的 tools / tool_choice 是扁平格式（type/name/parameters），Chat
+  // Completions 要求 function 嵌套。必须转换，否则 llama.cpp / DeepSeek 会因 tools[0] 缺
+  // function 字段而 400（codex 等 Responses 客户端会直接报错）。
+  const toolsOAI = responsesToolsToOAI(body.tools);
+  if (toolsOAI) params.tools = toolsOAI;
+  if (body.tool_choice !== undefined) params.tool_choice = responsesToolChoiceToOAI(body.tool_choice);
 
   let backend: ChatBackend;
   try {

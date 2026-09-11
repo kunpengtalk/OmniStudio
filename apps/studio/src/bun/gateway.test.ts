@@ -729,7 +729,7 @@ describe("OpenAI Responses tool calling (/v1/responses)", () => {
     parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
   };
 
-  test("non-stream: tools 透传，tool_calls 输出为 function_call 项", async () => {
+  test("non-stream: tools 转 Chat Completions function 嵌套格式，tool_calls 输出为 function_call 项", async () => {
     lastCloudChat = null;
     cloudOverride = Response.json({
         id: "chatcmpl-tool",
@@ -753,7 +753,17 @@ describe("OpenAI Responses tool calling (/v1/responses)", () => {
       body: JSON.stringify({ model: "cloud-gpt", input: "weather in Paris", tools: [weatherFn] }),
     });
     expect(res.status).toBe(200);
-    expect(readCloud()?.tools).toEqual([weatherFn]);
+    // Responses 扁平工具 → Chat Completions function 嵌套格式后再发给上游。
+    expect(readCloud()?.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "get_weather",
+          description: "Get current weather",
+          parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+        },
+      },
+    ]);
     const body = (await res.json()) as Record<string, any>;
     expect(body.status).toBe("completed");
     expect(body.output).toHaveLength(1);
