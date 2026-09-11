@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-type Route =
+export type Route =
   | {
       path: "index";
     }

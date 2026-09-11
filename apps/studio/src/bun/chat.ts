@@ -3,7 +3,7 @@ import path from "path";
 import { desc, eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { conversations, messages } from "./db/schema";
-import { getSetting } from "./db/settings";
+import { getSetting, getActiveServerPort } from "./db/settings";
 import { getChatModelName } from "./chat-model";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { recordUsage } from "./stats";
@@ -278,7 +278,7 @@ export function getChatBaseUrl(): string {
   const isLocal = getSetting("SERVER_MODE") === "local";
   if (isLocal) {
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
-    const port = getSetting("SERVER_PORT") || "8080";
+    const port = getActiveServerPort();
     return `http://${host}:${port}`;
   }
   return (getSetting("VLLM_API_BASE") || "").replace(/\/+$/, "").replace(/\/v1$/, "");

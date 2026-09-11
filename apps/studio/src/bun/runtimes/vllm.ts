@@ -1,6 +1,6 @@
 import type { Subprocess } from "bun";
 import { existsSync } from "fs";
-import { getSetting } from "../db/settings";
+import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/settings";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
@@ -180,7 +180,7 @@ export class VllmRuntime implements Runtime {
   }
 
   private buildArgs(model: string, servedName?: string): string[] {
-    const port = getSetting("SERVER_PORT");
+    const port = getServerPort(this.id);
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
     const maxModelLen = getSetting("VLLM_MAX_MODEL_LEN") || "8192";
     const tensorParallel = getSetting("VLLM_TENSOR_PARALLEL_SIZE") || "1";
@@ -207,6 +207,9 @@ export class VllmRuntime implements Runtime {
 
     if (servedName) args.push("--served-model-name", servedName);
     if (enforceEager) args.push("--enforce-eager");
+
+    const extra = getSetting(ENGINE_EXTRA_ARGS_KEYS[this.id]);
+    if (extra.trim()) args.push(...extra.trim().split(/\s+/));
 
     return args;
   }
@@ -269,7 +272,7 @@ export class VllmRuntime implements Runtime {
           self.setStatus("error");
         });
 
-      const port = getSetting("SERVER_PORT");
+      const port = getServerPort(this.id);
       const healthUrl = `http://localhost:${port}/health`;
       const maxIdleAttempts = 180; // vLLM may take longer to load
       let idleCount = 0;

@@ -1,4 +1,4 @@
-import { getSetting } from "./db/settings";
+import { getSetting, getActiveServerPort } from "./db/settings";
 
 export type BenchmarkParams = {
   model: string;
@@ -155,7 +155,7 @@ export async function runBenchmark(params: BenchmarkParams): Promise<BenchmarkRe
   const base =
     agent === "remote"
       ? (getSetting("VLLM_API_BASE") || "").replace(/\/$/, "").replace(/\/v1$/, "")
-      : `http://localhost:${getSetting("SERVER_PORT")}`;
+      : `http://localhost:${getActiveServerPort()}`;
 
   if (!base) return { ok: false, error: "No inference server configured", rows: [] };
 

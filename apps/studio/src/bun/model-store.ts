@@ -1,4 +1,4 @@
-import { existsSync, rmSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync } from "fs";
 import path from "path";
 import { getModelsBaseDir, safeRepoId, splitRepo, installedModelSize, isModelWeightExt } from "./modelscope";
 import { getSetting, updateSettings } from "./db/settings";
@@ -222,4 +222,26 @@ export function deleteLocalModel(pathToModel: string): { ok: boolean } {
 
 export function getActiveModelPath(): string {
   return getSetting("LOCAL_MODEL_PATH");
+}
+
+/**
+ * Import a local model file by copying it into the primary models dir
+ * (`<base>/imported/`) so it appears in the installed-models list. Uses an
+ * external `cp` process so multi-GB copies don't block the event loop.
+ */
+export async function importModelFile(sourcePath: string): Promise<{ ok: boolean; path?: string; error?: string }> {
+  if (!existsSync(sourcePath)) return { ok: false, error: "File does not exist" };
+  const fileName = path.basename(sourcePath);
+  if (!isModelWeightExt(fileName)) return { ok: false, error: "Not a supported model file" };
+  try {
+    const destDir = path.join(getModelsBaseDir(), "imported");
+    mkdirSync(destDir, { recursive: true });
+    const dest = path.join(destDir, fileName);
+    const proc = Bun.spawn(["cp", "-f", sourcePath, dest], { stdout: "ignore", stderr: "ignore" });
+    const code = await proc.exited;
+    if (code !== 0) return { ok: false, error: `Copy failed (exit ${code})` };
+    return { ok: true, path: dest };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
 }

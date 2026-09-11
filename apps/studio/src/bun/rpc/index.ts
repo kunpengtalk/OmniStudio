@@ -354,6 +354,10 @@ export type AppRPC = {
         params: { path: string };
         response: { ok: boolean };
       };
+      importModelFile: {
+        params: { sourcePath: string };
+        response: { ok: boolean; path?: string; error?: string };
+      };
       getModelDirs: {
         params: undefined;
         response: { dirs: string[] };
@@ -685,6 +689,8 @@ export type AppRPC = {
         text: string;
       };
       mlxModelDownloadProgress: MlxModelDownloadProgress;
+      /** CLI（`omi`）请求跳转到某个页面：models / settings / server / stats / chat / index。 */
+      navigate: { path: string };
     };
   }>;
 };
@@ -1196,6 +1202,10 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       deleteLocalModel: async ({ path }) => {
         return ModelStore.deleteLocalModel(path);
+      },
+
+      importModelFile: async ({ sourcePath }) => {
+        return ModelStore.importModelFile(sourcePath);
       },
 
       getModelDirs: async () => {

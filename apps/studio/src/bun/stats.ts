@@ -1,5 +1,5 @@
 import { freemem, loadavg, totalmem } from "node:os";
-import { getSetting } from "./db/settings";
+import { getActiveServerPort } from "./db/settings";
 import { listInstalledModels } from "./model-store";
 
 export type ActiveModel = {
@@ -48,7 +48,7 @@ export function recordUsage(modelId: string, promptTokens: number, completionTok
 /** Query llama-server /slots for the models actually loaded in VRAM/RAM. */
 async function fetchLoadedModels(): Promise<string[]> {
   try {
-    const port = getSetting("SERVER_PORT");
+    const port = getActiveServerPort();
     const res = await fetch(`http://localhost:${port}/slots`, {
       signal: AbortSignal.timeout(2000),
     });

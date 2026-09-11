@@ -7,6 +7,23 @@ export const ENGINE_OPTIONS: { value: InferenceEngine; labelKey: string }[] = [
   { value: "sglang", labelKey: "settings.engine.sglang" },
 ];
 
+/**
+ * Per-engine listen-port setting key (mirrors ENGINE_PORT_KEYS in bun/db/settings.ts).
+ * Used by the UI to display/resolve each engine's port from the settings blob.
+ */
+export const ENGINE_PORT_KEYS: Record<InferenceEngine, string> = {
+  "llama.cpp": "SERVER_PORT",
+  vllm: "VLLM_PORT",
+  sglang: "SGLANG_PORT",
+};
+
+/** Per-engine extra-launch-args setting key (mirrors ENGINE_EXTRA_ARGS_KEYS in bun/db/settings.ts). */
+export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, string> = {
+  "llama.cpp": "SERVER_EXTRA_ARGS",
+  vllm: "VLLM_EXTRA_ARGS",
+  sglang: "SGLANG_EXTRA_ARGS",
+};
+
 export type ModelFileKind = "gguf" | "safetensors" | "other";
 
 /** Classify a model file by extension (frontend mirror of the bun-side fileKind). */

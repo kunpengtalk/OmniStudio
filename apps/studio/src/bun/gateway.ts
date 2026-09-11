@@ -1,5 +1,5 @@
 import { randomBytes } from "crypto";
-import { getSetting, updateSettings } from "./db/settings";
+import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import * as ServerManager from "./server-manager";
 import * as TTSLocal from "./tts-local";
 import * as Asr from "./asr";
@@ -165,7 +165,7 @@ function errMsg(e: unknown): string {
 
 function getUpstreamBase(): string {
   const host = getSetting("SERVER_HOST") || "127.0.0.1";
-  const port = getSetting("SERVER_PORT") || "8080";
+  const port = getActiveServerPort();
   return `http://${host}:${port}`;
 }
 

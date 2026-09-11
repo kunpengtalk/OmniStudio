@@ -1,7 +1,7 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
 
-import { getSetting } from "../db/settings";
+import { getSetting, getActiveServerPort } from "../db/settings";
 import { getModelProfile } from "../../shared/model-profiles";
 
 export type ModelEndpoint = {
@@ -32,7 +32,7 @@ export function getModel(opts?: ModelEndpoint): LanguageModel {
   const isLocal = getSetting("SERVER_MODE") === "local";
 
   if (isLocal) {
-    const port = getSetting("SERVER_PORT");
+    const port = getActiveServerPort();
     const modelName = getLocalModelName();
 
     const provider = createOpenAICompatible({

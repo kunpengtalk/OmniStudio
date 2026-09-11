@@ -256,6 +256,9 @@ export class LlamaRuntime implements Runtime {
       args.push("--no-mmproj-offload");
     }
 
+    const extra = getSetting("SERVER_EXTRA_ARGS");
+    if (extra.trim()) args.push(...extra.trim().split(/\s+/));
+
     return args;
   }
 

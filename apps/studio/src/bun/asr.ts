@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
 import path from "path";
-import { getSetting, updateSettings } from "./db/settings";
+import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import { localModelPath, installedModelSize } from "./modelscope";
 import {
   getAudioBaseDir,
@@ -253,7 +253,7 @@ function getMainRemoteBaseUrl(): string {
   const isLocal = getSetting("SERVER_MODE") === "local";
   if (isLocal) {
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
-    const port = getSetting("SERVER_PORT") || "8080";
+    const port = getActiveServerPort();
     return `http://${host}:${port}`;
   }
   return (getSetting("VLLM_API_BASE") || "").replace(/\/+$/, "").replace(/\/v1$/, "");

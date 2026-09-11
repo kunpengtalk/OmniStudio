@@ -14,6 +14,7 @@ import { isConfigured, getSetting } from "./db/settings";
 import * as ServerManager from "./server-manager";
 import * as Gateway from "./gateway";
 import { stopAsr } from "./asr";
+import { startControlServer, stopControlServer } from "./control-server";
 
 // Check if Vite dev server is running for HMR
 async function getMainViewUrl(): Promise<string> {
@@ -71,6 +72,9 @@ mainWindow.webview.on("dom-ready", () => {
   broadcastUpdateStatus();
 });
 
+// CLI 控制通道（Unix socket），供 `omi` 命令唤醒/导航/管理。
+void startControlServer();
+
 // Check for updates on startup
 checkForUpdate();
 
@@ -103,23 +107,27 @@ if (
 // Handle window close
 mainWindow.on("close", async () => {
   await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway()]);
+  stopControlServer();
   Utils.quit();
 });
 
 // Cleanup on quit
 Electrobun.events.on("before-quit", async () => {
   await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway()]);
+  stopControlServer();
 });
 
 // Safety net for unexpected termination
 process.on("SIGTERM", () => {
   ServerManager.forceKill();
   void Gateway.stopGateway();
+  stopControlServer();
 });
 process.on("uncaughtException", (err) => {
   console.error("Uncaught exception:", err);
   ServerManager.forceKill();
   void Gateway.stopGateway();
+  stopControlServer();
 });
 
 console.log(`${APP_NAME} started!`);

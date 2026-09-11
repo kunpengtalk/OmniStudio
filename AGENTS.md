@@ -40,3 +40,16 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
 - Document pipeline: upload → PDF/image → Sharp → VLM OCR → HTML → Markdown
 - Settings and documents stored in SQLite via Drizzle
 - Image regions cropped from source using bounding boxes, stored as WebP
+
+## CLI (`omi`)
+
+- `apps/studio/bin/omi.ts` + `src/cli/*` is a standalone Bun CLI that talks to the
+  running app over a Unix socket (`<dataDir>/omni-control.sock`, served by
+  `src/bun/control-server.ts`). Commands: `start/stop/restart/serve/launch/model/
+  cloud/models/model-info/status/server/install/version/update`.
+- When the app is not running, read-only data access falls back to direct
+  SQLite imports (`src/cli/db.ts`) — it sets `OMNI_DATA_DIR`/`OMNI_DB_PATH` first.
+- `src/bun/paths.ts` and `src/bun/db/index.ts` must NOT import `electrobun/bun`
+  at module scope (it starts a dev server + reads version.json as a side effect);
+  they compute userData themselves via `getUserDataDir()`.
+- Install once with `cd apps/studio && bun link` to expose the `omi` command.

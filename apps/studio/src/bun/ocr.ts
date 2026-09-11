@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "fs";
 import path from "path";
 
-import { getSetting, updateSettings } from "./db/settings";
+import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import { getDataDir } from "./paths";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
@@ -528,7 +528,7 @@ export async function runOcrVlm(input: {
   } else {
     // 本地来源：显式指向本地推理服务器（引擎为 vLLM / llama.cpp / SGLang 时即为本地对应引擎）。
     endpoint = {
-      base: `http://localhost:${getSetting("SERVER_PORT")}/v1`,
+      base: `http://localhost:${getActiveServerPort()}/v1`,
       model: getLocalModelName(),
     };
   }

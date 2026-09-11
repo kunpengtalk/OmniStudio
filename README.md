@@ -124,12 +124,28 @@ apps/
 │       │   ├── runtimes/   #   llama.cpp / vLLM / SGLang runtime abstraction 运行时抽象
 │       │   ├── vllm/       #   model profiles & endpoints 模型配置与端点
 │       │   ├── db/         #   Drizzle schema, migrations, settings 数据库
+│       │   ├── control-server.ts  #   `omi` CLI ↔ 应用控制通道（Unix socket）
 │       │   └── ...         #   chat, voice, OCR, model hub, downloads, benchmarks, stats, updates
 │       │                   #   对话、语音、OCR、模型市集、下载、基准、统计、更新
+│       ├── cli/            # `omi` 命令行（bin/omi.ts 入口，复用 bun 数据层与运行时）
 │       ├── mainview/       # React UI（components, stores, lib）
 │       └── shared/         # shared constants, i18n, engine metadata 共享常量 / 国际化 / 引擎元数据
 └── landing/                # marketing site (kunpengtalk.com) 官网
 ```
+
+## 🖥 CLI / 命令行（`omi`）
+
+`omi` 是 OmniStudio 自带的本地命令（参照 [omlx](https://github.com/jundot/omlx) 设计）：启动应用、管理推理服务器、配置云端、唤起模型列表选模型、拉起编码工具。
+
+```bash
+cd apps/studio && bun link   # 安装一次，之后可直接用 `omi`
+omi start --server           # 启动应用并拉起推理服务器
+omi model                    # 打开应用里的模型列表选模型
+omi launch codex --model qwen3-4b-q4_k_m   # 拉起编码工具并接入当前模型
+omi status / omi models / omi stop / omi serve --port 8090
+```
+
+原理：应用主进程在数据目录监听 Unix socket（`omni-control.sock`，0600 权限），`omi` 通过该通道唤醒窗口、跳转页面、启停服务器、读写设置；应用未运行时 `models` / `model-info` / `cloud` 直接读同一个 SQLite 兜底。帮助：`omi help` 或 `omi <command> --help`。
 
 ## 🗺 Roadmap / 路线图
 
@@ -138,10 +154,11 @@ apps/
 - [x] Chat / Voice / OCR apps with per-app sessions; voice multi-engine TTS/ASR + cloning + records 对话 / 语音（多引擎）/ OCR 应用
 - [x] Dashboard, benchmarks, log viewer, CLI integrations, update channels, i18n 仪表盘 / 基准 / 日志 / 集成 / 更新 / 多语言
 - [x] Image generation loop for the Image app 图片应用生图闭环
+- [x] `omi` CLI: launch app / server / cloud, model picking, launcher tools, status & logs 命令行 omi（启动应用/服务器/云端、选模型、拉起编码工具、状态与日志）
 - [ ] Linux and Windows support Linux 与 Windows 支持
 - [ ] More document formats (PowerPoint, Word, Excel, etc.) 更多文档格式
 - [ ] Memory lifecycle (idle unload, prefault protection), KV cache tiering with SSD offload 内存生命周期与 KV 缓存分层
-- [ ] Menu bar / Dock indicators, API key encryption, `omni-studio launch <tool>` 菜单栏指标 / Key 加密 / launch 子命令
+- [ ] Menu bar / Dock indicators, API key encryption 菜单栏指标 / Key 加密
 
 ## 📄 License / 许可证
 

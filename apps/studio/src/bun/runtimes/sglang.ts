@@ -1,5 +1,5 @@
 import type { Subprocess } from "bun";
-import { getSetting } from "../db/settings";
+import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/settings";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
 import type {
@@ -151,7 +151,7 @@ export class SglangRuntime implements Runtime {
   }
 
   private buildArgs(model: string, servedName?: string): string[] {
-    const port = getSetting("SERVER_PORT");
+    const port = getServerPort(this.id);
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
     const contextLength = getSetting("SGLANG_CONTEXT_LENGTH") || "8192";
     const tpSize = getSetting("SGLANG_TP_SIZE") || "1";
@@ -180,6 +180,9 @@ export class SglangRuntime implements Runtime {
     if (chunkedPrefill && chunkedPrefill !== "0") {
       args.push("--chunked-prefill-size", chunkedPrefill);
     }
+
+    const extra = getSetting(ENGINE_EXTRA_ARGS_KEYS[this.id]);
+    if (extra.trim()) args.push(...extra.trim().split(/\s+/));
 
     return args;
   }
@@ -252,7 +255,7 @@ export class SglangRuntime implements Runtime {
           self.setStatus("error");
         });
 
-      const port = getSetting("SERVER_PORT");
+      const port = getServerPort(this.id);
       const healthUrl = `http://localhost:${port}/health`;
       const maxIdleAttempts = 180;
       let idleCount = 0;

@@ -1,4 +1,5 @@
 import { eq } from "drizzle-orm";
+import type { InferenceEngine } from "../../shared/modelscope";
 import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 
@@ -11,6 +12,11 @@ export type SettingsKey =
   | "SERVER_MODE"
   | "SERVER_HOST"
   | "SERVER_PORT"
+  | "VLLM_PORT"
+  | "SGLANG_PORT"
+  | "SERVER_EXTRA_ARGS"
+  | "VLLM_EXTRA_ARGS"
+  | "SGLANG_EXTRA_ARGS"
   | "AUTO_START_SERVER"
   | "MODEL_DIRS"
   | "UPDATE_CHANNEL"
@@ -105,6 +111,11 @@ const DEFAULTS: Record<SettingsKey, string> = {
   SERVER_MODE: "local",
   SERVER_HOST: "127.0.0.1",
   SERVER_PORT: "8080",
+  VLLM_PORT: "8081",
+  SGLANG_PORT: "8082",
+  SERVER_EXTRA_ARGS: "",
+  VLLM_EXTRA_ARGS: "",
+  SGLANG_EXTRA_ARGS: "",
   AUTO_START_SERVER: "1",
   MODEL_DIRS: "",
   UPDATE_CHANNEL: "stable",
@@ -221,4 +232,33 @@ export function updateSettings(values: Record<string, string>) {
 export function isConfigured(): boolean {
   const row = db.select().from(settingsTable).where(eq(settingsTable.key, "SETUP_COMPLETE")).get();
   return row?.value === "1";
+}
+
+/** The port key each LLM inference engine reads (mirrored on the UI by ENGINE_PORT_KEYS). */
+export const ENGINE_PORT_KEYS: Record<InferenceEngine, SettingsKey> = {
+  "llama.cpp": "SERVER_PORT",
+  vllm: "VLLM_PORT",
+  sglang: "SGLANG_PORT",
+};
+
+/** The extra-launch-args key for each LLM engine (whitespace-separated flags appended last). */
+export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, SettingsKey> = {
+  "llama.cpp": "SERVER_EXTRA_ARGS",
+  vllm: "VLLM_EXTRA_ARGS",
+  sglang: "SGLANG_EXTRA_ARGS",
+};
+
+/** The configured listen port of the given engine. */
+export function getServerPort(engine: InferenceEngine): string {
+  return getSetting(ENGINE_PORT_KEYS[engine]) || "8080";
+}
+
+/** The currently active LLM engine (as configured in INFERENCE_ENGINE). */
+export function getActiveInferenceEngine(): InferenceEngine {
+  return (getSetting("INFERENCE_ENGINE") as InferenceEngine) || "llama.cpp";
+}
+
+/** The listen port of the currently active LLM inference engine. */
+export function getActiveServerPort(): string {
+  return getServerPort(getActiveInferenceEngine());
 }

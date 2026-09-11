@@ -8,6 +8,7 @@ import { useModelDownloadStore } from "../stores/model-download";
 import { useGatewayStore } from "../stores/gateway";
 import { useMlxInstallStore } from "../stores/mlx-install";
 import { useMlxModelDownloadStore } from "../stores/mlx-model-download";
+import { useRouter } from "../stores/router";
 
 const knownCompletedIds = new Set<string>();
 
@@ -85,6 +86,19 @@ const rpc = Electroview.defineRPC<AppRPC>({
         // 下载结束（成功/失败）后刷新「已下载模型」列表，UI 的下载按钮/徽章随之更新。
         if (p.stage !== "downloading") {
           queryClient.invalidateQueries({ queryKey: ["mlx-downloaded-models"] });
+        }
+      },
+      navigate: ({ path }) => {
+        // 前端导航没有 URL 路由，全靠 router store；CLI 跳转只用到无参数路径。
+        if (
+          path === "models" ||
+          path === "settings" ||
+          path === "server" ||
+          path === "stats" ||
+          path === "chat" ||
+          path === "index"
+        ) {
+          useRouter.getState().setRoute({ path });
         }
       },
     },
