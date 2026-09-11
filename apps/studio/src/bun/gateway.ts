@@ -4,6 +4,7 @@ import * as ServerManager from "./server-manager";
 import * as TTSLocal from "./tts-local";
 import * as Asr from "./asr";
 import { getTTSProviderConfig, listProviderModels, runTTSEdge } from "./voice";
+import { listInstalledModels, slugModelFileName } from "./model-store";
 
 /**
  * 本地 API 网关。
@@ -243,15 +244,52 @@ async function localModelIds(): Promise<Set<string>> {
   return ids;
 }
 
+/** 路由失败（本地模型但服务器未运行 / 没有任何可用后端）时抛出。 */
+class ChatRouteError extends Error {}
+
+let installedSlugCache: { at: number; slugs: Set<string> } | null = null;
+const INSTALLED_SLUG_TTL_MS = 15_000;
+
+/** 已装本地模型的 canonical slug 全集。离线可得：推理服务器没在跑也能识别本地模型名。 */
+async function installedModelSlugs(): Promise<Set<string>> {
+  if (installedSlugCache && Date.now() - installedSlugCache.at < INSTALLED_SLUG_TTL_MS) {
+    return installedSlugCache.slugs;
+  }
+  const slugs = new Set(listInstalledModels().map((m) => slugModelFileName(m.fileName)));
+  installedSlugCache = { at: Date.now(), slugs };
+  return slugs;
+}
+
+/** 清空模型路由缓存（本地列表 / 已装 slug）。测试在改变桩数据后调用；生产代码无需使用。 */
+export function resetModelRouteCaches(): void {
+  localModelCache = null;
+  installedSlugCache = null;
+}
+
 /**
  * 按模型 ID 选择对话后端：
- * - 本地推理服务器运行时，请求的模型在本地列表里 → 本地；否则（且配置了云端）→ 云端；
- * - 本地未运行 → 云端（若配置）；都没有 → null。
+ * - 明确是本地已装模型 → 只走本地推理服务器；服务器未运行则抛 ChatRouteError。
+ *   本地模型名绝不转发给云端 —— 否则会出现「本地模型被云 API 拒绝」的误导性错误；
+ * - 本地推理服务器运行时，模型在本地列表里 → 本地；否则（且配置了云端）→ 云端；
+ * - 本地未运行 → 云端（若配置）；都没有后端 → 抛 ChatRouteError。
  */
-async function resolveChatBackend(model: string): Promise<ChatBackend | null> {
+async function resolveChatBackend(model: string): Promise<ChatBackend> {
   const localRunning = ServerManager.getStatus() === "running";
   const cloud = cloudChatBase();
   const local: ChatBackend = { kind: "local", base: getUpstreamBase(), headers: authHeaders() };
+
+  if (model) {
+    const installed = await installedModelSlugs();
+    if (installed.has(model)) {
+      if (!localRunning) {
+        throw new ChatRouteError(
+          `本地模型 ${model} 需要本地推理服务器，但服务器当前未运行。` +
+            `请先在应用里启动推理服务器，或运行 \`omi launch <agent> --model ${model}\`（会自动拉起服务器）。`,
+        );
+      }
+      return local;
+    }
+  }
 
   if (localRunning) {
     if (!cloud) return local;
@@ -260,7 +298,7 @@ async function resolveChatBackend(model: string): Promise<ChatBackend | null> {
     return ids.size === 0 || ids.has(model) ? local : { kind: "cloud", base: cloud, headers: cloudAuthHeaders() };
   }
   if (cloud) return { kind: "cloud", base: cloud, headers: cloudAuthHeaders() };
-  return null;
+  throw new ChatRouteError("没有可用的对话后端：请先启动本地推理服务器或配置云端 API。");
 }
 
 /** 上游 chat completions 调用失败（网络或 HTTP 错误）时抛出。 */
@@ -371,15 +409,19 @@ async function* iterUpstreamChatStream(res: Response): AsyncGenerator<{
         try {
           const chunk = JSON.parse(data) as {
             choices?: {
-              delta?: { content?: unknown; tool_calls?: OAIToolCall[] };
+              delta?: { content?: unknown; reasoning_content?: unknown; tool_calls?: OAIToolCall[] };
               finish_reason?: string | null;
             }[];
             usage?: OpenAIChatResult["usage"];
           };
-          const delta = chunk.choices?.[0]?.delta?.content;
+          // 不少云端模型（如 DeepSeek）把思考内容放在 reasoning_content 里流式返回；
+          // content 为空时把 reasoning_content 也当作文本增量透传，避免流式时"空转"。
+          const d = chunk.choices?.[0]?.delta;
+          const content = typeof d?.content === "string" && d.content ? d.content : undefined;
+          const reasoning = typeof d?.reasoning_content === "string" ? d.reasoning_content : undefined;
           yield {
-            delta: typeof delta === "string" ? delta : "",
-            toolCalls: chunk.choices?.[0]?.delta?.tool_calls,
+            delta: content ?? reasoning ?? "",
+            toolCalls: d?.tool_calls,
             finish: chunk.choices?.[0]?.finish_reason,
             usage: chunk.usage,
           };
@@ -632,9 +674,11 @@ async function handleMessages(req: Request): Promise<Response> {
   const toolChoiceOAI = anthropicToolChoiceToOAI(body.tool_choice);
   if (toolChoiceOAI) params.tool_choice = toolChoiceOAI;
 
-  const backend = await resolveChatBackend(model);
-  if (!backend) {
-    return anthropicError(503, "No chat backend available: start a local inference server or configure a remote API", "api_error");
+  let backend: ChatBackend;
+  try {
+    backend = await resolveChatBackend(model);
+  } catch (e) {
+    return anthropicError(503, errMsg(e), "api_error");
   }
 
   if (body.stream) {
@@ -952,9 +996,11 @@ async function handleResponses(req: Request): Promise<Response> {
   if (Array.isArray(body.tools) && body.tools.length) params.tools = body.tools;
   if (body.tool_choice !== undefined) params.tool_choice = body.tool_choice;
 
-  const backend = await resolveChatBackend(model);
-  if (!backend) {
-    return apiError(503, "没有可用的对话后端：请先启动本地推理服务器或配置云端 API", "server_error");
+  let backend: ChatBackend;
+  try {
+    backend = await resolveChatBackend(model);
+  } catch (e) {
+    return apiError(503, errMsg(e), "server_error");
   }
 
   if (body.stream) {
@@ -1148,9 +1194,11 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     return apiError(400, `模型 ${model} 不是对话模型（TTS/ASR 请使用对应的 /v1/audio/* 端点）`);
   }
 
-  const backend = await resolveChatBackend(model);
-  if (!backend) {
-    return apiError(503, "没有可用的对话后端：请先启动本地推理服务器或配置云端 API", "server_error");
+  let backend: ChatBackend;
+  try {
+    backend = await resolveChatBackend(model);
+  } catch (e) {
+    return apiError(503, errMsg(e), "server_error");
   }
 
   let upstream: Response;

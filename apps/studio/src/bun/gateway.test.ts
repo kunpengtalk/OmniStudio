@@ -79,10 +79,23 @@ mock.module("./db/settings", () => ({
   getSetting: (key: string) => SETTINGS[key] ?? "",
   updateSettings: (values: Record<string, string>) => Object.assign(SETTINGS, values),
   getAllSettings: () => ({ ...SETTINGS }),
+  getActiveServerPort: () => SETTINGS.SERVER_PORT || String(LOCAL_PORT),
+}));
+
+// 桩掉「已装本地模型」：默认空 → 所有模型名都走"非本地已装"的旧路由逻辑；
+// 需要验证本地模型路由的测试自行填充 INSTALLED_MODELS。
+let INSTALLED_MODELS: { fileName: string }[] = [];
+mock.module("./model-store", () => ({
+  listInstalledModels: () => INSTALLED_MODELS,
+  slugModelFileName: (fileName: string) =>
+    fileName
+      .replace(/\.(gguf|safetensors|bin|pt|pth|ckpt|onnx|ggml)$/i, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9_.-]/g, "-"),
 }));
 
 // 在所有 mock 注册后动态加载被测模块（静态 import 会被提升到 mock 之前执行）。
-const { startGateway, stopGateway, getGatewayStatus, generateGatewayApiKey } = await import("./gateway");
+const { startGateway, stopGateway, getGatewayStatus, generateGatewayApiKey, resetModelRouteCaches } = await import("./gateway");
 
 const GATEWAY_BASE = `http://127.0.0.1:10123`;
 
@@ -334,6 +347,51 @@ describe("OpenAI-compatible endpoints", () => {
     expect(body.choices[0]?.message?.content).toBe("hello-cloud!");
     expect(readCloud()?.model).toBe("cloud-gpt");
     expect(readLocal()).toBeNull();
+  });
+
+  test("POST /v1/chat/completions routes an installed local model to local upstream even if the server model list lacks it", async () => {
+    lastLocalChat = null;
+    lastCloudChat = null;
+    INSTALLED_MODELS = [{ fileName: "qwen3-4b-q4_k_m.gguf" }];
+    resetModelRouteCaches();
+    try {
+      const res = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "qwen3-4b-q4_k_m", messages: [{ role: "user", content: "hi" }] }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { choices: { message: { content: string } }[] };
+      expect(body.choices[0]?.message?.content).toBe("hello-local!");
+      expect(readLocal()?.model).toBe("qwen3-4b-q4_k_m");
+      expect(readCloud()).toBeNull();
+    } finally {
+      INSTALLED_MODELS = [];
+      resetModelRouteCaches();
+    }
+  });
+
+  test("POST /v1/chat/completions refuses an installed local model with a clear error when the local server is down", async () => {
+    lastLocalChat = null;
+    lastCloudChat = null;
+    SERVER_STATUS = "stopped";
+    INSTALLED_MODELS = [{ fileName: "qwen3-4b-q4_k_m.gguf" }];
+    resetModelRouteCaches();
+    try {
+      const res = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "qwen3-4b-q4_k_m", messages: [{ role: "user", content: "hi" }] }),
+      });
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { error?: { message?: string } };
+      expect(body.error?.message).toContain("qwen3-4b-q4_k_m");
+      expect(readCloud()).toBeNull(); // 绝不把本地模型名转发给云端
+    } finally {
+      SERVER_STATUS = "running";
+      INSTALLED_MODELS = [];
+      resetModelRouteCaches();
+    }
   });
 
   test("POST /v1/chat/completions rejects omni-* capability models", async () => {

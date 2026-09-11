@@ -30,11 +30,22 @@ mock.module("./db/settings", () => ({
           : "",
   updateSettings: () => {},
   getAllSettings: () => ({}),
+  getActiveServerPort: () => "18080",
 }));
 mock.module("./chat-model", () => ({ getChatModelName: () => "test-model" }));
 mock.module("./image-server", () => ({
   chatImageDir: () => "/tmp",
   getImagesBaseDir: () => "/tmp",
+  // 同一批测试在同一进程共享 mock 注册表，image-server.route.test 也会 import
+  // ./image-server；补上它需要的导出，避免该文件的冒烟测试被这个桩污染。
+  getPromptLibraryMediaBase: () => {
+    const base = join(process.env.HOME || "", "ai", "vibedesign", "frontend", "public");
+    return fs.existsSync(join(base, "prompt-library")) ? base : null;
+  },
+  startImageServer: () => {
+    // 让路由冒烟测试按"端口被占用"的预设路径跳过服务器冒烟，只跑纯函数断言。
+    throw new Error("image-server mocked: treat as port occupied");
+  },
 }));
 mock.module("./stats", () => ({ recordUsage: () => {} }));
 mock.module("./server-manager", () => ({

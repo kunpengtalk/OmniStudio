@@ -34,6 +34,7 @@ import { Button } from "@ui/button";
 import { Badge } from "@ui/badge";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
+import { IntegrationModelSelect } from "@/mainview/components/integration-model-select";
 import {
   Dialog,
   DialogContent,
@@ -119,9 +120,9 @@ const LAUNCHER_TOOLS: { key: string; labelKey: string; tool: string }[] = [
 ];
 
 const CLAUDE_TIERS = [
-  { key: "LAUNCHER_CLAUDE_OPUS", labelKey: "settings.integrations.tier.opus" },
+  { key: "LAUNCHER_CLAUDE_OPUS", labelKey: "settings.integrations.tier.opus", omiFlag: "opus" },
   { key: "LAUNCHER_CLAUDE_SONNET", labelKey: "settings.integrations.tier.sonnet" },
-  { key: "LAUNCHER_CLAUDE_HAIKU", labelKey: "settings.integrations.tier.haiku" },
+  { key: "LAUNCHER_CLAUDE_HAIKU", labelKey: "settings.integrations.tier.haiku", omiFlag: "haiku" },
 ];
 
 type SettingsTab =
@@ -1030,15 +1031,86 @@ function PerformanceSettings({
   );
 }
 
-function launcherCommand(tool: string, baseUrl: string, model: string): string {
-  if (!model) return "";
-  if (tool === "claude") {
-    return `ANTHROPIC_BASE_URL=${baseUrl} ANTHROPIC_MODEL=${model} ANTHROPIC_API_KEY=EMPTY claude`;
+/**
+ * 与 `omi` CLI 对应的启动命令：URL / API Key 都存在设置里，点保存后命令保持最短。
+ * Claude Code 的三个档位合成一条命令：默认模型走 --model，Opus / Haiku 走 --opus / --haiku。
+ */
+function buildOmiCommand(
+  tool: string,
+  slots: { key: string; value: string; omiFlag?: string }[],
+): string {
+  const main = slots.find((s) => s.value && !s.omiFlag) ?? slots.find((s) => s.value);
+  if (!main?.value) return "";
+  let cmd = `omi launch ${tool} --model ${main.value}`;
+  for (const s of slots) {
+    if (s.omiFlag && s.value && s.value !== main.value) cmd += ` --${s.omiFlag} ${s.value}`;
   }
-  if (tool === "codex" || tool === "opencode" || tool === "openclaw" || tool === "copilot") {
-    return `OPENAI_BASE_URL=${baseUrl}/v1 OPENAI_API_KEY=EMPTY OPENAI_MODEL=${model} ${tool}`;
-  }
-  return `${tool} --model ${model} --base-url ${baseUrl}/v1`;
+  return cmd;
+}
+
+/** 集成 Agent 卡片：Agent 名 + 模型档位（Claude 三档 / 其他单档）+ 一条 omi 启动命令 + 复制。 */
+function IntegrationAgentCard({
+  label,
+  tool,
+  mode,
+  modelSlots,
+  onModelChange,
+}: {
+  label: string;
+  tool: string;
+  mode?: "local" | "cloud";
+  modelSlots: { key: string; label: string; value: string; omiFlag?: string }[];
+  onModelChange: (key: string, value: string) => void;
+}) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  const copy = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {}
+  };
+  const omiCmd = buildOmiCommand(tool, modelSlots);
+
+  return (
+    <div className="rounded-lg border p-3">
+      <h3 className="mb-2 text-sm font-medium">{label}</h3>
+      <div className="mb-2 flex flex-wrap items-end gap-2">
+        {modelSlots.map((slot) => (
+          <div key={slot.key} className="w-52">
+            {modelSlots.length > 1 && (
+              <Label className="mb-1 block text-[10px] text-muted-foreground">{slot.label}</Label>
+            )}
+            <IntegrationModelSelect
+              value={slot.value}
+              onChange={(v) => onModelChange(slot.key, v)}
+              placeholder={`${t("settings.integrations.model")}…`}
+              mode={mode}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center gap-2 rounded-md bg-muted px-3 py-1.5">
+        <span className="shrink-0 text-[10px] text-muted-foreground">
+          {t("settings.integrations.command")}
+        </span>
+        <code className="min-w-0 flex-1 truncate font-mono text-[11px] tabular-nums">
+          {omiCmd || "—"}
+        </code>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          className="h-6 w-6 shrink-0"
+          disabled={!omiCmd}
+          onClick={() => copy(omiCmd)}
+        >
+          {copied ? <CheckIcon className="size-3.5 text-primary" /> : <CopyIcon className="size-3.5" />}
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 function IntegrationsSettings({
@@ -1051,24 +1123,16 @@ function IntegrationsSettings({
   saveMutation: SaveMutationLike;
 }) {
   const t = useT();
-  const baseUrl = inferBaseUrl(form);
-  const mode = form.LAUNCHER_CLAUDE_MODE ?? "local";
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(launcherCommand("claude", baseUrl, form.LAUNCHER_CLAUDE_SONNET || ""));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {}
-  };
+  const mode: "local" | "cloud" =
+    (form.LAUNCHER_CLAUDE_MODE as "local" | "cloud" | undefined) ?? "local";
 
   return (
-    <div className="flex flex-col gap-5">
-      <div>
-        <p className="mb-3 text-xs text-muted-foreground">{t("settings.integrations.desc")}</p>
-        <h3 className="mb-2 text-sm font-medium">{t("settings.integrations.claude")}</h3>
-        <div className="mb-2 flex gap-2">
-          <Label className="mb-1 block text-xs">{t("settings.integrations.mode")}</Label>
+    <div className="flex flex-col gap-4">
+      {/* 页面级模式：本地只给本地模型，云端只给云端/API 模型。 */}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-muted-foreground">{t("settings.integrations.desc")}</p>
+        <div className="flex items-center gap-2">
+          <Label className="text-xs">{t("settings.integrations.mode")}</Label>
           <div className="flex gap-2">
             {(["local", "cloud"] as const).map((m) => (
               <Button
@@ -1084,54 +1148,36 @@ function IntegrationsSettings({
             ))}
           </div>
         </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          {CLAUDE_TIERS.map((tier) => (
-            <div key={tier.key}>
-              <Label htmlFor={tier.key} className="mb-1 text-xs">{t(tier.labelKey)}</Label>
-              <Input
-                id={tier.key}
-                placeholder={mode === "local" ? "local model name" : "e.g. claude-sonnet-4-20250514"}
-                value={form[tier.key] ?? ""}
-                onChange={(e) => updateField(tier.key, e.target.value)}
-                className="h-8 text-xs"
-              />
-            </div>
-          ))}
-        </div>
-        <div className="mt-3 flex items-center gap-2 rounded-lg border px-3 py-2">
-          <div className="min-w-0 flex-1">
-            <p className="text-[11px] text-muted-foreground">{t("settings.integrations.command")}</p>
-            <p className="truncate font-mono text-xs tabular-nums">
-              {launcherCommand("claude", baseUrl, form.LAUNCHER_CLAUDE_SONNET || "") || "—"}
-            </p>
-          </div>
-          <Button type="button" variant="ghost" size="sm" className="h-7 shrink-0 text-xs" onClick={copy} disabled={!form.LAUNCHER_CLAUDE_SONNET}>
-            {copied ? <CheckIcon className="size-3.5 text-primary" /> : <CopyIcon className="size-3.5" />}
-            {copied ? t("settings.endpoints.copied") : t("settings.endpoints.copy")}
-          </Button>
-        </div>
       </div>
 
+      {/* Claude Code：一个 Agent，卡片里带三档模型。 */}
+      <IntegrationAgentCard
+        label={t("settings.integrations.claude")}
+        tool="claude"
+        mode={mode}
+        modelSlots={CLAUDE_TIERS.map((tier) => ({
+          key: tier.key,
+          label: t(tier.labelKey),
+          value: form[tier.key] ?? "",
+          omiFlag: tier.omiFlag,
+        }))}
+        onModelChange={updateField}
+      />
+
       {LAUNCHER_TOOLS.map((tool) => (
-        <div key={tool.key}>
-          <div className="mb-2 flex items-baseline justify-between">
-            <h3 className="text-sm font-medium">{t(tool.labelKey)}</h3>
-            <Label htmlFor={tool.key} className="text-[11px] text-muted-foreground">{t("settings.integrations.model")}</Label>
-          </div>
-          <Input
-            id={tool.key}
-            placeholder={mode === "local" ? "local model name" : "e.g. gpt-4o"}
-            value={form[tool.key] ?? ""}
-            onChange={(e) => updateField(tool.key, e.target.value)}
-            className="mb-2 h-8 text-xs"
-          />
-          <p className="truncate rounded-lg bg-muted px-3 py-2 font-mono text-[11px] text-muted-foreground">
-            {launcherCommand(tool.tool, baseUrl, form[tool.key] || "") || "—"}
-          </p>
-        </div>
+        <IntegrationAgentCard
+          key={tool.key}
+          label={t(tool.labelKey)}
+          tool={tool.tool}
+          mode={mode}
+          modelSlots={[
+            { key: tool.key, label: t("settings.integrations.model"), value: form[tool.key] ?? "" },
+          ]}
+          onModelChange={updateField}
+        />
       ))}
 
-      <SaveRow mutation={saveMutation} />
+      <SaveRow mutation={saveMutation} hint={t("settings.restartHint")} />
     </div>
   );
 }

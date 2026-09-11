@@ -23,7 +23,12 @@ mock.module("./db/settings", () => ({
   getAllSettings: () => ({}),
 }));
 mock.module("./image-server", () => ({ getImagesBaseDir: () => `/tmp/img-${process.pid}` }));
+// 补全 server-info 的全部导出：replace mock 会在同进程内泄漏给其他测试文件
+// （如 prompt-library.test 的 IMAGE_SERVER_PORT 导入），缺导出会直接报错。
 mock.module("../shared/server-info", () => ({
+  IMAGE_SERVER_PORT: 19782,
+  DEFAULT_INFERENCE_PORT: "18080",
+  PROMPT_LIBRARY_MEDIA_ORIGIN: "https://kunpengtalk.com",
   chatImageUrl: (ref: string) => `http://img.local/${ref}`,
 }));
 mock.module("./mlx-gen", () => ({

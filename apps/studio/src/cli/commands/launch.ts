@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, writeFileSync } from "fs";
-import { basename, join } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { basename, dirname, join } from "path";
 import { homedir } from "os";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { ParsedArgs } from "../args";
 import { optBool, optString } from "../args";
 import { controlRequest, ensureAppRunning } from "../client";
@@ -12,6 +13,7 @@ import {
 import { formatBytes, slugModelFileName } from "../format";
 import { pickNumbered } from "../tui";
 import { getInstalledModels } from "./models";
+import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
 
 type ToolKind = "anthropic" | "openai" | "generic";
 
@@ -27,6 +29,7 @@ const TOOL_SPECS: Record<string, ToolKind> = {
 
 /** 工具 → 设置键（把选中的模型写回设置，GUI 设置页能看到）。 */
 const TOOL_SETTING_KEY: Record<string, string> = {
+  claude: "LAUNCHER_CLAUDE_SONNET",
   codex: "LAUNCHER_CODEX_MODEL",
   opencode: "LAUNCHER_OPENCODE_MODEL",
   openclaw: "LAUNCHER_OPENCLAW_MODEL",
@@ -36,6 +39,15 @@ const TOOL_SETTING_KEY: Record<string, string> = {
 };
 
 const LAUNCHER_CONFIG_DIR = join(homedir(), ".omni", "launcher");
+
+/** 控制通道 gatewayStatus / gatewayStart 返回的网关信息（真实绑定端口可能回退）。 */
+type GatewayStatusData = {
+  status: string;
+  host: string;
+  port: number;
+  url: string;
+  notice?: string;
+};
 
 function fail(msg: string): never {
   console.error(msg);
@@ -66,28 +78,47 @@ export async function cmdLaunch(parsed: ParsedArgs) {
   // 1. 确保应用在运行（读配置 / 起服务器都要走控制通道）。
   const connected = await ensureAppRunning({ appPath: optString(parsed.options, "app-path") });
 
-  // 2. 读取设置，确定 baseUrl + apiKey（与设置页 launcherCommand 的规则一致）。
+  // 2. 读取设置（网关地址 / 鉴权）。
   const settings = connected
     ? (await controlRequest("getSettings", undefined, 15_000)).data ?? {}
     : await getAllSettingsFallback();
-  const isLocal = (settings.SERVER_MODE ?? "local") !== "remote";
-
-  let baseUrl: string;
-  let apiKey: string;
-  if (isLocal) {
-    baseUrl = `http://${settings.SERVER_HOST || "127.0.0.1"}:${settings.SERVER_PORT || "8080"}`;
-    apiKey = "EMPTY";
-  } else {
-    baseUrl = (settings.VLLM_API_BASE ?? "").replace(/\/+$/, "").replace(/\/v1$/, "");
-    apiKey = settings.VLLM_API_KEY || "EMPTY";
-    if (!baseUrl) fail("云端模式缺少 Base URL，请先配置：`omi cloud --set ...`");
-  }
 
   // 3. 选模型（可能改活动模型 → 变更会触发本地服务器重启）。
-  const model = await resolveModel(parsed, connected, apiKey);
+  const model = await resolveModel(parsed, connected, settings.VLLM_API_KEY || "EMPTY");
 
-  // 4. 确保本地服务器在线且加载的就是选中的模型。
-  if (isLocal) {
+  // 端点由「选中的模型」决定而不是 SERVER_MODE：本地模型 → 本地推理服务器，
+  // 云端模型 ID → 云端 API。集成页选的就是模型名，本地模型绝不该发到云端。
+  const modelIsLocal = !!model.path;
+  const cloudBase = (settings.VLLM_API_BASE ?? "").replace(/\/+$/, "").replace(/\/v1$/, "");
+  const baseUrl = modelIsLocal
+    ? `http://${settings.SERVER_HOST || "127.0.0.1"}:${settings.SERVER_PORT || DEFAULT_INFERENCE_PORT}`
+    : cloudBase;
+  const apiKey = modelIsLocal ? "EMPTY" : (settings.VLLM_API_KEY || "EMPTY");
+  if (!modelIsLocal && !cloudBase) fail("云端模型需要先配置云端 API：`omi cloud --set ...`");
+
+  // 统一走本地 API 网关：网关负责协议翻译（Anthropic ↔ OpenAI）并按模型 ID 路由本地/云端。
+  // 网关可能因配置端口被占用而回退到下一个空闲端口（如 10000 被其它程序占用 → 10001），
+  // 所以以控制通道返回的真实 URL 为准，而不是设置里的 GATEWAY_PORT；未连接时回退设置值。
+  let gatewayBase = `http://${settings.GATEWAY_HOST || "127.0.0.1"}:${Number(settings.GATEWAY_PORT || 10000) || 10000}`;
+  let gatewayNotice = "";
+  if (connected) {
+    const g = await controlRequest("gatewayStatus", undefined, 10_000);
+    const gw = (g.ok ? g.data : undefined) as GatewayStatusData | undefined;
+    if (gw?.url) gatewayBase = gw.url;
+    if (gw?.notice) gatewayNotice = gw.notice;
+    if (gw && gw.status !== "running") {
+      console.log("API 网关未运行，正在启动…");
+      const started = await controlRequest("gatewayStart", undefined, 15_000);
+      const startGw = (started.ok ? started.data : undefined) as GatewayStatusData | undefined;
+      if (startGw?.url) gatewayBase = startGw.url;
+      if (startGw?.notice) gatewayNotice = startGw.notice;
+    }
+  }
+  const gatewayKey = ((settings.GATEWAY_API_KEY as string | undefined) ?? "").trim();
+  const agentKey = gatewayKey || apiKey;
+
+  // 4. 本地模型：确保推理服务器在线且加载的就是选中的模型（与 SERVER_MODE 无关）。
+  if (modelIsLocal) {
     if (connected) {
       const st = await controlRequest("status", undefined, 10_000);
       if (st.ok && st.data?.server?.status === "running") {
@@ -108,9 +139,15 @@ export async function cmdLaunch(parsed: ParsedArgs) {
 
   // 5. 写配置：把模型写回设置（GUI 集成页可见）+ 本地配置文件。
   const settingKey = TOOL_SETTING_KEY[tool];
+  const opusModel = optString(parsed.options, "opus");
+  const haikuModel = optString(parsed.options, "haiku");
   if (settingKey) {
     const patch: Record<string, string> = { [settingKey]: model.name };
-    if (tool === "claude") patch.LAUNCHER_CLAUDE_MODE = isLocal ? "local" : "cloud";
+    if (tool === "claude") {
+      patch.LAUNCHER_CLAUDE_MODE = modelIsLocal ? "local" : "cloud";
+      if (opusModel) patch.LAUNCHER_CLAUDE_OPUS = opusModel;
+      if (haikuModel) patch.LAUNCHER_CLAUDE_HAIKU = haikuModel;
+    }
     if (connected) {
       await controlRequest("updateSettings", { settings: patch }, 15_000);
     } else {
@@ -119,7 +156,10 @@ export async function cmdLaunch(parsed: ParsedArgs) {
   }
   writeToolConfig(tool, model.name, baseUrl);
 
-  console.log(`启动 ${tool}（模型：${model.name}，接口：${baseUrl}${apiKey !== "EMPTY" ? "，API Key 已设置" : ""}）`);
+  console.log(
+    `启动 ${tool}（模型：${model.name}，接口：${gatewayBase}${agentKey ? "，已鉴权" : ""}）` +
+      (gatewayNotice ? `\n提示：${gatewayNotice}` : ""),
+  );
 
   // 6. 构造环境变量 / 参数并拉起工具。
   const toolBin = tool === "claude" ? "claude" : tool;
@@ -132,17 +172,65 @@ export async function cmdLaunch(parsed: ParsedArgs) {
 
   const env: Record<string, string> = {};
   const extraArgs: string[] = [...parsed.rest];
-  if (kind === "anthropic") {
-    env.ANTHROPIC_BASE_URL = baseUrl;
-    env.ANTHROPIC_AUTH_TOKEN = apiKey;
-    env.ANTHROPIC_MODEL = model.name;
-  } else if (kind === "openai") {
-    env.OPENAI_BASE_URL = `${baseUrl}/v1`;
-    env.OPENAI_API_KEY = apiKey;
-    env.OPENAI_MODEL = model.name;
-  } else {
-    // generic：hermes / pi 用命令行参数
-    extraArgs.unshift("--model", model.name, "--base-url", `${baseUrl}/v1`);
+
+  // 每个 Agent 按自己的方式指向本机端点：能走配置文件的写配置文件（保留用户原有配置），
+  // 其余的用各自约定的环境变量。整体照搬 Ollama `launch <agent>` 的设计。
+  switch (tool) {
+    case "claude": {
+      env.ANTHROPIC_BASE_URL = gatewayBase;
+      env.ANTHROPIC_API_KEY = "";
+      env.ANTHROPIC_AUTH_TOKEN = agentKey;
+      env.ANTHROPIC_MODEL = model.name;
+      // 所有档位（Opus/Sonnet/Haiku/子智能体）都指向该模型；--opus / --haiku 可单独覆盖。
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL = opusModel ?? model.name;
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL = model.name;
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikuModel ?? model.name;
+      env.CLAUDE_CODE_SUBAGENT_MODEL = model.name;
+      // 关掉遥测/反馈提示（照搬 Ollama launch claude）。
+      env.CLAUDE_CODE_ATTRIBUTION_HEADER = "0";
+      env.CLAUDE_CODE_TOTAL_TOKENS_REMINDER = "off";
+      env.DISABLE_ERROR_REPORTING = "1";
+      env.DISABLE_FEEDBACK_COMMAND = "1";
+      env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY = "1";
+      extraArgs.unshift("--model", model.name);
+      break;
+    }
+    case "codex": {
+      configureCodex(`${gatewayBase}/v1/`, model.name);
+      env.OPENAI_API_KEY = agentKey;
+      extraArgs.unshift("--profile", CODEX_PROFILE_NAME, "-m", model.name);
+      break;
+    }
+    case "opencode": {
+      env.OPENCODE_CONFIG_CONTENT = buildOpenCodeConfig(`${gatewayBase}/v1`, agentKey, model.name);
+      writeOpenCodeState(model.name);
+      break;
+    }
+    case "openclaw": {
+      configureOpenClaw(`${gatewayBase}/v1`, agentKey, model.name);
+      if (extraArgs.length === 0) extraArgs.unshift("tui");
+      break;
+    }
+    case "copilot": {
+      env.COPILOT_PROVIDER_BASE_URL = `${gatewayBase}/v1`;
+      env.COPILOT_PROVIDER_API_KEY = agentKey;
+      env.COPILOT_PROVIDER_WIRE_API = "responses";
+      env.COPILOT_MODEL = model.name;
+      extraArgs.unshift("--model", model.name);
+      break;
+    }
+    case "pi": {
+      await configurePiProvider(`${gatewayBase}/v1`, agentKey, model.name);
+      extraArgs.unshift("--provider", PI_PROVIDER_NAME, "--model", model.name);
+      break;
+    }
+    case "hermes": {
+      await configureHermesProvider(`${gatewayBase}/v1`, agentKey, model.name);
+      extraArgs.unshift("--model", model.name);
+      break;
+    }
+    default:
+      fail(`未知工具「${tool}」。可用：${Object.keys(TOOL_SPECS).join(" / ")}`);
   }
 
   console.log(`\n$ ${tool} ${extraArgs.join(" ")}`.trimEnd());
@@ -168,6 +256,217 @@ function writeToolConfig(tool: string, model: string, baseUrl: string): void {
   } catch {
     // 写配置文件失败不阻塞启动
   }
+}
+
+function readJSONFile<T>(path: string): T | null {
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as T;
+  } catch {
+    return null;
+  }
+}
+
+function writeJSONFile(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(value, null, 2));
+}
+
+/** pi 的 managed provider 名（写在 ~/.pi/agent/models.json 里，不碰用户自建 provider）。 */
+const PI_CONFIG_DIR = join(homedir(), ".pi", "agent");
+const PI_MODELS_FILE = join(PI_CONFIG_DIR, "models.json");
+const PI_SETTINGS_FILE = join(PI_CONFIG_DIR, "settings.json");
+const PI_PROVIDER_NAME = "omni";
+
+/**
+ * 把端点和模型注册进 pi 的 provider 配置（照搬 Ollama launch pi 的做法）：
+ * - models.json：providers.omni 写 baseUrl/api/models；launch 管理的模型带 `_launch` 标记，
+ *   用户手写的模型（无标记）原样保留；
+ * - settings.json：defaultProvider/defaultModel 指向 omni 与本次模型，之后裸 `pi` 也能直接用。
+ */
+async function configurePiProvider(baseURL: string, apiKey: string, model: string): Promise<void> {
+  const config = readJSONFile<Record<string, any>>(PI_MODELS_FILE) ?? {};
+  const providers = (config.providers as Record<string, any> | undefined) ?? {};
+  const provider = (providers[PI_PROVIDER_NAME] as Record<string, any> | undefined) ?? {};
+
+  provider.baseUrl = baseURL;
+  provider.api = provider.api ?? "openai-completions";
+  provider.apiKey = apiKey;
+
+  const existing = Array.isArray(provider.models) ? (provider.models as any[]) : [];
+  // 保留用户自建的模型（无 _launch 标记），替换/新增 launch 管理的这条。
+  const userModels = existing.filter((m) => m?._launch !== true);
+  const base = userModels.filter((m) => m?.id !== model);
+  base.push({ id: model, _launch: true, input: ["text"], reasoning: false });
+  provider.models = base;
+
+  providers[PI_PROVIDER_NAME] = provider;
+  config.providers = providers;
+  writeJSONFile(PI_MODELS_FILE, config);
+
+  const settings = readJSONFile<Record<string, any>>(PI_SETTINGS_FILE) ?? {};
+  settings.defaultProvider = PI_PROVIDER_NAME;
+  settings.defaultModel = model;
+  writeJSONFile(PI_SETTINGS_FILE, settings);
+}
+
+/** hermes 的 managed provider 键（写在 ~/.hermes/config.yaml 里）。 */
+const HERMES_CONFIG_FILE = join(homedir(), ".hermes", "config.yaml");
+const HERMES_PROVIDER_KEY = "omni-launch";
+
+/**
+ * 把端点与模型写进 hermes 的 config.yaml（照搬 Ollama launch hermes 的做法）：
+ * model.provider/default/base_url/api_key 指向 managed provider，providers 里登记端点，
+ * 之后 `hermes` 会按这个默认模型走自定义端点。
+ */
+async function configureHermesProvider(
+  baseURL: string,
+  apiKey: string,
+  model: string,
+): Promise<void> {
+  let cfg: Record<string, any> = {};
+  try {
+    const parsed = parseYaml(readFileSync(HERMES_CONFIG_FILE, "utf8"));
+    if (parsed && typeof parsed === "object") cfg = parsed as Record<string, any>;
+  } catch {
+    // 配置不存在或不可解析时从空开始
+  }
+
+  const modelSection = (cfg.model as Record<string, any> | undefined) ?? {};
+  modelSection.provider = HERMES_PROVIDER_KEY;
+  modelSection.default = model;
+  modelSection.base_url = baseURL;
+  modelSection.api_key = apiKey;
+  cfg.model = modelSection;
+
+  const providers = (cfg.providers as Record<string, any> | undefined) ?? {};
+  providers[HERMES_PROVIDER_KEY] = {
+    name: "OmniStudio",
+    api: baseURL,
+    default_model: model,
+    models: [model],
+  };
+  cfg.providers = providers;
+
+  // 清掉 managed 的自定义 provider 条目，避免与 providers 重复；用户自建的其他条目保留。
+  const customProviders = (cfg.custom_providers as Record<string, any> | undefined) ?? {};
+  delete customProviders[HERMES_PROVIDER_KEY];
+  if (Object.keys(customProviders).length === 0) delete cfg.custom_providers;
+  else cfg.custom_providers = customProviders;
+
+  mkdirSync(dirname(HERMES_CONFIG_FILE), { recursive: true });
+  writeFileSync(HERMES_CONFIG_FILE, stringifyYaml(cfg));
+}
+
+/** codex：写 model.json 模型目录 + omni-launch.config.toml profile（照搬 Ollama launch codex）。 */
+const CODEX_DIR = join(homedir(), ".codex");
+const CODEX_PROFILE_NAME = "omni-launch";
+
+function configureCodex(baseURL: string, model: string): void {
+  mkdirSync(CODEX_DIR, { recursive: true });
+
+  const catalogPath = join(CODEX_DIR, "model.json");
+  const catalog = {
+    models: [
+      {
+        slug: model,
+        display_name: model,
+        context_window: 128_000,
+        shell_type: "default",
+        visibility: "list",
+        supported_in_api: true,
+        priority: 0,
+        truncation_policy: { mode: "tokens", limit: 10000 },
+        input_modalities: ["text"],
+        base_instructions: "",
+        support_verbosity: true,
+        default_verbosity: "low",
+        supports_parallel_tool_calls: false,
+        supported_reasoning_levels: [],
+        experimental_supported_tools: [],
+      },
+    ],
+  };
+  writeFileSync(catalogPath, JSON.stringify(catalog, null, 2));
+
+  const profilePath = join(CODEX_DIR, `${CODEX_PROFILE_NAME}.config.toml`);
+  const text = [
+    `model = ${JSON.stringify(model)}`,
+    `model_provider = ${JSON.stringify(CODEX_PROFILE_NAME)}`,
+    `model_catalog_json = ${JSON.stringify(catalogPath)}`,
+    "",
+    `[model_providers.${CODEX_PROFILE_NAME}]`,
+    `name = ${JSON.stringify("OmniStudio")}`,
+    `base_url = ${JSON.stringify(baseURL)}`,
+    `wire_api = "responses"`,
+    "",
+  ].join("\n");
+  writeFileSync(profilePath, text);
+}
+
+/** opencode：内联 provider 配置走 OPENCODE_CONFIG_CONTENT，模型注册进状态文件（照搬 Ollama）。 */
+function buildOpenCodeConfig(baseURL: string, apiKey: string, model: string): string {
+  const options: Record<string, string> = { baseURL };
+  if (apiKey && apiKey !== "EMPTY") options.apiKey = apiKey;
+  const config = {
+    $schema: "https://opencode.ai/config.json",
+    provider: {
+      omni: {
+        npm: "@ai-sdk/openai-compatible",
+        name: "OmniStudio",
+        options,
+        models: { [model]: { name: model } },
+      },
+    },
+    model: `omni/${model}`,
+  };
+  return JSON.stringify(config);
+}
+
+function writeOpenCodeState(model: string): void {
+  const statePath = join(homedir(), ".local", "state", "opencode", "model.json");
+  const state = readJSONFile<Record<string, any>>(statePath) ?? { recent: [], favorite: [], variant: {} };
+  const recent = Array.isArray(state.recent) ? (state.recent as any[]) : [];
+  const deduped = recent.filter((e) => !(e?.providerID === "omni" && e?.modelID === model));
+  state.recent = [{ providerID: "omni", modelID: model }, ...deduped].slice(0, 10);
+  writeJSONFile(statePath, state);
+}
+
+/** openclaw：写 models.providers.omni + agents.defaults.model.primary（照搬 Ollama launch openclaw）。 */
+const OPENCLAW_CONFIG_FILE = join(homedir(), ".openclaw", "openclaw.json");
+const OPENCLAW_PROVIDER = "omni";
+
+function configureOpenClaw(baseURL: string, apiKey: string, model: string): void {
+  const config = readJSONFile<Record<string, any>>(OPENCLAW_CONFIG_FILE) ?? {};
+  const modelsSection = (config.models as Record<string, any> | undefined) ?? {};
+  const providers = (modelsSection.providers as Record<string, any> | undefined) ?? {};
+  const provider = (providers[OPENCLAW_PROVIDER] as Record<string, any> | undefined) ?? {};
+
+  provider.baseUrl = baseURL;
+  provider.apiKey = apiKey;
+  // openclaw 的 provider.api 是枚举：只认 openai-completions / openai-responses 等，
+  // 写裸 "openai" 会直接拒绝启动（Config invalid）。
+  provider.api = "openai-completions";
+  provider.models = [
+    {
+      id: model,
+      name: model,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
+  ];
+  providers[OPENCLAW_PROVIDER] = provider;
+  modelsSection.providers = providers;
+  config.models = modelsSection;
+
+  const agents = (config.agents as Record<string, any> | undefined) ?? {};
+  const defaults = (agents.defaults as Record<string, any> | undefined) ?? {};
+  const modelConfig = (defaults.model as Record<string, any> | undefined) ?? {};
+  modelConfig.primary = `${OPENCLAW_PROVIDER}/${model}`;
+  defaults.model = modelConfig;
+  agents.defaults = defaults;
+  config.agents = agents;
+
+  writeJSONFile(OPENCLAW_CONFIG_FILE, config);
 }
 
 async function resolveModel(

@@ -102,17 +102,18 @@ if (
       console.error("Failed to start inference server:", result.error);
     }
   });
+}
 
-  // 本地模式下默认启动 API 网关（OpenAI 兼容 + /docs 接口文档）。
-  if (Gateway.isGatewayEnabled()) {
-    Gateway.startGateway().then((result) => {
-      if (result.ok) {
-        console.log("API gateway started successfully");
-      } else {
-        console.error("Failed to start API gateway:", result.error);
-      }
-    });
-  }
+// API 网关默认随应用启动（本地/云端都起）：统一对外提供 OpenAI / Anthropic / Responses
+// 协议，按模型 ID 把请求路由到本地推理服务器或云端 API，供集成 CLI 与客户端使用。
+if (Gateway.isGatewayEnabled()) {
+  Gateway.startGateway().then((result) => {
+    if (result.ok) {
+      console.log("API gateway started successfully");
+    } else {
+      console.error("Failed to start API gateway:", result.error);
+    }
+  });
 }
 
 // Handle window close
