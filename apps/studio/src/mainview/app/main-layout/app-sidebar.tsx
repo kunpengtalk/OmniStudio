@@ -14,7 +14,6 @@ import {
   PinIcon,
   PinOffIcon,
   SparklesIcon,
-  Maximize2Icon,
   LayersIcon,
   LanguagesIcon,
 } from "lucide-react";
@@ -603,7 +602,7 @@ function ImageRecordList() {
         {(
           [
             { key: "generate", icon: <SparklesIcon className="size-4" />, labelKey: "image.tab.generate", soon: false },
-            { key: "upscale", icon: <Maximize2Icon className="size-4" />, labelKey: "image.tab.upscale", soon: true },
+            { key: "edit", icon: <Wand2Icon className="size-4" />, labelKey: "image.tab.edit", soon: false },
             { key: "batch", icon: <LayersIcon className="size-4" />, labelKey: "image.tab.batch", soon: true },
           ] as const
         ).map((item) => (

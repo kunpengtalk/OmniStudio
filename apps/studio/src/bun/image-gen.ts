@@ -69,6 +69,9 @@ export type GenerateImageParams = {
   model?: string;
   /** MLX 后端：加载时量化位数（3/4/5/6/8），0 表示不量化。 */
   quantize?: number;
+  /** AI 修图：参考图在 images 目录下的 ref（如 edit/in/xxx.png）。仅 OpenAI 兼容云端后端支持。
+   *  提供时走 /v1/images/edits 以图改图；否则走 /v1/images/generations 纯文生图。 */
+  referenceImageRef?: string;
   /** 前端当前页面的实时配置。若提供则优先使用（避免读取到未保存的旧配置），并顺带落盘。 */
   config?: Partial<ImageGenConfig>;
 };
@@ -256,6 +259,40 @@ function saveGeneratedImage(data: Uint8Array): string {
 }
 
 // ---------------------------------------------------------------------------
+// AI 修图：参考图暂存与解析
+// ---------------------------------------------------------------------------
+
+const EDIT_IMAGE_EXT_RE = /^\.(png|jpe?g|webp|bmp|tiff?|heic|heif)$/;
+
+/** 把用户选中的参考图拷入 images/edit/in/，返回 {ref, url}（供修图页展示与生成时引用）。 */
+export async function stageEditImage(
+  paths: string[],
+): Promise<{ ref: string; url: string }[]> {
+  const dir = path.join(getImagesBaseDir(), "edit", "in");
+  mkdirSync(dir, { recursive: true });
+  const out: { ref: string; url: string }[] = [];
+  for (const p of paths) {
+    if (!existsSync(p)) continue;
+    const ext = path.extname(p).toLowerCase();
+    if (!EDIT_IMAGE_EXT_RE.test(ext)) continue;
+    const name = `${randomUUID()}${ext}`;
+    const dest = path.join(dir, name);
+    await Bun.write(dest, Bun.file(p));
+    const ref = `edit/in/${name}`;
+    out.push({ ref, url: chatImageUrl(ref) });
+  }
+  return out;
+}
+
+/** 把 ref 解析为 images 目录下的绝对路径（防目录穿越），不存在时返回 null。 */
+function resolveImageRef(ref: string): string | null {
+  const base = getImagesBaseDir();
+  const resolved = path.resolve(base, ref);
+  if (!resolved.startsWith(base + path.sep)) return null;
+  return existsSync(resolved) ? resolved : null;
+}
+
+// ---------------------------------------------------------------------------
 // 生成：MLX 本地引擎（mflux，Apple Silicon）
 // ---------------------------------------------------------------------------
 
@@ -300,35 +337,8 @@ async function generateViaMlx(
 
 type ApiImageItem = { b64_json?: string; url?: string };
 
-async function generateViaApi(
-  cfg: ImageGenConfig,
-  params: GenerateImageParams,
-): Promise<string[]> {
-  const base = normalizeApiBase(cfg.apiBase);
-  if (!base) throw new Error("请先在左侧配置 OpenAI 兼容服务的 Base URL");
-  const model = params.model?.trim() || cfg.model;
-  if (!model) throw new Error("请先填写生图模型 ID");
-
-  const body: Record<string, unknown> = {
-    model,
-    prompt: params.prompt,
-    n: Math.max(1, Math.min(params.count ?? 1, 8)),
-    size: `${params.width ?? 1024}x${params.height ?? 1024}`,
-    response_format: "b64_json",
-  };
-  if (params.negativePrompt?.trim()) body.negative_prompt = params.negativePrompt.trim();
-
-  const res = await fetch(`${base}/images/generations`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}),
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(600_000),
-  });
-  if (!res.ok) throw new Error(await errorMessage(res, "生图请求失败"));
-
+/** 解析 OpenAI 兼容图片接口的返回，逐张落盘并返回 ref 列表。 */
+async function saveApiItems(res: Response): Promise<string[]> {
   const json = (await res.json().catch(() => null)) as { data?: ApiImageItem[] } | null;
   const items = json?.data ?? [];
   if (items.length === 0) throw new Error("服务未返回任何图片");
@@ -345,6 +355,69 @@ async function generateViaApi(
   }
   if (refs.length === 0) throw new Error("服务返回的数据无法解析为图片");
   return refs;
+}
+
+async function generateViaApi(
+  cfg: ImageGenConfig,
+  params: GenerateImageParams,
+): Promise<string[]> {
+  const base = normalizeApiBase(cfg.apiBase);
+  if (!base) throw new Error("请先在左侧配置 OpenAI 兼容服务的 Base URL");
+  const model = params.model?.trim() || cfg.model;
+  if (!model) throw new Error("请先填写生图模型 ID");
+
+  const count = Math.max(1, Math.min(params.count ?? 1, 8));
+  const size = `${params.width ?? 1024}x${params.height ?? 1024}`;
+
+  // AI 修图：带参考图时走 /v1/images/edits（multipart 以图改图）；否则走纯文生图。
+  if (params.referenceImageRef) {
+    const abs = resolveImageRef(params.referenceImageRef);
+    if (!abs) throw new Error("参考图文件不存在");
+
+    const form = new FormData();
+    form.append("model", model);
+    form.append("prompt", params.prompt);
+    form.append("n", String(count));
+    form.append("size", size);
+    form.append("response_format", "b64_json");
+    if (params.negativePrompt?.trim()) form.append("negative_prompt", params.negativePrompt.trim());
+    form.append(
+      "image",
+      new File([await Bun.file(abs).arrayBuffer()], path.basename(abs), {
+        type: "image/png",
+      }),
+    );
+
+    const res = await fetch(`${base}/images/edits`, {
+      method: "POST",
+      headers: cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {},
+      body: form,
+      signal: AbortSignal.timeout(600_000),
+    });
+    if (!res.ok) throw new Error(await errorMessage(res, "修图请求失败"));
+    return saveApiItems(res);
+  }
+
+  const body: Record<string, unknown> = {
+    model,
+    prompt: params.prompt,
+    n: count,
+    size,
+    response_format: "b64_json",
+  };
+  if (params.negativePrompt?.trim()) body.negative_prompt = params.negativePrompt.trim();
+
+  const res = await fetch(`${base}/images/generations`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}),
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(600_000),
+  });
+  if (!res.ok) throw new Error(await errorMessage(res, "生图请求失败"));
+  return saveApiItems(res);
 }
 
 // ---------------------------------------------------------------------------
@@ -522,6 +595,10 @@ export async function generateImage(
   }
 
   try {
+    // 参考图以图改图目前只有 OpenAI 兼容云端后端具备。
+    if (params.referenceImageRef && cfg.backend !== "api") {
+      throw new Error("参考图修图仅支持 OpenAI 兼容的云端后端（api）");
+    }
     const refs =
       cfg.backend === "mlx"
         ? await generateViaMlx(cfg, params)

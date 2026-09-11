@@ -1,11 +1,11 @@
 import { create } from "zustand";
 
-export type ImageTool = "generate" | "upscale" | "batch";
+export type ImageTool = "generate" | "edit" | "batch";
 /** 生图页内部视图：参数生成页 / 全部历史页。 */
 export type ImageView = "generate" | "history";
 
 interface ImageState {
-  /** 左侧边栏「生图」工具菜单当前选中项（放大/批量暂未开放）。 */
+  /** 左侧侧边栏「生图」工具菜单当前选中项（批处理暂未开放）。 */
   tool: ImageTool;
   setTool: (tool: ImageTool) => void;
   /** 当前视图；切到工具菜单时自动回到生成页。 */

@@ -583,6 +583,10 @@ export type AppRPC = {
         response: { models: string[]; error?: string };
       };
       // AI 生图
+      stageEditImage: {
+        params: { paths: string[] };
+        response: { files: { ref: string; url: string }[] };
+      };
       generateImage: {
         params: {
           prompt: string;
@@ -594,6 +598,8 @@ export type AppRPC = {
           steps?: number;
           model?: string;
           quantize?: number;
+          /** AI 修图：参考图 ref（images 目录内）。 */
+          referenceImageRef?: string;
           config?: Partial<ImageGenConfig>;
         };
         response: { records: ImageRecordRow[]; error?: string };
@@ -1531,6 +1537,11 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       // AI 生图
+      stageEditImage: async ({ paths }) => {
+        const files = await ImageGen.stageEditImage(paths);
+        return { files };
+      },
+
       generateImage: async (params) => {
         return ImageGen.generateImage(params);
       },
