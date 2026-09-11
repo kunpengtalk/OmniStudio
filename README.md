@@ -73,11 +73,13 @@
 
 ### 五大内置应用
 
+全部应用采用统一工作台布局：左侧栏工具入口 + 左侧参数面板（引擎切换 / 配置 / 输入 / 主操作）+ 右侧结果区，各页体验一致。
+
 - **对话** — 流式回复 + 推理过程展示、图片多模态输入、联网检索（Bing / DuckDuckGo / Tavily，结果注入上下文并标注来源）、文本附件；自动标题、按应用隔离会话、用量统计。
 - **语音** — TTS 多来源（audio.cpp 本地引擎、Edge-TTS、OpenAI 兼容 TTS）+ 声音克隆库 + 多引擎 ASR（whisper.cpp / audio.cpp / OpenAI 兼容转写）；实时聆听对话（云端 / 本地），记录库内嵌播放器。
-- **OCR 文档识别** — 双引擎：本地 Tesseract（多语言 LSTM 语言包、词级 / 行级包围盒）与 VLM（Chandra / GLM-OCR / LightOnOCR）；上传 PDF / 图片输出结构化 Markdown（GFM 表格、KaTeX 公式、代码块、图注、按包围盒裁剪的图片区域），带文档队列与检索。
+- **OCR 文档识别** — 三引擎：本地 Tesseract（一键安装、多语言 LSTM 语言包、词级 / 行级包围盒）、PaddleOCR（PP-OCRv6 本地常驻 worker，medium 档约 140MB）与 VLM（Chandra / GLM-OCR / LightOnOCR）；识别记录入库；上传 PDF / 图片输出结构化 Markdown（GFM 表格、KaTeX 公式、代码块、图注、按包围盒裁剪的图片区域），带文档队列与检索。
 - **图片** — 经云端 OpenAI 兼容 API、ComfyUI 或 Apple Silicon 上的本地 MLX（mflux）引擎生图；MLX 权重生成前预下载并实时显示进度。
-- **翻译** — 经当前对话模型在 22 种语言间互译，支持源语言自动检测、语言交换与一键复制。
+- **翻译** — 引擎可切：当前对话模型（本地 / OpenAI 兼容）或 Google 免费接口，22 种语言互译，支持源语言自动检测、语言交换与一键复制。
 
 ### 运维与遥测
 
@@ -133,7 +135,7 @@ omni config get INFERENCE_ENGINE
 | 前端 | React 19, Tailwind, shadcn/ui, Zustand, TanStack Query |
 | AI | Vercel AI SDK (`ai`), `@ai-sdk/openai-compatible` |
 | 推理引擎 | llama.cpp, vLLM, SGLang, OpenAI-compatible |
-| 语音与 OCR | audio.cpp, whisper.cpp, Tesseract, Edge-TTS, VLM |
+| 语音与 OCR | audio.cpp, whisper.cpp, Tesseract, PaddleOCR, Edge-TTS, VLM |
 | 数据库 | Drizzle ORM + Bun SQLite |
 | 文档处理 | Sharp, pdfjs-dist, @napi-rs/canvas, Cheerio, Turndown |
 | 模型市集 | ModelScope OpenAPI, HuggingFace |

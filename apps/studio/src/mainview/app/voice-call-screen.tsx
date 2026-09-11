@@ -212,59 +212,6 @@ function PreflightRow({
   );
 }
 
-/** 通话模式二选一卡片（首次进入时主打展示）。 */
-function ProviderCards({
-  value,
-  onChange,
-}: {
-  value: "local" | "cloud" | "";
-  onChange: (v: "local" | "cloud") => void;
-}) {
-  const t = useT();
-  const options = [
-    {
-      id: "local" as const,
-      icon: CpuIcon,
-      label: t("voicecall.providerLocal"),
-      desc: t("voicecall.providerLocalDesc"),
-    },
-    {
-      id: "cloud" as const,
-      icon: CloudIcon,
-      label: t("voicecall.providerCloud"),
-      desc: t("voicecall.providerCloudDesc"),
-    },
-  ];
-  return (
-    <div className="grid w-full grid-cols-2 gap-3">
-      {options.map((o) => {
-        const Icon = o.icon;
-        const active = value === o.id;
-        return (
-          <button
-            key={o.id}
-            type="button"
-            onClick={() => onChange(o.id)}
-            className={cn(
-              "flex flex-col gap-2 rounded-xl border p-3 text-left transition-colors",
-              active
-                ? "border-primary bg-primary/5 ring-1 ring-primary/40"
-                : "border-border hover:bg-muted/50",
-            )}
-          >
-            <div className="flex items-center gap-2">
-              <Icon className={cn("size-4", active ? "text-primary" : "text-muted-foreground")} />
-              <span className="text-sm font-medium">{o.label}</span>
-              {active && <CheckIcon className="ml-auto size-4 text-primary" />}
-            </div>
-            <span className="text-[11px] leading-5 text-muted-foreground">{o.desc}</span>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 /** 云端模式配置引导：步骤化引导 + 保存并测试连接（未配置时全量展开，已就绪后收成一行）。 */
 function CloudSetupGuide({ configured }: { configured: boolean }) {
   const t = useT();
@@ -437,145 +384,7 @@ function CloudSetupGuide({ configured }: { configured: boolean }) {
   );
 }
 
-type Preflight = {
-  model: { available: boolean; detail: string };
-  asr: { available: boolean; detail: string };
-  tts: { available: boolean; detail: string };
-  provider: { mode: "local" | "cloud"; cloudConfigured: boolean; detail: string };
-};
-
 type ConfigureTarget = "model" | "asr" | "tts";
-
-/** 未通话时的拨号面板：模式选择 + 就绪检测 + 音色 + 大拨号键。 */
-function DialPanel({
-  preflight,
-  starting,
-  error,
-  onStart,
-  onConfigure,
-  provider,
-  onProviderChange,
-}: {
-  preflight?: Preflight;
-  starting: boolean;
-  error: string | null;
-  onStart: () => void;
-  onConfigure: (target: ConfigureTarget) => void;
-  provider: "local" | "cloud" | "";
-  onProviderChange: (v: "local" | "cloud") => void;
-}) {
-  const t = useT();
-  // 云端被选中但还没保存可用的 API Key：禁用拨号键，先引导完成配置。
-  const cloudUnready = provider === "cloud" && preflight?.provider.cloudConfigured !== true;
-  return (
-    <div className="mx-auto flex h-full max-w-md flex-col items-center justify-center gap-5 px-6">
-      <div className="flex size-20 items-center justify-center rounded-full bg-primary/10">
-        <PhoneIcon className="size-9 text-primary" />
-      </div>
-      <div className="text-center">
-        <h2 className="text-lg font-semibold">{t("voicecall.title")}</h2>
-        <p className="mt-1 text-sm leading-6 whitespace-pre-line text-muted-foreground">
-          {t("voicecall.hint")}
-        </p>
-      </div>
-
-      {/* 通话模式：首次进入用醒目二选一卡片；选定后变紧凑切换条。 */}
-      {provider === "" ? (
-        <div className="w-full space-y-2">
-          <p className="text-center text-xs text-muted-foreground">{t("voicecall.providerFirstHint")}</p>
-          <ProviderCards value={provider} onChange={onProviderChange} />
-        </div>
-      ) : (
-        <div className="flex w-full items-center justify-center gap-2">
-          <span className="text-xs text-muted-foreground">{t("voicecall.provider")}：</span>
-          <div className="flex rounded-lg border bg-card p-0.5">
-            {(["local", "cloud"] as const).map((m) => (
-              <button
-                key={m}
-                type="button"
-                onClick={() => onProviderChange(m)}
-                className={cn(
-                  "rounded-md px-3 py-1 text-xs font-medium transition-colors",
-                  provider === m
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-muted",
-                )}
-              >
-                {m === "local" ? t("voicecall.providerLocal") : t("voicecall.providerCloud")}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {provider === "cloud" && <CloudSetupGuide configured={preflight?.provider.cloudConfigured === true} />}
-
-      {preflight && (
-        <div className="w-full space-y-1.5 rounded-xl border bg-card p-3 text-xs">
-          <PreflightRow
-            ok={provider === "cloud" ? preflight.provider.cloudConfigured : true}
-            label={t("voicecall.pfProvider")}
-            detail={preflight.provider.detail}
-          />
-          {/* 云端 Realtime 是端到端语音到语音，不依赖本地聊天模型 / ASR / TTS，只显示云端配置状态。 */}
-          {provider !== "cloud" && (
-            <>
-              <PreflightRow
-                ok={preflight.model.available}
-                label={t("voicecall.pfModel")}
-                detail={preflight.model.detail}
-                onClick={() => onConfigure("model")}
-              />
-              <PreflightRow
-                ok={preflight.asr.available}
-                label={t("voicecall.pfAsr")}
-                detail={preflight.asr.detail}
-                onClick={() => onConfigure("asr")}
-              />
-              <PreflightRow
-                ok={preflight.tts.available}
-                label={t("voicecall.pfTts")}
-                detail={preflight.tts.detail}
-                onClick={() => onConfigure("tts")}
-              />
-            </>
-          )}
-        </div>
-      )}
-      {error && (
-        <p className="flex w-full items-start gap-1.5 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
-          <span className="min-w-0 break-words">{error}</span>
-        </p>
-      )}
-      <div className="flex flex-col items-center gap-2">
-        <Button
-          size="icon"
-          disabled={starting || cloudUnready}
-          onClick={onStart}
-          className="flex size-16 items-center justify-center rounded-full"
-          tooltip={cloudUnready ? t("voicecall.cloudNeedSetup") : t("voicecall.start")}
-        >
-          {starting ? <Loader2Icon className="size-6 animate-spin" /> : <PhoneIcon className="size-6" />}
-        </Button>
-        {cloudUnready ? (
-          <span className="text-xs text-muted-foreground">{t("voicecall.cloudNeedSetup")}</span>
-        ) : (
-          <span className="text-xs text-muted-foreground">{t("voicecall.tapToCall")}</span>
-        )}
-        {provider === "cloud" && cloudUnready && (
-          <button
-            type="button"
-            onClick={() => onProviderChange("local")}
-            className="text-[11px] font-medium text-primary hover:underline"
-          >
-            {t("voicecall.backToLocal")}
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
 
 function CallMessageBubble({
   message,
@@ -711,120 +520,225 @@ export function VoiceCallWindow() {
     setRoute({ path: "index" });
   };
 
+  // 云端被选中但还没保存可用的 API Key：禁用拨号键，先引导完成配置。
+  const preflight = preflightQuery.data;
+  const cloudUnready = provider === "cloud" && preflight?.provider.cloudConfigured !== true;
+
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* 顶栏 */}
-      <header className="electrobun-webkit-app-region-drag shrink-0 border-b px-4 py-2.5">
-        {inCall ? (
-          <div className="flex items-center gap-2.5">
+    <div className="flex h-full min-h-0">
+      {/* 左侧：通话配置面板（与生图页同款布局） */}
+      <aside className="w-[340px] shrink-0 overflow-y-auto border-r p-4">
+        <div className="flex flex-col gap-5">
+          {/* 通话模式切换 */}
+          <div>
+            <Label className="mb-1.5 block text-xs">{t("voicecall.providerTitle")}</Label>
+            <div className="flex overflow-hidden rounded-lg border">
+              {(["local", "cloud"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => providerMutation.mutate(m)}
+                  className={cn(
+                    "flex flex-1 items-center justify-center gap-1.5 px-2 py-1.5 text-xs transition-colors",
+                    provider === m
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
+                >
+                  {m === "local" ? <CpuIcon className="size-3.5" /> : <CloudIcon className="size-3.5" />}
+                  {m === "local" ? t("voicecall.providerLocal") : t("voicecall.providerCloud")}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+              {providerSetting === ""
+                ? t("voicecall.providerFirstHint")
+                : provider === "local"
+                  ? t("voicecall.providerLocalDesc")
+                  : t("voicecall.providerCloudDesc")}
+            </p>
+          </div>
+
+          {/* 云端模式配置引导 */}
+          {provider === "cloud" && (
+            <CloudSetupGuide configured={preflight?.provider.cloudConfigured === true} />
+          )}
+
+          {/* 就绪检测 */}
+          {preflight && (
+            <div className="flex flex-col gap-2 rounded-lg border bg-card p-3 text-xs">
+              <PreflightRow
+                ok={provider === "cloud" ? preflight.provider.cloudConfigured : true}
+                label={t("voicecall.pfProvider")}
+                detail={preflight.provider.detail}
+              />
+              {/* 云端 Realtime 是端到端语音到语音，不依赖本地聊天模型 / ASR / TTS，只显示云端配置状态。 */}
+              {provider !== "cloud" && (
+                <>
+                  <PreflightRow
+                    ok={preflight.model.available}
+                    label={t("voicecall.pfModel")}
+                    detail={preflight.model.detail}
+                    onClick={() => handleConfigure("model")}
+                  />
+                  <PreflightRow
+                    ok={preflight.asr.available}
+                    label={t("voicecall.pfAsr")}
+                    detail={preflight.asr.detail}
+                    onClick={() => handleConfigure("asr")}
+                  />
+                  <PreflightRow
+                    ok={preflight.tts.available}
+                    label={t("voicecall.pfTts")}
+                    detail={preflight.tts.detail}
+                    onClick={() => handleConfigure("tts")}
+                  />
+                </>
+              )}
+            </div>
+          )}
+
+          {phase === "error" && error && (
+            <p className="flex items-start gap-1.5 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+              <span className="min-w-0 break-words">{error}</span>
+            </p>
+          )}
+
+          {/* 开始通话 */}
+          <Button
+            size="lg"
+            className="w-full"
+            disabled={phase === "starting" || cloudUnready}
+            onClick={() => void start(activeConversationId, provider)}
+          >
+            {phase === "starting" ? (
+              <Loader2Icon data-icon="inline-start" className="animate-spin" />
+            ) : (
+              <PhoneIcon data-icon="inline-start" />
+            )}
+            {t("voicecall.start")}
+          </Button>
+          {cloudUnready && (
+            <p className="text-center text-[10px] text-amber-600/80 dark:text-amber-400/80">
+              {t("voicecall.cloudNeedSetup")}
+            </p>
+          )}
+        </div>
+      </aside>
+
+      {/* 右侧：通话区 */}
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+        {/* 顶栏：通话状态 */}
+        {inCall && (
+          <header className="electrobun-webkit-app-region-drag flex shrink-0 items-center gap-2.5 border-b px-4 py-2.5">
             <CallStatusChip phase={phase} elapsed={elapsed} />
             <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
               {callProvider === "cloud" ? t("voicecall.providerCloud") : t("voicecall.providerLocal")}
             </span>
-          </div>
-        ) : (
-          <span className="text-sm font-medium">{t("voicecall.title")}</span>
+          </header>
         )}
-      </header>
 
-      {/* 消息区 / 拨号面板 */}
-      <main className="min-h-0 flex-1 overflow-y-auto">
-        {/* 云端拨号中：先亮起语音球等待接通（GPT-4o 风格） */}
-        {phase === "starting" && callProvider === "cloud" ? (
-          <RealtimeScene phase={phase} liveText={liveText} micLevel={micLevel} />
-        ) : showDial ? (
-          <DialPanel
-            preflight={preflightQuery.data}
-            starting={phase === "starting"}
-            error={phase === "error" ? error : null}
-            onStart={() => void start(activeConversationId, provider)}
-            onConfigure={handleConfigure}
-            provider={providerSetting}
-            onProviderChange={(v) => providerMutation.mutate(v)}
-          />
-        ) : inCall && callProvider === "cloud" ? (
-          <RealtimeScene phase={phase} liveText={liveText} micLevel={micLevel} />
-        ) : convQuery.isLoading ? (
-          <div className="flex h-full items-center justify-center">
-            <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
-          </div>
-        ) : (
-          <div
-            ref={scrollRef}
-            className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-6 py-6"
-          >
-            {activeMessages.map((m) => {
-              const isLastStreaming = streaming && m.id === lastMessageId;
-              return (
-                <CallMessageBubble
-                  key={m.id}
-                  message={m}
-                  isStreamingMessage={isLastStreaming}
-                  masked={isLastStreaming && phase === "thinking"}
-                />
-              );
-            })}
-            {inCall && activeMessages.length === 0 && (
-              <div className="flex flex-col items-center gap-2 py-16 text-sm text-muted-foreground">
-                <SparklesIcon className="size-5" />
-                <span>{t("voicecall.talkToStart")}</span>
-                <span className="text-xs">{t("voicecall.interruptHint")}</span>
+        {/* 通话内容 / 空状态 */}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {/* 云端拨号中：先亮起语音球等待接通（GPT-4o 风格） */}
+          {phase === "starting" && callProvider === "cloud" ? (
+            <RealtimeScene phase={phase} liveText={liveText} micLevel={micLevel} />
+          ) : showDial ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+              <div className="flex size-20 items-center justify-center rounded-2xl bg-primary/15">
+                <PhoneIcon className="size-9 text-primary" />
               </div>
-            )}
-          </div>
-        )}
-      </main>
-
-      {/* 实时字幕：正在说的话，随 ASR 增量更新（云端模式由 RealtimeScene 展示） */}
-      {inCall && callProvider !== "cloud" && liveActive && (
-        <div className="shrink-0 border-t bg-muted/30 px-6 py-2.5">
-          <div className="mx-auto flex max-w-3xl items-start gap-2 text-sm">
-            <span className="mt-0.5 shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] text-primary">
-              {t("voicecall.live")}
-            </span>
-            <span className="min-w-0 flex-1 text-muted-foreground">
-              {liveText || "…"}
-              <span className="animate-pulse">▍</span>
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* 底部控制条 */}
-      <footer className="shrink-0 border-t bg-gradient-to-t from-muted/40 to-transparent p-4">
-        <div className="mx-auto flex max-w-3xl items-center justify-center gap-4">
-          {inCall ? (
-            <>
-              <div className="flex w-40 items-center justify-end gap-3">
-                <span className="text-xs text-muted-foreground">{t(`voicecall.status.${phase}`)}</span>
-                <MicLevelBar level={micLevel} />
-              </div>
-              <Button
-                size="icon"
-                variant="destructive"
-                onClick={() => void hangup()}
-                className="flex size-14 items-center justify-center rounded-full"
-                tooltip={t("voicecall.hangup")}
-              >
-                <PhoneOffIcon className="size-5" />
-              </Button>
-              <div className="w-40" />
-            </>
+              <p className="text-lg font-medium">{t("voicecall.title")}</p>
+              <p className="max-w-xs text-sm whitespace-pre-line text-muted-foreground">
+                {t("voicecall.hint")}
+              </p>
+              <p className="text-xs text-muted-foreground">{t("voicecall.tapToCall")}</p>
+            </div>
+          ) : inCall && callProvider === "cloud" ? (
+            <RealtimeScene phase={phase} liveText={liveText} micLevel={micLevel} />
+          ) : convQuery.isLoading ? (
+            <div className="flex h-full items-center justify-center">
+              <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
+            </div>
           ) : (
-            activeConversationId != null &&
-            activeMessages.length > 0 && (
-              <Button
-                size="lg"
-                className="gap-2 rounded-full px-6"
-                onClick={() => void start(activeConversationId, provider)}
-              >
-                <PhoneIcon className="size-4" />
-                {t("voicecall.resume")}
-              </Button>
-            )
+            <div
+              ref={scrollRef}
+              className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-6 py-6"
+            >
+              {activeMessages.map((m) => {
+                const isLastStreaming = streaming && m.id === lastMessageId;
+                return (
+                  <CallMessageBubble
+                    key={m.id}
+                    message={m}
+                    isStreamingMessage={isLastStreaming}
+                    masked={isLastStreaming && phase === "thinking"}
+                  />
+                );
+              })}
+              {inCall && activeMessages.length === 0 && (
+                <div className="flex flex-col items-center gap-2 py-16 text-sm text-muted-foreground">
+                  <SparklesIcon className="size-5" />
+                  <span>{t("voicecall.talkToStart")}</span>
+                  <span className="text-xs">{t("voicecall.interruptHint")}</span>
+                </div>
+              )}
+            </div>
           )}
         </div>
-      </footer>
+
+        {/* 实时字幕：正在说的话，随 ASR 增量更新（云端模式由 RealtimeScene 展示） */}
+        {inCall && callProvider !== "cloud" && liveActive && (
+          <div className="shrink-0 border-t bg-muted/30 px-6 py-2.5">
+            <div className="mx-auto flex max-w-3xl items-start gap-2 text-sm">
+              <span className="mt-0.5 shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] text-primary">
+                {t("voicecall.live")}
+              </span>
+              <span className="min-w-0 flex-1 text-muted-foreground">
+                {liveText || "…"}
+                <span className="animate-pulse">▍</span>
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* 底部控制条：挂断 / 继续通话 */}
+        <footer className="shrink-0 border-t bg-gradient-to-t from-muted/40 to-transparent p-4">
+          <div className="mx-auto flex max-w-3xl items-center justify-center gap-4">
+            {inCall ? (
+              <>
+                <div className="flex w-40 items-center justify-end gap-3">
+                  <span className="text-xs text-muted-foreground">{t(`voicecall.status.${phase}`)}</span>
+                  <MicLevelBar level={micLevel} />
+                </div>
+                <Button
+                  size="icon"
+                  variant="destructive"
+                  onClick={() => void hangup()}
+                  className="flex size-14 items-center justify-center rounded-full"
+                  tooltip={t("voicecall.hangup")}
+                >
+                  <PhoneOffIcon className="size-5" />
+                </Button>
+                <div className="w-40" />
+              </>
+            ) : (
+              activeConversationId != null &&
+              activeMessages.length > 0 && (
+                <Button
+                  size="lg"
+                  className="gap-2 rounded-full px-6"
+                  onClick={() => void start(activeConversationId, provider)}
+                >
+                  <PhoneIcon className="size-4" />
+                  {t("voicecall.resume")}
+                </Button>
+              )
+            )}
+          </div>
+        </footer>
+      </main>
     </div>
   );
 }

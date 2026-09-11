@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   MicIcon,
+  PhoneIcon,
   ImageIcon,
   ScanTextIcon,
   SettingsIcon,
@@ -21,6 +22,8 @@ import {
   ImageIcon as ImagePromptIcon,
   BotIcon,
   FilmIcon,
+  FileTextIcon,
+  FileIcon,
   LayoutListIcon,
 } from "lucide-react";
 
@@ -51,6 +54,7 @@ import { useAppStore, type AppId } from "@stores/app";
 import { useChatStore } from "@stores/chat";
 import { useVoiceStore, type VoiceTab } from "@stores/voice";
 import { useImageStore } from "@stores/image";
+import { useOcrStore } from "@stores/ocr";
 import { useT } from "@stores/ui-lang";
 import { useTranslateStore } from "@stores/translate";
 import { usePromptStore } from "@stores/prompt";
@@ -181,6 +185,8 @@ function OcrRecordList() {
 
   return (
     <SidebarGroup className="min-h-0 flex-1 gap-1">
+      {/* OCR 工具菜单：识别提取 / 文档处理（与生图页侧栏入口同款） */}
+      <OcrToolSwitcher />
       <SidebarGroupLabel>
         <span className="flex items-center gap-1.5">
           <ScanTextIcon className="size-3.5" />
@@ -231,8 +237,24 @@ function OcrRecordList() {
                       onClick={() => setRoute({ path: "document", id: doc.id })}
                       tooltip={doc.name}
                     >
+                      {/* 左侧：图片缩略图 / PDF 图标 / 通用文件图标。 */}
+                      <span className="flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-md border bg-muted">
+                        {doc.kind === "pdf" ? (
+                          <FileTextIcon className="size-4 text-red-500" />
+                        ) : doc.thumbUrl ? (
+                          <img
+                            src={doc.thumbUrl}
+                            alt=""
+                            loading="lazy"
+                            className="size-full object-cover"
+                          />
+                        ) : (
+                          <FileIcon className="size-3.5 text-muted-foreground" />
+                        )}
+                      </span>
+                      {/* 右侧：识别内容首行预览（识别记录文件名是 UUID，直接展示太丑），无内容时退回文件名。 */}
                       <span className="min-w-0 flex-1 truncate text-xs font-medium">
-                        {doc.name}
+                        {doc.preview || doc.name}
                       </span>
                       <DocStatusDot
                         status={doc.status as DocumentStatus}
@@ -262,6 +284,81 @@ const VOICE_TAB_ICONS: Record<VoiceTab, React.ReactNode> = {
   asr: <MicIcon className="size-4" />,
   clone: <Wand2Icon className="size-4" />,
 };
+
+/** 单工具页的侧栏顶部入口（与多工具页的入口按钮组同款位置与选中样式）。 */
+function SingleToolEntry({ icon, label }: { icon: React.ReactNode; label: string }) {
+  return (
+    <div className="mx-1 mb-1 flex items-center gap-2 rounded-lg bg-primary/10 px-3 py-2 text-xs font-medium text-primary">
+      {icon}
+      <span className="leading-none">{label}</span>
+    </div>
+  );
+}
+
+/** 侧栏顶部的工具切换按钮组（与生图页 AI生图/AI修图 入口同款样式）。 */
+function OcrToolSwitcher() {
+  const t = useT();
+  const tab = useOcrStore((s) => s.tab);
+  const setTab = useOcrStore((s) => s.setTab);
+  return (
+    <div className="grid grid-cols-2 gap-1 px-1 pb-1">
+      {(
+        [
+          { key: "extract", icon: <ScanTextIcon className="size-4" />, labelKey: "ocr.tab.extract" },
+          { key: "docs", icon: <FileTextIcon className="size-4" />, labelKey: "ocr.tab.docs" },
+        ] as const
+      ).map((item) => (
+        <button
+          key={item.key}
+          type="button"
+          onClick={() => setTab(item.key)}
+          className={cn(
+            "flex flex-col items-center gap-1 rounded-lg px-1 py-2 text-[11px] transition-colors",
+            tab === item.key
+              ? "bg-primary/10 text-primary"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground",
+          )}
+        >
+          {item.icon}
+          <span className="leading-none">{t(item.labelKey)}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** 侧栏顶部的语音工具切换按钮组（语音合成 / 语音识别 / 声音克隆）。 */
+function VoiceToolSwitcher() {
+  const t = useT();
+  const tab = useVoiceStore((s) => s.tab);
+  const setTab = useVoiceStore((s) => s.setTab);
+  return (
+    <div className="grid grid-cols-3 gap-1 px-1 pb-1">
+      {(
+        [
+          { key: "tts", icon: <AudioLinesIcon className="size-4" />, labelKey: "voice.tab.tts" },
+          { key: "asr", icon: <MicIcon className="size-4" />, labelKey: "voice.tab.asr" },
+          { key: "clone", icon: <Wand2Icon className="size-4" />, labelKey: "voice.tab.clone" },
+        ] as const
+      ).map((item) => (
+        <button
+          key={item.key}
+          type="button"
+          onClick={() => setTab(item.key)}
+          className={cn(
+            "flex flex-col items-center gap-1 rounded-lg px-1 py-2 text-[11px] transition-colors",
+            tab === item.key
+              ? "bg-primary/10 text-primary"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground",
+          )}
+        >
+          {item.icon}
+          <span className="leading-none">{t(item.labelKey)}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function VoiceAudio({ url }: { url: string }) {
   const t = useT();
@@ -296,6 +393,8 @@ function VoiceRecordList() {
 
   return (
     <SidebarGroup className="min-h-0 flex-1">
+      {/* 语音工具菜单：语音合成 / 语音识别 / 声音克隆（与生图页侧栏入口同款） */}
+      <VoiceToolSwitcher />
       <SidebarGroupLabel>
         <span className="flex items-center gap-1.5">
           {VOICE_TAB_ICONS[tab]}
@@ -437,6 +536,10 @@ function ConversationRecordList({ app }: { app: AppId }) {
 
   return (
     <SidebarGroup className="min-h-0 flex-1">
+      {/* 单工具页的入口位：与其他工具页侧栏顶部入口对齐 */}
+      {app === "voicecall" && (
+        <SingleToolEntry icon={<PhoneIcon className="size-4" />} label={t("apps.voicecall")} />
+      )}
       {/* 顶部一行：标题 + 浅色数量标识 + 新建对话按钮（最右侧，后面无数字） */}
       <SidebarGroupLabel>
         <span className="flex items-center gap-1.5">
@@ -740,6 +843,8 @@ function TranslateRecordList() {
 
   return (
     <SidebarGroup className="min-h-0 flex-1">
+      {/* 单工具页的入口位：与其他工具页侧栏顶部入口对齐 */}
+      <SingleToolEntry icon={<LanguagesIcon className="size-4" />} label={t("apps.translate")} />
       <SidebarGroupLabel>
         <span className="flex items-center gap-1.5">
           <LanguagesIcon className="size-3.5" />

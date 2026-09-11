@@ -216,7 +216,7 @@ export function CopyButton({ text }: { text: string }) {
   );
 }
 
-/** 左参数面板 + 右结果区的统一外壳。 */
+/** 左参数面板 + 右结果区的统一外壳（与生图页同款规格）。 */
 export function Workbench({
   panel,
   footer,
@@ -230,11 +230,11 @@ export function Workbench({
 }) {
   return (
     <div className="flex min-h-0 flex-1">
-      <aside className="flex w-[352px] shrink-0 flex-col border-r bg-muted/30">
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <div className="flex flex-col gap-5 p-4">{panel}</div>
+      <aside className="w-[340px] shrink-0 overflow-y-auto border-r p-4">
+        <div className="flex flex-col gap-5">
+          {panel}
+          {footer}
         </div>
-        <div className="shrink-0 border-t bg-background p-3">{footer}</div>
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">
