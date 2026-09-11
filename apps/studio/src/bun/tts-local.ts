@@ -76,6 +76,21 @@ export type TtsLocalModel = {
  */
 export const AUDIOCPP_TTS_CATALOG: TtsLocalModel[] = [
   {
+    id: "index-tts2-5",
+    name: "IndexTTS2.5",
+    family: "index_tts2",
+    task: "clon",
+    repoPath: "IndexTTS2.5-GGUF/index-tts2_5-q8_0.gguf",
+    approxSizeGb: 3.26,
+    languages: ["中文", "English", "日本語", "Español", "العربية"],
+    description: "IndexTTS2.5 中/英/日/西/阿 多语言零样本克隆，支持情绪控制与语速调节（duration_factor）。",
+    voiceKind: "clone",
+    requiresVoiceRef: true,
+
+    languageSupported: true,
+    languageCodes: ["zh", "en", "ja", "es", "ar"],
+  },
+  {
     id: "qwen3-tts-1.7b-customvoice",
     name: "Qwen3-TTS 1.7B · CustomVoice",
     family: "qwen3_tts",
