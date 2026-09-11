@@ -1,9 +1,10 @@
 import { drizzle } from "drizzle-orm/bun-sqlite";
+import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { Database } from "bun:sqlite";
 import { join } from "path";
 import { mkdirSync, existsSync, renameSync } from "fs";
-import { getUserDataDir } from "../paths";
 import * as schema from "./schema";
+import { getDataDir } from "../paths";
 
 const isDev = import.meta.env.NODE_ENV === "development";
 
@@ -15,7 +16,7 @@ if (isDev && !process.env.OMNI_DB_PATH && !process.env.OMNI_DATA_DIR) {
   dbPath = "sqlite.db";
 } else {
   // Ensure data directory exists
-  const dataDir = process.env.OMNI_DATA_DIR ?? getUserDataDir();
+  const dataDir = getDataDir();
   if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
   dbPath = process.env.OMNI_DB_PATH ?? join(dataDir, "omni-studio.db");
   for (const legacyName of ["vllm-studio.db", "kunpengtalk-studio.db"]) {
@@ -34,3 +35,8 @@ if (isDev && !process.env.OMNI_DB_PATH && !process.env.OMNI_DATA_DIR) {
 
 const sqlite = new Database(dbPath, { create: true });
 export const db = drizzle({ client: sqlite, schema: schema });
+
+// 连接建立即迁移：gateway/rpc 等模块在 import 阶段就会读表，
+// 若等 bun/index.ts 的顶层代码再 migrate，空库首次启动会先崩在 settings 表缺失上。
+// 打包后所有模块合并进 app/bun/index.js，import.meta.dir 即 app/bun，故路径需带 db/ 前缀。
+migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });

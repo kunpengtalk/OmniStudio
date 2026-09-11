@@ -316,3 +316,38 @@
   transform-origin: 50% 100%;
   animation: tts-eq 1.1s ease-in-out infinite;
 }
+
+/* ------------------------------------------------------------------ */
+/* 实时语音 — GPT-4o 风格语音球（随声音律动的蓝色光球）                  */
+/* ------------------------------------------------------------------ */
+@keyframes orb-halo {
+  0%,
+  100% {
+    transform: scale(0.8);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.45);
+    opacity: 0;
+  }
+}
+.orb-halo {
+  animation: orb-halo 2.6s ease-out infinite;
+}
+
+@keyframes orb-speaking {
+  0%,
+  100% {
+    box-shadow:
+      0 0 70px rgba(56, 189, 248, 0.55),
+      0 0 140px rgba(56, 189, 248, 0.22);
+  }
+  50% {
+    box-shadow:
+      0 0 110px rgba(125, 211, 252, 0.85),
+      0 0 200px rgba(56, 189, 248, 0.4);
+  }
+}
+.orb-speaking {
+  animation: orb-speaking 1.4s ease-in-out infinite;
+}

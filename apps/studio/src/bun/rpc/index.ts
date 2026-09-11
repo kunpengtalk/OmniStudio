@@ -1,7 +1,7 @@
 import { BrowserView, BrowserWindow, RPCSchema, Updater, Utils } from "electrobun/bun";
 import { asc, eq, desc, like, sql } from "drizzle-orm";
 import path from "path";
-import { existsSync, rmSync, copyFileSync, mkdirSync } from "fs";
+import { existsSync, rmSync, copyFileSync, mkdirSync, appendFileSync } from "fs";
 
 import { db } from "../db";
 import { documents, pages } from "../db/schema";
@@ -17,6 +17,12 @@ import type { GatewayStatus } from "../gateway";
 import { getSetupEnvironment, type SetupEnvironment } from "../setup-env";
 import * as Chat from "../chat";
 import type { Conversation, ChatMessage, ChatStats } from "../chat";
+import * as Agent from "../agent";
+import type { AgentEventRow, AgentMode } from "../agent";
+import * as VoiceCall from "../voice-call";
+import type { VoiceCallOutgoing, VoiceCallPhase, VoiceCallPreflight } from "../voice-call";
+import * as RealtimeVoice from "../realtime-voice";
+import type { RealtimeProviderConfig } from "../realtime-voice";
 import * as Translate from "../translate";
 import { listChatModels, selectChatModel, type ChatModelOption } from "../chat-model";
 import * as ModelScope from "../modelscope";
@@ -42,6 +48,7 @@ import * as Ocr from "../ocr";
 import type { OcrLangModelInfo, OcrStatus, OcrResult, OcrVlmResult, OcrProviderConfig } from "../ocr";
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
+import * as PromptLib from "../prompt-library";
 import * as MlxGen from "../mlx-gen";
 import type { MlxModelInfo, MlxGenStatus, MlxModelDownloadProgress } from "../mlx-gen";
 import type { EdgeVoice } from "../edge-tts";
@@ -285,6 +292,19 @@ export type AppRPC = {
         params: { id: number };
         response: { ok: boolean };
       };
+      // ---- 提示词库 ----
+      getPromptLibraryStats: {
+        params: undefined;
+        response: { counts: Record<PromptLib.PromptKind, number> };
+      };
+      listPromptCategories: {
+        params: { kind: PromptLib.PromptKind };
+        response: { categories: PromptLib.PromptCategoryRow[] };
+      };
+      listPrompts: {
+        params: PromptLib.PromptListParams;
+        response: { items: PromptLib.PromptRow[]; total: number };
+      };
       listChatModels: {
         params: undefined;
         response: { models: ChatModelOption[] };
@@ -292,6 +312,94 @@ export type AppRPC = {
       selectChatModel: {
         params: { type: "local" | "api"; value: string };
         response: { ok: boolean; error?: string; restarting?: boolean };
+      };
+      // Agent（Pi Agent Harness）
+      sendAgentMessage: {
+        params: {
+          conversationId: number;
+          content: string;
+          mode?: string;
+          workspace?: string;
+          files?: { name: string; content: string }[];
+          imagePaths?: string[];
+        };
+        response: { ok: boolean; error?: string };
+      };
+      stopAgentRun: {
+        params: { conversationId: number };
+        response: { ok: boolean };
+      };
+      regenerateAgentMessage: {
+        params: { conversationId: number; messageId: number };
+        response: { ok: boolean; error?: string };
+      };
+      listAgentEvents: {
+        params: { conversationId: number };
+        response: { events: AgentEventRow[] };
+      };
+      listAgentTools: {
+        params: { mode?: string } | undefined;
+        response: { tools: { name: string; label: string; description: string }[] };
+      };
+      getAgentWorkspace: {
+        params: undefined;
+        response: { workspace: string; isDefault: boolean };
+      };
+      // 实时语音通话（本地 ASR + agent + TTS / 云端 Qwen Realtime）
+      voicecallPreflight: {
+        params: undefined;
+        response: VoiceCallPreflight;
+      };
+      voicecallStart: {
+        params: { conversationId?: number; provider?: "local" | "cloud" };
+        response: { ok: boolean; conversation?: Conversation; error?: string };
+      };
+      voicecallPushAudio: {
+        params: { conversationId: number; wavBase64: string; format?: "wav" | "pcm" };
+        response: { ok: boolean };
+      };
+      voicecallEndUtterance: {
+        params: { conversationId: number };
+        response: { ok: boolean; text?: string; error?: string };
+      };
+      voicecallInterrupt: {
+        params: { conversationId: number };
+        response: { ok: boolean };
+      };
+      voicecallStop: {
+        params: { conversationId: number };
+        response: { ok: boolean };
+      };
+      voicecallGetProviderConfig: {
+        params: undefined;
+        response: { config: RealtimeProviderConfig };
+      };
+      voicecallSaveProviderConfig: {
+        params: {
+          provider?: "local" | "cloud";
+          apiKey?: string;
+          baseUrl?: string;
+          model?: string;
+          voice?: string;
+        };
+        response: { ok: boolean };
+      };
+      voicecallDebug: {
+        params: { line: string };
+        response: { ok: boolean };
+      };
+      voicecallTestRealtime: {
+        params: {
+          apiKey?: string;
+          baseUrl?: string;
+          model?: string;
+          voice?: string;
+        };
+        response: { ok: boolean; error?: string; latencyMs?: number };
+      };
+      openDirectoryDialog: {
+        params: undefined;
+        response: { path: string };
       };
       stageChatImages: {
         params: { conversationId: number; paths: string[] };
@@ -674,6 +782,17 @@ export type AppRPC = {
         error?: string;
       };
       chatStats: ChatStats;
+      agentEvent: AgentEventRow;
+      voicecallPartial: { conversationId: number; text: string };
+      voicecallUtterance: { conversationId: number; messageId: number; text: string };
+      voicecallState: { conversationId: number; phase: VoiceCallPhase };
+      voicecallAudio: {
+        conversationId: number;
+        wavBase64: string;
+        format: "wav" | "pcm";
+      };
+      voicecallAudioStop: { conversationId: number };
+      voicecallError: { conversationId: number; message: string };
       modelDownloadProgress: {
         repo: string;
         fileName: string;
@@ -1058,6 +1177,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       deleteConversation: async ({ id }) => {
+        Agent.deleteConversationEvents(id);
         Chat.deleteConversation(id);
         return { ok: true };
       },
@@ -1102,12 +1222,105 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return Translate.deleteTranslationRecord(id);
       },
 
+      getPromptLibraryStats: async () => {
+        return { counts: PromptLib.countPromptsByKind() };
+      },
+
+      listPromptCategories: async ({ kind }) => {
+        return { categories: PromptLib.listCategories(kind) };
+      },
+
+      listPrompts: async (params) => {
+        return PromptLib.listPrompts(params);
+      },
+
       listChatModels: async () => {
         return listChatModels();
       },
 
       selectChatModel: async ({ type, value }) => {
         return selectChatModel(type, value);
+      },
+
+      // Agent（Pi Agent Harness）
+      sendAgentMessage: async ({ conversationId, content, mode, workspace, files, imagePaths }) => {
+        return Agent.runAgentTurn({
+          conversationId,
+          content,
+          mode: (mode ?? undefined) as AgentMode | undefined,
+          workspace: workspace ?? undefined,
+          files: files ?? undefined,
+          imagePaths: imagePaths ?? undefined,
+        });
+      },
+
+      stopAgentRun: async ({ conversationId }) => {
+        return Agent.stopAgentRun(conversationId);
+      },
+
+      regenerateAgentMessage: async ({ conversationId, messageId }) => {
+        return Agent.regenerateAgentMessage(conversationId, messageId);
+      },
+
+      listAgentEvents: async ({ conversationId }) => {
+        return { events: Agent.listAgentEvents(conversationId) };
+      },
+
+      listAgentTools: async (params) => {
+        const mode = params?.mode as AgentMode | undefined;
+        return { tools: Agent.listAgentTools(mode) };
+      },
+
+      // 实时语音通话
+      voicecallPreflight: async () => {
+        return VoiceCall.voiceCallPreflight();
+      },
+      voicecallStart: async ({ conversationId, provider }) => {
+        return VoiceCall.startVoiceCall({ conversationId, provider });
+      },
+      voicecallPushAudio: async ({ conversationId, wavBase64, format }) => {
+        return VoiceCall.pushVoiceCallAudio({ conversationId, wavBase64, format });
+      },
+      voicecallEndUtterance: async ({ conversationId }) => {
+        return VoiceCall.endVoiceCallUtterance({ conversationId });
+      },
+      voicecallInterrupt: async ({ conversationId }) => {
+        return VoiceCall.interruptVoiceCall(conversationId);
+      },
+      voicecallStop: async ({ conversationId }) => {
+        return VoiceCall.stopVoiceCall(conversationId);
+      },
+      voicecallGetProviderConfig: async () => {
+        return { config: RealtimeVoice.getRealtimeProviderConfig() };
+      },
+      voicecallSaveProviderConfig: async (params) => {
+        RealtimeVoice.saveRealtimeProviderConfig(params);
+        return { ok: true };
+      },
+      voicecallDebug: async ({ line }) => {
+        try {
+          appendFileSync("/tmp/omni-voicecall.log", `[${new Date().toISOString()}] [frontend] ${line}\n`);
+        } catch {
+          // 日志失败忽略
+        }
+        return { ok: true };
+      },
+      voicecallTestRealtime: async (params) => {
+        return VoiceCall.testRealtimeConnection(params ?? {});
+      },
+
+      openDirectoryDialog: async () => {
+        const dirs = await Utils.openFileDialog({
+          canChooseFiles: false,
+          canChooseDirectory: true,
+          allowsMultipleSelection: false,
+        });
+        return { path: (dirs ?? [])[0]?.trim() ?? "" };
+      },
+
+      getAgentWorkspace: async () => {
+        const configured = getSetting("AGENT_WORKSPACE").trim();
+        return { workspace: Agent.getAgentWorkspace(), isDefault: !configured };
       },
 
       stageChatImages: async ({ conversationId, paths }) => {
@@ -1657,6 +1870,79 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
   Chat.onChatStats((payload) => {
     try {
       win.webview.rpc?.send.chatStats(payload);
+    } catch {}
+  });
+  Agent.onAgentEvent((payload) => {
+    try {
+      win.webview.rpc?.send.agentEvent(payload);
+    } catch {}
+  });
+  // Agent 的文本流复用 chat 的 chunk / done / stats 通道，前端无需区分来源。
+  Agent.onAgentChunk((payload) => {
+    try {
+      win.webview.rpc?.send.chatChunk(payload);
+    } catch {}
+  });
+  Agent.onAgentDone((payload) => {
+    try {
+      win.webview.rpc?.send.chatDone(payload);
+    } catch {}
+  });
+  Agent.onAgentStats((payload) => {
+    try {
+      win.webview.rpc?.send.chatStats(payload);
+    } catch {}
+  });
+  // 实时语音通话：把后端会话事件按类型路由到对应的一元消息通道。
+  VoiceCall.onVoiceCallEvent((msg: VoiceCallOutgoing) => {
+    try {
+      switch (msg.type) {
+        case "partial":
+          win.webview.rpc?.send.voicecallPartial({ conversationId: msg.conversationId, text: msg.text });
+          break;
+        case "utterance":
+          win.webview.rpc?.send.voicecallUtterance({
+            conversationId: msg.conversationId,
+            messageId: msg.messageId,
+            text: msg.text,
+          });
+          break;
+        case "state":
+          win.webview.rpc?.send.voicecallState({ conversationId: msg.conversationId, phase: msg.phase });
+          break;
+        case "audio":
+          win.webview.rpc?.send.voicecallAudio({
+            conversationId: msg.conversationId,
+            wavBase64: msg.wavBase64,
+            format: msg.format,
+          });
+          break;
+        case "audioStop":
+          win.webview.rpc?.send.voicecallAudioStop({ conversationId: msg.conversationId });
+          break;
+        case "assistantPartial":
+          // 云端助手流式正文：走 chatChunk，前端聊天 store 自动建气泡追加。
+          win.webview.rpc?.send.chatChunk({
+            conversationId: msg.conversationId,
+            messageId: msg.messageId,
+            delta: msg.text,
+            kind: "content",
+          });
+          break;
+        case "assistantDone":
+          win.webview.rpc?.send.chatDone({
+            conversationId: msg.conversationId,
+            messageId: msg.messageId,
+            content: msg.text,
+          });
+          break;
+        case "error":
+          win.webview.rpc?.send.voicecallError({
+            conversationId: msg.conversationId,
+            message: msg.message,
+          });
+          break;
+      }
     } catch {}
   });
 }

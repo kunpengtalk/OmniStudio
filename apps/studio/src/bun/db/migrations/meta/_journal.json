@@ -71,6 +71,27 @@
       "when": 1789905600000,
       "tag": "0009_add_translation_records",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1789992000000,
+      "tag": "0010_add_agent_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1790078400000,
+      "tag": "0011_update_default_server_port",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1790082000000,
+      "tag": "0012_add_prompt_library",
+      "breakpoints": true
     }
   ]
 }

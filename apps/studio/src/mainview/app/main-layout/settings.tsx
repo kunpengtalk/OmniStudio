@@ -50,6 +50,7 @@ import { useUILang } from "@stores/ui-lang";
 import { useT } from "@stores/ui-lang";
 import { LANGS, type UILang } from "@/shared/i18n";
 import { cn } from "@/mainview/lib/utils";
+import { DEFAULT_INFERENCE_PORT } from "@/shared/server-info";
 import { ServerStatsScreen } from "../server-stats";
 import { ServerLogsScreen } from "./server-logs";
 import { ModelsScreen } from "../models-screen";
@@ -214,7 +215,7 @@ interface SaveMutationLike {
 function inferBaseUrl(form: SettingsFormState): string {
   const isLocal = (form.SERVER_MODE ?? "local") === "local";
   if (isLocal) {
-    return `http://${form.SERVER_HOST || "127.0.0.1"}:${form.SERVER_PORT || "8080"}`;
+    return `http://${form.SERVER_HOST || "127.0.0.1"}:${form.SERVER_PORT || DEFAULT_INFERENCE_PORT}`;
   }
   return (form.VLLM_API_BASE ?? "").replace(/\/+$/, "").replace(/\/v1$/, "");
 }

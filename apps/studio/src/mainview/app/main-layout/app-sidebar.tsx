@@ -16,6 +16,11 @@ import {
   SparklesIcon,
   LayersIcon,
   LanguagesIcon,
+  ClipboardListIcon,
+  ImageIcon as ImagePromptIcon,
+  BotIcon,
+  FilmIcon,
+  LayoutListIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -47,6 +52,8 @@ import { useVoiceStore, type VoiceTab } from "@stores/voice";
 import { useImageStore } from "@stores/image";
 import { useT } from "@stores/ui-lang";
 import { useTranslateStore } from "@stores/translate";
+import { usePromptStore } from "@stores/prompt";
+import type { PromptKind } from "@/bun/prompt-library";
 import type { TranslationRecordRow } from "@/bun/translate";
 import { translationLangShort } from "@/shared/translate";
 import { Button } from "@ui/button";
@@ -432,7 +439,11 @@ function ConversationRecordList({ app }: { app: AppId }) {
       {/* 顶部一行：标题 + 浅色数量标识 + 新建对话按钮（最右侧，后面无数字） */}
       <SidebarGroupLabel>
         <span className="flex items-center gap-1.5">
-          {t("chat.chats")}
+          {app === "voicecall"
+            ? t("voicecall.history")
+            : app === "agent"
+              ? t("agent.sessions")
+              : t("chat.chats")}
           <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">
             {conversations.length}
           </Badge>
@@ -849,6 +860,118 @@ function TranslateRecordList() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 提示词库侧边栏：左侧最窄列（AppRail）之外的「菜单」列，
+// 负责在生图 / 大模型 / 视频三类之间切换，并列出当前类的分类导航。
+// ---------------------------------------------------------------------------
+
+const PROMPT_KIND_TABS: {
+  kind: PromptKind;
+  icon: React.ReactNode;
+  labelKey: string;
+}[] = [
+  { kind: "image", icon: <ImagePromptIcon className="size-4" />, labelKey: "prompt.kind.image" },
+  { kind: "llm", icon: <BotIcon className="size-4" />, labelKey: "prompt.kind.llm" },
+  { kind: "video", icon: <FilmIcon className="size-4" />, labelKey: "prompt.kind.video" },
+];
+
+function PromptSidebar() {
+  const t = useT();
+  const { kind, setKind, category, setCategory } = usePromptStore();
+
+  const { data: stats } = useQuery({
+    queryKey: ["prompt-stats"],
+    queryFn: () => rpcClient.getPromptLibraryStats(),
+  });
+  const { data: catsData, isLoading } = useQuery({
+    queryKey: ["prompt-categories", kind],
+    queryFn: () => rpcClient.listPromptCategories({ kind }),
+  });
+  const categories = catsData?.categories ?? [];
+
+  return (
+    <SidebarGroup className="min-h-0 flex-1">
+      <SidebarGroupLabel>
+        <span className="flex items-center gap-1.5">
+          <ClipboardListIcon className="size-3.5" />
+          {t("prompt.title")}
+        </span>
+      </SidebarGroupLabel>
+
+      {/* 三类切换菜单：生图 / 大模型 / 视频 */}
+      <div className="flex flex-col gap-0.5 px-2 pb-1">
+        {PROMPT_KIND_TABS.map(({ kind: k, icon, labelKey }) => {
+          const active = kind === k;
+          const count = stats?.counts[k] ?? 0;
+          return (
+            <button
+              key={k}
+              type="button"
+              onClick={() => setKind(k)}
+              className={cn(
+                "flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs transition-colors",
+                active
+                  ? "bg-primary/10 font-medium text-primary"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              {icon}
+              <span className="flex-1 text-left">{t(labelKey)}</span>
+              <Badge variant="secondary" className="h-4 px-1.5 text-[9px] tabular-nums">
+                {count || "…"}
+              </Badge>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* 分类导航 */}
+      <SidebarGroupLabel className="mt-1">
+        <span className="flex items-center gap-1.5">
+          <LayoutListIcon className="size-3.5" />
+          {t("prompt.categories")}
+        </span>
+      </SidebarGroupLabel>
+      <ScrollArea className="min-h-0 flex-1">
+        <SidebarMenu className="gap-0.5">
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              isActive={category === "all"}
+              onClick={() => setCategory("all")}
+              tooltip={t("prompt.allCategories")}
+            >
+              <span className="min-w-0 flex-1 truncate text-xs">{t("prompt.allCategories")}</span>
+              <Badge variant="secondary" className="h-4 px-1.5 text-[9px] tabular-nums">
+                {stats?.counts[kind] ?? "…"}
+              </Badge>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          {isLoading ? (
+            <div className="flex justify-center py-4">
+              <Spinner className="size-3.5" />
+            </div>
+          ) : (
+            categories.map((c) => (
+              <SidebarMenuItem key={c.name}>
+                <SidebarMenuButton
+                  isActive={category === c.name}
+                  onClick={() => setCategory(c.name)}
+                  tooltip={c.name}
+                >
+                  <span className="min-w-0 flex-1 truncate text-xs">{c.name}</span>
+                  <Badge variant="secondary" className="h-4 px-1.5 text-[9px] tabular-nums">
+                    {c.count}
+                  </Badge>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            ))
+          )}
+        </SidebarMenu>
+      </ScrollArea>
+    </SidebarGroup>
+  );
+}
+
 export function AppSidebar() {
   const t = useT();
   const { activeApp } = useAppStore();
@@ -875,6 +998,8 @@ export function AppSidebar() {
           <ImageRecordList />
         ) : activeApp === "translate" ? (
           <TranslateRecordList />
+        ) : activeApp === "prompt" ? (
+          <PromptSidebar />
         ) : (
           <ConversationRecordList app={activeApp} />
         )}

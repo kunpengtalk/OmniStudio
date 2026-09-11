@@ -1,10 +1,13 @@
 import type { ReactNode } from "react";
 import {
   MessageCircleDashedIcon,
+  BotIcon,
+  PhoneIcon,
   AudioWaveformIcon,
   ShapesIcon,
   ScanSearchIcon,
   EarthIcon,
+  WandSparklesIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
 
@@ -12,18 +15,22 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@ui/to
 import { useRouter } from "@stores/router";
 import { useAppStore, type AppId } from "@stores/app";
 import { useChatStore } from "@stores/chat";
+import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 
-const APP_IDS: AppId[] = ["chat", "voice", "image", "ocr", "translate"];
+const APP_IDS: AppId[] = ["chat", "agent", "voicecall", "voice", "image", "ocr", "translate", "prompt"];
 
 // 抽象几何风格图标，区别于参考原型（气泡/麦克风/风景画）的具象图标
 const APP_ICONS: Record<AppId, ReactNode> = {
   chat: <MessageCircleDashedIcon className="size-5" />,
+  agent: <BotIcon className="size-5" />,
+  voicecall: <PhoneIcon className="size-5" />,
   voice: <AudioWaveformIcon className="size-5" />,
   image: <ShapesIcon className="size-5" />,
   ocr: <ScanSearchIcon className="size-5" />,
   translate: <EarthIcon className="size-5" />,
+  prompt: <WandSparklesIcon className="size-5" />,
 };
 
 function RailButton({
@@ -78,6 +85,7 @@ export function AppRail() {
     useChatStore.getState().setActiveConversation(null);
     useChatStore.getState().setActiveMessages([]);
     useChatStore.getState().setStreaming(false);
+    useAgentStore.getState().clear();
     setRoute({ path: "index" });
   };
 

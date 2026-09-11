@@ -14,6 +14,9 @@ interface ImageState {
   /** 在侧边栏点击某条历史记录时聚焦它。 */
   focusRecordId: number | null;
   setFocusRecordId: (id: number | null) => void;
+  /** 提示词库「去试试」带过来的草稿，生图页挂载时读入提示词框。 */
+  pendingPrompt: string | null;
+  setPendingPrompt: (prompt: string | null) => void;
 }
 
 export const useImageStore = create<ImageState>((set) => ({
@@ -23,4 +26,6 @@ export const useImageStore = create<ImageState>((set) => ({
   setView: (view) => set({ view }),
   focusRecordId: null,
   setFocusRecordId: (id) => set({ focusRecordId: id }),
+  pendingPrompt: null,
+  setPendingPrompt: (pendingPrompt) => set({ pendingPrompt }),
 }));

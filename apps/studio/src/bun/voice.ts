@@ -7,6 +7,7 @@ import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
 import { edgeSynthesize } from "./edge-tts";
+import { synthesizeCallLocal } from "./tts-local";
 
 export type VoiceRecordKind = "tts" | "asr" | "clone";
 
@@ -223,14 +224,14 @@ export async function listProviderModels(
 // TTS
 // ---------------------------------------------------------------------------
 
-export async function runTTS(input: {
+/** OpenAI 兼容 /v1/audio/speech，返回 mp3 字节（不入库）。 */
+async function synthesizeOpenAiAudio(input: {
   text: string;
   voice?: string;
   model?: string;
   base?: string;
   apiKey?: string;
-}): Promise<VoiceRecordRow> {
-  // 优先用 TTS 页配置的三方 provider；未配置时回退到主推理服务。
+}): Promise<Buffer> {
   const provider = getTTSProviderConfig();
   const base = input.base?.trim() || provider.base || getBaseUrl();
   if (!base) throw new Error("No inference server configured");
@@ -254,8 +255,36 @@ export async function runTTS(input: {
     signal: AbortSignal.timeout(120_000),
   });
   if (!res.ok) throw new Error(await errorMessage(res, "TTS request failed"));
+  return Buffer.from(await res.arrayBuffer());
+}
 
-  const buf = await res.arrayBuffer();
+/**
+ * 通话逐句合成：优先本地 audio.cpp TTS（合成快、无网络延迟，适合逐句播报），
+ * 其次用 TTS 页配置的三方 provider，最后回退 Edge（免密钥）。
+ * 不落库、不写 voice_records，避免一句一记录污染语音历史。
+ */
+export async function synthesizeCallSpeech(
+  text: string,
+): Promise<{ buffer: Buffer; engine: "local" | "provider" | "edge" }> {
+  const local = await synthesizeCallLocal(text);
+  if (local) return { buffer: local, engine: "local" };
+  const provider = getTTSProviderConfig();
+  if (provider.base) {
+    const buffer = await synthesizeOpenAiAudio({ text });
+    return { buffer, engine: "provider" };
+  }
+  const voice = getSetting("TTS_EDGE_VOICE") || "zh-CN-XiaoxiaoNeural";
+  return { buffer: await edgeSynthesize(text, voice), engine: "edge" };
+}
+
+export async function runTTS(input: {
+  text: string;
+  voice?: string;
+  model?: string;
+  base?: string;
+  apiKey?: string;
+}): Promise<VoiceRecordRow> {
+  const buf = await synthesizeOpenAiAudio(input);
   const dir = getAudioBaseDir();
   mkdirSync(dir, { recursive: true });
   const name = `tts-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.mp3`;
@@ -264,8 +293,8 @@ export async function runTTS(input: {
   const ref = `audio/${name}`;
   const record = insertVoiceRecord({
     kind: "tts",
-    model: model ?? null,
-    voice,
+    model: input.model?.trim() || getSetting("TTS_MODEL") || null,
+    voice: input.voice?.trim() || getSetting("TTS_VOICE") || "alloy",
     text: input.text,
     audioPath: ref,
   });
@@ -305,7 +334,7 @@ export async function runASR(input: {
   const base = getBaseUrl();
   if (!base) throw new Error("No inference server configured");
 
-  const model = input.model?.trim() || getSetting("ASR_MODEL") || undefined;
+  const model = input.model?.trim() || undefined;
   const mime = "audio/mpeg";
   const form = new FormData();
   form.append(

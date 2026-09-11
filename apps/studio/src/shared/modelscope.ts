@@ -169,6 +169,16 @@ export type AsrPreset = {
   sizeBytes: number;
 };
 
+/**
+ * 默认本地 ASR 模型（Whisper large-v3-turbo，q8_0 量化）：
+ * 识别效果与速度的平衡最佳，作为未配置时的默认值。
+ */
+export const DEFAULT_ASR_MODEL_FILE = "large-v3-turbo-q8_0.bin";
+
+export function defaultAsrModelPreset(): AsrPreset | null {
+  return ASR_PRESETS.find((p) => p.fileName === DEFAULT_ASR_MODEL_FILE) ?? null;
+}
+
 export const ASR_PRESETS: readonly AsrPreset[] = [
   {
     id: "whisper-tiny",

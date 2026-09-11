@@ -9,7 +9,7 @@ import {
   voiceRecordToRow,
   type VoiceRecordRow,
 } from "./voice";
-import { ASR_PRESETS } from "../shared/modelscope";
+import { ASR_PRESETS, DEFAULT_ASR_MODEL_FILE } from "../shared/modelscope";
 import { runAsrAudioCpp } from "./asr-audiocpp";
 import { getWhisperEngineInfo, resolveWhisperBinary } from "./whisper-engine";
 import {
@@ -81,18 +81,54 @@ export function listAsrModels(): AsrModelItem[] {
   });
 }
 
-function resolveModelPath(model?: string): string | null {
-  const candidates = [model, getSetting("ASR_MODEL")].filter(Boolean) as string[];
-  for (const c of candidates) {
-    if (!c) continue;
-    if (path.isAbsolute(c) && existsSync(c)) return c;
-    const preset = ASR_PRESETS.find((p) => p.fileName === c);
-    if (preset) {
-      const pth = localModelPath(preset.repo, preset.fileName);
-      if (existsSync(pth)) return pth;
-    }
+/** 按引用解析本地模型路径：绝对路径直接返回，文件名则匹配预设仓库。 */
+function resolveFile(ref: string): string | null {
+  if (path.isAbsolute(ref) && existsSync(ref)) return ref;
+  const preset = ASR_PRESETS.find((p) => p.fileName === ref);
+  if (preset) {
+    const pth = localModelPath(preset.repo, preset.fileName);
+    if (existsSync(pth)) return pth;
   }
   return null;
+}
+
+/**
+ * 解析本地 ASR 模型路径，优先级：
+ * 1. 显式传入的模型（用户在界面上点「启动」→ whisper-server 用这个模型）；
+ * 2. ASR_MODEL 设置（含默认值 Whisper large-v3-turbo）；
+ * 3. 兜底：未配置任何模型时，默认使用 Whisper large-v3-turbo（已下载才可用）。
+ *
+ * 小模型（tiny/base/small）多语言转写效果差、中文几乎不可用：当设置指向这类
+ * 模型而默认 turbo 已下载时，直接升级到 turbo（这是默认行为，不是用户当前选择）。
+ */
+export function resolveModelPath(model?: string): string | null {
+  const explicit = model?.trim();
+  if (explicit) {
+    const p = resolveFile(explicit);
+    if (p) return p;
+  }
+  const configured = getSetting("ASR_MODEL").trim();
+  const conf = configured ? resolveFile(configured) : null;
+  if (conf) {
+    const base = path.basename(conf);
+    if (
+      (base === "tiny.bin" || base === "base.bin" || base === "small.bin") &&
+      resolveFile(DEFAULT_ASR_MODEL_FILE)
+    ) {
+      return resolveFile(DEFAULT_ASR_MODEL_FILE)!;
+    }
+    return conf;
+  }
+  return resolveFile(DEFAULT_ASR_MODEL_FILE);
+}
+
+/**
+ * 解析 ASR 识别语言：`auto`/空 表示交给 whisper 自动检测（此时不传参）。
+ * 默认按设置 ASR_LANG（中文）强制指定，避免短句中文被误判成英文。
+ */
+export function resolveAsrLanguage(input?: string): string | null {
+  const lang = (input ?? getSetting("ASR_LANG") ?? "auto").trim().toLowerCase();
+  return lang && lang !== "auto" ? lang : null;
 }
 
 export async function getAsrStatus(): Promise<AsrStatus> {
@@ -263,7 +299,11 @@ function getMainRemoteBaseUrl(): string {
 // Local engine transcription (segments via verbose_json / cli JSON)
 // ---------------------------------------------------------------------------
 
-async function postToServer(audioPath: string, diarize = false): Promise<AsrTranscript> {
+async function postToServer(
+  audioPath: string,
+  diarize = false,
+  lang: string | null = null,
+): Promise<AsrTranscript> {
   const port = Number(getSetting("ASR_PORT") || 18081);
   const base = `http://127.0.0.1:${port}`;
   const post = async (endpoint: string, verbose: boolean) => {
@@ -274,6 +314,8 @@ async function postToServer(audioPath: string, diarize = false): Promise<AsrTran
       path.basename(audioPath),
     );
     if (verbose) form.append("response_format", "verbose_json");
+    // 显式语言：避免短句中文被 whisper 自动检测误判为英文。
+    if (lang) form.append("language", lang);
     // whisper-server 的双声道说话人分离（须同时提交 response_format=verbose_json）。
     if (diarize) form.append("diarize", "true");
     return await fetch(`${base}${endpoint}`, {
@@ -309,14 +351,18 @@ async function postToServer(audioPath: string, diarize = false): Promise<AsrTran
   return buildTranscript(text || segments.map((s) => s.text).join(""), segments, "whisper-server");
 }
 
-async function runCli(bin: string, modelPath: string, audioPath: string): Promise<AsrTranscript> {
+async function runCli(
+  bin: string,
+  modelPath: string,
+  audioPath: string,
+  lang: string | null = null,
+): Promise<AsrTranscript> {
   const tmp = path.join(getAudioBaseDir(), "tmp");
   mkdirSync(tmp, { recursive: true });
   const outBase = path.join(tmp, `whisper-${crypto.randomUUID().slice(0, 8)}`);
-  const proc = Bun.spawn(
-    [bin, "-m", modelPath, "-f", audioPath, "-otxt", "-oj", "-of", outBase, "--no-prints"],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const args = [bin, "-m", modelPath, "-f", audioPath, "-otxt", "-oj", "-of", outBase, "--no-prints"];
+  if (lang) args.push("-l", lang);
+  const proc = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
   const stderr =
     proc.stderr && typeof proc.stderr !== "number"
       ? await new Response(proc.stderr).text()
@@ -370,6 +416,7 @@ async function postRemoteForm(input: {
   model?: string;
   diarize?: boolean;
   verbose: boolean;
+  language?: string | null;
 }): Promise<{ text: string; segments: AsrSegment[] }> {
   const form = new FormData();
   form.append(
@@ -381,6 +428,8 @@ async function postRemoteForm(input: {
   if (input.verbose) form.append("response_format", "verbose_json");
   // Some OpenAI-compatible providers expose diarization behind this flag.
   if (input.diarize) form.append("diarize", "true");
+  // 显式语言提示（OpenAI 兼容端点标准字段）。
+  if (input.language) form.append("language", input.language);
 
   const headers: Record<string, string> = {};
   if (input.apiKey && input.apiKey !== "EMPTY") headers.Authorization = `Bearer ${input.apiKey}`;
@@ -411,6 +460,7 @@ async function transcribeRemote(
   model?: string,
   diarize?: boolean,
   useProvider = true,
+  language?: string | null,
 ): Promise<AsrTranscript> {
   const provider = getASRProviderConfig();
   const configured = useProvider && !!provider.base;
@@ -420,15 +470,15 @@ async function transcribeRemote(
     ? provider.apiKey || getSetting("VLLM_API_KEY")
     : getSetting("VLLM_API_KEY");
   const m =
-    model?.trim() || (configured ? provider.model : "") || getSetting("ASR_MODEL") || undefined;
+    model?.trim() || (configured ? provider.model : "") || undefined;
 
   try {
-    const r = await postRemoteForm({ base, apiKey, audioPath, model: m, diarize, verbose: true });
+    const r = await postRemoteForm({ base, apiKey, audioPath, model: m, diarize, verbose: true, language });
     return buildTranscript(r.text, r.segments, "remote");
   } catch (e) {
     // Some providers reject the verbose_json param; retry without it.
     if (e instanceof Error && /response_format/i.test(e.message)) {
-      const r = await postRemoteForm({ base, apiKey, audioPath, model: m, diarize: false, verbose: false });
+      const r = await postRemoteForm({ base, apiKey, audioPath, model: m, diarize: false, verbose: false, language });
       return buildTranscript(r.text, r.segments, "remote");
     }
     throw e;
@@ -463,6 +513,8 @@ export async function transcribeAudio(input: {
   save?: boolean;
   source?: AsrSource;
   diarize?: boolean;
+  /** 识别语言码（zh/en/…）；auto/空 表示由 whisper 自动检测。 */
+  language?: string;
 }): Promise<AsrTranscript> {
   let audioPath: string | null = null;
   let audioRef: string | null = input.audioRef ?? null;
@@ -481,6 +533,7 @@ export async function transcribeAudio(input: {
   if (!audioPath || !existsSync(audioPath)) throw new Error("音频文件不存在");
 
   const source = input.source ?? "auto";
+  const lang = resolveAsrLanguage(input.language);
   const provider = getASRProviderConfig();
   const { serverBin, cliBin } = await pickLocalEngine();
   const hasLocal = !!(serverBin || cliBin);
@@ -507,9 +560,9 @@ export async function transcribeAudio(input: {
         const r = await startAsr(modelPath);
         if (!r.ok) throw new Error(r.error);
       }
-      transcript = await postToServer(audioPath, input.diarize);
+      transcript = await postToServer(audioPath, input.diarize, lang);
     } else {
-      transcript = await runCli(cliBin!, modelPath, audioPath);
+      transcript = await runCli(cliBin!, modelPath, audioPath, lang);
     }
     return { transcript, modelLabel: path.basename(modelPath) };
   };
@@ -520,14 +573,14 @@ export async function transcribeAudio(input: {
   };
 
   const remoteResult = (useProvider: boolean) =>
-    transcribeRemote(audioPath, input.model, input.diarize, useProvider);
+    transcribeRemote(audioPath, input.model, input.diarize, useProvider, lang);
 
   // 显式远程：优先用配置的 OpenAI 兼容 provider，未配置时回退主推理服务。
   if (source === "remote") {
     const useProvider = !!provider.base;
     return saveRecord(
       await remoteResult(useProvider),
-      input.model || (useProvider ? provider.model : "") || getSetting("ASR_MODEL") || null,
+      input.model || (useProvider ? provider.model : "") || null,
     );
   }
 
@@ -551,6 +604,6 @@ export async function transcribeAudio(input: {
   }
   return saveRecord(
     await remoteResult(false),
-    input.model || getSetting("ASR_MODEL") || null,
+    input.model || null,
   );
 }

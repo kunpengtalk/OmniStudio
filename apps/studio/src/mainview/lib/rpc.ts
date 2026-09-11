@@ -4,6 +4,8 @@ import { queryClient } from "../components/providers";
 import { useUpdateStore } from "./update-store";
 import { useServerStore } from "../stores/server";
 import { useChatStore } from "../stores/chat";
+import { useAgentStore } from "../stores/agent";
+import { useVoiceCallStore } from "../stores/voice-call";
 import { useModelDownloadStore } from "../stores/model-download";
 import { useGatewayStore } from "../stores/gateway";
 import { useMlxInstallStore } from "../stores/mlx-install";
@@ -41,6 +43,8 @@ const rpc = Electroview.defineRPC<AppRPC>({
           content || (error ? `⚠️ ${error}` : ""),
           reasoning,
         );
+        // Agent 的文本流也走这个通道：收尾时一并解除运行态。
+        useAgentStore.getState().setRunning(false);
         queryClient.invalidateQueries({ queryKey: ["conversations"] });
         queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
       },
@@ -50,6 +54,38 @@ const rpc = Electroview.defineRPC<AppRPC>({
           stats.messageId,
           stats,
         );
+      },
+      // Agent 运行轨迹：工具调用 / 状态 / 错误
+      agentEvent: (event) => {
+        useAgentStore.getState().appendEvent(event);
+      },
+      // 实时语音通话：增量字幕 / 定稿 / 阶段 / TTS 音频与打断
+      voicecallPartial: ({ conversationId, text }) => {
+        const vc = useVoiceCallStore.getState();
+        if (vc.callConversationId !== conversationId) return;
+        vc.setLiveText(text);
+      },
+      voicecallUtterance: ({ conversationId, messageId, text }) => {
+        useVoiceCallStore.getState().commitUtterance(conversationId, messageId, text);
+      },
+      voicecallState: ({ conversationId, phase }) => {
+        const vc = useVoiceCallStore.getState();
+        if (vc.callConversationId !== conversationId) return;
+        vc.setPhase(phase);
+      },
+      voicecallAudio: ({ conversationId, wavBase64, format }) => {
+        useVoiceCallStore.getState().enqueueAudio({ conversationId, base64: wavBase64, format });
+      },
+      voicecallAudioStop: ({ conversationId }) => {
+        const vc = useVoiceCallStore.getState();
+        if (vc.callConversationId !== conversationId) return;
+        vc.clearAudio();
+      },
+      voicecallError: ({ conversationId, message }) => {
+        const vc = useVoiceCallStore.getState();
+        if (vc.callConversationId !== conversationId) return;
+        vc.setError(message);
+        vc.setPhase("error");
       },
       modelDownloadProgress: ({ repo, fileName, progress }) => {
         useModelDownloadStore.getState().setProgress(repo, fileName, progress);

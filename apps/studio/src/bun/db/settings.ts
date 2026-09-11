@@ -2,6 +2,8 @@ import { eq } from "drizzle-orm";
 import type { InferenceEngine } from "../../shared/modelscope";
 import { db } from "./index";
 import { settings as settingsTable } from "./schema";
+import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
+import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
 
 export type SettingsKey =
   | "SETUP_COMPLETE"
@@ -61,6 +63,7 @@ export type SettingsKey =
   | "SGLANG_CHUNKED_PREFILL_SIZE"
   | "TTS_MODEL"
   | "ASR_MODEL"
+  | "ASR_LANG"
   | "TTS_VOICE"
   | "VOICE_CLONES"
   | "TTS_HTTP_BASE"
@@ -100,17 +103,27 @@ export type SettingsKey =
   | "WEB_SEARCH_PROVIDER"
   | "WEB_SEARCH_API_KEY"
   | "WEB_SEARCH_MAX_RESULTS"
-  | "TRANSLATION_ENGINE";
+  | "TRANSLATION_ENGINE"
+  | "AGENT_WORKSPACE"
+  | "AGENT_WORKSPACES"
+  | "AGENT_MODE"
+  | "AGENT_MAX_STEPS"
+  | "AGENT_ALLOW_SHELL"
+  | "VOICE_CALL_PROVIDER"
+  | "VOICE_CALL_REALTIME_API_KEY"
+  | "VOICE_CALL_REALTIME_BASE_URL"
+  | "VOICE_CALL_REALTIME_MODEL"
+  | "VOICE_CALL_REALTIME_VOICE";
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
-  VLLM_API_BASE: "http://localhost:8080/v1",
+  VLLM_API_BASE: `http://localhost:${DEFAULT_INFERENCE_PORT}/v1`,
   VLLM_API_KEY: "EMPTY",
   VLLM_MODEL_NAME: "",
   VLLM_MODEL_PROFILE: "chandra",
   SERVER_MODE: "local",
   SERVER_HOST: "127.0.0.1",
-  SERVER_PORT: "8080",
+  SERVER_PORT: DEFAULT_INFERENCE_PORT,
   VLLM_PORT: "8081",
   SGLANG_PORT: "8082",
   SERVER_EXTRA_ARGS: "",
@@ -159,7 +172,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   SGLANG_MEM_FRACTION_STATIC: "0.88",
   SGLANG_CHUNKED_PREFILL_SIZE: "",
   TTS_MODEL: "",
-  ASR_MODEL: "",
+  ASR_MODEL: DEFAULT_ASR_MODEL_FILE,
+  ASR_LANG: "zh",
   TTS_VOICE: "alloy",
   VOICE_CLONES: "[]",
   TTS_HTTP_BASE: "",
@@ -200,6 +214,19 @@ const DEFAULTS: Record<SettingsKey, string> = {
   WEB_SEARCH_API_KEY: "",
   WEB_SEARCH_MAX_RESULTS: "5",
   TRANSLATION_ENGINE: "model",
+  AGENT_WORKSPACE: "",
+  /** 最近使用的工作区列表（JSON 数组），供输入框上方的工作区选择面板展示。 */
+  AGENT_WORKSPACES: "[]",
+  AGENT_MODE: "agent",
+  AGENT_MAX_STEPS: "40",
+  AGENT_ALLOW_SHELL: "1",
+  // 语音通话：local = 本地 ASR+LLM+TTS 三段管线；cloud = Qwen Realtime（DashScope）。
+  // 默认空 = 首次进入时由前端引导二选一（getVoiceCallProvider 会把空值当 local）。
+  VOICE_CALL_PROVIDER: "",
+  VOICE_CALL_REALTIME_API_KEY: "",
+  VOICE_CALL_REALTIME_BASE_URL: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+  VOICE_CALL_REALTIME_MODEL: "qwen-audio-3.0-realtime-plus",
+  VOICE_CALL_REALTIME_VOICE: "longanqian",
 };
 
 export function getSetting(key: SettingsKey): string {

@@ -12,10 +12,13 @@ import { SettingsScreen } from "./settings";
 import { ServerLogsScreen } from "./server-logs";
 import { ServerStatsScreen } from "../server-stats";
 import { ChatWindow } from "../chat-screen";
+import { AgentWindow } from "../agent-screen";
+import { VoiceCallWindow } from "../voice-call-screen";
 import { VoiceScreen } from "../voice-screen";
 import { ImageScreen } from "../image-screen";
 import { OcrScreen } from "../ocr";
 import { TranslateScreen } from "../translate-screen";
+import { PromptScreen } from "../prompt-screen";
 import { ModelsScreen } from "../models-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { DownloadsButton } from "@components/download-panel";
@@ -26,6 +29,10 @@ import { useUILang } from "@stores/ui-lang";
 
 const renderActiveApp = (activeApp: AppId): ReactNode => {
   switch (activeApp) {
+    case "agent":
+      return <AgentWindow />;
+    case "voicecall":
+      return <VoiceCallWindow />;
     case "ocr":
       return <OcrScreen />;
     case "voice":
@@ -34,6 +41,8 @@ const renderActiveApp = (activeApp: AppId): ReactNode => {
       return <ImageScreen />;
     case "translate":
       return <TranslateScreen />;
+    case "prompt":
+      return <PromptScreen />;
     default:
       return <ChatWindow />;
   }
