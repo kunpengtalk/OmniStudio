@@ -89,6 +89,7 @@ export type SettingsKey =
   | "OCR_PROVIDER_BASE"
   | "OCR_PROVIDER_API_KEY"
   | "OCR_PROVIDER_MODEL"
+  | "PPOCR_MODEL_SIZE"
   | "IMG_BACKEND"
   | "IMG_API_BASE"
   | "IMG_API_KEY"
@@ -201,6 +202,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   OCR_PROVIDER_BASE: "",
   OCR_PROVIDER_API_KEY: "",
   OCR_PROVIDER_MODEL: "",
+  PPOCR_MODEL_SIZE: "medium",
   IMG_BACKEND: "api",
   IMG_API_BASE: "",
   IMG_API_KEY: "",

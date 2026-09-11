@@ -70,10 +70,11 @@ export type OcrLine = OcrBox & {
 
 export type OcrResult = {
   text: string;
-  engine: "tesseract";
+  engine: "tesseract" | "paddleocr";
   modelLabel: string;
   modelCode: string;
-  psm: number;
+  /** psm 仅 Tesseract 路径使用（PaddleOCR 无此概念）。 */
+  psm?: number;
   lines: OcrLine[];
 };
 
@@ -319,7 +320,8 @@ export async function stageOcrImage(paths: string[]): Promise<{ ref: string; url
   return out;
 }
 
-function resolveOcrImage(ref: string): string | null {
+/** 把 OCR 暂存图片 ref（ocr/in/...）解析为绝对路径（限 images 目录内）。 */
+export function resolveOcrImage(ref: string): string | null {
   const base = getImagesBaseDir();
   const resolved = path.resolve(base, ref);
   if (!resolved.startsWith(base + path.sep)) return null;

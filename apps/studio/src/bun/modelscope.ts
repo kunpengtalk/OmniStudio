@@ -505,8 +505,9 @@ function cleanupParts(destPath: string): void {
 /**
  * 带并行分片 + 断点续传的文件下载。最终落盘文件与单流一致,分片文件
  * 下载过程中存在于 destPath.partN,完成后合并删除。
+ * 供通用 url+dest 下载复用（如 PaddleOCR 引擎的模型权重）。
  */
-async function downloadHttpFile(
+export async function downloadHttpFile(
   url: string,
   destPath: string,
   onProgress?: (progress: DownloadProgress) => void,

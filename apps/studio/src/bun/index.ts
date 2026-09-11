@@ -6,7 +6,7 @@ import { BrowserWindow, Updater } from "electrobun/bun";
 import { db } from "./db";
 import { startImageServer } from "./image-server";
 import { setWindowRef } from "./window";
-import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast } from "./rpc";
+import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initPpOcrBroadcast } from "./rpc";
 import { seedIfNeeded } from "./prompt-library";
 import { APP_NAME } from "./config";
 import { createMenu } from "./menu";
@@ -15,6 +15,7 @@ import { isConfigured, getSetting } from "./db/settings";
 import * as ServerManager from "./server-manager";
 import * as Gateway from "./gateway";
 import { stopAsr } from "./asr";
+import { stopPpOcr } from "./ppocr";
 import { startControlServer, stopControlServer } from "./control-server";
 import { getAgentWorkspace } from "./agent";
 
@@ -78,6 +79,7 @@ initTTSModelDownloadBroadcast(mainWindow);
 initGatewayBroadcast(mainWindow);
 initMlxInstallBroadcast(mainWindow);
 initMlxModelDownloadBroadcast(mainWindow);
+initPpOcrBroadcast(mainWindow);
 
 mainWindow.webview.on("dom-ready", () => {
   broadcastUpdateStatus();
@@ -118,14 +120,14 @@ if (Gateway.isGatewayEnabled()) {
 
 // Handle window close
 mainWindow.on("close", async () => {
-  await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway()]);
+  await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
   stopControlServer();
   Utils.quit();
 });
 
 // Cleanup on quit
 Electrobun.events.on("before-quit", async () => {
-  await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway()]);
+  await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
   stopControlServer();
 });
 

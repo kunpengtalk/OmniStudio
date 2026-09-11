@@ -11,6 +11,7 @@ import { useGatewayStore } from "../stores/gateway";
 import { useMlxInstallStore } from "../stores/mlx-install";
 import { useMlxModelDownloadStore } from "../stores/mlx-model-download";
 import { useMlxModelRunStore } from "../stores/mlx-model-run";
+import { usePpOcrInstallStore } from "../stores/ppocr-install";
 import { useRouter } from "../stores/router";
 
 const knownCompletedIds = new Set<string>();
@@ -132,6 +133,19 @@ const rpc = Electroview.defineRPC<AppRPC>({
         // 阶段进入终态（已加载 / 空闲 / 出错）时刷新「已启动模型」查询。
         if (p.phase === "loaded" || p.phase === "idle" || p.phase === "error") {
           queryClient.invalidateQueries({ queryKey: ["mlx-active-model"] });
+        }
+      },
+      ppOcrInstallLog: ({ text }) => {
+        usePpOcrInstallStore.getState().appendLog(text);
+        // 安装完成（成功或失败）后刷新引擎状态。
+        if (text.includes("安装成功") || text.includes("安装失败")) {
+          queryClient.invalidateQueries({ queryKey: ["ppocr-status"] });
+        }
+      },
+      ppOcrPhase: ({ phase, message }) => {
+        // 阶段进入终态（就绪 / 空闲 / 出错）时刷新引擎状态查询。
+        if (phase === "ready" || phase === "idle" || phase === "error") {
+          queryClient.invalidateQueries({ queryKey: ["ppocr-status"] });
         }
       },
       navigate: ({ path }) => {

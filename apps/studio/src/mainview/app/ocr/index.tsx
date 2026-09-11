@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CpuIcon, FileTextIcon, ScanTextIcon, SparklesIcon } from "lucide-react";
+import { BotIcon, CpuIcon, FileTextIcon, ScanTextIcon, SparklesIcon } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { useT } from "@stores/ui-lang";
@@ -8,6 +8,7 @@ import { cn } from "@/mainview/lib/utils";
 import type { OcrEngineType } from "../../../shared/ocr";
 import { DropZone } from "../main-layout/drop-zone";
 import { SegmentedControl, type StagedImage } from "./parts";
+import { PaddleOcrTab } from "./paddleocr-tab";
 import { TesseractTab } from "./tesseract-tab";
 import { VlmTab } from "./vlm-tab";
 
@@ -34,6 +35,8 @@ export function OcrScreen() {
       setEngine("vlm");
     } else if (saved === "tesseract") {
       setEngine("tesseract");
+    } else if (saved === "paddleocr") {
+      setEngine("paddleocr");
     } else {
       // 后端默认为空，识别时会因引擎未启用而失败，这里显式落到 Tesseract。
       setEngine("tesseract");
@@ -42,6 +45,10 @@ export function OcrScreen() {
   }, [settingsData]);
 
   const switchEngine = (v: OcrEngineType) => {
+    if (engine === "paddleocr" && v !== "paddleocr") {
+      // 切走时停掉常驻 worker，释放内存。
+      void rpcClient.stopPpOcr();
+    }
     setEngine(v);
     void rpcClient.updateSettings({ settings: { OCR_ENGINE: v } });
   };
@@ -74,7 +81,7 @@ export function OcrScreen() {
         </div>
 
         {tab === "extract" ? (
-          <div className="ml-auto w-56 shrink-0">
+          <div className="ml-auto w-72 shrink-0">
             <SegmentedControl<OcrEngineType>
               value={engine}
               onChange={switchEngine}
@@ -83,6 +90,11 @@ export function OcrScreen() {
                   value: "tesseract",
                   label: t("ocr.engine.tesseract.short"),
                   icon: <CpuIcon className="size-3.5" />,
+                },
+                {
+                  value: "paddleocr",
+                  label: t("ocr.engine.paddleocr.short"),
+                  icon: <BotIcon className="size-3.5" />,
                 },
                 {
                   value: "vlm",
@@ -100,6 +112,8 @@ export function OcrScreen() {
           <DropZone />
         ) : engine === "vlm" ? (
           <VlmTab image={image} onImageChange={setImage} />
+        ) : engine === "paddleocr" ? (
+          <PaddleOcrTab image={image} onImageChange={setImage} />
         ) : (
           <TesseractTab image={image} onImageChange={setImage} />
         )}

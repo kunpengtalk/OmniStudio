@@ -46,6 +46,8 @@ import * as TTSLocal from "../tts-local";
 import type { TtsLocalModelInfo, TtsLocalStatus } from "../tts-local";
 import * as Ocr from "../ocr";
 import type { OcrLangModelInfo, OcrStatus, OcrResult, OcrVlmResult, OcrProviderConfig } from "../ocr";
+import * as PpOcr from "../ppocr";
+import type { PpOcrModelSize } from "../../shared/ocr";
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
 import * as PromptLib from "../prompt-library";
@@ -744,6 +746,27 @@ export type AppRPC = {
         params: { base?: string; apiKey?: string } | undefined;
         response: { models: string[]; error?: string };
       };
+      // PaddleOCR（本地 PP-OCRv6 引擎）
+      getPpOcrStatus: {
+        params: undefined;
+        response: PpOcr.PpOcrStatus;
+      };
+      downloadPpOcrEngine: {
+        params: undefined;
+        response: { ok: boolean; error?: string; version?: string };
+      };
+      startPpOcr: {
+        params: { modelSize?: PpOcrModelSize };
+        response: { ok: boolean; error?: string; already?: boolean };
+      };
+      stopPpOcr: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      runPpOcr: {
+        params: { imageRef: string; modelSize?: PpOcrModelSize };
+        response: { result?: OcrResult; error?: string };
+      };
       // AI 生图
       stageEditImage: {
         params: { paths: string[] };
@@ -880,6 +903,9 @@ export type AppRPC = {
       mlxModelDownloadProgress: MlxModelDownloadProgress;
       /** 生图阶段事件：启动/加载/生成 n/N/完成。 */
       mlxGenPhase: MlxGenPhase;
+      /** PaddleOCR 引擎安装日志 / 阶段（下载模型 / 加载 / 就绪 / 错误），实时推送。 */
+      ppOcrInstallLog: { text: string };
+      ppOcrPhase: { phase: PpOcr.PpOcrPhase; message: string };
       /** CLI（`omi`）请求跳转到某个页面：models / settings / server / stats / chat / index。 */
       navigate: { path: string };
     };
@@ -1815,6 +1841,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       stopOcr: async () => {
         try {
           await Ocr.stopOcr();
+          // 切回其他引擎时顺手停掉常驻的 PaddleOCR worker，释放内存。
+          await PpOcr.stopPpOcr();
           return { ok: true };
         } catch (e) {
           return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -1864,6 +1892,57 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
           return { models };
         } catch (e) {
           return { models: [], error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      getPpOcrStatus: async () => {
+        try {
+          return await PpOcr.getPpOcrStatus();
+        } catch (e) {
+          return {
+            pythonFound: false,
+            pythonPath: null,
+            engineInstalled: false,
+            version: "",
+            engineDir: null,
+            workerRunning: false,
+            phase: "idle",
+            phaseMessage: "",
+            modelSize: "medium",
+          };
+        }
+      },
+
+      downloadPpOcrEngine: async () => {
+        try {
+          return await PpOcr.downloadPpOcrEngine();
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      startPpOcr: async ({ modelSize }) => {
+        try {
+          return await PpOcr.startPpOcr(modelSize);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      stopPpOcr: async () => {
+        try {
+          await PpOcr.stopPpOcr();
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      runPpOcr: async (params) => {
+        try {
+          return { result: await PpOcr.runPpOcr(params) };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
         }
       },
 
@@ -2112,6 +2191,20 @@ export function initMlxModelDownloadBroadcast(win: BrowserWindowWithRPC) {
   MlxGen.onMlxGenPhase((p) => {
     try {
       win.webview.rpc?.send.mlxGenPhase(p);
+    } catch {}
+  });
+}
+
+/** PaddleOCR 引擎安装日志 / 阶段，实时推送到前端。 */
+export function initPpOcrBroadcast(win: BrowserWindowWithRPC) {
+  PpOcr.onPpOcrInstallLog((text) => {
+    try {
+      win.webview.rpc?.send.ppOcrInstallLog({ text });
+    } catch {}
+  });
+  PpOcr.onPpOcrPhase((phase, message) => {
+    try {
+      win.webview.rpc?.send.ppOcrPhase({ phase, message });
     } catch {}
   });
 }
