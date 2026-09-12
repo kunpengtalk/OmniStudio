@@ -19,6 +19,7 @@ import { stopAsr } from "./asr";
 import { stopPpOcr } from "./ppocr";
 import { startControlServer, stopControlServer } from "./control-server";
 import { getAgentWorkspace } from "./agent";
+import { runMemoryMaintenance } from "./memory";
 
 // Check if Vite dev server is running for HMR
 async function getMainViewUrl(): Promise<string> {
@@ -133,6 +134,12 @@ if (Gateway.isGatewayEnabled()) {
     }
   });
 }
+
+// 记忆库维护（启动后台跑一次）：补内容哈希、归档过期/长期未用的低价值记忆、补向量。
+// 不阻塞窗口显示，也不影响首屏；失败只记日志。
+void runMemoryMaintenance().catch((e) => {
+  console.error("Memory maintenance failed:", e instanceof Error ? e.message : String(e));
+});
 
 // Handle window close
 mainWindow.on("close", async () => {

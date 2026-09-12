@@ -27,7 +27,7 @@ import * as Mcp from "../mcp";
 import type { McpServerConfig } from "../mcp";
 import * as Memory from "../memory";
 import * as MemorySync from "../memory-sync";
-import type { MemoryCategory, MemoryEntry } from "../../shared/memory";
+import type { MemoryCategory, MemoryEntry, MemoryEventEntry, MemoryStats, MemoryStatus } from "../../shared/memory";
 import type { MemorySyncResult, MemorySyncStatus } from "../memory-sync";
 import * as VoiceCall from "../voice-call";
 import type { VoiceCallOutgoing, VoiceCallPhase, VoiceCallPreflight } from "../voice-call";
@@ -532,9 +532,16 @@ export type AppRPC = {
       // -----------------------------------------------------------------
       // 记忆（所有 Agent 共享的长期记忆库）
       // -----------------------------------------------------------------
-      /** 记忆列表（可按关键词 / 分类过滤，置顶优先）。 */
+      /** 记忆列表（可按关键词 / 分类 / 状态过滤，置顶与重要度优先）。 */
       memoryList: {
-        params: { query?: string; category?: MemoryCategory } | undefined;
+        params:
+          | {
+              query?: string;
+              category?: MemoryCategory;
+              status?: MemoryStatus | "all" | "open";
+              limit?: number;
+            }
+          | undefined;
         response: { memories: MemoryEntry[] };
       };
       /** 新建 / 编辑（带 id 为编辑）。 */
@@ -546,6 +553,7 @@ export type AppRPC = {
             category?: MemoryCategory;
             tags?: string[];
             pinned?: boolean;
+            importance?: number;
           };
         };
         response: { ok: boolean; memory: MemoryEntry };
@@ -557,6 +565,41 @@ export type AppRPC = {
       memorySetPinned: {
         params: { id: number; pinned: boolean };
         response: { ok: boolean };
+      };
+      /** 更改生命周期状态：确认待确认记忆 / 归档 / 恢复。 */
+      memorySetStatus: {
+        params: { id: number; status: MemoryStatus };
+        response: { ok: boolean };
+      };
+      /** 待用户确认的 Agent 写入（开启「写入需确认」后出现）。 */
+      memoryPending: {
+        params: undefined;
+        response: { memories: MemoryEntry[] };
+      };
+      /** 记忆统计（条数分布、检索命中率、合并与拦截次数、向量化进度）。 */
+      memoryStats: {
+        params: undefined;
+        response: { stats: MemoryStats };
+      };
+      /** 记忆审计流水（写入 / 合并 / 取代 / 归档 / 删除）。 */
+      memoryEvents: {
+        params: { limit?: number; memoryId?: number } | undefined;
+        response: { events: MemoryEventEntry[] };
+      };
+      /** 生命周期维护：归档过期 / 长期未用的低价值记忆，补向量。 */
+      memoryMaintain: {
+        params: undefined;
+        response: { hashed: number; expired: number; archived: number; consolidated: number; embedded: number };
+      };
+      /** 导出全部记忆（JSON，可备份 / 迁移）。 */
+      memoryExport: {
+        params: undefined;
+        response: { version: number; exportedAt: number; memories: MemoryEntry[] };
+      };
+      /** 导入记忆（逐条判重合并）。 */
+      memoryImport: {
+        params: { payload: unknown };
+        response: { imported: number; merged: number; rejected: number; errors: string[] };
       };
       /** 外部 Agent 同步状态（各工具上下文文件是否已含托管区块）。 */
       memorySyncStatus: {
@@ -2179,11 +2222,46 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       // 记忆（所有 Agent 共享的长期记忆库）
       memoryList: async (params) => {
+        // 有查询词时走排序检索（相关度/重要度/新鲜度），界面浏览不累计使用热度。
+        if (params?.query?.trim()) {
+          const hits = await Memory.searchMemories(params.query, {
+            limit: params.limit ?? 50,
+            category: params.category,
+            includeArchived: params.status === "archived" || params.status === "all",
+            trackUsage: false,
+          });
+          const filtered = params.status && params.status !== "all" && params.status !== "archived"
+            ? hits.filter((h) => h.status === params.status)
+            : hits;
+          return { memories: filtered };
+        }
         return { memories: Memory.listMemories(params ?? undefined) };
       },
       memorySave: async ({ memory }) => {
         const saved = Memory.saveMemory(memory);
         return { ok: true, memory: saved };
+      },
+      memorySetStatus: async ({ id, status }) => {
+        Memory.setMemoryStatus(id, status);
+        return { ok: true };
+      },
+      memoryPending: async () => {
+        return { memories: Memory.pendingMemories() };
+      },
+      memoryStats: async () => {
+        return { stats: Memory.memoryStats() };
+      },
+      memoryEvents: async (params) => {
+        return { events: Memory.listMemoryEvents(params?.limit ?? 30, params?.memoryId) };
+      },
+      memoryMaintain: async () => {
+        return Memory.runMemoryMaintenance();
+      },
+      memoryExport: async () => {
+        return Memory.exportMemories();
+      },
+      memoryImport: async ({ payload }) => {
+        return Memory.importMemories(payload);
       },
       memoryDelete: async ({ id }) => {
         Memory.deleteMemory(id);

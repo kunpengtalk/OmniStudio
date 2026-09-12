@@ -165,23 +165,56 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
     case "gatewayStatus":
       return { ok: true, data: { ...Gateway.getGatewayStatus(), apiKey: Gateway.getGatewayApiKey() } };
 
-    // 记忆写回通道：omi memory add / omi-memory MCP 桥接在应用运行时走这里，
+    // 记忆写回通道：omi memory add / omni-memory MCP 桥接在应用运行时走这里，
     // 与应用内 Agent 工具写的是同一个库。
     case "memoryAdd": {
       const content = typeof payload.content === "string" ? payload.content : "";
       if (!content.trim()) return { ok: false, error: "content is required" };
-      const category = typeof payload.category === "string" ? payload.category : undefined;
-      const tags = Array.isArray(payload.tags) ? payload.tags.map(String) : undefined;
-      const memory = Memory.saveAgentMemory(content, category as never, tags);
-      return { ok: true, data: { memory } };
+      const outcome = await Memory.saveAgentMemory({
+        content,
+        category: typeof payload.category === "string" ? (payload.category as never) : undefined,
+        tags: Array.isArray(payload.tags) ? payload.tags.map(String) : undefined,
+        sourceRef: typeof payload.sourceRef === "string" ? payload.sourceRef : "cli",
+      });
+      if (!outcome.ok) return { ok: false, error: outcome.error };
+      return { ok: true, data: { memory: outcome.result.memory, action: outcome.result.action } };
     }
     case "memorySearch": {
       const query = typeof payload.query === "string" ? payload.query : "";
       const limit = typeof payload.limit === "number" ? payload.limit : 8;
-      return { ok: true, data: { memories: Memory.searchMemories(query, limit) } };
+      const hits = await Memory.searchMemories(query, { limit, scope: "all" });
+      return { ok: true, data: { memories: hits } };
     }
     case "memoryList": {
-      return { ok: true, data: { memories: Memory.listMemories() } };
+      const status = typeof payload.status === "string" ? (payload.status as never) : "open";
+      return { ok: true, data: { memories: Memory.listMemories({ status, scope: "all" }) } };
+    }
+    case "memoryStats":
+      return { ok: true, data: Memory.memoryStats() as unknown as Record<string, unknown> };
+    case "memoryMaintain": {
+      const result = await Memory.runMemoryMaintenance();
+      return { ok: true, data: { ...result } };
+    }
+    case "memoryForget": {
+      const id = Number(payload.id ?? 0);
+      if (!Number.isFinite(id) || id <= 0) return { ok: false, error: "id is required" };
+      return { ok: true, data: { deleted: Memory.deleteMemory(id) } };
+    }
+    case "memorySetStatus": {
+      const id = Number(payload.id ?? 0);
+      const status = String(payload.status ?? "");
+      if (!Number.isFinite(id) || id <= 0) return { ok: false, error: "id is required" };
+      if (!["active", "pending", "archived", "superseded"].includes(status)) return { ok: false, error: "invalid status" };
+      Memory.setMemoryStatus(id, status as never);
+      return { ok: true, data: { id, status } };
+    }
+    case "memoryPending":
+      return { ok: true, data: { memories: Memory.pendingMemories() } };
+    case "memoryExport":
+      return { ok: true, data: Memory.exportMemories() as unknown as Record<string, unknown> };
+    case "memoryImport": {
+      const result = await Memory.importMemories(payload.payload);
+      return { ok: true, data: { ...result, errors: result.errors.slice(0, 5) } };
     }
 
     case "models": {

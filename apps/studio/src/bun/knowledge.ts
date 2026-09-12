@@ -15,6 +15,16 @@ import { db } from "./db";
 import { knowledgeBases, knowledgeDocs, knowledgeChunks } from "./db/schema";
 import type { KnowledgeBaseRow, KnowledgeDocRow } from "./db/schema";
 import { getSetting, getActiveServerPort } from "./db/settings";
+import {
+  callEmbeddings,
+  cosine,
+  decodeEmbedding,
+  embeddingHeaders,
+  encodeEmbedding,
+  resolveEmbeddingBase,
+  type EmbeddingConfig,
+} from "./embeddings";
+import { tokenize } from "./text-search";
 import { convertFileToImages, generate, type ModelEndpoint } from "./vllm";
 import { getLocalModelName } from "./vllm/model";
 import type { KbCitation, KbHit, KbDocKind } from "../shared/knowledge";
@@ -305,21 +315,8 @@ export function splitIntoChunks(text: string, chunkSize = 800, overlap = 120): s
 // 分词与 BM25 索引（内存缓存，写路径统一失效）
 // ---------------------------------------------------------------------------
 
-/** 拉丁/数字按词元，CJK 按二元组（单字短语退化为单字）。 */
-export function tokenize(text: string): string[] {
-  const tokens: string[] = [];
-  const lower = text.toLowerCase();
-  for (const m of lower.matchAll(/[a-z0-9]+/g)) tokens.push(m[0]);
-  for (const m of lower.matchAll(/[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]+/g)) {
-    const run = Array.from(m[0]);
-    if (run.length === 1) {
-      tokens.push(run[0]!);
-    } else {
-      for (let i = 0; i + 1 < run.length; i++) tokens.push(run[i]! + run[i + 1]!);
-    }
-  }
-  return tokens;
-}
+/** 与记忆库共用的分词（拉丁词元 + CJK 二元组），实现见 text-search.ts。 */
+export { tokenize };
 
 type IndexedChunk = {
   id: number;
@@ -389,95 +386,8 @@ function bm25Rank(index: KbIndex, query: string, limit: number): { id: number; s
 }
 
 // ---------------------------------------------------------------------------
-// 向量：编解码 / 调用 / 余弦
+// 向量：编解码 / 调用 / 余弦（实现见 embeddings.ts，与记忆库共用）
 // ---------------------------------------------------------------------------
-
-type EmbeddingConfig = {
-  embeddingModel: string;
-  embeddingBase: string;
-  embeddingApiKey: string;
-  embeddingDim: number | null;
-};
-
-/** 解析嵌入请求的 base（不带 /v1）：显式配置 > 云服务商槽位 > 本地推理服务。 */
-function resolveEmbeddingBase(cfg: Pick<EmbeddingConfig, "embeddingBase">): string {
-  const trimBase = (v: string) => v.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
-  if (cfg.embeddingBase.trim()) return trimBase(cfg.embeddingBase);
-  if (getSetting("SERVER_MODE") === "remote") return trimBase(getSetting("VLLM_API_BASE"));
-  const host = getSetting("SERVER_HOST") || "127.0.0.1";
-  return `http://${host}:${getActiveServerPort()}`;
-}
-
-function embeddingHeaders(apiKey: string): Record<string, string> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const key = apiKey.trim() || getSetting("VLLM_API_KEY");
-  if (key && key !== "EMPTY") headers.Authorization = `Bearer ${key}`;
-  return headers;
-}
-
-/** 调 OpenAI 兼容 /v1/embeddings，批大小 32，全部成功才返回。 */
-async function callEmbeddings(cfg: EmbeddingConfig, texts: string[]): Promise<Float32Array[]> {
-  const model = cfg.embeddingModel.trim();
-  if (!model) throw new Error("未配置嵌入模型");
-  const base = resolveEmbeddingBase(cfg);
-  if (!base) throw new Error("未配置嵌入服务地址");
-
-  const out: Float32Array[] = [];
-  for (let i = 0; i < texts.length; i += 32) {
-    const batch = texts.slice(i, i + 32);
-    const res = await fetch(`${base}/v1/embeddings`, {
-      method: "POST",
-      headers: embeddingHeaders(cfg.embeddingApiKey),
-      body: JSON.stringify({ model, input: batch }),
-      signal: AbortSignal.timeout(120_000),
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`嵌入请求失败（HTTP ${res.status}）${body.slice(0, 200)}`);
-    }
-    const json = (await res.json()) as { data?: { embedding?: number[]; index?: number }[] };
-    const data = json.data ?? [];
-    if (data.length !== batch.length) throw new Error("嵌入服务返回数量与输入不一致");
-    const ordered = new Map<number, number[]>();
-    for (const d of data) {
-      if (!Array.isArray(d.embedding)) throw new Error("嵌入服务返回格式异常");
-      ordered.set(d.index ?? ordered.size, d.embedding);
-    }
-    for (let j = 0; j < batch.length; j++) {
-      const vec = ordered.get(j);
-      if (!vec) throw new Error("嵌入服务返回缺少向量");
-      const arr = new Float32Array(vec);
-      if (cfg.embeddingDim != null && arr.length !== cfg.embeddingDim) {
-        throw new Error(`向量维度不一致（${arr.length} ≠ ${cfg.embeddingDim}），请检查嵌入模型`);
-      }
-      out.push(arr);
-    }
-  }
-  return out;
-}
-
-function encodeEmbedding(vec: Float32Array): string {
-  return Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength).toString("base64");
-}
-
-function decodeEmbedding(b64: string): Float32Array {
-  const buf = Buffer.from(b64, "base64");
-  return new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
-}
-
-function cosine(a: Float32Array, b: Float32Array): number {
-  if (a.length !== b.length) return 0;
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i]! * b[i]!;
-    na += a[i]! * a[i]!;
-    nb += b[i]! * b[i]!;
-  }
-  if (na === 0 || nb === 0) return 0;
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
 
 /** 测试嵌入配置可用性：嵌入 "ping" 并返回维度。 */
 export async function testEmbedding(input: {

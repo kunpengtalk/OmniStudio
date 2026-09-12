@@ -303,6 +303,10 @@ export async function cmdLaunch(parsed: ParsedArgs) {
   }
 
   console.log(`\n$ ${tool} ${extraArgs.join(" ")}`.trimEnd());
+  // 把当前工作目录告诉 omni-memory MCP 桥：外部 Agent 写入的记忆按项目作用域归档，
+  // 而不是全塞进全局记忆（偏好 / 技能仍然默认全局，见 memory.ts 的归属策略）。
+  if (memoryOn) env.OMNI_MEMORY_SCOPE = process.cwd();
+
   const proc = Bun.spawn([binPath, ...extraArgs], {
     env: { ...process.env, ...env },
     stdio: ["inherit", "inherit", "inherit"],

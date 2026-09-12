@@ -4,14 +4,19 @@ import { create } from "zustand";
 type MemoryUiState = {
   /** "all" | "pinned" | MemoryCategory。 */
   category: string;
+  /** "open" | "active" | "pending" | "archived" | "all"。 */
+  status: string;
   query: string;
   setCategory: (c: string) => void;
+  setStatus: (s: string) => void;
   setQuery: (q: string) => void;
 };
 
 export const useMemoryUi = create<MemoryUiState>((set) => ({
   category: "all",
+  status: "open",
   query: "",
   setCategory: (category) => set({ category }),
+  setStatus: (status) => set({ status }),
   setQuery: (query) => set({ query }),
 }));

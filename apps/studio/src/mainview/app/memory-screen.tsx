@@ -1,13 +1,16 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
+  ArchiveIcon,
   BrainIcon,
   CheckIcon,
   CopyIcon,
   GlobeIcon,
   HashIcon,
+  HistoryIcon,
   LayersIcon,
   PinIcon,
+  ShieldAlertIcon,
   SparklesIcon,
 } from "lucide-react";
 
@@ -17,7 +20,13 @@ import { cn } from "@lib/utils";
 import { useT } from "@stores/ui-lang";
 import { useMemoryUi } from "@stores/memory-ui";
 import { MEMORY_CATEGORIES, type MemoryCategory } from "@/shared/memory";
-import { MemoryEnableCard, MemoryListCard, MemorySyncCard } from "./main-layout/memory-tab";
+import {
+  MemoryEnableCard,
+  MemoryListCard,
+  MemoryMaintenanceCard,
+  MemoryPendingCard,
+  MemorySyncCard,
+} from "./main-layout/memory-tab";
 import { SettingsSection } from "./main-layout/setting-ui";
 
 /**
@@ -90,15 +99,14 @@ function MemoryApiCard() {
 
 export function MemoryScreen() {
   const t = useT();
+  // 统计在服务端算（含检索命中率、合并/拦截次数、向量化进度），界面不再拉全库。
   const { data } = useQuery({
-    queryKey: ["memories", "stats"],
-    queryFn: () => rpcClient.memoryList(undefined),
+    queryKey: ["memory-stats"],
+    queryFn: () => rpcClient.memoryStats(undefined),
   });
-  const memories = data?.memories ?? [];
-  const pinned = memories.filter((m) => m.pinned).length;
-  const fromAgents = memories.filter((m) => m.source === "agent").length;
-  const weekAgo = Date.now() - 7 * 24 * 3600 * 1000;
-  const recent = memories.filter((m) => (m.updatedAt ?? 0) > weekAgo).length;
+  const stats = data?.stats;
+  const hitRate =
+    stats && stats.searches > 0 ? `${Math.round((stats.hitSearches / stats.searches) * 100)}%` : "—";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -110,14 +118,44 @@ export function MemoryScreen() {
       <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">
         <div className="mx-auto flex max-w-3xl flex-col gap-4">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <StatCard label={t("memory.stats.total")} value={memories.length} icon={<BrainIcon className="size-4" />} />
-            <StatCard label={t("memory.stats.pinned")} value={pinned} icon={<PinIcon className="size-4" />} />
-            <StatCard label={t("memory.stats.fromAgents")} value={fromAgents} icon={<SparklesIcon className="size-4" />} />
-            <StatCard label={t("memory.stats.recent")} value={recent} icon={<GlobeIcon className="size-4" />} />
+            <StatCard label={t("memory.stats.total")} value={stats?.total ?? 0} icon={<BrainIcon className="size-4" />} />
+            <StatCard label={t("memory.stats.pinned")} value={stats?.pinned ?? 0} icon={<PinIcon className="size-4" />} />
+            <StatCard
+              label={t("memory.stats.fromAgents")}
+              value={stats?.agentWritten ?? 0}
+              icon={<SparklesIcon className="size-4" />}
+            />
+            <StatCard
+              label={t("memory.stats.recent")}
+              value={stats?.updatedLast7d ?? 0}
+              icon={<GlobeIcon className="size-4" />}
+            />
+            <StatCard
+              label={t("memory.stats.hitRate")}
+              value={hitRate}
+              icon={<HistoryIcon className="size-4" />}
+            />
+            <StatCard
+              label={t("memory.stats.merges")}
+              value={stats?.merges ?? 0}
+              icon={<LayersIcon className="size-4" />}
+            />
+            <StatCard
+              label={t("memory.stats.archived")}
+              value={stats?.archivedTotal ?? 0}
+              icon={<ArchiveIcon className="size-4" />}
+            />
+            <StatCard
+              label={t("memory.stats.blocked")}
+              value={stats?.blocked ?? 0}
+              icon={<ShieldAlertIcon className="size-4" />}
+            />
           </div>
 
           <MemoryEnableCard />
+          <MemoryPendingCard />
           <MemoryListCard />
+          <MemoryMaintenanceCard />
           <MemorySyncCard />
           <MemoryApiCard />
         </div>

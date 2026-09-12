@@ -252,22 +252,42 @@ export const CLI_SECTIONS: CliSection[] = [
       },
       {
         cmd: 'omi memory search "关键词" [--limit 8]',
-        zh: "按关键词检索记忆（默认 8 条，上限 20）。",
-        en: "Search memories by keyword (8 by default, max 20).",
+        zh: "检索记忆（默认 8 条，上限 20）。结果是排序过的：相关度为主，重要度与新鲜度加权，等价改写也能召回。",
+        en: "Search memories (8 by default, max 20), ranked by relevance with importance and freshness weighting — paraphrases match too.",
       },
       {
-        cmd: "omi memory list",
-        zh: "列出全部记忆，带编号、分类、置顶与来源（手动 / Agent）。删除可在应用的「记忆」应用里完成。",
-        en: "List every memory with id, category, pinned flag and source (manual / agent). Deletion happens in the app's Memory view.",
+        cmd: "omi memory list [--status active|pending|archived|all] [--limit n]",
+        zh: "列出记忆，带编号、分类、状态、置顶与来源。默认不含「已被取代」的旧事实。",
+        en: "List memories with id, category, status, pinned flag and source. Superseded entries are hidden by default.",
+      },
+      {
+        cmd: "omi memory stats",
+        zh: "记忆统计：条数分布（可用/待确认/归档/已取代）、分类分布、检索命中率、合并与敏感内容拦截次数、向量化进度。",
+        en: "Memory stats: counts by status and category, search hit rate, merge and secret-block counts, embedding progress.",
+      },
+      {
+        cmd: "omi memory maintain",
+        zh: "整理记忆：合并历史遗留的近似重复、归档过期或长期未用的低价值记忆（不删除，可恢复）、补齐向量。应用启动时也会自动跑一次。",
+        en: "Tidy the store: merge legacy near-duplicates, archive expired or long-unused low-value memories (never deleted, always restorable), backfill embeddings. Also runs automatically at app start.",
+      },
+      {
+        cmd: "omi memory forget <id>",
+        zh: "删除一条记忆（编号见 list / search）。用于撤回写错或已过时的内容。",
+        en: "Delete one memory by id (from list / search) — retract wrong or outdated content.",
+      },
+      {
+        cmd: "omi memory export [--out file.json]  ·  omi memory import <file.json>",
+        zh: "导出全部记忆为 JSON，或从 JSON 导入：逐条判重合并，可安全重复执行（迁移 / 备份用）。",
+        en: "Export all memories as JSON, or import from JSON with per-entry dedup and merge — safe to re-run (backup / migration).",
       },
       {
         cmd: "omi memory mcp",
         zh:
-          "把同一个记忆库作为 stdio MCP 服务器（omni-memory）暴露给宿主 Agent，提供 memory_search / memory_save / memory_list 三个工具。" +
-          "应用在不在都能用：直连 SQLite，WAL 并发安全。",
+          "把同一个记忆库作为 stdio MCP 服务器（omni-memory）暴露给宿主 Agent，提供 memory_search / memory_save / memory_forget / memory_list 四个工具。" +
+          "写入自动判重合并，可用 supersedes 取代过时记忆；应用在不在都能用：直连 SQLite，WAL 并发安全。",
         en:
-          "Expose the same memory store as a stdio MCP server (omni-memory) with three tools: memory_search / memory_save / memory_list. " +
-          "Works with or without the app running, connecting straight to SQLite (WAL-safe).",
+          "Expose the same memory store as a stdio MCP server (omni-memory) with four tools: memory_search / memory_save / memory_forget / memory_list. " +
+          "Writes are deduplicated and merged automatically, and supersedes retires outdated entries. Works with or without the app running, straight against SQLite (WAL-safe).",
         notes: [
           {
             zh: "omi launch 启动 Claude Code / Codex / OpenCode 时会自动写绝对路径并挂载它，多数情况下不用手配。",
@@ -276,9 +296,15 @@ export const CLI_SECTIONS: CliSection[] = [
         ],
       },
       {
-        cmd: "MEMORY_ENABLED=0",
-        zh: "记忆总开关。关闭后不再注入上下文文件、不给编码工具挂 MCP，内置 Agent 也不再读写记忆。",
-        en: "Master switch. When off, memory context is not injected, coding tools get no MCP server, and the built-in agent stops reading or writing memories.",
+        cmd: "MEMORY_ENABLED=0  ·  MEMORY_REVIEW_MODE=1  ·  MEMORY_EMBEDDING_MODEL=<模型>",
+        zh:
+          "记忆开关：MEMORY_ENABLED=0 关闭全部记忆能力（不注入上下文文件、不挂 MCP、内置 Agent 不读写）；" +
+          "MEMORY_REVIEW_MODE=1 让 Agent / CLI / MCP 的写入先落「待确认」，在记忆页批准后才生效；" +
+          "配置 MEMORY_EMBEDDING_MODEL（可加 MEMORY_EMBEDDING_BASE / _API_KEY）后启用向量检索，语义相近的改写也能召回。",
+        en:
+          "Memory switches: MEMORY_ENABLED=0 disables everything (no context injection, no MCP, no agent reads or writes); " +
+          "MEMORY_REVIEW_MODE=1 makes agent / CLI / MCP writes land as pending until approved in the Memory view; " +
+          "set MEMORY_EMBEDDING_MODEL (plus MEMORY_EMBEDDING_BASE / _API_KEY) to enable vector retrieval so paraphrases match.",
       },
     ],
   },

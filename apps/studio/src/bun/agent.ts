@@ -22,7 +22,7 @@ import { getChatModelName } from "./chat-model";
 import { recordUsage } from "./stats";
 import { buildAgentTools, buildReadOnlyTools } from "./agent-tools";
 import { buildMcpAgentTools } from "./mcp";
-import { buildMemoryAgentTools, memoryEnabled, memoryPromptSection } from "./memory";
+import { buildMemoryAgentTools, memoryEnabled, memoryPromptSection, memoryRecallSection } from "./memory";
 import * as Chat from "./chat";
 
 /** Agent 的三种工作模式（对齐 PI-Desktop 的 Agent / Plan / Goal）。 */
@@ -317,12 +317,18 @@ function buildSystemPrompt(mode: AgentMode, workspace: string): string {
  * 工具集 = 内置工具 + 记忆工具 + 已启用 MCP 服务器的工具（连接失败的服务器自动跳过）。
  * Plan 模式只保留内置只读工具，记忆 / MCP 工具可能有副作用，不参与"先出方案"阶段。
  */
-async function toolsForMode(mode: AgentMode, workspace: string): Promise<AgentTool<any>[]> {
+async function toolsForMode(mode: AgentMode, workspace: string, conversationId?: number): Promise<AgentTool<any>[]> {
   const allowShell = getSetting("AGENT_ALLOW_SHELL") !== "0";
   const ctx = { workspace, allowShell: allowShell && mode !== "plan" };
   const base = mode === "plan" ? buildReadOnlyTools(ctx) : buildAgentTools(ctx);
   if (mode === "plan") return base;
-  const extras = memoryEnabled() ? buildMemoryAgentTools() : [];
+  // 记忆工具带上下文：写入记项目作用域（按工作区隔离）与审计来源（哪个会话写的）。
+  const extras = memoryEnabled()
+    ? buildMemoryAgentTools({
+        scope: workspace,
+        sourceRef: conversationId ? `agent:conv-${conversationId}` : "agent",
+      })
+    : [];
   const mcpTools = await buildMcpAgentTools();
   return [...base, ...extras, ...mcpTools];
 }
@@ -407,7 +413,7 @@ async function getOrCreateSession(conversationId: number, mode: AgentMode, works
     initialState: {
       systemPrompt: buildSystemPrompt(mode, workspace),
       model,
-      tools: await toolsForMode(mode, workspace),
+      tools: await toolsForMode(mode, workspace, conversationId),
       messages: historyAsAgentMessages(conversationId),
     },
   });
@@ -459,6 +465,7 @@ function withAttachments(
   content: string,
   files: { name: string; content: string }[],
   imagePaths: string[],
+  recall?: string | null,
 ): string {
   const parts: string[] = [];
   const text = content.trim();
@@ -470,6 +477,8 @@ function withAttachments(
   for (const p of imagePaths) {
     parts.push(`--- 附件图片（本地路径）：${p} ---`);
   }
+  // 召回的记忆随用户消息一起进来（会随会话正文保留，便于回溯"当时它知道什么"）。
+  if (recall) parts.push(`--- 自动召回的相关记忆（仅供参考） ---\n${recall}\n--- 记忆结束 ---`);
   return parts.join("\n\n") || content;
 }
 
@@ -619,7 +628,13 @@ export async function runAgentTurn(opts: {
   try {
     agent.shouldStopAfterTurn = () => step >= maxSteps;
 
-    await agent.prompt(withAttachments(content, files, imagePaths));
+    // 每轮开始刷新系统提示：核心记忆（置顶 / 高重要度）可能在上几轮里变了，
+    // 一轮之内保持稳定，不影响本地推理的前缀缓存。
+    agent.state.systemPrompt = buildSystemPrompt(mode, workspace);
+    // 按当前问题召回相关记忆，拼进本轮用户消息（不改系统提示，故缓存友好）。
+    const recall = await memoryRecallSection(content, { scope: workspace }).catch(() => null);
+
+    await agent.prompt(withAttachments(content, files, imagePaths, recall));
 
     if (step >= maxSteps) {
       recordEvent({

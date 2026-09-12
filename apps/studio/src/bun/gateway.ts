@@ -1754,7 +1754,7 @@ function openApiSpec(): Record<string, unknown> {
       "/mcp": {
         post: {
           summary: "OmniStudio MCP 端点（Streamable HTTP）",
-          description: "JSON-RPC 2.0：initialize / tools/list / tools/call。工具：kb_search / kb_list（知识库检索）+ memory_search / memory_save / memory_list（共享记忆读写）。任何 MCP 客户端把本端点配置为远程（type=http）服务器即可使用；浏览器直接打开（GET）为调试工作台。",
+          description: "JSON-RPC 2.0：initialize / tools/list / tools/call。工具：kb_search / kb_list（知识库检索）+ memory_search / memory_save / memory_forget / memory_list（共享记忆读写，写入自动判重合并）。任何 MCP 客户端把本端点配置为远程（type=http）服务器即可使用；浏览器直接打开（GET）为调试工作台。",
           responses: { "200": { description: "JSON-RPC 响应" } },
         },
       },
@@ -2041,19 +2041,22 @@ function htmlResponse(html: string): Response {
 // MCP 服务 Agent —— 与 OpenMemory/Mem0 的对外形式一致）。
 // ---------------------------------------------------------------------------
 
-function handleMemoryList(url: URL): Response {
+async function handleMemoryList(url: URL): Promise<Response> {
   const q = url.searchParams.get("q") ?? url.searchParams.get("query") ?? "";
   const category = (url.searchParams.get("category") ?? undefined) as MemoryCategory | undefined;
+  const status = (url.searchParams.get("status") ?? "open") as "open" | "active" | "pending" | "archived" | "all";
   const limit = Number(url.searchParams.get("limit") ?? 0) || undefined;
-  let memories = q
-    ? Memory.searchMemories(q, limit ?? 20)
-    : Memory.listMemories(category ? { category } : undefined);
-  if (limit && memories.length > limit) memories = memories.slice(0, limit);
+  if (q) {
+    // 有查询词时走排序检索（相关度/重要度/新鲜度），便于外部程序直接消费。
+    const hits = await Memory.searchMemories(q, { limit: limit ?? 20, category });
+    return json({ memories: hits, count: hits.length });
+  }
+  const memories = Memory.listMemories({ category, status, scope: "all", limit: limit ?? 500 });
   return json({ memories, count: memories.length });
 }
 
 async function handleMemoryCreate(req: Request): Promise<Response> {
-  let body: { content?: unknown; category?: unknown; tags?: unknown };
+  let body: { content?: unknown; category?: unknown; tags?: unknown; supersedes?: unknown };
   try {
     body = await req.json();
   } catch {
@@ -2061,12 +2064,15 @@ async function handleMemoryCreate(req: Request): Promise<Response> {
   }
   const content = typeof body.content === "string" ? body.content.trim() : "";
   if (!content) return apiError(400, "content is required", "invalid_request_error");
-  const memory = Memory.saveAgentMemory(
+  const outcome = await Memory.saveAgentMemory({
     content,
-    typeof body.category === "string" ? (body.category as MemoryCategory) : undefined,
-    Array.isArray(body.tags) ? body.tags.map(String) : undefined,
-  );
-  return json({ memory }, 201);
+    category: typeof body.category === "string" ? (body.category as MemoryCategory) : undefined,
+    tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+    supersedes: Array.isArray(body.supersedes) ? body.supersedes.map(Number).filter(Number.isFinite) : undefined,
+    sourceRef: "rest",
+  });
+  if (!outcome.ok) return apiError(400, outcome.error, "invalid_request_error");
+  return json({ memory: outcome.result.memory, action: outcome.result.action }, 201);
 }
 
 async function route(req: Request): Promise<Response> {
@@ -2153,7 +2159,7 @@ async function route(req: Request): Promise<Response> {
       return handleImageGeneration(req);
     // 共享记忆 REST（Mem0 风格）：任何程序经网关读写记忆库。
     case "/v1/memories":
-      if (req.method === "GET") return handleMemoryList(url);
+      if (req.method === "GET") return await handleMemoryList(url);
       if (req.method === "POST") return handleMemoryCreate(req);
       return apiError(405, "Method Not Allowed");
     // OmniStudio MCP 服务（Streamable HTTP）：知识库检索 + 共享记忆读写。

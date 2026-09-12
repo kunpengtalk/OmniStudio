@@ -24,7 +24,7 @@ export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台
   cloud [options]      查看 / 配置云端模型服务
   models               列出本地与云端模型
   model-info <name>    查看模型详情
-  memory <子命令>      共享记忆：add / search / list / mcp（mcp 供外部 Agent 接入）
+  memory <子命令>      共享记忆：add / search / list / stats / maintain / forget / export / import / mcp
   status               查看服务器 / 网关状态
   server <action>      管理服务器：list | start | stop | restart | info | logs
   install              检查推理引擎依赖（llama.cpp / vLLM / SGLang / MLX）
@@ -89,17 +89,26 @@ export const CMD_HELP: Record<string, string> = {
 
 子命令：
   add <内容> [--category fact|preference|experience|skill|other] [--tags a,b]
-              写入一条记忆
+              写入一条记忆（重复内容自动合并；疑似密钥会被拒绝）
   search <关键词> [--limit 8]
-              检索记忆（上限 20）
-  list         列出全部记忆
+              检索记忆（按相关度/重要度/新鲜度排序，上限 20）
+  list [--status active|pending|archived|all] [--limit n]
+              列出记忆（默认排除已被取代的条目）
+  stats        记忆统计：条数、分类、检索命中率、合并/拦截次数
+  maintain     整理记忆：合并历史重复、归档过期/长期未用的低价值记忆、补向量
+  forget <id>  删除一条记忆（等同"忘掉"）
+  export [--out file.json]
+              导出全部记忆为 JSON（备份 / 迁移）
+  import <file.json>
+              从 JSON 导入（逐条判重合并，可安全重复执行）
   mcp          作为 stdio MCP 服务器运行（omni-memory，供 Claude Code /
                Codex / OpenCode 等以 MCP 工具读写同一份记忆库）
 
 示例：
   omi memory add "偏好用中文回答" --category preference --tags 偏好
   omi memory search "构建工具" --limit 5
-  omi memory list
+  omi memory stats
+  omi memory export --out memories.json
 
 接入片段见 'omi help memory mcp'；应用在运行时也可走网关：
   MCP   POST http://127.0.0.1:10000/mcp
@@ -234,9 +243,11 @@ export const TOPIC_HELP: Record<string, string> = {
 示例：
   omi memory search "构建工具"
   omi memory search 部署 --limit 3`,
-  "memory list": `列出全部共享记忆（编号、分类、来源、标签）。
+  "memory list": `列出共享记忆（编号、分类、来源、状态、标签）。
 
-用法：omi memory list
+用法：omi memory list [--status active|pending|archived|all] [--limit n]
+
+默认列出除"已被取代"之外的全部条目。
 
 说明：条目编号即应用「记忆」页里的 id；删除、置顶请在应用内操作。`,
   "memory mcp": `把共享记忆库作为 stdio MCP 服务器（omni-memory）提供给外部 Agent。
@@ -244,9 +255,10 @@ export const TOPIC_HELP: Record<string, string> = {
 用法：omi memory mcp
 
 提供的工具：
-  memory_search(query, limit)                 检索
-  memory_save(content, category?, tags?)      写入（重复内容合并）
-  memory_list()                               列出全部
+  memory_search(query, limit, category?)          检索（相关度排序）
+  memory_save(content, category?, tags?, supersedes?) 写入（重复合并 / 取代旧记忆）
+  memory_forget(id?, query?, reason?)             删除错误或过时的记忆
+  memory_list(status?, limit?)                    列出记忆
 
 Claude Code（写进 MCP 配置，omi launch claude 会自动带上等价参数）
   {"mcpServers":{"omni-memory":{"command":"omi","args":["memory","mcp"]}}}

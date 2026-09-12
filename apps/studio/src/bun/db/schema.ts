@@ -1,5 +1,6 @@
-import { sqliteTable, text, int, unique, primaryKey, index } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, int, real, unique, primaryKey, index } from "drizzle-orm/sqlite-core";
 import type { KbDocKind, KbDocStatus } from "../../shared/knowledge";
+import type { MemoryStatus } from "../../shared/memory";
 
 export type PromptKind = "image" | "llm" | "video";
 
@@ -506,28 +507,81 @@ export type KnowledgeChunkRow = typeof knowledgeChunks.$inferSelect;
 
 // ---------------------------------------------------------------------------
 // 记忆（Memory）：所有 Agent 共享的长期记忆库。
-// Agent 对话中经 memory_search / memory_save 工具读写，置顶记忆注入系统提示。
+// Agent 对话中经 memory_search / memory_save 工具读写，常驻核心记忆注入系统提示。
+// 生命周期：写入去重合并 → 检索打分（相关度/重要度/新鲜度）→ 过期归档。
 // ---------------------------------------------------------------------------
 
-export const memories = sqliteTable("memories", {
-  id: int("id").primaryKey({ autoIncrement: true }),
-  content: text("content").notNull(),
-  category: text("category")
-    .$type<"fact" | "preference" | "experience" | "skill" | "other">()
-    .notNull()
-    .default("fact"),
-  /** JSON 字符串数组。 */
-  tags: text("tags").notNull().default("[]"),
-  /** manual = 设置页录入；agent = Agent 工具写入。 */
-  source: text("source").$type<"manual" | "agent">().notNull().default("manual"),
-  /** 置顶记忆注入 Agent 系统提示（常驻核心记忆）。 */
-  pinned: int("pinned").notNull().default(0),
-  usageCount: int("usage_count").notNull().default(0),
-  lastAccessedAt: int("last_accessed_at"),
-  createdAt: int("created_at").$defaultFn(() => Date.now()),
-  updatedAt: int("updated_at")
-    .$defaultFn(() => Date.now())
-    .$onUpdateFn(() => Date.now()),
-});
+export const memories = sqliteTable(
+  "memories",
+  {
+    id: int("id").primaryKey({ autoIncrement: true }),
+    content: text("content").notNull(),
+    category: text("category")
+      .$type<"fact" | "preference" | "experience" | "skill" | "other">()
+      .notNull()
+      .default("fact"),
+    /** JSON 字符串数组。 */
+    tags: text("tags").notNull().default("[]"),
+    /** manual = 界面录入；agent = Agent 工具写入。 */
+    source: text("source").$type<"manual" | "agent">().notNull().default("manual"),
+    /** 置顶记忆注入 Agent 系统提示（常驻核心记忆）。 */
+    pinned: int("pinned").notNull().default(0),
+    usageCount: int("usage_count").notNull().default(0),
+    lastAccessedAt: int("last_accessed_at"),
+    createdAt: int("created_at").$defaultFn(() => Date.now()),
+    updatedAt: int("updated_at")
+      .$defaultFn(() => Date.now())
+      .$onUpdateFn(() => Date.now()),
+    /** 重要度 0..1：按分类给默认值，被复用/置顶时上调，参与检索打分。 */
+    importance: real("importance").notNull().default(0.5),
+    /** active=可用；pending=待用户确认；archived=归档（不注入，可检索）；superseded=已被新记忆取代。 */
+    status: text("status").$type<MemoryStatus>().notNull().default("active"),
+    /** 来源描述：ui / cli / rest / mcp:claude / agent:conv-3 等，用于审计与回溯。 */
+    sourceRef: text("source_ref"),
+    /** 项目作用域（工作区绝对路径）；NULL = 全局记忆。 */
+    scope: text("scope"),
+    /** 被哪条记忆取代（冲突更新时指向新条目）。 */
+    supersededBy: int("superseded_by"),
+    /** 可选失效时间：过期后自动归档（时间性事实）。 */
+    validUntil: int("valid_until"),
+    /** 归一化内容的 SHA-256，用于精确判重（比 content 全等更稳）。 */
+    contentHash: text("content_hash"),
+    /** 向量（Float32 base64），可选；未配置嵌入模型时为 NULL。 */
+    embedding: text("embedding"),
+    embeddingModel: text("embedding_model"),
+  },
+  (t) => ({
+    statusIdx: index("memories_status_idx").on(t.status),
+    contentHashIdx: index("memories_content_hash_idx").on(t.contentHash),
+    scopeIdx: index("memories_scope_idx").on(t.scope),
+  }),
+);
 
 export type MemoryRow = typeof memories.$inferSelect;
+
+/** 记忆审计流水：写入/合并/取代/归档/删除都留痕，供「这条记忆为什么在」的追问。 */
+export const memoryEvents = sqliteTable(
+  "memory_events",
+  {
+    id: int("id").primaryKey({ autoIncrement: true }),
+    memoryId: int("memory_id"),
+    /** created | merged | updated | superseded | forgotten | archived | approved | rejected | imported | blocked */
+    action: text("action").notNull(),
+    /** 事件细节（JSON）：旧文本、相似度、命中原因等。 */
+    detail: text("detail"),
+    createdAt: int("created_at").$defaultFn(() => Date.now()),
+  },
+  (t) => ({
+    memoryIdx: index("memory_events_memory_id_idx").on(t.memoryId),
+    actionIdx: index("memory_events_action_idx").on(t.action),
+  }),
+);
+
+export type MemoryEventRow = typeof memoryEvents.$inferSelect;
+
+/** 记忆指标计数器（key/value）：检索命中率、合并次数、拦截次数等，供记忆页展示。 */
+export const memoryMetrics = sqliteTable("memory_metrics", {
+  key: text("key").primaryKey(),
+  value: int("value").notNull().default(0),
+});
+

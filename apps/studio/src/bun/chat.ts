@@ -10,6 +10,7 @@ import { recordUsage } from "./stats";
 import { webSearch } from "./web-search";
 import { getStatus, getLastError, startServer } from "./server-manager";
 import { buildChatContext } from "./knowledge";
+import { memoryEnabled, memoryRecallSection } from "./memory";
 import type { KbCitation } from "../shared/knowledge";
 
 export type ChatMessage = {
@@ -882,6 +883,14 @@ async function buildPayloadMessages(
     const ctx = await buildChatContext(kbIds, latestQuery);
     if (ctx.system) payloadMessages.unshift({ role: "system", content: ctx.system });
     citations = ctx.citations;
+  }
+
+  // 普通对话也吃共享记忆：按当前提问召回相关记忆，作为 system 注入（不落库）。
+  if (memoryEnabled() && latestQuery.trim()) {
+    const recall = await memoryRecallSection(latestQuery).catch(() => null);
+    if (recall) {
+      payloadMessages.unshift({ role: "system", content: `## 相关长期记忆（自动召回）\n${recall}` });
+    }
   }
 
   return { messages: payloadMessages, citations };

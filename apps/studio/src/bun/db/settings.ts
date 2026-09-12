@@ -127,6 +127,11 @@ export type SettingsKey =
   | "WEB_SEARCH_MAX_RESULTS"
   /** 记忆总开关：Agent 获得记忆工具，置顶记忆注入系统提示。 */
   | "MEMORY_ENABLED"
+  | "MEMORY_REVIEW_MODE"
+  | "MEMORY_EMBEDDING_MODEL"
+  | "MEMORY_EMBEDDING_BASE"
+  | "MEMORY_EMBEDDING_API_KEY"
+  | "MEMORY_SCOPE_ENABLED"
   | "TRANSLATION_ENGINE"
   | "AGENT_WORKSPACE"
   | "AGENT_WORKSPACES"
@@ -281,6 +286,14 @@ const DEFAULTS: Record<SettingsKey, string> = {
   WEB_SEARCH_API_KEY: "",
   WEB_SEARCH_MAX_RESULTS: "5",
   MEMORY_ENABLED: "1",
+  /** Agent / CLI / MCP 的写入先落「待确认」，用户在记忆页批准后才生效（0=直接生效）。 */
+  MEMORY_REVIEW_MODE: "0",
+  /** 记忆向量检索（可选）：留空则纯关键词检索。 */
+  MEMORY_EMBEDDING_MODEL: "",
+  MEMORY_EMBEDDING_BASE: "",
+  MEMORY_EMBEDDING_API_KEY: "",
+  /** 是否把 Agent 写入记为项目记忆（按工作区隔离，1=开启）。 */
+  MEMORY_SCOPE_ENABLED: "1",
   TRANSLATION_ENGINE: "model",
   AGENT_WORKSPACE: "",
   /** 最近使用的工作区列表（JSON 数组），供输入框上方的工作区选择面板展示。 */
