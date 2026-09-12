@@ -9,6 +9,7 @@ import {
   CpuIcon,
   DownloadIcon,
   ExternalLinkIcon,
+  FolderIcon,
   FolderOpenIcon,
   HardDriveIcon,
   Loader2Icon,
@@ -38,6 +39,7 @@ import {
   ENGINE_OPTIONS,
   ENGINE_PORT_KEYS,
   ENGINE_EXTRA_ARGS_KEYS,
+  ENGINE_SHORT_NAMES,
   MODEL_PRESETS,
   fileKind,
   engineSupports,
@@ -47,6 +49,7 @@ import {
   type InferenceEngine,
   type MarketFile,
   type ModelCategory,
+  type ModelFileKind,
   type ModelSource,
 } from "@/shared/modelscope";
 import { MODEL_PROFILES } from "@/shared/model-profiles";
@@ -337,15 +340,20 @@ function ModelConfigCard({ engine }: { engine: InferenceEngine }) {
               onValueChange={(v) => patch.mutate({ MLX_MODEL: v })}
               disabled={busy}
             >
-              <SelectTrigger className="h-8 text-xs">
+              <SelectTrigger className="h-9 w-full text-xs">
                 <SelectValue placeholder={t("engine.mlxSelectPlaceholder")} />
               </SelectTrigger>
-              <SelectContent className="max-h-72 max-w-sm">
+              <SelectContent className="w-[30rem] max-w-[min(30rem,90vw)]">
                 {mlxPresets.map((p) => (
                   <SelectItem key={p.repo} value={p.repo}>
-                    <span className="flex min-w-0 items-center gap-2">
-                      <span className="truncate">{p.label}</span>
-                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/70">MLX</span>
+                    <span className="min-w-0 flex-1 truncate">{p.label}</span>
+                    <span className="flex shrink-0 items-center gap-1.5">
+                      <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
+                        {ENGINE_SHORT_NAMES.mlx}
+                      </span>
+                      <span className="max-w-44 truncate text-[10px] text-muted-foreground/70">
+                        {p.repo}
+                      </span>
                     </span>
                   </SelectItem>
                 ))}
@@ -360,22 +368,34 @@ function ModelConfigCard({ engine }: { engine: InferenceEngine }) {
               onValueChange={(v) => setActiveMutation.mutate(v)}
               disabled={setActiveMutation.isPending || busy}
             >
-              <SelectTrigger className="h-8 text-xs">
+              <SelectTrigger className="h-9 w-full text-xs">
                 <SelectValue placeholder={t("engine.modelPlaceholder")} />
               </SelectTrigger>
-              <SelectContent className="max-h-72 max-w-sm">
+              <SelectContent className="w-[30rem] max-w-[min(30rem,90vw)]">
                 {installedModels
-                  .filter((m) => engineSupports(engine, fileKind(m.fileName)))
+                  // 目录条目（vLLM / SGLang / MLX 的整个仓库）文件名没有扩展名，
+                  // 格式要按目录内容判定，否则 safetensors 仓库会被当成 other 漏掉。
+                  .filter((m) => engineSupports(engine, m.kind ?? fileKind(m.fileName)))
                   .map((m) => {
-                    const kind = fileKind(m.fileName);
+                    const kind = m.kind ?? fileKind(m.fileName);
                     return (
                       <SelectItem key={m.path} value={m.path}>
-                        <span className="flex min-w-0 items-center gap-2">
+                        <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                          {m.isDir && (
+                            <FolderIcon className="size-3 shrink-0 text-muted-foreground/60" />
+                          )}
                           <span className="truncate">{m.fileName}</span>
-                          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/70">
-                            {kind === "gguf" ? "GGUF" : kind === "safetensors" ? "safetensors" : "·"}
-                            {m.isActive ? ` · ${t("models.inUse")}` : ""}
+                        </span>
+                        <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted-foreground/70">
+                          {m.isActive && <span className="text-primary">{t("models.inUse")}</span>}
+                          <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
+                            {kind === "gguf"
+                              ? "GGUF"
+                              : kind === "safetensors"
+                                ? "safetensors"
+                                : t("models.format.other")}
                           </span>
+                          <span className="max-w-44 truncate">{m.repo}</span>
                         </span>
                       </SelectItem>
                     );
@@ -661,13 +681,16 @@ function InstalledModelRow({
     favorite: boolean;
     /** 下载来源平台（老数据可能没有）。 */
     source?: ModelSource;
+    /** path 是目录（整仓库模型）时为 true；格式按目录内容判定。 */
+    isDir?: boolean;
+    kind?: ModelFileKind;
   };
   engine: InferenceEngine;
 }) {
   const queryClient = useQueryClient();
   const t = useT();
   const serverStatus = useServerStore((s) => s.status);
-  const kind = fileKind(model.fileName);
+  const kind = model.kind ?? fileKind(model.fileName);
   const compatible = engineSupports(engine, kind);
   const [startError, setStartError] = useState<string | null>(null);
 
@@ -728,6 +751,9 @@ function InstalledModelRow({
     <div className="flex items-center gap-3 rounded-lg border p-3">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
+          {model.isDir && (
+            <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
+          )}
           <span className="truncate text-sm font-medium">{model.fileName}</span>
           <span
             className={cn(
@@ -864,7 +890,7 @@ export function InstalledModels({ engine }: { engine: InferenceEngine }) {
   }
 
   const allModels = (data?.models ?? []).filter(
-    (m) => fileKind(m.fileName) === "other" || engineSupports(engine, fileKind(m.fileName)),
+    (m) => (m.kind ?? fileKind(m.fileName)) === "other" || engineSupports(engine, m.kind ?? fileKind(m.fileName)),
   );
   const models = tab === "all" ? allModels : allModels.filter((m) => (m.category ?? "other") === tab);
 

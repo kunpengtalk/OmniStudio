@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AudioLinesIcon,
+  FolderIcon,
   ImageIcon,
   LanguagesIcon,
   MicIcon,
@@ -12,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { ENGINE_SHORT_NAMES } from "@/shared/engines";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import {
@@ -245,10 +247,10 @@ function ChatModelCard() {
           setOpen(false);
         }}
       >
-        <SelectTrigger size="sm" className="h-8 min-w-0 flex-1 text-xs">
+        <SelectTrigger size="sm" className="h-9 min-w-0 flex-1 text-xs">
           <SelectValue placeholder={t("defaults.notSet")} />
         </SelectTrigger>
-        <SelectContent position="popper" sideOffset={6} className="max-w-80">
+        <SelectContent position="popper" sideOffset={6} className="w-[30rem] max-w-[min(30rem,90vw)]">
           <div className="sticky top-0 z-10 bg-popover p-1.5 pb-1" onKeyDown={(e) => e.stopPropagation()}>
             <Input
               value={query}
@@ -279,10 +281,24 @@ function ChatModelCard() {
               <SelectLabel>{t("chat.modelLocal")}</SelectLabel>
               {localOptions.map((o) => (
                 <SelectItem key={o.value} value={o.value}>
-                  <span className="truncate">{o.label}</span>
-                  {o.detail && (
-                    <span className="truncate text-[10px] text-muted-foreground/70">{o.detail}</span>
-                  )}
+                  <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                    {o.isDir && (
+                      <FolderIcon className="size-3 shrink-0 text-muted-foreground/60" />
+                    )}
+                    <span className="truncate">{o.label}</span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    {o.engine && (
+                      <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
+                        {ENGINE_SHORT_NAMES[o.engine]}
+                      </span>
+                    )}
+                    {o.detail && (
+                      <span className="max-w-44 truncate text-[10px] text-muted-foreground/70">
+                        {o.detail}
+                      </span>
+                    )}
+                  </span>
                 </SelectItem>
               ))}
             </SelectGroup>
@@ -292,9 +308,11 @@ function ChatModelCard() {
               <SelectLabel>{t("chat.modelApi")}</SelectLabel>
               {apiOptions.map((o) => (
                 <SelectItem key={o.value} value={o.value}>
-                  <span className="truncate">{o.label}</span>
+                  <span className="min-w-0 flex-1 truncate">{o.label}</span>
                   {o.detail && (
-                    <span className="truncate text-[10px] text-muted-foreground/70">{o.detail}</span>
+                    <span className="max-w-44 shrink-0 truncate text-[10px] text-muted-foreground/70">
+                      {o.detail}
+                    </span>
                   )}
                 </SelectItem>
               ))}

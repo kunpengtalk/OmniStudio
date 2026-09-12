@@ -4,6 +4,7 @@ import path from "path";
 import {
   fileKind,
   isModelWeightExt,
+  modelDisplayName,
   type ModelFileKind,
   type ModelOrigin,
   type ModelSource,
@@ -22,7 +23,9 @@ import { isInsideDir } from "./path-safety";
  *               mlx-lm / hf_hub_download 拉下来的模型都在这里。
  *
  * 扫描不要求标准目录结构：任意深度的子目录里只要有权重文件就算数。
- * 每条记录额外给出 `runtimeTarget`：推理引擎真正该加载的路径（见下）。
+ * 但**粒度**要对：vLLM / SGLang / MLX 的仓库（config.json + 分片权重）是一个模型，
+ * 列表里就必须是一条目录条目，而不是每个 `model-00001-of-00004.safetensors` 一条
+ * （见 `isRepoModelDir`）。每条记录额外给出 `runtimeTarget`：推理引擎真正该加载的路径。
  */
 
 export type { ModelOrigin };
@@ -30,6 +33,7 @@ export type { ModelOrigin };
 export type ScannedModel = {
   /** 展示用的仓库标识：managed/external 是相对目录，hf-cache 是 `org/repo`。 */
   repo: string;
+  /** 展示名：目录条目是仓库名（`Qwen__Qwen3.5-4B` → `Qwen3.5-4B`），文件条目是文件名。 */
   fileName: string;
   path: string;
   size: number;
@@ -40,8 +44,14 @@ export type ScannedModel = {
    * 只有 llama.cpp 需要精确的 .gguf 文件，所以按"目录里有 config.json 就是目录"判定。
    */
   runtimeTarget: string;
-  /** 整仓库条目（HF 缓存按仓库聚合成一行，path 指向 snapshot 目录）。 */
+  /** 整仓库条目（仓库目录 / HF 缓存条目聚合成一行，path 指向该目录）。 */
   isDir: boolean;
+  /**
+   * 条目包含的权重文件名（整仓库条目是仓库里的全部权重，分批 GGUF 是它的各个分片）。
+   * 市场页靠它判断"这个文件是不是已经下过了"——目录条目只有一个记录，
+   * 只比对 `fileName` 会把仓库里的文件都当成没下载。
+   */
+  files?: string[];
   /** 下载来源平台（应用下载的模型由 .vllm-meta.json 提供，HF 缓存固定是 huggingface）。 */
   source?: ModelSource;
 };
@@ -88,16 +98,82 @@ export function getScanDirs(): { dir: string; origin: ModelOrigin }[] {
  */
 export function resolveRuntimeTarget(filePath: string): string {
   const lower = filePath.toLowerCase();
-  if (lower.endsWith(".gguf") || lower.endsWith(".ggml")) return filePath;
+  if (lower.endsWith(".gguf") || lower.endsWith(".ggml")) {
+    // 分批 GGUF 交给 llama.cpp 时也要给第一个分片，给中间某片是加载不了的
+    return firstSplitShardPath(filePath) ?? filePath;
+  }
   try {
     const st = statSync(filePath);
     if (st.isDirectory()) return filePath;
     const dir = path.dirname(filePath);
-    if (existsSync(path.join(dir, "config.json"))) return dir;
+    if (isRepoModelDir(dir)) return dir;
   } catch {
     // 文件不可读时按原样返回，交给上层报错
   }
   return filePath;
+}
+
+/** 分片权重的命名：`model-00001-of-00004.safetensors`（HF 分片仓库的统一命名）。 */
+const SHARD_WEIGHT_RE = /-\d{5}-of-\d{5}\.(safetensors|bin|pt)$/i;
+
+/** 分批 GGUF 的分片命名：`GLM-5.2-UD-Q3_K_M-00003-of-00009.gguf`。 */
+const SPLIT_GGUF_RE = /^(.*)-(\d{5})-of-(\d{5})\.gguf$/i;
+
+/**
+ * 分批 GGUF 的展示名（`GLM-5.2-UD-Q3_K_M-00003-of-00009.gguf` → `GLM-5.2-UD-Q3_K_M.gguf`）；
+ * 不是分片时返回 null。llama.cpp 只认第一个分片，分片名不该出现在模型名里。
+ */
+export function splitGgufBaseName(fileName: string): string | null {
+  const m = SPLIT_GGUF_RE.exec(fileName);
+  if (!m) return null;
+  return `${m[1]}.gguf`;
+}
+
+/**
+ * 一个 gguf 分片对应的**第一个分片**路径；只有第一个分片能加载（其余分片由
+ * llama.cpp 顺序读入）。不是分片、或第一个分片不在磁盘上（下载不完整）时返回 null。
+ */
+export function firstSplitShardPath(filePath: string): string | null {
+  const m = SPLIT_GGUF_RE.exec(path.basename(filePath));
+  if (!m || m[2] === "00001") return null;
+  const first = path.join(path.dirname(filePath), `${m[1]}-00001-of-${m[3]}.gguf`);
+  return existsSync(first) ? first : null;
+}
+
+/**
+ * 加载目标路径的展示名（服务名 slug 的来源）：分批 GGUF 指向第一个分片，
+ * 名字不该带 `-00001-of-00009`；目录 / 普通文件就是自己的名字。
+ */
+export function modelNameForPath(target: string): string {
+  const base = path.basename(target);
+  return splitGgufBaseName(base) ?? base;
+}
+
+/**
+ * 目录是不是"整仓库"模型目录 —— vLLM / SGLang / MLX 加载的是整个目录，
+ * 单独拿一个分片文件是加载不了的，所以列表里必须按目录聚成一条，
+ * 而不是把 `model-00001-of-00004.safetensors` 这类分片名当成模型名摆出来。
+ *
+ * 判定依据是仓库布局本身，不是猜名字：
+ *   - 顶层有分片命名权重；
+ *   - 顶层有分片索引（`model.safetensors.index.json` / `pytorch_model.bin.index.json`）；
+ *   - 顶层有 `config.json`（HF 仓库根的标志）+ 非 GGUF 权重。
+ * 纯 GGUF 仓库（`unsloth/xxx-GGUF` 这类 config.json + 多个量化文件）**不算**：
+ * 每个量化都是能单独加载的模型，聚成一条用户就没法挑量化了。
+ */
+export function isRepoModelDir(dir: string): boolean {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return false;
+  }
+  if (names.some((n) => isModelWeightExt(n) && SHARD_WEIGHT_RE.test(n))) return true;
+  if (names.some((n) => n.toLowerCase().endsWith(".index.json"))) return true;
+  const nonGgufWeight = names.some(
+    (n) => fileKind(n) === "safetensors" || /\.(bin|pt|pth|ckpt)$/i.test(n),
+  );
+  return names.includes("config.json") && nonGgufWeight;
 }
 
 /**
@@ -189,29 +265,167 @@ function walkWeights(root: string): { files: WalkHit[]; truncated: boolean } {
   return { files: out, truncated };
 }
 
-/** repo 标签：相对扫描根目录的目录名；根目录下的文件用根目录名。 */
-function repoLabel(root: string, filePath: string): string {
-  const rel = path.relative(root, path.dirname(filePath));
+/**
+ * 扫描一棵目录树，产出两类结果：
+ *   - `repos`：整仓库模型目录（vLLM / SGLang / MLX 加载的粒度），一条 = 一个模型；
+ *   - `files`：能单独加载的权重文件（GGUF 量化、`.bin` / `.pt` 这类单文件模型）。
+ * 命中仓库目录后不再往下走：里面的分片和子目录都属于同一个模型。
+ */
+function walkModelTree(root: string): {
+  repos: { dir: string; files: WalkHit[] }[];
+  files: WalkHit[];
+  truncated: boolean;
+} {
+  const repos: { dir: string; files: WalkHit[] }[] = [];
+  const files: WalkHit[] = [];
+  const seenReal = new Set<string>();
+  let truncated = false;
+
+  const visit = (dir: string, depth: number) => {
+    if (truncated || depth > MAX_DEPTH) return;
+    if (isRepoModelDir(dir)) {
+      const found = walkWeights(dir);
+      // 有 config.json 但没有权重（只下了 tokenizer 之类）时不聚合，继续往下走
+      if (found.files.length > 0) {
+        truncated ||= found.truncated;
+        repos.push({ dir, files: found.files });
+        return;
+      }
+    }
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (files.length + repos.length >= MAX_MODELS) {
+        truncated = true;
+        return;
+      }
+      const name = entry.name;
+      if (name.startsWith(".")) continue;
+      const full = path.join(dir, name);
+      const st = statOrNull(full);
+      if (!st) continue;
+      if (st.isDir) {
+        const real = realKey(full);
+        if (seenReal.has(real)) continue;
+        seenReal.add(real);
+        visit(full, depth + 1);
+      } else if (isModelWeightExt(name)) {
+        files.push({ path: full, size: st.size });
+      }
+    }
+  };
+
+  visit(root, 0);
+  return { repos, files, truncated };
+}
+
+/** repo 标签：相对扫描根目录的路径；根目录下的文件用根目录名。 */
+function repoLabel(root: string, target: string): string {
+  const rel = path.relative(root, path.dirname(target));
   if (!rel || rel === ".") return path.basename(root);
   return rel.split(path.sep).join("/");
 }
 
-/** 扫描一个普通目录（应用下载目录 / 用户目录），逐文件一行。 */
+/** 仓库目录条目的 repo 标签：相对扫描根的目录本身（不是它的父目录）。 */
+function repoDirLabel(root: string, dir: string): string {
+  const rel = path.relative(root, dir);
+  if (!rel || rel === ".") return path.basename(root);
+  return rel.split(path.sep).join("/");
+}
+
+/**
+ * 扫描一个普通目录（应用下载目录 / 用户目录）。
+ *
+ * 仓库目录聚成一条（`LiquidAI/LFM2-1.2B-4bit` → 一条，而不是 4 条分片），
+ * 其余能单独加载的权重逐文件一条（GGUF 量化、`.bin` / `.pt` 单文件模型）。
+ */
 export function scanPlainDir(root: string, origin: ModelOrigin): ScannedModel[] {
-  const { files } = walkWeights(root);
-  return files.map((f) => {
-    const fileName = path.basename(f.path);
-    return {
-      repo: repoLabel(root, f.path),
-      fileName,
-      path: f.path,
-      size: f.size,
-      kind: fileKind(fileName),
+  const { repos, files } = walkModelTree(root);
+
+  const out: ScannedModel[] = repos.map((r) => ({
+    repo: repoDirLabel(root, r.dir),
+    // 目录名可能是 safeRepoId 编码过的（`Qwen__Qwen3.5-4B`），展示名取仓库名那一段
+    fileName: modelDisplayName(path.basename(r.dir)),
+    path: r.dir,
+    size: r.files.reduce((sum, f) => sum + f.size, 0),
+    // 与 setActiveModel / getLaunchCommand 用同一个判定，保证列表徽标与实际加载的引擎一致
+    kind: dirModelKind(r.dir),
+    origin,
+    runtimeTarget: r.dir,
+    isDir: true,
+    files: r.files.map((f) => path.basename(f.path)),
+  }));
+
+  for (const e of fileEntries(files)) {
+    out.push({
+      repo: repoLabel(root, e.path),
+      fileName: e.fileName,
+      path: e.path,
+      size: e.size,
+      kind: fileKind(e.fileName),
       origin,
-      runtimeTarget: resolveRuntimeTarget(f.path),
+      runtimeTarget: resolveRuntimeTarget(e.path),
       isDir: false,
-    };
-  });
+      files: e.members,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * 权重文件 → 待展示的条目。
+ *
+ * 分批 GGUF 的分片合成一条：同一个量化被切成 N 片时只有第一个分片能加载
+ * （其余由 llama.cpp 顺序读入），N 个分片各算一个"模型"既没意义、选错了还启动不了。
+ * 第一个分片不在磁盘上（下载不完整）时保留逐片展示，免得把残缺的分片当成完整模型。
+ */
+function fileEntries(files: WalkHit[]): { path: string; fileName: string; size: number; members: string[] }[] {
+  const out: { path: string; fileName: string; size: number; members: string[] }[] = [];
+  const buckets = new Map<string, WalkHit[]>();
+  for (const f of files) {
+    const m = SPLIT_GGUF_RE.exec(path.basename(f.path));
+    if (!m) {
+      out.push({
+        path: f.path,
+        fileName: path.basename(f.path),
+        size: f.size,
+        members: [path.basename(f.path)],
+      });
+      continue;
+    }
+    const key = `${path.dirname(f.path)}\0${m[1]}\0${m[3]}`;
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(f);
+    else buckets.set(key, [f]);
+  }
+  for (const bucket of buckets.values()) {
+    const names = bucket.map((f) => path.basename(f.path));
+    const first = bucket.find((f) => SPLIT_GGUF_RE.exec(path.basename(f.path))?.[2] === "00001");
+    if (!first) {
+      for (const f of bucket) {
+        out.push({
+          path: f.path,
+          fileName: path.basename(f.path),
+          size: f.size,
+          members: [path.basename(f.path)],
+        });
+      }
+      continue;
+    }
+    out.push({
+      path: first.path,
+      fileName: splitGgufBaseName(path.basename(first.path)) ?? path.basename(first.path),
+      size: bucket.reduce((sum, f) => sum + f.size, 0),
+      // 成员是磁盘上真实的分片名（`X.gguf` 只是展示名，别拿它去比对"下过没有"）
+      members: names,
+    });
+  }
+  return out;
 }
 
 /**
@@ -281,6 +495,7 @@ export function scanHfCache(hubDir: string): ScannedModel[] {
       origin: "hf-cache",
       runtimeTarget: best.dir,
       isDir: true,
+      files: best.files.map((f) => path.basename(f.path)),
       source: "huggingface",
     });
   }

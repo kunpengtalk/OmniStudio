@@ -2,6 +2,7 @@ import type { Subprocess } from "bun";
 import { existsSync } from "fs";
 import { getModelProfile, type ServerArgs } from "../../shared/model-profiles";
 import { getSetting } from "../db/settings";
+import { modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
@@ -154,7 +155,7 @@ export class LlamaRuntime implements Runtime {
         model = {
           kind: "local",
           path: modelOverride,
-          alias: slugModelFileName(modelOverride.split(/[\\/]/).pop() ?? "model"),
+          alias: slugModelFileName(modelNameForPath(modelOverride)),
         };
       } else {
         model = { kind: "hf", ref: modelOverride };

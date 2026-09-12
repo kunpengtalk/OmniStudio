@@ -1,6 +1,7 @@
 import type { Subprocess } from "bun";
 import { existsSync } from "fs";
 import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/settings";
+import { modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
@@ -133,7 +134,7 @@ export class VllmRuntime implements Runtime {
     if (modelOverride) {
       model = modelOverride;
       if (existsSync(modelOverride)) {
-        servedName = slugModelFileName(modelOverride.split(/[\\/]/).pop() ?? "model");
+        servedName = slugModelFileName(modelNameForPath(modelOverride));
       }
     } else {
       const resolved = this.resolveModel();

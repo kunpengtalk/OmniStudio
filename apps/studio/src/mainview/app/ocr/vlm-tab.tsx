@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpIcon,
   CheckCircle2Icon,
+  FolderIcon,
   GlobeIcon,
   Loader2Icon,
   PlayIcon,
@@ -108,7 +109,8 @@ export function VlmTab({
     queryFn: () => rpcClient.listInstalledModels(),
   });
   const installedModels = (installedData?.models ?? [])
-    .filter((m) => engineSupports(engine, fileKind(m.fileName)))
+    // 目录条目（整个仓库）文件名没有扩展名，格式按目录内容判定。
+    .filter((m) => engineSupports(engine, m.kind ?? fileKind(m.fileName)))
     .sort((a, b) => Number(b.isActive) - Number(a.isActive));
 
   useEffect(() => {
@@ -389,19 +391,25 @@ export function VlmTab({
               </div>
             ) : (
               <Select value={selectedModel?.path ?? ""} onValueChange={selectModel}>
-                <SelectTrigger className="h-8 w-full text-xs">
+                <SelectTrigger className="h-9 w-full text-xs">
                   <SelectValue placeholder={t("ocr.vlm.model")} />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="w-[28rem] max-w-[min(28rem,90vw)]">
                   {installedModels.map((m) => (
                     <SelectItem key={m.path} value={m.path} className="text-xs">
-                      <span className="flex w-full items-center justify-between gap-2">
+                      <span className="flex w-full min-w-0 items-center justify-between gap-2">
                         <span className="truncate">{m.fileName}</span>
-                        {m.isActive ? (
-                          <span className="shrink-0 text-[10px] text-emerald-500">
-                            {t("ocr.vlm.activeModel")}
+                        <span className="flex shrink-0 items-center gap-1.5">
+                          {m.isDir && <FolderIcon className="size-3 text-muted-foreground/60" />}
+                          <span className="max-w-40 truncate text-[10px] text-muted-foreground/70">
+                            {m.repo}
                           </span>
-                        ) : null}
+                          {m.isActive ? (
+                            <span className="text-[10px] text-emerald-500">
+                              {t("ocr.vlm.activeModel")}
+                            </span>
+                          ) : null}
+                        </span>
                       </span>
                     </SelectItem>
                   ))}

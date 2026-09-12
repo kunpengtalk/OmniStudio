@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { basename, dirname, join } from "path";
+import { dirname, join } from "path";
 import { homedir } from "os";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { ParsedArgs } from "../args";
@@ -7,10 +7,11 @@ import { optBool, optString } from "../args";
 import { controlRequest, ensureAppRunning } from "../client";
 import {
   getAllSettingsFallback,
+  servedNameForModelPathFallback,
   setActiveModelFallback,
   updateSettingsFallback,
 } from "../db";
-import { formatBytes, slugModelFileName } from "../format";
+import { formatBytes } from "../format";
 import { pickNumbered } from "../tui";
 import { getInstalledModels } from "./models";
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
@@ -821,7 +822,10 @@ async function resolveModel(
     if (existsSync(flag)) {
       const active = installed.some((m) => m.path === flag && m.isActive);
       await setActive(connected, flag);
-      return { name: slugModelFileName(basename(flag)), path: flag, changed: !active };
+      // 服务名走与 setActiveModel 同一套解析：分批 GGUF 落到第一个分片、仓库目录落到
+      // 目录名，直接用 basename 会把 `-00001-of-00009` 或 `org__repo` 带进模型 id。
+      const name = await servedNameForModelPathFallback(flag);
+      return { name, path: flag, changed: !active };
     }
     const match = installed.find(
       (m) => m.servedName === flag || m.fileName === flag || m.repo === flag,

@@ -105,7 +105,7 @@ export function IntegrationModelSelect({
       <SelectTrigger size="sm" className="h-8 w-full text-xs">
         <SelectValue placeholder={placeholder ?? t("settings.integrations.selectModel")} />
       </SelectTrigger>
-      <SelectContent position="popper" sideOffset={6} className="max-w-80">
+      <SelectContent position="popper" sideOffset={6} className="w-[28rem] max-w-[min(28rem,90vw)]">
         <div
           className="sticky top-0 z-10 bg-popover p-1.5 pb-1"
           onKeyDown={(e) => e.stopPropagation()}
@@ -140,9 +140,11 @@ export function IntegrationModelSelect({
             <SelectLabel>{t("chat.modelLocal")}</SelectLabel>
             {shownLocal.map((o) => (
               <SelectItem key={`local-${o.label}`} value={o.label}>
-                <span className="truncate">{o.label}</span>
+                <span className="min-w-0 flex-1 truncate">{o.label}</span>
                 {o.detail && (
-                  <span className="truncate text-[10px] text-muted-foreground/70">{o.detail}</span>
+                  <span className="max-w-40 shrink-0 truncate text-[10px] text-muted-foreground/70">
+                    {o.detail}
+                  </span>
                 )}
               </SelectItem>
             ))}
@@ -153,9 +155,11 @@ export function IntegrationModelSelect({
             <SelectLabel>{t("chat.modelApi")}</SelectLabel>
             {shownApi.map((o) => (
               <SelectItem key={`api-${o.label}`} value={o.label}>
-                <span className="truncate">{o.label}</span>
+                <span className="min-w-0 flex-1 truncate">{o.label}</span>
                 {o.detail && (
-                  <span className="truncate text-[10px] text-muted-foreground/70">{o.detail}</span>
+                  <span className="max-w-40 shrink-0 truncate text-[10px] text-muted-foreground/70">
+                    {o.detail}
+                  </span>
                 )}
               </SelectItem>
             ))}

@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import path from "path";
-import { getModelsBaseDir, safeRepoId, isModelWeightExt } from "./modelscope";
+import { getModelsBaseDir, safeRepoId, isModelWeightExt, modelDisplayName } from "./modelscope";
 import {
   dirModelKind,
   getExtraModelDirs,
   getHfHubCacheDir,
   getScanDirs,
+  modelNameForPath,
   resolveRuntimeTarget,
   scanModelSources,
 } from "./model-scan";
@@ -64,11 +65,12 @@ const VALID_CATEGORIES: ModelCategory[] = ["chat", "tts", "asr", "image", "other
 const VALID_SOURCES: ModelSource[] = ["modelscope", "huggingface"];
 
 /**
- * 从文件所在目录往上找到最近的 `.vllm-meta.json`（分类 / 下载来源）。
- * 下载落盘时写在仓库顶层目录，嵌套子目录里的文件要靠向上查找才能命中。
+ * 从权重文件 / 仓库目录往上找到最近的 `.vllm-meta.json`（分类 / 下载来源）。
+ * 下载落盘时写在仓库顶层目录，嵌套子目录里的文件要靠向上查找才能命中；
+ * 目录条目（整个仓库一行）直接从目录本身开始找。
  */
-function readRepoMetaFor(filePath: string, root: string): RepoMeta {
-  let dir = path.dirname(filePath);
+function readRepoMetaFor(target: string, root: string, isDir: boolean): RepoMeta {
+  let dir = isDir ? target : path.dirname(target);
   const stop = path.resolve(root);
   // 最多向上 8 层，且不越过扫描根目录
   for (let i = 0; i < 8; i += 1) {
@@ -155,7 +157,7 @@ export function listInstalledModels(): InstalledModel[] {
     const meta =
       m.origin === "hf-cache"
         ? {}
-        : readRepoMetaFor(m.path, roots.get(m.origin) ?? getModelsBaseDir());
+        : readRepoMetaFor(m.path, roots.get(m.origin) ?? getModelsBaseDir(), m.isDir);
     return {
       repo: m.repo,
       fileName: m.fileName,
@@ -173,6 +175,7 @@ export function listInstalledModels(): InstalledModel[] {
       isDir: m.isDir,
       kind: m.kind,
       runtimeTarget: m.runtimeTarget,
+      files: m.files,
     };
   });
 }
@@ -199,7 +202,8 @@ function ensureEngineForKind(kind: ModelFileKind): void {
 
 /** 服务端模型名：目录条目取仓库名（HF 缓存路径的 sha 目录不能当名字用）。 */
 function servedNameForTarget(target: string, isDir: boolean): string {
-  if (!isDir) return slugModelFileName(path.basename(target));
+  // 分批 GGUF 指向第一个分片，服务名不带 `-00001-of-00009`（见 modelNameForPath）
+  if (!isDir) return slugModelFileName(modelNameForPath(target));
   let name = path.basename(target);
   if (/^[0-9a-f]{7,64}$/i.test(name)) {
     const snapshots = path.dirname(target);
@@ -207,8 +211,29 @@ function servedNameForTarget(target: string, isDir: boolean): string {
       const entry = path.basename(path.dirname(snapshots));
       name = entry.replace(/^models--/, "").split("--").pop() || entry;
     }
+  } else {
+    // 应用下载目录的目录名是 safeRepoId 编码过的（`Qwen__Qwen3.5-4B`），
+    // 服务名取仓库名那一段，别把编码后的 `__` 带进模型 ID。
+    name = modelDisplayName(name);
   }
   return slugModelFileName(name);
+}
+
+/**
+ * 本地模型路径 → 服务名（slug）。
+ *
+ * 与 `setActiveModel` 写入 `LOCAL_MODEL_NAME` 用的是同一套解析：分批 GGUF 落到第一个
+ * 分片、仓库目录落到目录，所以 CLI / 预览命令算出来的名字和服务器实际提供的一致。
+ */
+export function servedNameForModelPath(modelPath: string): string {
+  const target = resolveRuntimeTarget(modelPath);
+  let isDir = false;
+  try {
+    isDir = statSync(target).isDirectory();
+  } catch {
+    // 不可读时按文件处理，交给调用方报错
+  }
+  return servedNameForTarget(target, isDir);
 }
 
 /**
@@ -295,10 +320,13 @@ export function deleteLocalModel(pathToModel: string): { ok: boolean; error?: st
       const st = statSync(abs);
       freed = st.isDirectory() ? dirSize(abs) : st.size;
       rmSync(abs, { recursive: true, force: true });
-      // 仓库目录里没有权重文件了就顺手把元数据一起清掉。
-      const dir = path.dirname(abs);
-      if (existsSync(dir) && readdirSync(dir).filter((n) => isModelWeightExt(n)).length === 0) {
-        rmSync(path.join(dir, META_FILE), { force: true });
+      // 单文件删完后仓库目录里没有权重文件了，顺手把元数据一起清掉。
+      // （目录条目本身就是仓库目录，元数据在它里面，已经跟着删掉了。）
+      if (!st.isDirectory()) {
+        const dir = path.dirname(abs);
+        if (existsSync(dir) && readdirSync(dir).filter((n) => isModelWeightExt(n)).length === 0) {
+          rmSync(path.join(dir, META_FILE), { force: true });
+        }
       }
     }
   } catch (e) {

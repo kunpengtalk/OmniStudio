@@ -162,7 +162,9 @@ function ensureActiveModel(model: string, backend: Backend): string {
   if (!path) return model; // 未匹配到本地文件 → 当作远端模型 id 透传
   const res = backend.modelStore.setActiveModel(path);
   if (!res.ok) fail(res.error ?? "激活模型失败");
-  return backend.modelStore.slugModelFileName(basename(path));
+  // 用与 setActiveModel 同一套解析：分批 GGUF 落到第一个分片、仓库目录落到目录，
+  // 算出来的名字必须和服务器实际提供的模型 id 一致。
+  return backend.modelStore.servedNameForModelPath(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +260,7 @@ async function cmdModel(ctx: Ctx, args: string[]) {
       if (!path) fail(`找不到模型「${ref}」。先 \`omni model list\` 看可用的文件名。`);
       const res = backend.modelStore.setActiveModel(path);
       if (!res.ok) fail(res.error ?? "激活失败");
-      const slug = backend.modelStore.slugModelFileName(basename(path));
+      const slug = backend.modelStore.servedNameForModelPath(path);
       json
         ? console.log(JSON.stringify({ ok: true, path, model: slug }, null, 2))
         : console.log(`已激活: ${slug}\n路径: ${path}`);

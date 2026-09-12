@@ -7,7 +7,7 @@ import { getModelProfile } from "../shared/model-profiles";
 import {
   fileKind,
   engineSupports,
-  resolveEngineForModel,
+  resolveEngineForKind,
   type InferenceEngine,
 } from "../shared/modelscope";
 import * as ModelStore from "./model-store";
@@ -79,6 +79,8 @@ export type ChatModelOption = {
   isActive: boolean;
   /** 本地模型将用哪个推理引擎启动（api 选项无此字段） */
   engine?: InferenceEngine;
+  /** 本地仓库目录条目（vLLM / SGLang / MLX 加载整个目录）：UI 上标成文件夹。 */
+  isDir?: boolean;
 };
 
 /** 从配置的 OpenAI 兼容服务拉取 /v1/models 列表（失败时返回空数组）。 */
@@ -112,7 +114,8 @@ export async function listChatModels(): Promise<{ models: ChatModelOption[] }> {
   const engine = (getSetting("INFERENCE_ENGINE") || "llama.cpp") as InferenceEngine;
   const localSeen = new Set<string>();
   for (const m of ModelStore.listInstalledModels()) {
-    const kind = fileKind(m.fileName);
+    // 目录条目（vLLM / SGLang / MLX 的整个仓库）按目录内容判格式，文件名没有扩展名。
+    const kind = m.kind ?? fileKind(m.fileName);
     const compatible = engineSupports(engine, kind);
     const isChat =
       m.category === "chat" ||
@@ -125,7 +128,8 @@ export async function listChatModels(): Promise<{ models: ChatModelOption[] }> {
       label: ModelStore.slugModelFileName(m.fileName),
       detail: m.repo,
       isActive: m.isActive,
-      engine: resolveEngineForModel(m.fileName, engine),
+      engine: resolveEngineForKind(kind, engine),
+      isDir: m.isDir,
     });
   }
   // MLX 引擎：部署模型是 HF repo id（不是本地文件），单独作为选项展示并绑定 CHAT_MODEL。

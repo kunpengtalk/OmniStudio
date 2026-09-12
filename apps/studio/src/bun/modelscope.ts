@@ -3,6 +3,7 @@ import path from "path";
 import {
   isModelWeightExt,
   matchFormat,
+  modelDisplayName,
   modelFormats,
   safeRepoId,
   type MarketFile,
@@ -13,7 +14,7 @@ import {
 import { getDataDir } from "./paths";
 import { safeJoin } from "./path-safety";
 
-export { isModelWeightExt, safeRepoId };
+export { isModelWeightExt, modelDisplayName, safeRepoId };
 export type { MarketFile, MarketModel };
 
 const MODELSCOPE_BASE = "https://modelscope.cn";

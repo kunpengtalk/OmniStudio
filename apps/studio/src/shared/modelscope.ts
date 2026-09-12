@@ -14,6 +14,7 @@ export {
   ENGINE_INSTALL_HINTS,
   ENGINE_OPTIONS,
   ENGINE_PORT_KEYS,
+  ENGINE_SHORT_NAMES,
   ENGINE_SPECS,
   SEARCH_FORMATS,
   engineSearchFormat,
@@ -52,9 +53,19 @@ export function resolveEngineForModel(
   fileName: string,
   currentEngine: InferenceEngine,
 ): InferenceEngine {
-  const kind = fileKind(fileName);
+  return resolveEngineForKind(fileKind(fileName), currentEngine);
+}
+
+/**
+ * 同上，但格式由调用方给出 —— 已安装列表里的**目录条目**（vLLM / SGLang / MLX
+ * 的整个仓库）文件名没有扩展名，格式要按目录内容判定（`InstalledModel.kind`）。
+ */
+export function resolveEngineForKind(
+  kind: ModelFileKind,
+  currentEngine: InferenceEngine,
+): InferenceEngine {
   if (engineSupports(currentEngine, kind)) return currentEngine;
-  return engineForModelFile(fileName) ?? currentEngine;
+  return engineForModelKind(kind) ?? currentEngine;
 }
 
 /** 模型来源平台 —— 检索走哪个站点、下载走哪条链路、UI 上打的哪个标都由它决定。 */
@@ -135,6 +146,18 @@ export function matchFormat(
 /** Directory name used for a downloaded repo under the models base dir. */
 export function safeRepoId(repo: string): string {
   return repo.replace(/[/\\:\s]+/g, "__");
+}
+
+/**
+ * 仓库/模型目录名 → 展示名（`safeRepoId` 的逆向取值）。
+ *
+ * 下载目录用 `safeRepoId` 编码过（`Qwen__Qwen3.5-4B`），用户自己的目录可能本来就是
+ * `org/repo` 结构，两者都取最后一段做展示名：`Qwen__Qwen3.5-4B` → `Qwen3.5-4B`。
+ * 展示名同时是服务名（`--served-model-name`）的来源，UI 与推理服务必须用同一个。
+ */
+export function modelDisplayName(dirName: string): string {
+  const parts = dirName.split(/[/\\]+|__+/).filter(Boolean);
+  return parts.length > 0 ? parts[parts.length - 1]! : dirName;
 }
 
 /**
@@ -236,6 +259,11 @@ export type InstalledModel = {
   kind: ModelFileKind;
   /** 推理引擎实际加载的路径（目录或文件）。 */
   runtimeTarget: string;
+  /**
+   * 条目包含的权重文件名（整仓库条目 = 仓库里的全部权重，分批 GGUF = 它的分片）。
+   * 市场页用它判断"这个文件下过没有"：目录条目只有一条记录，只比 fileName 会漏。
+   */
+  files?: string[];
 };
 
 export type ModelCategory = "chat" | "tts" | "asr" | "image" | "other";

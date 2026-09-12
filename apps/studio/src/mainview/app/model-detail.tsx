@@ -35,6 +35,7 @@ import {
 } from "../../shared/modelscope";
 import type { ModelFileKind } from "../../shared/modelscope";
 import { SourceBadge } from "@components/source-badge";
+import { installedFileNames } from "@/mainview/lib/installed-models";
 import { cn } from "@/mainview/lib/utils";
 
 function formatBytes(bytes: number): string {
@@ -82,8 +83,9 @@ function FileRow({
     queryFn: () => rpcClient.listInstalledModels(),
   });
 
-  const installedPaths = new Set((installedModels.data?.models ?? []).map((m) => m.fileName));
-  // 已安装列表存的是文件名，仓库里的文件可能是 `BF16/xxx.gguf` 这样的子目录路径。
+  // 已安装列表存的是文件名，仓库里的文件可能是 `BF16/xxx.gguf` 这样的子目录路径；
+  // 整仓库条目（一个仓库一条记录）的成员文件在 `files` 里，由 installedFileNames 摊平。
+  const installedPaths = installedFileNames(installedModels.data?.models ?? []);
   const isInstalledHere = installedPaths.has(fileBaseName(file.name));
   const task = tasks.find((t) => t.repo === repo && t.fileName === file.name && t.status !== "canceled");
 
@@ -275,7 +277,7 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
     queryFn: () => rpcClient.listInstalledModels(),
   });
   const installedNames = useMemo(
-    () => new Set((installedData?.models ?? []).map((m) => m.fileName)),
+    () => installedFileNames(installedData?.models ?? []),
     [installedData],
   );
 
@@ -603,7 +605,7 @@ function DownloadRecommendedButton({
     queryKey: ["installed-models"],
     queryFn: () => rpcClient.listInstalledModels(),
   });
-  const installedNames = new Set((installed.data?.models ?? []).map((m) => m.fileName));
+  const installedNames = installedFileNames(installed.data?.models ?? []);
 
   const singleFile = file.kind === "gguf";
   const targets = singleFile ? [file] : repoFiles.length > 0 ? repoFiles : [file];

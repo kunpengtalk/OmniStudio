@@ -51,3 +51,9 @@ export async function activeModelPathFallback(): Promise<string> {
   const { modelStore } = await appModules();
   return modelStore.getActiveModelPath();
 }
+
+/** 本地模型路径 → 服务名：与主进程 setActiveModel 写入 LOCAL_MODEL_NAME 的解析一致。 */
+export async function servedNameForModelPathFallback(path: string): Promise<string> {
+  const { modelStore } = await appModules();
+  return modelStore.servedNameForModelPath(path);
+}

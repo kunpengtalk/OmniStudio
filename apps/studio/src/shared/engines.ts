@@ -106,6 +106,18 @@ export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, string> = Object.fr
   ENGINE_IDS.map((id) => [id, ENGINE_SPECS[id].extraArgsKey]),
 ) as Record<InferenceEngine, string>;
 
+/**
+ * 引擎短名（品牌名，不翻译）。选择器里的徽标用这个，不要用 `settings.engine.*`：
+ * 那几个是设置页的完整说明（「MLX（Apple Silicon，MLX 模型）」），放进一行模型
+ * 条目里会把模型名挤到只剩省略号。
+ */
+export const ENGINE_SHORT_NAMES: Record<InferenceEngine, string> = {
+  "llama.cpp": "llama.cpp",
+  vllm: "vLLM",
+  sglang: "SGLang",
+  mlx: "MLX",
+};
+
 /** 缺失引擎的安装提示。 */
 export const ENGINE_INSTALL_HINTS: Record<InferenceEngine, string> = Object.fromEntries(
   ENGINE_IDS.map((id) => [id, ENGINE_SPECS[id].installHint]),

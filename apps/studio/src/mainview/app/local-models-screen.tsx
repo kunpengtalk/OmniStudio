@@ -331,20 +331,30 @@ function LaunchBar({ installedModels, engine }: { installedModels: InstalledMode
             onValueChange={(v) => selectMutation.mutate(v)}
             disabled={selectMutation.isPending || busy}
           >
-            <SelectTrigger className="h-8 text-xs">
+            <SelectTrigger className="h-9 text-xs">
               <SelectValue placeholder={t("models.chooseModelEmpty")} />
             </SelectTrigger>
-            <SelectContent className="max-w-sm">
+            <SelectContent className="w-[30rem] max-w-[min(30rem,90vw)]">
               {compatibleModels.map((m) => {
-                const kind = fileKind(m.fileName);
+                const kind = m.kind ?? fileKind(m.fileName);
                 return (
                   <SelectItem key={m.path} value={m.path}>
-                    <span className="flex min-w-0 items-center gap-2">
+                    <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                      {m.isDir && (
+                        <FolderIcon className="size-3 shrink-0 text-muted-foreground/60" />
+                      )}
                       <span className="truncate">{m.fileName}</span>
-                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/70">
-                        {kind === "gguf" ? "GGUF" : kind === "safetensors" ? "safetensors" : "·"}
-                        {m.isActive ? ` · ${t("models.inUse")}` : ""}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted-foreground/70">
+                      {m.isActive && <span className="text-primary">{t("models.inUse")}</span>}
+                      <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
+                        {kind === "gguf"
+                          ? "GGUF"
+                          : kind === "safetensors"
+                            ? "safetensors"
+                            : t("models.format.other")}
                       </span>
+                      <span className="max-w-44 truncate">{m.repo}</span>
                     </span>
                   </SelectItem>
                 );
@@ -505,6 +515,9 @@ function InstalledModelRow({
     <div className="flex items-center gap-3 rounded-lg border p-3">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
+          {model.isDir && (
+            <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
+          )}
           <span className="truncate text-sm font-medium">{model.fileName}</span>
           <span
             className={cn(

@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangleIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
+import { AlertTriangleIcon, FolderIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { ENGINE_SHORT_NAMES } from "@/shared/engines";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import {
@@ -101,10 +102,15 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
         }}
         disabled={busy || disabled}
       >
-        <SelectTrigger size="sm" className="h-7 max-w-64 text-xs">
+        <SelectTrigger size="sm" className="h-8 min-w-36 max-w-72 text-xs">
           <SelectValue placeholder={t("chat.modelEmpty")} />
         </SelectTrigger>
-        <SelectContent className="max-w-80" position="popper" align="end" sideOffset={6}>
+        <SelectContent
+          className="w-[30rem] max-w-[min(30rem,90vw)]"
+          position="popper"
+          align="end"
+          sideOffset={6}
+        >
           {/* 搜索框：拦截键盘事件，避免被 Select 的 typeahead 抢走焦点 */}
           <div
             className="sticky top-0 z-10 bg-popover p-1.5 pb-1"
@@ -133,15 +139,20 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
               <SelectLabel>{t("chat.modelLocal")}</SelectLabel>
               {localOptions.map((o) => (
                 <SelectItem key={`local-${o.value}`} value={o.value}>
-                  <span className="truncate">{o.label}</span>
-                  <span className="flex min-w-0 items-center gap-1">
+                  <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                    {o.isDir && (
+                      <FolderIcon className="size-3 shrink-0 text-muted-foreground/60" />
+                    )}
+                    <span className="truncate">{o.label}</span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-1.5">
                     {o.engine && (
                       <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
-                        {t(`settings.engine.${o.engine}`)}
+                        {ENGINE_SHORT_NAMES[o.engine]}
                       </span>
                     )}
                     {o.detail && (
-                      <span className="truncate text-[10px] text-muted-foreground/70">
+                      <span className="max-w-40 truncate text-[10px] text-muted-foreground/70">
                         {o.detail}
                       </span>
                     )}
@@ -155,9 +166,9 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
               <SelectLabel>{t("chat.modelApi")}</SelectLabel>
               {apiOptions.map((o) => (
                 <SelectItem key={`api-${o.value}`} value={o.value}>
-                  <span className="truncate">{o.label}</span>
+                  <span className="min-w-0 flex-1 truncate">{o.label}</span>
                   {o.detail && (
-                    <span className="truncate text-[10px] text-muted-foreground/70">
+                    <span className="max-w-40 shrink-0 truncate text-[10px] text-muted-foreground/70">
                       {o.detail}
                     </span>
                   )}
