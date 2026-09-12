@@ -354,7 +354,16 @@ export function MediaSetupDialog() {
                           <button
                             type="button"
                             aria-pressed={model === candidate.id}
-                            onClick={() => setModel(candidate.id)}
+                            onClick={() => {
+                              // 来自「云端模型」的候选自带服务商地址与 Key：选中就切到
+                              // 云端生图并按这份配置确认，不必让用户再手填一遍。
+                              if (candidate.apiBase) {
+                                setBackend("api");
+                                setApiBase(candidate.apiBase);
+                                if (candidate.apiKey !== undefined) setApiKey(candidate.apiKey);
+                              }
+                              setModel(candidate.id);
+                            }}
                             className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
                           >
                             <span className="truncate text-xs font-medium">{candidate.label}</span>

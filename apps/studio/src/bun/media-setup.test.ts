@@ -1,10 +1,26 @@
 import { afterAll, expect, mock, test } from "bun:test";
 
 import type { MediaSetupAnswer, MediaSetupPayload } from "./media-setup";
+import type { CloudProviderInfo } from "../shared/cloud-providers";
 
 // ---------------------------------------------------------------------------
-// 不做模块 mock：bunfig 的 test-preload 已把数据目录指向本进程专属临时目录。
+// 生图配置走真实 settings（bunfig 的 test-preload 已把数据目录指向本进程专属临时目录）。
+//
+// 云服务商这一层则用内存 fake：bun 的 mock.module 会在同进程内跨文件泄漏，
+// 别的测试文件把 ./db 换成自己的临时库并删掉之后，真实 cloud-providers 再读写
+// 那张表会直接 SQLITE_IOERR_VNODE —— 整个套件一起跑时才暴露，单跑本文件却正常。
 // ---------------------------------------------------------------------------
+const fakeProviders: CloudProviderInfo[] = [];
+
+mock.module("./cloud-providers", () => ({
+  activeProviderId: () => fakeProviders[0]?.id ?? null,
+  listCloudProviders: () => ({
+    providers: fakeProviders,
+    activeId: fakeProviders[0]?.id ?? null,
+  }),
+  getCloudProviderInfo: (id: string) => fakeProviders.find((p) => p.id === id) ?? null,
+}));
+
 const MediaSetup = await import("./media-setup");
 const { getSetting, updateSettings } = await import("./db/settings");
 
@@ -158,6 +174,116 @@ test("工具调用里显式指定了模型：只补后端配置，不再问用�
     expect(seen).toHaveLength(1); // 只有"补配置"这一次弹窗
   } finally {
     stop();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 「云端模型」（云服务商）里已经配好的生图模型：生图这条路以前完全看不见它们，
+// 于是只会弹窗让用户把地址与 Key 再手填一遍。下面这几条钉住「配过就别再问」。
+// ---------------------------------------------------------------------------
+
+/** 造一个配好 Key 与模型清单的云服务商，返回 id（用完记得删）。 */
+function addCloudProvider(input: { name: string; baseUrl: string; models: string[]; apiKey?: string }) {
+  const id = `test-${input.name}-${fakeProviders.length}`;
+  fakeProviders.push({
+    id,
+    name: input.name,
+    vendor: "测试",
+    baseUrl: input.baseUrl,
+    apiKey: input.apiKey ?? "sk-test",
+    models: input.models.map((modelId) => ({ id: modelId })),
+    createdAt: 0,
+    updatedAt: 0,
+  });
+  return id;
+}
+
+function removeCloudProvider(id: string) {
+  const index = fakeProviders.findIndex((p) => p.id === id);
+  if (index >= 0) fakeProviders.splice(index, 1);
+}
+
+test("cloudImageCandidates 只认配好地址 + Key 的服务商里的生图模型", async () => {
+  const ready = addCloudProvider({
+    name: "SiliconFlow",
+    baseUrl: "https://api.siliconflow.cn/v1",
+    models: ["Qwen/Qwen-Image", "deepseek-v4-flash"],
+  });
+  const noKey = addCloudProvider({
+    name: "还没填 Key",
+    baseUrl: "https://example.com/v1",
+    models: ["flux-dev"],
+    apiKey: "",
+  });
+  try {
+    const ids = MediaSetup.cloudImageCandidates().map((c) => c.id);
+    expect(ids).toContain("Qwen/Qwen-Image");
+    expect(ids).not.toContain("deepseek-v4-flash"); // 对话模型不是生图候选
+    expect(ids).not.toContain("flux-dev"); // 没填 Key 的服务商不算「配过」
+  } finally {
+    removeCloudProvider(ready);
+    removeCloudProvider(noKey);
+  }
+});
+
+test("「云端模型」里只有一个生图模型：直接采用，不弹窗", async () => {
+  updateSettings({ IMG_BACKEND: "api", IMG_API_BASE: "", IMG_API_KEY: "", IMG_MODEL: "" });
+  const provider = addCloudProvider({
+    name: "SiliconFlow",
+    baseUrl: "https://api.siliconflow.cn/v1",
+    models: ["Qwen/Qwen-Image"],
+  });
+  const { seen, stop } = fakeWebview([]);
+  try {
+    const res = await MediaSetup.prepareImageGeneration();
+    expect(res).toEqual({ ok: true, model: "Qwen/Qwen-Image" });
+    expect(seen).toHaveLength(0); // 用户已经配过，不该再问一遍
+    expect(getSetting("IMG_API_BASE")).toBe("https://api.siliconflow.cn/v1");
+    expect(getSetting("IMG_API_KEY")).toBe("sk-test");
+    expect(getSetting("IMG_MODEL")).toBe("Qwen/Qwen-Image");
+  } finally {
+    stop();
+    removeCloudProvider(provider);
+  }
+});
+
+test("「云端模型」里有多个生图模型：列出来让用户挑，挑谁用谁的地址", async () => {
+  updateSettings({ IMG_BACKEND: "api", IMG_API_BASE: "", IMG_API_KEY: "", IMG_MODEL: "" });
+  const a = addCloudProvider({
+    name: "SiliconFlow",
+    baseUrl: "https://api.siliconflow.cn/v1",
+    models: ["Qwen/Qwen-Image"],
+  });
+  const b = addCloudProvider({
+    name: "自建服务",
+    baseUrl: "http://127.0.0.1:9/v1",
+    models: ["flux-dev"],
+    apiKey: "sk-local",
+  });
+  const { seen, stop } = fakeWebview([
+    (payload) => {
+      expect(payload.reason).toBe("choose-model");
+      expect(payload.candidates.map((c) => c.id)).toEqual(["Qwen/Qwen-Image", "flux-dev"]);
+      // 界面选中「自建服务」那一行时就是这样回传的（地址 / Key 来自服务商）。
+      return {
+        action: "confirm",
+        backend: "api",
+        model: "flux-dev",
+        apiBase: "http://127.0.0.1:9/v1",
+        apiKey: "sk-local",
+      };
+    },
+  ]);
+  try {
+    const res = await MediaSetup.prepareImageGeneration();
+    expect(res).toEqual({ ok: true, model: "flux-dev" });
+    expect(seen).toHaveLength(1);
+    expect(getSetting("IMG_API_BASE")).toBe("http://127.0.0.1:9/v1");
+    expect(getSetting("IMG_API_KEY")).toBe("sk-local");
+  } finally {
+    stop();
+    removeCloudProvider(a);
+    removeCloudProvider(b);
   }
 });
 

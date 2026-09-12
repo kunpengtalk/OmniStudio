@@ -3,7 +3,7 @@ import { existsSync } from "fs";
 import { resolve as resolvePath } from "path";
 import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/settings";
 import { markServerStarted } from "../stats";
-import { extractStartupError } from "./errors";
+import { extractDeadWorkerError, extractStartupError } from "./errors";
 import { MAX_LOG_CHARS, killProcessTree, pumpServerOutput, spawnServerProcess, waitExit } from "./proc";
 import type {
   BinaryCheckResult,
@@ -343,6 +343,22 @@ export class MlxRuntime implements Runtime {
         try {
           const res = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) });
           if (res.ok) {
+            // /v1/models 通了不等于模型加载好了：加载在后台线程里，线程死掉时 HTTP
+            // 服务照样应答（表现就是界面显示「运行中」但每次都生不出东西）。
+            const deadWorker = extractDeadWorkerError(this.serverLogs);
+            if (deadWorker) {
+              const proc = this.serverProcess;
+              this.appendLog(`\n[mlx] ${deadWorker}\n`);
+              if (proc) {
+                killProcessTree(proc, "SIGTERM");
+                // 先等 exited 的既有处理器跑完（它也会写状态），再盖章成 error。
+                await proc.exited.catch(() => {});
+                this.serverProcess = null;
+              }
+              this.lastError = deadWorker;
+              this.setStatus("error");
+              return { ok: false, error: deadWorker };
+            }
             this.setStatus("running");
             this.appendLog("\n[server is ready]\n");
             markServerStarted();
