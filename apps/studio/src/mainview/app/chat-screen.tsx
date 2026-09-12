@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpIcon,
@@ -445,6 +445,12 @@ function KbPickerDialog({
   );
 }
 
+/**
+ * 流式输出时只有最后一条消息会被替换成新对象，其余消息引用不变；
+ * memo 让历史气泡整段跳过重渲染（否则每个增量都会重渲染整个会话）。
+ */
+const MemoizedMessageBubble = memo(MessageBubble);
+
 function ChatMessages({ conversationId }: { conversationId: number }) {
   const queryClient = useQueryClient();
   const t = useT();
@@ -633,7 +639,7 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
             </div>
           ) : (
             activeMessages.map((m) => (
-              <MessageBubble
+              <MemoizedMessageBubble
                 key={m.id}
                 message={m}
                 isStreamingMessage={

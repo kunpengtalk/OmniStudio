@@ -28,6 +28,8 @@ export type DownloadTask = {
 const MAX_CONCURRENT = 2;
 const EMIT_THROTTLE_MS = 300;
 const PERSIST_THROTTLE_MS = 1000;
+/** 进度事件广播节流（webview 每条进度都会写 store 并重渲染）。 */
+const PROGRESS_EMIT_MS = 400;
 const TASKS_SETTINGS_KEY = "MODEL_DOWNLOADS";
 
 /**
@@ -256,6 +258,7 @@ export class DownloadManager {
 
     let lastTime = Date.now();
     let lastBytes = task.received;
+    let lastProgressEmit = 0;
 
     try {
       const dl = task.source === "huggingface" ? downloadHuggingFaceFile : downloadFile;
@@ -272,8 +275,13 @@ export class DownloadManager {
             lastTime = now;
             lastBytes = p.received;
           }
-          for (const cb of this.progressListeners) {
-            cb({ repo: task.repo, fileName: task.fileName, progress: p });
+          // 并行分片下载时底层回调很密，这里再节流一次：webview 侧每条进度都会
+          // 触发一次 store 写入 + 重渲染，400ms 足够流畅（任务状态字段始终最新）。
+          if (now - lastProgressEmit >= PROGRESS_EMIT_MS) {
+            lastProgressEmit = now;
+            for (const cb of this.progressListeners) {
+              cb({ repo: task.repo, fileName: task.fileName, progress: p });
+            }
           }
           this.emit(false);
         },

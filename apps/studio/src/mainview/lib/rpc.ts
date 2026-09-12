@@ -94,9 +94,9 @@ const rpc = Electroview.defineRPC<AppRPC>({
         vc.setPhase("error");
       },
       modelDownloadProgress: ({ repo, fileName, progress }) => {
+        // 只更新进度显示。"已下载模型"列表在 downloadsChanged 的完成分支里刷新
+        // ——下载过程中每次进度都 invalidate 会让 30GB 下载全程反复全量扫盘。
         useModelDownloadStore.getState().setProgress(repo, fileName, progress);
-        queryClient.invalidateQueries({ queryKey: ["installed-models"] });
-        queryClient.invalidateQueries({ queryKey: ["tts-local-models"] });
       },
       downloadsChanged: ({ tasks }) => {
         const store = useModelDownloadStore.getState();

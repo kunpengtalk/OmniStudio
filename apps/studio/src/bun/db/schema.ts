@@ -1,4 +1,4 @@
-import { sqliteTable, text, int, unique, primaryKey } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, int, unique, primaryKey, index } from "drizzle-orm/sqlite-core";
 import type { KbDocKind, KbDocStatus } from "../../shared/knowledge";
 
 export type PromptKind = "image" | "llm" | "video";
@@ -72,7 +72,10 @@ export const messages = sqliteTable("messages", {
   /** assistant 消息：知识库引用溯源（KbCitation[] 的 JSON）。 */
   citations: text("citations"),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
-});
+}, (t) => ({
+  // 会话消息按 conversation_id 取用/分组；无索引时每次刷新会话列表都全表扫描。
+  convIdx: index("messages_conversation_id_idx").on(t.conversationId),
+}));
 
 /**
  * Agent 运行轨迹（工具调用、状态变更）。会话正文仍落在 messages 里，
@@ -93,7 +96,10 @@ export const agentEvents = sqliteTable("agent_events", {
   output: text("output"),
   isError: int("is_error").notNull().default(0),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
-});
+}, (t) => ({
+  // 会话轨迹按 conversation_id 读取（打开会话时一次性加载）。
+  convIdx: index("agent_events_conversation_id_idx").on(t.conversationId),
+}));
 
 export const imageRecords = sqliteTable("image_records", {
   id: int("id").primaryKey({ autoIncrement: true }),
@@ -471,7 +477,10 @@ export const knowledgeDocs = sqliteTable("knowledge_docs", {
   updatedAt: int("updated_at")
     .$defaultFn(() => Date.now())
     .$onUpdateFn(() => Date.now()),
-});
+}, (t) => ({
+  // 文档列表 / 统计按 kb_id 过滤。
+  kbIdx: index("knowledge_docs_kb_id_idx").on(t.kbId),
+}));
 
 export const knowledgeChunks = sqliteTable("knowledge_chunks", {
   id: int().primaryKey({ autoIncrement: true }),
@@ -484,7 +493,11 @@ export const knowledgeChunks = sqliteTable("knowledge_chunks", {
   /** Float32Array 的 base64；NULL = 未向量化。 */
   embedding: text("embedding"),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
-});
+}, (t) => ({
+  // 召回按 kb_id 全量取块、重嵌入/删除按 doc_id 定位。
+  kbIdx: index("knowledge_chunks_kb_id_idx").on(t.kbId),
+  docIdx: index("knowledge_chunks_doc_id_idx").on(t.docId),
+}));
 
 export type KnowledgeBaseRow = typeof knowledgeBases.$inferSelect;
 export type KnowledgeDocRow = typeof knowledgeDocs.$inferSelect;

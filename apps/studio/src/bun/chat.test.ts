@@ -94,14 +94,22 @@ afterAll(() => {
 test("sendMessage streams, persists content+tokens and emits stats", async () => {
   const conv = createConversation(undefined, "chat");
   const events: string[] = [];
-  const offChunk = onChatChunk(() => events.push("chunk"));
+  const deltas: string[] = [];
+  // 增量按 ~40ms 批量下发（减少 IPC 与前端重渲染），事件条数不再等于 token 数：
+  // 这里断言真正的不变量 —— 内容一字不丢、done 最后收尾。
+  const offChunk = onChatChunk((payload) => {
+    events.push("chunk");
+    if (payload.kind !== "reasoning") deltas.push(payload.delta);
+  });
   const offDone = onChatDone(() => events.push("done"));
   const stats: number[] = [];
   const offStats = onChatStats((s) => stats.push(s.tokens));
 
   const res = await sendMessage(conv.id, "hello");
   expect(res.ok).toBe(true);
-  expect(events).toEqual(["chunk", "chunk", "done"]);
+  expect(deltas.join("")).toBe("你好世界");
+  expect(events.length).toBeGreaterThan(0);
+  expect(events.at(-1)).toBe("done");
   expect(stats).toEqual([4]);
 
   const { messages } = getConversation(conv.id);

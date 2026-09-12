@@ -454,16 +454,47 @@ async function streamAssistantReply(opts: {
   let full = "";
   let reasoning = "";
 
+  /**
+   * 增量按帧批量下发：模型侧每个 token 一次 RPC 会让 webview 每秒重建几十次
+   * 消息数组、并整段重解析 Markdown。40ms 一批（≈25fps）保持"逐字"观感，
+   * 同时把 IPC 与前端重渲染次数降一个数量级。
+   */
+  const FLUSH_INTERVAL_MS = 40;
+  let pendingContent = "";
+  let pendingReasoning = "";
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const flushChunks = () => {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    if (pendingContent) {
+      emitChunk({ conversationId, messageId: assistantId, delta: pendingContent, kind: "content" });
+      pendingContent = "";
+    }
+    if (pendingReasoning) {
+      emitChunk({ conversationId, messageId: assistantId, delta: pendingReasoning, kind: "reasoning" });
+      pendingReasoning = "";
+    }
+  };
+  const scheduleFlush = () => {
+    if (!flushTimer) flushTimer = setTimeout(flushChunks, FLUSH_INTERVAL_MS);
+  };
+
   const appendContent = (delta: string) => {
     if (!delta) return;
     full += delta;
-    emitChunk({ conversationId, messageId: assistantId, delta, kind: "content" });
+    pendingContent += delta;
+    // 即时消费方（语音通话边生成边合成）仍按 token 回调，不走批量缓冲。
     opts.onDelta?.(delta);
+    scheduleFlush();
   };
   const appendReasoning = (delta: string) => {
     if (!delta) return;
     reasoning += delta;
-    emitChunk({ conversationId, messageId: assistantId, delta, kind: "reasoning" });
+    pendingReasoning += delta;
+    scheduleFlush();
   };
 
   const startedAt = performance.now();
@@ -536,6 +567,8 @@ async function streamAssistantReply(opts: {
     if (buffer.trim()) consumeLine(buffer);
 
     recordUsage(model, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0);
+    // 收尾前先冲掉最后一批增量，避免 emitDone 先到、尾巴几个字后到。
+    flushChunks();
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     // 被外部中断（语音通话抢话打断）：保留已生成的部分内容，不当作错误处理。
@@ -548,6 +581,7 @@ async function streamAssistantReply(opts: {
         .set({ updatedAt: Date.now() })
         .where(eq(conversations.id, conversationId))
         .run();
+      flushChunks();
       emitDone({
         conversationId,
         messageId: assistantId,
@@ -566,8 +600,11 @@ async function streamAssistantReply(opts: {
       .set({ updatedAt: Date.now() })
       .where(eq(conversations.id, conversationId))
       .run();
+    flushChunks();
     emitDone({ conversationId, messageId: assistantId, content: "", reasoning: reasoning || undefined, error: msg });
     return { ok: false, error: msg, content: "" };
+  } finally {
+    if (flushTimer) clearTimeout(flushTimer);
   }
 
   const tokens = usage?.completion_tokens ?? estimateTokens(full);
