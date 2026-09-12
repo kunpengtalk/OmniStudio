@@ -5,6 +5,7 @@ import { db } from "./db";
 import { conversations, messages } from "./db/schema";
 import { getSetting, getActiveServerPort } from "./db/settings";
 import { getChatModelName, getChatRequestModelId } from "./chat-model";
+import { mergeSystemMessages } from "./chat-messages";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { recordUsage } from "./stats";
 import { webSearch } from "./web-search";
@@ -443,11 +444,13 @@ async function streamAssistantReply(opts: {
 
   const payload = {
     model,
-    messages: [
+    // 时间 / 场景提示词 / 检索 / 知识库 / 记忆都是 system：Qwen 系模板只允许开头一条，
+    // 多条会被它整请求拒掉（"System message must be at the beginning."），这里合并成一条。
+    messages: mergeSystemMessages([
       ...(opts.extraSystem ? [{ role: "system", content: opts.extraSystem }] : []),
       currentTimeSystemMessage(),
       ...payloadMessages,
-    ],
+    ]),
     stream: true,
     // llama.cpp / Qwen3 等支持：通话等场景要求直接回答，不打思考草稿。
     ...(opts.disableThinking ? { chat_template_kwargs: { enable_thinking: false } } : {}),
