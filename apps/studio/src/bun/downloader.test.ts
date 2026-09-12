@@ -174,7 +174,8 @@ describe("多路并发 + 断点续传", () => {
 
   test("暂停后重启：只请求缺失区间，不从头重下", async () => {
     const data = makeData(BIG);
-    const { server, requests } = startServer({ data });
+    // 同上：分片之间留间隔，取消才确定落在下载中途而不是整份下完之后。
+    const { server, requests } = startServer({ data, chunkDelayMs: 5 });
     servers.push(server);
     const dest = path.join(dir, "big.gguf");
 
