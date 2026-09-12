@@ -13,6 +13,7 @@ import {
 import { randomUUID } from "crypto";
 import type { SkillSource, SkillsInstallProgress } from "../../shared/skills";
 import { getCentralRepoDir, getTmpDir, ensureCentralRepo, muteSelfWrites } from "./central-repo";
+import { isInsideDir, safeJoin, safeName } from "../path-safety";
 import {
   upsertSkill,
   getSkillRow,
@@ -354,9 +355,14 @@ export function gitConfirm(
   const norm = normalizeGitUrl(rawUrl);
   const installed: string[] = [];
   const errors: string[] = [];
+  // tempDir 会走到函数结尾的递归删除，必须限定为我们自己的预览临时目录；
+  // 否则 skillsGitConfirm({tempDir:"/Users/x/Pictures", items:[]}) 会删掉任意目录。
+  if (!isInsideDir(getTmpDir(), tempDir)) {
+    return { ok: false, installed, errors: ["非法的临时目录：必须来自技能仓库预览"] };
+  }
   for (const item of items) {
-    const dir = join(tempDir, item.relPath);
-    if (!existsSync(dir) || !isSkillDir(dir)) {
+    const dir = safeJoin(tempDir, item.relPath);
+    if (!dir || !existsSync(dir) || !isSkillDir(dir)) {
       errors.push(item.relPath);
       continue;
     }
@@ -380,7 +386,8 @@ export function gitConfirm(
 
 export function gitCancelPreview(tempDir: string) {
   try {
-    if (existsSync(tempDir) && tempDir.includes("preview-")) {
+    // 与 gitConfirm 同样的约束：只清理自己的预览目录。
+    if (existsSync(tempDir) && isInsideDir(getTmpDir(), tempDir)) {
       rmSync(tempDir, { recursive: true, force: true });
     }
   } catch {}

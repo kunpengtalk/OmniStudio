@@ -3,7 +3,7 @@ import { readFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { db } from "./db";
 import { prompts as promptsTable, promptCategories as catsTable } from "./db/schema";
-import { IMAGE_SERVER_PORT } from "../shared/server-info";
+import { IMAGE_SERVER_HOST, IMAGE_SERVER_PORT } from "../shared/server-info";
 import {
   getPromptLibraryMediaBase,
   getPromptLibraryCacheBase,
@@ -93,7 +93,7 @@ export function mediaUrl(raw: string | null): string | null {
   // 已下载过的本地缓存优先（离线也能看）
   if (existsSync(join(getPromptLibraryCacheBase(), rel))) return promptLibraryLocalUrl(rel);
   // 开发机上有 vibedesign 素材目录时由本地 image-server 静态服务
-  if (getPromptLibraryMediaBase()) return `http://localhost:${IMAGE_SERVER_PORT}${raw}`;
+  if (getPromptLibraryMediaBase()) return `http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}${raw}`;
   return promptMediaCloudUrl(raw);
 }
 

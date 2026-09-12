@@ -4,6 +4,7 @@ import { join, resolve } from "path";
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, cpSync, statSync, readFileSync } from "fs";
 import type { ProjectSkillView, ProjectSyncState } from "../../shared/skills";
 import { getCentralRepoDir, getProjectBackupDir } from "./central-repo";
+import { safeJoin, safeName } from "../path-safety";
 import {
   listProjectRows,
   addProjectRow,
@@ -118,12 +119,15 @@ export function removeProject(id: string) {
 
 /** 启停：skills 与 skills-disabled 兄弟目录间改名。 */
 export function toggleProjectSkill(projectPath: string, relDir: string, enabled: boolean): { ok: boolean; error?: string } {
-  const full = join(projectPath, relDir);
+  // relDir 来自 webview：必须解析后仍在项目目录内，否则改名/删除会跑到项目外。
+  const full = safeJoin(projectPath, relDir);
+  const name = safeName(relDir.split("/").pop() ?? "");
+  if (!full || !name) return { ok: false, error: "非法的技能路径" };
   const parent = relDir.split("/").slice(0, -1).join("/");
-  const name = relDir.split("/").pop()!;
   const base = parent.replace(/-disabled$/, "");
-  const targetRel = enabled ? `${base}/${name}` : `${base}-disabled/${name}`;
-  const target = join(projectPath, targetRel);
+  const targetRel = enabled ? join(base, name) : join(`${base}-disabled`, name);
+  const target = safeJoin(projectPath, targetRel);
+  if (!target) return { ok: false, error: "非法的技能路径" };
   try {
     if (enabled) mkdirSync(join(projectPath, base), { recursive: true });
     else mkdirSync(join(projectPath, `${base}-disabled`), { recursive: true });
@@ -135,8 +139,10 @@ export function toggleProjectSkill(projectPath: string, relDir: string, enabled:
 }
 
 export function deleteProjectSkill(projectPath: string, relDir: string): { ok: boolean; error?: string } {
+  const full = safeJoin(projectPath, relDir);
+  if (!full) return { ok: false, error: "非法的技能路径" };
   try {
-    rmSync(join(projectPath, relDir), { recursive: true, force: true });
+    rmSync(full, { recursive: true, force: true });
     return { ok: true };
   } catch (e) {
     return { ok: false, error: String(e) };
@@ -145,8 +151,8 @@ export function deleteProjectSkill(projectPath: string, relDir: string): { ok: b
 
 /** 项目技能收编进中央库（不动项目目录）。 */
 export function importProjectSkill(projectPath: string, relDir: string): { ok: boolean; id?: string; error?: string } {
-  const full = join(projectPath, relDir);
-  if (!existsSync(full) || !isSkillDir(full)) return { ok: false, error: "skill not found" };
+  const full = safeJoin(projectPath, relDir);
+  if (!full || !existsSync(full) || !isSkillDir(full)) return { ok: false, error: "skill not found" };
   return importSkillDir(full, { sourceType: "project", sourceRef: projectPath });
 }
 
@@ -161,11 +167,13 @@ function backupBeforeOverwrite(label: string, dir: string) {
 
 /** 中央库 → 项目（覆盖项目侧）。 */
 export function exportSkillToProject(projectPath: string, skillId: string, agentRel?: string): { ok: boolean; error?: string } {
-  const centralDir = join(getCentralRepoDir(), skillId);
-  if (!existsSync(centralDir)) return { ok: false, error: "skill missing in central" };
+  const id = safeName(skillId);
+  const centralDir = id ? safeJoin(getCentralRepoDir(), id) : null;
+  if (!id || !centralDir || !existsSync(centralDir)) return { ok: false, error: "skill missing in central" };
   const rel = agentRel ?? defaultProjectRel(projectPath);
-  const target = join(projectPath, rel, skillId);
-  backupBeforeOverwrite(`proj-${skillId}`, target);
+  const target = safeJoin(projectPath, join(rel, id));
+  if (!target) return { ok: false, error: "非法的目标路径" };
+  backupBeforeOverwrite(`proj-${id}`, target);
   try {
     if (existsSync(target)) rmSync(target, { recursive: true, force: true });
     mkdirSync(join(projectPath, rel), { recursive: true });
@@ -184,8 +192,8 @@ function defaultProjectRel(projectPath: string): string {
 
 /** 项目 → 中央库（覆盖中央库侧，重推 copy 目标）。 */
 export function updateProjectSkillToCenter(projectPath: string, relDir: string): { ok: boolean; id?: string; error?: string } {
-  const full = join(projectPath, relDir);
-  if (!existsSync(full) || !isSkillDir(full)) return { ok: false, error: "skill not found" };
+  const full = safeJoin(projectPath, relDir);
+  if (!full || !existsSync(full) || !isSkillDir(full)) return { ok: false, error: "skill not found" };
   const name = relDir.split("/").pop()!;
   const meta = parseSkillMd(full);
   const match = matchCentralSkill(name, meta.name, hashSkillDir(full));
@@ -216,8 +224,8 @@ export function updateProjectSkillToCenter(projectPath: string, relDir: string):
 
 /** 项目技能文档。 */
 export function getProjectSkillDoc(projectPath: string, relDir: string): string | null {
-  const full = join(projectPath, relDir);
-  if (!existsSync(full) || !isSkillDir(full)) return null;
+  const full = safeJoin(projectPath, relDir);
+  if (!full || !existsSync(full) || !isSkillDir(full)) return null;
   const marker = ["SKILL.md", "skill.md"].find((m) => existsSync(join(full, m)));
   if (!marker) return null;
   try {

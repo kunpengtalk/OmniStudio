@@ -11,6 +11,7 @@ import * as Memory from "./memory";
 import type { MemoryCategory } from "../shared/memory";
 import { handleMcpRequest } from "./kb-mcp";
 import * as Img from "./gateway-images";
+import { isLocalOrigin, isLoopbackHost } from "../shared/server-info";
 
 /**
  * 本地 API 网关。
@@ -124,8 +125,34 @@ function authOk(req: Request): boolean {
   if (!key) return true;
   const auth = req.headers.get("authorization") ?? "";
   const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
-  const xApiKey = (req.headers.get("x-api-key") ?? "").trim();
+  const xApiKey = req.headers.get("x-api-key") ?? "";
+
   return bearer === key || xApiKey === key;
+}
+
+/**
+ * 浏览器来源防护：网关无 Key 时对任何本地进程开放（curl / agent 不带 Origin），
+ * 但外部网页一律拒绝 —— 否则用户随便打开一个网页，页面里的 fetch 就能读记忆库、
+ * 写持久记忆（等于注入 Agent 提示词）、或用用户配置的云端 Key 跑推理。
+ * 外部页面只有在配置了 Key 且带上正确 Key 时才放行（等于用户显式授权）。
+ */
+function browserOriginAllowed(req: Request): boolean {
+  const origin = (req.headers.get("origin") ?? "").trim();
+  if (!origin) return true; // 非浏览器请求
+  if (isLocalOrigin(origin)) return true;
+  return getGatewayApiKey().length > 0 && authOk(req);
+}
+
+/**
+ * Host 头校验：绑在回环时只接受回环 Host，挡住 DNS rebinding
+ * （网页把自己的域名解析到 127.0.0.1，Host 仍是攻击者域名）。
+ * 用户显式把 GATEWAY_HOST 绑到非回环地址时视为有意对外服务，不做限制。
+ */
+function hostHeaderAllowed(req: Request): boolean {
+  const host = req.headers.get("host");
+  if (!host) return true;
+  if (isLoopbackHost(host)) return true;
+  return !isLoopbackHost(boundHost);
 }
 
 function unauthorized(): Response {
@@ -2049,6 +2076,15 @@ async function route(req: Request): Promise<Response> {
 
   const url = new URL(req.url);
   const path = url.pathname;
+
+  // 浏览器来源 / DNS rebinding 防护（在鉴权之前，未配置 Key 时同样生效）。
+  if (!browserOriginAllowed(req) || !hostHeaderAllowed(req)) {
+    return apiError(
+      403,
+      "该请求来自外部网页。网关只接受本机进程调用，或在配置 GATEWAY_API_KEY 后携带正确 Key 调用。",
+      "forbidden",
+    );
+  }
 
   // API Key 鉴权：/v1/* 与 /mcp 端点需要（元信息端点保持开放）。
   // 例外：浏览器 GET /mcp 返回静态调试工作台（无秘密，页面里的调用仍需 Key）。

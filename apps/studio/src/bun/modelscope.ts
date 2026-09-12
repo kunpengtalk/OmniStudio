@@ -2,6 +2,7 @@ import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync
 import path from "path";
 import { isModelWeightExt, safeRepoId } from "../shared/modelscope";
 import { getDataDir } from "./paths";
+import { safeJoin } from "./path-safety";
 
 export { isModelWeightExt, safeRepoId };
 
@@ -168,6 +169,15 @@ export function localModelPath(repo: string, fileName: string): string {
   return path.join(getModelsBaseDir(), safeRepoId(repo), fileName);
 }
 
+/**
+ * 模型下载的落盘路径（带穿越校验）。repo / fileName 会从 RPC 与控制套接字传入，
+ * `fileName = "../../omni-studio.db"` 这类输入能覆盖数据目录下的任意文件，必须走这里。
+ * 越界返回 null，调用方要当成参数错误处理。
+ */
+export function modelDestPath(repo: string, fileName: string): string | null {
+  return safeJoin(path.join(getModelsBaseDir(), safeRepoId(repo)), fileName);
+}
+
 export function isModelInstalled(repo: string, fileName: string): boolean {
   return existsSync(localModelPath(repo, fileName));
 }
@@ -200,8 +210,8 @@ export async function downloadHuggingFaceFile(
   onProgress?: (progress: DownloadProgress) => void,
   signal?: AbortSignal,
 ): Promise<{ path: string; size: number }> {
-  const dir = path.join(getModelsBaseDir(), safeRepoId(repo));
-  const destPath = path.join(dir, filePath);
+  const destPath = modelDestPath(repo, filePath);
+  if (!destPath) throw new Error(`非法的模型文件路径：${filePath}`);
   mkdirSync(path.dirname(destPath), { recursive: true });
 
   const mirrors = [
@@ -550,7 +560,8 @@ export async function downloadFile(
 ): Promise<{ path: string; size: number }> {
   const dir = path.join(getModelsBaseDir(), safeRepoId(repo));
   mkdirSync(dir, { recursive: true });
-  const destPath = path.join(dir, fileName);
+  const destPath = modelDestPath(repo, fileName);
+  if (!destPath) throw new Error(`非法的模型文件名：${fileName}`);
 
   return downloadHttpFile(resolveFileUrl(repo, fileName), destPath, onProgress, signal);
 }

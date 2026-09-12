@@ -8,6 +8,7 @@ import { documents, pages } from "../db/schema";
 import { getAllSettings, getSetting, isConfigured, updateSettings } from "../db/settings";
 import { getImagesBaseDir, getUploadsBaseDir } from "../image-server";
 import { chatImageDir, chatImageUrl } from "../image-server";
+import { safeBaseName, safeJoin } from "../path-safety";
 import { processDocumentPages } from "../queue";
 import { updateState, checkForUpdate, type UpdateInfo } from "../updates";
 import * as ReleaseCheck from "../release-check";
@@ -1901,9 +1902,13 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       saveImageToDownloads: async ({ url, filename }) => {
         try {
           const parsed = new URL(url);
-          const filePath = path.join(getImagesBaseDir(), decodeURIComponent(parsed.pathname));
-          if (!existsSync(filePath)) return { ok: false };
-          const dest = path.join(Utils.paths.downloads, filename);
+          // 源路径（URL 里可能带 %2f..%2f）与目标文件名都来自调用方，双向都要限位。
+          const ref = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
+          const filePath = safeJoin(getImagesBaseDir(), ref);
+          if (!filePath || !existsSync(filePath)) return { ok: false };
+          const name = safeBaseName(filename);
+          if (!name) return { ok: false };
+          const dest = path.join(Utils.paths.downloads, name);
           copyFileSync(filePath, dest);
           return { ok: true };
         } catch {

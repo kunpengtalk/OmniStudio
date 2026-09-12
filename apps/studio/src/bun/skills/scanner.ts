@@ -7,6 +7,7 @@ import { adapterSkillsPath, resolveAdapters, getDisabledTools } from "./store";
 import { isSkillDir, parseSkillMd, hashSkillDir } from "./metadata";
 import { importSkillDir } from "./installer";
 import { audit } from "./audit";
+import { isInsideDir } from "../path-safety";
 
 const IGNORED_DIRS = new Set(["node_modules", "target", "__pycache__", ".git", "dist", "build", ".venv"]);
 
@@ -85,6 +86,9 @@ export function importDiscoveredGroup(name: string, paths: string[], removeOrigi
   if (!result.ok) return result;
   if (removeOriginal) {
     for (const p of paths) {
+      // 只删"确实是技能目录、且位于某个已配工具的 skills 目录内"的路径：
+      // paths 由 webview 回传，不校验的话这里就是任意目录递归删除。
+      if (!isInsideToolSkillsDir(p) || !isSkillDir(p)) continue;
       try {
         if (statSync(p).isDirectory()) {
           rmSync(p, { recursive: true, force: true });
@@ -94,6 +98,17 @@ export function importDiscoveredGroup(name: string, paths: string[], removeOrigi
   }
   audit("scan_import", `${name} -> ${result.id}`);
   return result;
+}
+
+/** 路径是否位于某个已配置工具的 skills 目录内（用于收编时安全清理原目录）。 */
+function isInsideToolSkillsDir(target: string): boolean {
+  for (const adapter of resolveAdapters()) {
+    for (const dirRel of [adapter.skillsDir, ...(adapter.extraScanDirs ?? [])]) {
+      const dir = adapterSkillsPath({ ...adapter, skillsDir: dirRel });
+      if (isInsideDir(dir, target)) return true;
+    }
+  }
+  return false;
 }
 
 /** 一键收编全部发现组。 */

@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { Type } from "typebox";
 import { db } from "./db";
 import { mcpServers, type McpServerRow } from "./db/schema";
+import { audit } from "./skills/audit";
 import type { BuiltTool } from "./agent-tools";
 import type { McpServerConfig, McpTransportType } from "../shared/mcp";
 
@@ -227,6 +228,39 @@ function augmentPath(): string {
   return [...extra, process.env.PATH ?? ""].join(":");
 }
 
+/**
+ * 会劫持子进程加载器 / 注入代码的 env 键。MCP 配置由 webview 提交，
+ * 允许覆盖这些键等于让配置方在每次启动时往任意 stdio 服务器进程里注入代码。
+ * 业务变量（API Key 等）仍然放行。
+ */
+const BLOCKED_ENV_KEYS = new Set([
+  "NODE_OPTIONS",
+  "BUN_OPTIONS",
+  "PYTHONSTARTUP",
+  "PYTHONPATH",
+  "PYTHONHOME",
+  "PERL5OPT",
+  "RUBYOPT",
+  "NODE_PATH",
+]);
+
+function sanitizeSpawnEnv(env?: Record<string, string>): {
+  env: Record<string, string>;
+  blocked: string[];
+} {
+  const out: Record<string, string> = {};
+  const blocked: string[] = [];
+  for (const [key, value] of Object.entries(env ?? {})) {
+    const upper = key.toUpperCase();
+    if (BLOCKED_ENV_KEYS.has(upper) || upper.startsWith("LD_") || upper.startsWith("DYLD_")) {
+      blocked.push(key);
+      continue;
+    }
+    out[key] = value;
+  }
+  return { env: out, blocked };
+}
+
 class StdioConnection implements McpConnection {
   private proc: ReturnType<typeof Bun.spawn> | null = null;
   private rpc = new RpcPeer();
@@ -251,11 +285,18 @@ class StdioConnection implements McpConnection {
   };
 
   async connect() {
+    const { env, blocked } = sanitizeSpawnEnv(this.cfg.env);
+    if (blocked.length > 0) {
+      // 动态链接器 / 解释器注入类变量被忽略，仅记审计，不影响业务变量（API Key 等）。
+      audit("mcp_env_blocked", `${this.cfg.name ?? this.cfg.command}: ${blocked.join(", ")}`);
+    }
+    // stdio 服务器等于执行任意命令：每次启动都留审计，便于事后追溯。
+    audit("mcp_spawn", `${this.cfg.name ?? "server"}: ${[this.cfg.command, ...this.cfg.args].join(" ")}`);
     const proc = Bun.spawn([this.cfg.command, ...this.cfg.args], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
-      env: { ...process.env, ...this.cfg.env, PATH: augmentPath() },
+      env: { ...process.env, ...env, PATH: augmentPath() },
     });
     this.proc = proc;
     // stderr 仅排空防背压，内容丢给控制台便于排查服务器崩溃。

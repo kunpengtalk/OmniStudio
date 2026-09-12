@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, rmSync, statSync } from "fs";
 import path from "path";
-import { downloadFile, downloadHuggingFaceFile, localModelPath, type DownloadProgress } from "./modelscope";
+import { downloadFile, downloadHuggingFaceFile, modelDestPath, type DownloadProgress } from "./modelscope";
 import { setModelCategory } from "./model-store";
 import { getSetting, updateSettings } from "./db/settings";
 import type { ModelCategory } from "../shared/modelscope";
@@ -94,7 +94,8 @@ export class DownloadManager {
 
   /** 磁盘上是否已有该任务的部分数据(最终文件或 .part 分片)。 */
   private hasPartialData(task: DownloadTask): boolean {
-    const p = localModelPath(task.repo, task.fileName);
+    const p = modelDestPath(task.repo, task.fileName);
+    if (!p) return false;
     try {
       if (existsSync(p) && statSync(p).size > 0) return true;
       const dir = path.dirname(p);
@@ -160,6 +161,14 @@ export class DownloadManager {
       speed: 0,
       createdAt: Date.now(),
     };
+    // 落盘路径不合法（含 ../ 或绝对路径）时直接标记失败，避免进队列后覆盖数据目录外的文件。
+    if (!modelDestPath(repo, fileName)) {
+      task.status = "failed";
+      task.error = `非法的下载路径：${fileName}`;
+      this.tasks.set(task.id, task);
+      this.emit(true);
+      return task;
+    }
     this.tasks.set(task.id, task);
     this.queue.push(task.id);
     this.emit(true);
@@ -211,8 +220,11 @@ export class DownloadManager {
   }
 
   private removePartial(task: DownloadTask) {
+    // 路径必须做穿越校验：任务的 repo/fileName 来自 RPC 与控制套接字，
+    // 未校验的 `../` 会让"取消下载"变成删除数据目录外的任意文件。
+    const p = modelDestPath(task.repo, task.fileName);
+    if (!p) return;
     try {
-      const p = localModelPath(task.repo, task.fileName);
       rmSync(p, { force: true });
       const dir = path.dirname(p);
       const base = path.basename(p);

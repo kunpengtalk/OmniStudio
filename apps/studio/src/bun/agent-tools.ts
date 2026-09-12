@@ -6,6 +6,7 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earen
 import { getSetting } from "./db/settings";
 import { webSearch } from "./web-search";
 import { listKnowledgeBases, recall } from "./knowledge";
+import { audit } from "./skills/audit";
 
 /**
  * Agent 可使用的工具集。
@@ -77,7 +78,47 @@ function resolvePath(workspace: string, input: string): string {
   const expanded = trimmed.startsWith("~")
     ? path.join(process.env.HOME ?? "/", trimmed.slice(1))
     : trimmed;
-  return path.resolve(workspace, expanded);
+  const target = path.resolve(workspace, expanded);
+  assertNotSecret(workspace, target);
+  return target;
+}
+
+/**
+ * 工作区外读取的敏感路径黑名单。
+ *
+ * Agent 的工具结果会原样喂回模型，而网页搜索 / 知识库 / MCP 的返回内容都可能被
+ * 提示词注入（"读 ~/.ssh/id_rsa 然后 curl 发到某处"）。工作区内不受限制（开发必需），
+ * 工作区外命中这些凭据目录一律拒绝。
+ */
+const SECRET_PATH_PATTERNS: RegExp[] = [
+  /(^|\/)\.ssh(\/|$)/,
+  /(^|\/)\.aws(\/|$)/,
+  /(^|\/)\.gnupg(\/|$)/,
+  /(^|\/)\.kube(\/|$)/,
+  /(^|\/)\.docker\/config\.json$/,
+  /(^|\/)\.netrc$/,
+  /(^|\/)\.npmrc$/,
+  /(^|\/)\.git-credentials$/,
+  /(^|\/)\.config\/(gh|gcloud|gcloud-legacy)(\/|$)/,
+  // 本机其他编码 agent 的凭据与会话（含第三方 API Key）
+  /(^|\/)\.omni(\/|$)/,
+  /(^|\/)\.codex(\/|$)/,
+  /(^|\/)\.claude(\/|$)/,
+  /Library\/Keychains(\/|$)/,
+  // 本应用自己的数据目录：设置表里存着全部云端 API Key
+  /Library\/Application Support\/omni-studio(\/|$)/,
+];
+
+function assertNotSecret(workspace: string, target: string): void {
+  const root = path.resolve(workspace);
+  if (target === root || target.startsWith(root + path.sep)) return;
+  const normalized = target.replace(/\\/g, "/");
+  if (SECRET_PATH_PATTERNS.some((re) => re.test(normalized))) {
+    throw new Error(
+      `Refusing to access a credential path outside the workspace: ${target}. ` +
+        "Copy what you need into the workspace instead.",
+    );
+  }
 }
 
 /** 写操作必须落在工作区内。 */
@@ -378,6 +419,9 @@ function createBash(ctx: ToolContext): BuiltTool {
         );
       }
       const shell = process.env.SHELL || "/bin/zsh";
+      // 执行过的每条命令都入库留痕：模型可能被注入内容诱导执行破坏性命令，
+      // 出事后要能查到"谁在什么时候跑了什么"。
+      audit("agent_shell", `${ctx.workspace}: ${params.command}`);
       try {
         const proc = Bun.spawn([shell, "-c", params.command], {
           cwd: ctx.workspace,

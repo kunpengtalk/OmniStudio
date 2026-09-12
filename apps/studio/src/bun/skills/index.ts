@@ -2,6 +2,7 @@
 import { join } from "path";
 import { existsSync, readFileSync, rmSync } from "fs";
 import type { ManagedSkill, ProjectSkillView } from "../../shared/skills";
+import { safeJoin, safeName } from "../path-safety";
 import {
   ensureCentralRepo,
   reindexCentralRepo,
@@ -127,21 +128,30 @@ export function getSkillDoc(skillId: string): { markdown: string } | null {
 /** 删除技能：卸载全部部署 + 删中央库目录 + 删 DB 行 + 刷元数据。 */
 export function deleteSkills(ids: string[]): { ok: boolean; errors: string[] } {
   const errors: string[] = [];
-  for (const id of ids) {
+  const validIds: string[] = [];
+  for (const rawId of ids) {
+    // id 来自 webview：必须是单层目录名，且解析后仍在中央库内，
+    // 否则 `../..` 会让"删除技能"变成删掉用户主目录。
+    const id = safeName(rawId);
+    const dir = id ? safeJoin(getCentralRepoDir(), id) : null;
+    if (!id || !dir) {
+      errors.push(`${rawId}: 非法的技能 id`);
+      continue;
+    }
+    validIds.push(id);
     for (const t of listTargetRows().filter((t) => t.skillId === id)) {
       const r = unsyncSkillFromTool(id, t.tool);
       if (!r.ok) errors.push(`${id}/${t.tool}: ${r.error}`);
     }
-    const dir = join(getCentralRepoDir(), id);
     try {
       if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     } catch (e) {
       errors.push(`${id}: ${String(e)}`);
     }
   }
-  deleteSkillRows(ids);
+  deleteSkillRows(validIds);
   writeAllMetadata();
-  audit("delete", ids.join(","));
+  audit("delete", validIds.join(","));
   return { ok: errors.length === 0, errors };
 }
 

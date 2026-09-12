@@ -1,4 +1,9 @@
 export const IMAGE_SERVER_PORT = 19782;
+/**
+ * 图片服务只监听回环地址：它无鉴权地提供文档页图、聊天图片、生成图与 TTS 音频，
+ * 绑到 0.0.0.0 会让同网段任何人直接下载这些文件。
+ */
+export const IMAGE_SERVER_HOST = "127.0.0.1";
 /** 本地推理服务器（llama.cpp / vLLM / SGLang）的默认端口。 */
 export const DEFAULT_INFERENCE_PORT = "18080";
 /**
@@ -7,6 +12,34 @@ export const DEFAULT_INFERENCE_PORT = "18080";
  */
 export const PROMPT_LIBRARY_MEDIA_ORIGIN = "https://kunpengtalk.com";
 
+/**
+ * 本机回环 Host / Origin 判定：本地无鉴权服务（图片服务、网关）用它挡 DNS rebinding
+ * —— 网页把自己的域名解析到 127.0.0.1 后，Host/Origin 仍是攻击者域名。
+ */
+export function isLoopbackHost(host: string | null | undefined): boolean {
+  const raw = (host ?? "").trim().toLowerCase();
+  if (!raw) return false;
+  const name = raw.startsWith("[") ? raw.slice(1, raw.indexOf("]")) : (raw.split(":")[0] ?? "");
+  return name === "127.0.0.1" || name === "localhost" || name === "::1";
+}
+
+/** 请求是否来自本应用（webview / 本地进程）；外部网页的 http(s) Origin 一律拒绝。 */
+export function isLocalOrigin(origin: string | null | undefined): boolean {
+  const raw = (origin ?? "").trim().toLowerCase();
+  if (!raw) return true; // 非浏览器请求（curl / 本地 agent）不带 Origin
+  if (raw === "null") return true; // file:// 页面
+  if (raw.startsWith("views://") || raw.startsWith("electrobun://")) return true;
+  if (raw.startsWith("file://")) return true;
+  if (raw.startsWith("http://") || raw.startsWith("https://")) {
+    try {
+      return isLoopbackHost(new URL(raw).host);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export function chatImageUrl(ref: string): string {
-  return `http://localhost:${IMAGE_SERVER_PORT}/${ref}`;
+  return `http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}/${ref}`;
 }

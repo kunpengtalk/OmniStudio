@@ -11,11 +11,14 @@ import { audit } from "./audit";
 
 const GITIGNORE_LINES = [".DS_Store", "Thumbs.db", "*.tmp", "__pycache__/", "*.pyc", ".omnistudio/tmp/", ".omnistudio/project-backups/"];
 
-function git(args: string[]): { code: number; stdout: string; stderr: string } {
+function git(
+  args: string[],
+  env: Record<string, string> = {},
+): { code: number; stdout: string; stderr: string } {
   const proc = Bun.spawnSync(["git", "-C", getCentralRepoDir(), ...args], {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...env },
   });
   return {
     code: proc.exitCode ?? -1,
@@ -24,15 +27,25 @@ function git(args: string[]): { code: number; stdout: string; stderr: string } {
   };
 }
 
-/** 远端 URL：设置里的 remote + 可选 PAT（https 时注入 userinfo）。 */
-function remoteUrlWithCredential(): { url: string; hasPat: boolean } {
-  const remote = getSetting("SKILLS_GIT_REMOTE").trim();
-  const pat = getSetting("SKILLS_GIT_PAT").trim();
-  if (!remote) return { url: "", hasPat: false };
-  if (pat && /^https:\/\//.test(remote)) {
-    return { url: remote.replace(/^https:\/\//, `https://x-access-token:${pat}@`), hasPat: true };
-  }
-  return { url: remote, hasPat: pat.length > 0 };
+/**
+ * 带凭据的 git 调用：PAT 经 credential helper 从环境变量读取，不写进 argv、
+ * 也不落 .git/config —— `git push -u <带凭据的 URL>` 会把该 URL 记进
+ * branch.<name>.remote，一旦后续步骤失败，PAT 就留在仓库配置里了。
+ */
+const PAT_CREDENTIAL_HELPER =
+  '!f() { if [ "$1" = "get" ]; then echo username=x-access-token; echo "password=$OMNI_GIT_PAT"; fi; }; f';
+
+function gitAuthed(args: string[], pat: string): { code: number; stdout: string; stderr: string } {
+  if (!pat) return git(args);
+  return git(["-c", `credential.helper=${PAT_CREDENTIAL_HELPER}`, ...args], { OMNI_GIT_PAT: pat });
+}
+
+/** 远端信息：干净 URL（不含凭据）+ 仅 https 时可用的 PAT。 */
+function remoteWithCredential(): { url: string; pat: string } {
+  const url = getSetting("SKILLS_GIT_REMOTE").trim();
+  const rawPat = getSetting("SKILLS_GIT_PAT").trim();
+  if (!url) return { url: "", pat: "" };
+  return { url, pat: /^https:\/\//.test(url) ? rawPat : "" };
 }
 
 export interface BackupStatus {
@@ -146,11 +159,11 @@ export function backupCommit(message = "backup"): { ok: boolean; error?: string 
 }
 
 export function backupPush(): { ok: boolean; error?: string } {
-  const { url } = remoteUrlWithCredential();
+  const { url, pat } = remoteWithCredential();
   if (!url) return { ok: false, error: "no remote" };
   const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.trim() || "main";
   // 首推：set upstream。
-  const push = git(["push", "-u", url, `HEAD:${branch}`]);
+  const push = gitAuthed(["push", "-u", url, `HEAD:${branch}`], pat);
   if (push.code !== 0) {
     return { ok: false, error: classifyPushError(push.stderr) };
   }
@@ -171,10 +184,10 @@ function classifyPushError(stderr: string): string {
 }
 
 export function backupPull(): { ok: boolean; error?: string } {
-  const { url } = remoteUrlWithCredential();
+  const { url, pat } = remoteWithCredential();
   if (!url) return { ok: false, error: "no remote" };
   const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.trim() || "main";
-  const fetch = git(["fetch", url, branch]);
+  const fetch = gitAuthed(["fetch", url, branch], pat);
   if (fetch.code !== 0) return { ok: false, error: fetch.stderr.slice(0, 200) };
   const merge = git(["merge", "--no-edit", "FETCH_HEAD"]);
   if (merge.code !== 0) {
@@ -232,15 +245,15 @@ export function resolveConflict(keep: "local" | "remote"): { ok: boolean; error?
   const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.trim() || "main";
   if (keep === "local") {
     createSnapshot("pre-force-push");
-    const { url } = remoteUrlWithCredential();
+    const { url, pat } = remoteWithCredential();
     if (!url) return { ok: false, error: "no remote" };
-    const push = git(["push", "-u", url, `+HEAD:${branch}`]);
+    const push = gitAuthed(["push", "-u", url, `+HEAD:${branch}`], pat);
     return push.code === 0 ? { ok: true } : { ok: false, error: push.stderr.slice(0, 200) };
   }
   createSnapshot("pre-reset-remote");
-  const { url } = remoteUrlWithCredential();
+  const { url, pat } = remoteWithCredential();
   if (!url) return { ok: false, error: "no remote" };
-  const fetch = git(["fetch", url, branch]);
+  const fetch = gitAuthed(["fetch", url, branch], pat);
   if (fetch.code !== 0) return { ok: false, error: fetch.stderr.slice(0, 200) };
   const reset = git(["reset", "--hard", "FETCH_HEAD"]);
   if (reset.code !== 0) return { ok: false, error: reset.stderr.slice(0, 200) };
