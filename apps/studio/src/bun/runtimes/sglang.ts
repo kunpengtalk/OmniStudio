@@ -2,6 +2,7 @@ import type { Subprocess } from "bun";
 import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/settings";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
+import { MAX_LOG_CHARS, killProcessTree, pumpServerOutput, spawnServerProcess, waitExit } from "./proc";
 import type {
   BinaryCheckResult,
   LogListener,
@@ -11,37 +12,9 @@ import type {
   StatusListener,
 } from "./types";
 
-const MAX_LOG_CHARS = 200_000;
 const DOWNLOAD_PATTERN = /downloading|fetching|(\d+(\.\d+)?)\s*%|progress/i;
 
-function collapseCarriageReturns(text: string): string {
-  if (!text.includes("\r")) return text;
-  const normalized = text.replace(/\r\n/g, "\n");
-  if (!normalized.includes("\r")) return normalized;
-  return normalized
-    .split("\n")
-    .map((line) => {
-      if (!line.includes("\r")) return line;
-      const parts = line.split("\r").filter(Boolean);
-      return parts.length > 0 ? parts[parts.length - 1] : "";
-    })
-    .join("\n");
-}
 
-async function pipeStream(stream: ReadableStream<Uint8Array>, appendLog: (text: string) => void) {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const text = collapseCarriageReturns(decoder.decode(value, { stream: true }));
-      if (text) appendLog(text);
-    }
-  } catch {
-    // stream closed
-  }
-}
 
 export class SglangRuntime implements Runtime {
   readonly id = "sglang";
@@ -113,10 +86,7 @@ export class SglangRuntime implements Runtime {
         stdout: "pipe",
         stderr: "pipe",
       });
-      const exited = await Promise.race([
-        proc.exited.then(() => true),
-        Bun.sleep(5000).then(() => false),
-      ]);
+      const exited = await waitExit(proc, 5000);
       if (exited) return { found: true, path: pythonPath };
     } catch {
       // not available
@@ -224,15 +194,8 @@ export class SglangRuntime implements Runtime {
     this.appendLog(`$ ${cmd.join(" ")}\n`);
 
     try {
-      this.serverProcess = Bun.spawn(cmd, {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-
-      const { stdout, stderr } = this.serverProcess;
-      const appendLog = this.appendLog.bind(this);
-      if (stdout && typeof stdout !== "number") pipeStream(stdout, appendLog);
-      if (stderr && typeof stderr !== "number") pipeStream(stderr, appendLog);
+      this.serverProcess = spawnServerProcess(cmd);
+      pumpServerOutput(this.serverProcess, this.appendLog.bind(this));
 
       const self = this;
       this.serverProcess.exited
@@ -316,7 +279,7 @@ export class SglangRuntime implements Runtime {
     this.setStatus("stopped");
     this.appendLog("\n[stopping server...]\n");
 
-    proc.kill("SIGTERM");
+    killProcessTree(proc, "SIGTERM");
 
     const exited = await Promise.race([
       proc.exited.then(() => true),
@@ -324,7 +287,7 @@ export class SglangRuntime implements Runtime {
     ]);
 
     if (!exited) {
-      proc.kill("SIGKILL");
+      killProcessTree(proc, "SIGKILL");
       await proc.exited.catch(() => {});
     }
 
@@ -339,7 +302,7 @@ export class SglangRuntime implements Runtime {
   forceKill() {
     if (this.serverProcess) {
       try {
-        this.serverProcess.kill("SIGKILL");
+        killProcessTree(this.serverProcess, "SIGKILL");
       } catch {
         // already dead
       }
