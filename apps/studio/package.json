@@ -17,6 +17,8 @@
     "dev:hmr": "concurrently \"bun run hmr\" \"bun run start --watch\"",
     "db:generate": "drizzle-kit generate",
     "hmr": "vite --port 5173",
+    "test": "bun test",
+    "test:smoke": "bun scripts/migrations-smoke.ts && bun scripts/memory-smoke.ts && bun scripts/kb-smoke.ts && bun scripts/kb-chat-smoke.ts && bun scripts/kb-rerank-smoke.ts && bun scripts/kb-access-smoke.ts && bun scripts/video-gen-smoke.ts",
     "build:dev": "vite build && electrobun build",
     "build:canary": "vite build && electrobun build --env=canary",
     "build:stable": "vite build && electrobun build --env=stable"

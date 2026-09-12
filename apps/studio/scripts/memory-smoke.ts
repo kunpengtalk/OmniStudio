@@ -25,13 +25,13 @@ const m2 = memory.saveMemory({ content: "部署走 bun，不用 npm", category: 
 check("插入拿到 id", m1.id > 0 && m2.id > m1.id);
 check("列表 2 条、置顶优先", memory.listMemories().length === 2);
 memory.setMemoryPinned(m2.id, true);
-check("置顶排序在最前", memory.listMemories()[0].id === m2.id);
+check("置顶排序在最前", memory.listMemories()[0]?.id === m2.id);
 const edited = memory.saveMemory({ id: m1.id, content: "用户偏好简洁的中文回复（更新）", category: "preference", tags: ["偏好"] });
 check("编辑保留 id", edited.id === m1.id && edited.content.includes("更新"));
 
 // 2. 检索（内容 + 标签）与热度
 const hits = memory.searchMemories("部署");
-check("按内容检索命中", hits.length === 1 && hits[0].id === m2.id);
+check("按内容检索命中", hits.length === 1 && hits[0]?.id === m2.id);
 check("检索累计使用次数", memory.listMemories().find((m) => m.id === m2.id)!.usageCount === 1);
 const tagHits = memory.searchMemories("偏好");
 check("按标签检索命中", tagHits.some((m) => m.id === m1.id));
@@ -43,7 +43,7 @@ const save = tools.find((t) => t.name === "memory_save");
 check("提供 memory_search / memory_save", Boolean(search && save));
 if (search && save) {
   const res = await search.execute("c1", { query: "偏好" });
-  const text = (res.content as { type: string; text: string }[])[0].text;
+  const text = (res.content as { type: string; text: string }[])[0]?.text ?? "";
   check("memory_search 返回记忆", text.includes("简洁的中文回复"), text);
   await save.execute("c2", { content: "用户的项目是 OmniStudio", category: "fact", tags: ["项目"] });
   check("memory_save 落库（source=agent）", memory.listMemories().some((m) => m.source === "agent" && m.content.includes("OmniStudio")));

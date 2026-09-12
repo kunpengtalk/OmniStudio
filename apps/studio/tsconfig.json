@@ -12,5 +12,5 @@
       "@hooks/*": ["./src/mainview/hooks/*"]
     }
   },
-  "include": ["src", "vite.config.ts", "electrobun.config.ts", "drizzle.config.ts"]
+  "include": ["src", "scripts", "test-preload.ts", "vite.config.ts", "electrobun.config.ts", "drizzle.config.ts"]
 }

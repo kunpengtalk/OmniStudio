@@ -21,8 +21,10 @@ function embed(text: string): number[] {
   const tokens = text.toLowerCase().match(/[a-z0-9]+|[\u3400-\u9fff]/g) ?? [];
   for (const tk of tokens) {
     const h = hashToken(tk);
-    vec[h % dim] += (h % 2 === 0 ? 1 : -1) * 1;
-    vec[(h >>> 8) % dim] += (h % 2 === 0 ? 1 : -1) * 0.6;
+    const i1 = h % dim;
+    const i2 = (h >>> 8) % dim;
+    vec[i1] = (vec[i1] ?? 0) + (h % 2 === 0 ? 1 : -1) * 1;
+    vec[i2] = (vec[i2] ?? 0) + (h % 2 === 0 ? 1 : -1) * 0.6;
   }
   const norm = Math.sqrt(vec.reduce((s, v) => s + v * v, 0)) || 1;
   return vec.map((v) => Number((v / norm).toFixed(6)));

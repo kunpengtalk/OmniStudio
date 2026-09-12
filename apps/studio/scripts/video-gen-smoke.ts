@@ -10,6 +10,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import type * as VideoGenT from "../src/bun/video-gen";
+import { IMAGE_SERVER_HOST, IMAGE_SERVER_PORT } from "../src/shared/server-info";
 
 process.env.OMNI_DATA_DIR = mkdtempSync(path.join(tmpdir(), "video-gen-smoke-"));
 process.env.NODE_ENV = "production";
@@ -67,7 +68,7 @@ const minimaxQueries = { minimax: 0, posts: 0 };
 
 const seedance = Bun.serve({
   port: 0,
-  async fetch(req) {
+  async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
     if (req.method === "POST" && url.pathname === "/api/v3/contents/generations/tasks") {
       seen.seedanceSubmit = await req.json();
@@ -145,8 +146,9 @@ let getImagesBaseDir: () => string = () => {
 
 function assertFileOk(row: VideoRecordRow, label: string) {
   check(`${label}: status=done`, row.status === "done", `got ${row.status} ${row.error ?? ""}`);
-  check(`${label}: videoUrl 指向本地媒体服务`, !!row.videoUrl?.startsWith("http://localhost:19782/videos/"), row.videoUrl ?? "");
-  const ref = row.videoUrl!.replace("http://localhost:19782/", "");
+  const mediaBase = `http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}/`;
+  check(`${label}: videoUrl 指向本地媒体服务`, !!row.videoUrl?.startsWith(`${mediaBase}videos/`), row.videoUrl ?? "");
+  const ref = row.videoUrl!.replace(mediaBase, "");
   const abs = path.join(getImagesBaseDir(), ref);
   check(`${label}: 成片已落盘`, existsSync(abs));
   check(`${label}: 落盘内容正确`, existsSync(abs) && Buffer.compare(readFileSync(abs), Buffer.from(FAKE_MP4)) === 0);
@@ -256,7 +258,7 @@ async function main() {
     const done = list.filter((r) => r.status === "done");
     check("3 条均 done", done.length === 3);
     const target = done[0]!;
-    const ref = target.videoUrl!.replace("http://localhost:19782/", "");
+    const ref = target.videoUrl!.replace(`http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}/`, "");
     const abs = path.join(getImagesBaseDir(), ref);
     VideoGen.deleteVideoRecord(target.id);
     check("删除后文件清理", !existsSync(abs));

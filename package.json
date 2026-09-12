@@ -28,6 +28,7 @@
   "scripts": {
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
+    "test": "bun run --cwd apps/studio test",
     "lint": "oxlint --report-unused-disable-directives",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",

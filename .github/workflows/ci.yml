@@ -1,0 +1,60 @@
+name: CI
+
+# PR / main 分支的基础校验。此前仓库只有 tag 触发的 release.yml，
+# typecheck / lint / 测试在合并前一律不跑，main 可以长期是红的。
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint / typecheck / test
+    # macOS runner：应用目标平台是 macOS（llama.cpp / MLX 等引擎与路径逻辑都有
+    # darwin 分支），测试也按 macOS 假设编写；Linux/Windows 的构建由 release.yml 覆盖。
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests（bunfig preload 会把数据目录指向临时目录）
+        run: bun run test
+
+      - name: Smoke（KB / 记忆 / 视频 / 迁移）
+        run: bun run --cwd apps/studio test:smoke
+
+  build:
+    name: vite build
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build webview bundle
+        run: bun x vite build
+        working-directory: apps/studio

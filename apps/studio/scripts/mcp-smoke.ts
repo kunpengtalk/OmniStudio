@@ -59,7 +59,7 @@ check("list 有 1 台", listMcpServers().length === 1);
 // 2. 连接 + 枚举工具
 const test = await testMcpServer(saved);
 check("stdio 连接成功", test.ok, test.error);
-check("枚举到 echo 工具", test.ok && test.tools.length === 1 && test.tools[0].name === "echo");
+check("枚举到 echo 工具", test.ok && test.tools.length === 1 && test.tools[0]?.name === "echo");
 
 // 3. Agent 工具注入 + 调用
 const tools = await buildMcpAgentTools();
@@ -87,8 +87,10 @@ const parsed = parseMcpJson(
   }),
 );
 check("json 解析 2 台", parsed.length === 2);
-check("stdio 归类", parsed[0].type === "stdio" && parsed[0].command === "npx" && parsed[0].args.length === 3);
-check("http 归类", parsed[1].type === "http" && parsed[1].url === "https://example.com/mcp");
+const p0 = parsed[0];
+const p1 = parsed[1];
+check("stdio 归类", p0?.type === "stdio" && p0.command === "npx" && p0.args.length === 3);
+check("http 归类", p1?.type === "http" && p1.url === "https://example.com/mcp");
 
 // 6. 删除
 deleteMcpServer(saved.id!);
