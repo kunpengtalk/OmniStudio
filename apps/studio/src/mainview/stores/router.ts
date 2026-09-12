@@ -6,15 +6,14 @@ export type Route =
     }
   | {
       path: "settings";
+      /** 设置页内目标标签（如 "store" = 模型库）。省略时保持当前标签。 */
+      tab?: string;
     }
   | {
       path: "server";
     }
   | {
       path: "stats";
-    }
-  | {
-      path: "models";
     }
   | {
       path: "model-detail";

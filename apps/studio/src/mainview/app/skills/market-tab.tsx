@@ -12,7 +12,7 @@ import {
   BlocksIcon,
   RadarIcon,
   SearchIcon,
-  PackageSearchIcon,
+  ShoppingBagIcon,
   XIcon,
 } from "lucide-react";
 
@@ -35,7 +35,7 @@ import type { SkillsShSkill, DiscoveredSkillGroup } from "@/shared/skills";
 import { InstallState, SegmentedControl, Toolbar, chipClass } from "./parts";
 
 const MARKET_TABS = [
-  { value: "marketplace", labelKey: "skills.market.tab", icon: <PackageSearchIcon className="size-3.5" /> },
+  { value: "marketplace", labelKey: "skills.market.tab", icon: <ShoppingBagIcon className="size-3.5" /> },
   { value: "git", labelKey: "skills.market.git", icon: <GitBranchIcon className="size-3.5" /> },
   { value: "local", labelKey: "skills.market.local", icon: <FolderInputIcon className="size-3.5" /> },
   { value: "scan", labelKey: "skills.market.scan", icon: <RadarIcon className="size-3.5" /> },
@@ -166,7 +166,7 @@ function MarketplacePane({ search }: { search: string }) {
       ) : items.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 py-20 text-center">
           <div className="flex size-16 items-center justify-center rounded-2xl bg-primary/10">
-            <PackageSearchIcon className="size-7 text-muted-foreground" />
+            <ShoppingBagIcon className="size-7 text-muted-foreground" />
           </div>
           <p className="text-xs text-muted-foreground">{t("common.noResults")}</p>
         </div>
@@ -419,7 +419,7 @@ export function MarketTab() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <Toolbar icon={<PackageSearchIcon className="size-4 text-muted-foreground" />} title={t("skills.nav.market")}>
+      <Toolbar icon={<ShoppingBagIcon className="size-4 text-muted-foreground" />} title={t("skills.nav.market")}>
         {tab === "marketplace" && (
           <div className="relative">
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />

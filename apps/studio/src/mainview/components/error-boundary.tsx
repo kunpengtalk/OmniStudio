@@ -37,7 +37,7 @@ function ErrorFallback({ error, onRetry }: { error: Error; onRetry: () => void }
 
   const goBack = () => {
     onRetry();
-    setRoute({ path: "models" });
+    setRoute({ path: "settings", tab: "store" });
   };
 
   return (

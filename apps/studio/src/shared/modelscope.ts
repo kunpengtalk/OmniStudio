@@ -258,6 +258,8 @@ export type ChatPreset = {
   quants: string[];
   /** Inference engine(s) the preset's weights are compatible with. "all" = not an inference-engine model (TTS/ASR/image). */
   engine?: InferenceEngine | "all";
+  /** 模型库默认推荐（千问小模型优先），置顶展示。 */
+  recommended?: boolean;
 };
 
 /** Local whisper.cpp (GGML) ASR models, served from ModelScope. */
@@ -332,7 +334,7 @@ export const ASR_PRESETS: readonly AsrPreset[] = [
 ];
 
 export const MODEL_PRESETS: readonly ChatPreset[] = [
-  // 对话 / VLM (GGUF → llama.cpp)
+  // 对话 / VLM (GGUF → llama.cpp)。recommended 的千问小模型排最前，作为模型库默认推荐。
   {
     app: "chat",
     repo: "unsloth/Qwen3.5-4B-GGUF",
@@ -341,6 +343,27 @@ export const MODEL_PRESETS: readonly ChatPreset[] = [
     defaultQuant: "Q4_K_M",
     quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
     engine: "llama.cpp",
+    recommended: true,
+  },
+  {
+    app: "chat",
+    repo: "Qwen/Qwen2.5-3B-Instruct-GGUF",
+    label: "Qwen2.5 3B Instruct",
+    description: "Qwen2.5 3B 轻量对话模型（GGUF），低资源友好",
+    defaultQuant: "Q4_K_M",
+    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
+    engine: "llama.cpp",
+    recommended: true,
+  },
+  {
+    app: "chat",
+    repo: "Qwen/Qwen3-4B-GGUF",
+    label: "Qwen3 4B",
+    description: "Qwen3 4B 轻量对话模型（GGUF）",
+    defaultQuant: "Q4_K_M",
+    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
+    engine: "llama.cpp",
+    recommended: true,
   },
   {
     app: "chat",
@@ -350,6 +373,27 @@ export const MODEL_PRESETS: readonly ChatPreset[] = [
     defaultQuant: "Q4_K_M",
     quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
     engine: "llama.cpp",
+    recommended: true,
+  },
+  {
+    app: "chat",
+    repo: "Qwen/Qwen3-8B-GGUF",
+    label: "Qwen3 8B",
+    description: "Qwen3 8B 对话模型（GGUF），原生支持多工具调用",
+    defaultQuant: "Q4_K_M",
+    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
+    engine: "llama.cpp",
+    recommended: true,
+  },
+  {
+    app: "chat",
+    repo: "Qwen/Qwen2.5-7B-Instruct-GGUF",
+    label: "Qwen2.5 7B Instruct",
+    description: "Qwen2.5 7B 通用对话模型（GGUF）",
+    defaultQuant: "Q4_K_M",
+    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
+    engine: "llama.cpp",
+    recommended: true,
   },
   {
     app: "chat",
@@ -365,42 +409,6 @@ export const MODEL_PRESETS: readonly ChatPreset[] = [
     repo: "unsloth/Qwen3.6-27B-GGUF",
     label: "Qwen3.6 27B",
     description: "Qwen3.6 27B 旗舰对话模型（GGUF）",
-    defaultQuant: "Q4_K_M",
-    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
-    engine: "llama.cpp",
-  },
-  {
-    app: "chat",
-    repo: "Qwen/Qwen2.5-7B-Instruct-GGUF",
-    label: "Qwen2.5 7B Instruct",
-    description: "Qwen2.5 7B 通用对话模型（GGUF）",
-    defaultQuant: "Q4_K_M",
-    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
-    engine: "llama.cpp",
-  },
-  {
-    app: "chat",
-    repo: "Qwen/Qwen2.5-3B-Instruct-GGUF",
-    label: "Qwen2.5 3B Instruct",
-    description: "Qwen2.5 3B 轻量对话模型（GGUF），低资源友好",
-    defaultQuant: "Q4_K_M",
-    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
-    engine: "llama.cpp",
-  },
-  {
-    app: "chat",
-    repo: "Qwen/Qwen3-8B-GGUF",
-    label: "Qwen3 8B",
-    description: "Qwen3 8B 对话模型（GGUF），原生支持多工具调用",
-    defaultQuant: "Q4_K_M",
-    quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
-    engine: "llama.cpp",
-  },
-  {
-    app: "chat",
-    repo: "Qwen/Qwen3-4B-GGUF",
-    label: "Qwen3 4B",
-    description: "Qwen3 4B 轻量对话模型（GGUF）",
     defaultQuant: "Q4_K_M",
     quants: ["Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"],
     engine: "llama.cpp",
@@ -423,6 +431,7 @@ export const MODEL_PRESETS: readonly ChatPreset[] = [
     defaultQuant: "",
     quants: [],
     engine: "vllm",
+    recommended: true,
   },
   {
     app: "chat",
@@ -432,6 +441,27 @@ export const MODEL_PRESETS: readonly ChatPreset[] = [
     defaultQuant: "",
     quants: [],
     engine: "vllm",
+    recommended: true,
+  },
+  {
+    app: "chat",
+    repo: "Qwen/Qwen2.5-7B-Instruct",
+    label: "Qwen2.5 7B Instruct (HF)",
+    description: "Qwen2.5 7B 通用对话模型（safetensors）",
+    defaultQuant: "",
+    quants: [],
+    engine: "vllm",
+    recommended: true,
+  },
+  {
+    app: "chat",
+    repo: "Qwen/Qwen3-8B",
+    label: "Qwen3 8B (HF)",
+    description: "Qwen3 8B 对话模型（safetensors），原生支持多工具调用",
+    defaultQuant: "",
+    quants: [],
+    engine: "vllm",
+    recommended: true,
   },
   {
     app: "chat",
@@ -453,27 +483,9 @@ export const MODEL_PRESETS: readonly ChatPreset[] = [
   },
   {
     app: "chat",
-    repo: "Qwen/Qwen2.5-7B-Instruct",
-    label: "Qwen2.5 7B Instruct (HF)",
-    description: "Qwen2.5 7B 通用对话模型（safetensors）",
-    defaultQuant: "",
-    quants: [],
-    engine: "vllm",
-  },
-  {
-    app: "chat",
     repo: "Qwen/Qwen2.5-VL-7B-Instruct",
     label: "Qwen2.5-VL 7B",
     description: "Qwen2.5-VL 7B 多模态视觉对话模型（safetensors）",
-    defaultQuant: "",
-    quants: [],
-    engine: "vllm",
-  },
-  {
-    app: "chat",
-    repo: "Qwen/Qwen3-8B",
-    label: "Qwen3 8B (HF)",
-    description: "Qwen3 8B 对话模型（safetensors），原生支持多工具调用",
     defaultQuant: "",
     quants: [],
     engine: "vllm",

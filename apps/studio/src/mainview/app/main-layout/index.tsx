@@ -23,7 +23,6 @@ import { PromptScreen } from "../prompt-screen";
 import { SkillsScreen } from "../skills";
 import { MemoryScreen } from "../memory-screen";
 import { KbScreen } from "../kb";
-import { ModelsScreen } from "../models-screen";
 import { BenchmarkScreen } from "../benchmark-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { DownloadsButton } from "@components/download-panel";
@@ -70,9 +69,7 @@ const Outlet = () => {
   const activeApp = useAppStore((s) => s.activeApp);
 
   let content: ReactNode;
-  if (route.path === "models") {
-    content = <ModelsScreen />;
-  } else if (route.path === "model-detail") {
+  if (route.path === "model-detail") {
     content = <ModelDetailScreen />;
   } else if (route.path === "settings") {
     content = <SettingsScreen />;

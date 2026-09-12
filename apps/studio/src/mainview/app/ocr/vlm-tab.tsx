@@ -382,7 +382,7 @@ export function VlmTab({
             {installedModels.length === 0 ? (
               <div className="flex flex-col items-start gap-2 rounded-lg border border-dashed px-3 py-3">
                 <p className="text-[11px] text-muted-foreground">{t("ocr.vlm.noModels")}</p>
-                <Button size="xs" variant="outline" onClick={() => router.setRoute({ path: "models" })}>
+                <Button size="xs" variant="outline" onClick={() => router.setRoute({ path: "settings", tab: "store" })}>
                   <StoreIcon data-icon="inline-start" />
                   {t("ocr.vlm.goLibrary")}
                 </Button>

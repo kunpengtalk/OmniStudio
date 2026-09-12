@@ -220,7 +220,7 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
   const queryClient = useQueryClient();
   const { source, setSource } = useModelDetailStore();
   const setRoute = useRouter((s) => s.setRoute);
-  const goBack = () => (onBack ? onBack() : setRoute({ path: "models" }));
+  const goBack = () => (onBack ? onBack() : setRoute({ path: "settings", tab: "store" }));
   const { engine } = useEngine();
   // null = auto: follow the active engine's native format
   const [formatFilter, setFormatFilter] = useState<"all" | ModelFileKind | null>(null);

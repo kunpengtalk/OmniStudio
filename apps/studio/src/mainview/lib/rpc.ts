@@ -199,8 +199,10 @@ const rpc = Electroview.defineRPC<AppRPC>({
       },
       navigate: ({ path }) => {
         // 前端导航没有 URL 路由，全靠 router store；CLI 跳转只用到无参数路径。
-        if (
-          path === "models" ||
+        // 模型库已并入设置页，旧的 "models" 路由映射到设置-模型库标签。
+        if (path === "models") {
+          useRouter.getState().setRoute({ path: "settings", tab: "store" });
+        } else if (
           path === "settings" ||
           path === "server" ||
           path === "stats" ||

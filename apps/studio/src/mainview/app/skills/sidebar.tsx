@@ -22,7 +22,7 @@ import { useSkillsStore, type SkillsSection } from "@stores/skills";
 import { useT } from "@stores/ui-lang";
 
 const SECTIONS: { key: SkillsSection; labelKey: string; icon: React.ReactNode }[] = [
-  { key: "market", labelKey: "skills.nav.market", icon: <PackageSearchIcon className="size-4" /> },
+  { key: "market", labelKey: "skills.nav.market", icon: <ShoppingBagIcon className="size-4" /> },
   { key: "my", labelKey: "skills.nav.my", icon: <BlocksIcon className="size-4" /> },
   { key: "presets", labelKey: "skills.nav.presets", icon: <LayersIcon className="size-4" /> },
   { key: "projects", labelKey: "skills.nav.projects", icon: <FolderTreeIcon className="size-4" /> },

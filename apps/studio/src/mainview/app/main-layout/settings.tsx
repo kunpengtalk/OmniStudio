@@ -52,6 +52,7 @@ import { LocalModelsScreen } from "../local-models-screen";
 import { MarketScreen } from "../market-screen";
 import { GatewayScreen } from "../gateway-screen";
 import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detail";
+import { useRouter } from "@stores/router";
 
 type SettingsFormState = Record<string, string>;
 
@@ -488,6 +489,14 @@ export function SettingsScreen() {
     setActiveTab(tab);
     setDetail(null);
   };
+
+  // 外部跳转（CLI / OCR / 错误回退）带 tab 参数时切到对应标签。
+  const routeTab = useRouter((s) => (s.route.path === "settings" ? s.route.tab : undefined));
+  useEffect(() => {
+    if (!routeTab || !(routeTab in TAB_DEFS)) return;
+    setActiveTab((current) => (current === routeTab ? current : (routeTab as SettingsTab)));
+    setDetail(null);
+  }, [routeTab]);
 
   const { data } = useQuery({
     queryKey: ["settings"],
