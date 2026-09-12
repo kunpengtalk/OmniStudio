@@ -338,7 +338,9 @@ omni-control.sock       CLI 控制通道
 **全局备份 / 恢复**（`src/bun/backup/`，设置 → 数据 → 备份与恢复 / `omi backup`）把数据分成 7 个**作用域**（`shared/backup.ts`：settings / chats / prompts / skills / memory / knowledge / media），每个作用域 = 一组不可拆分的表 + 若干文件根。归档是 gzip + tar（`backup/tar.ts` 自己实现，`Bun.Archive` 当前版本会把 `Bun.file()` 条目写成 0 字节且不支持 gzip），内含 `manifest.json` + `data/omni-studio.db` + `data/files/<根>/<相对路径>`：
 
 - **快照**：`VACUUM INTO`（只读连接即可，WAL 下与应用并发也一致）；未勾选作用域的表会被 `secure_delete` 删除再 `VACUUM`，所以"没勾选"既不在体积里也不在文件残页里。
-- **恢复**：先自动做一份 `pre-restore-*.omnibackup`，再把快照按表整表替换（列取交集，兼容旧版本备份），文件同名覆盖、不删除备份里没有的文件；外部根（技能中央库）按恢复后的设置重新解析，归档条目一律过 `path-safety` 校验防越界。
+- **恢复**：先自动做一份 `pre-restore-*.omnibackup`，再把快照按表整表替换（列取交集，兼容旧版本备份），文件同名覆盖、不删除备份里没有的文件；归档条目一律过 `path-safety` 校验防越界。
+- **归档是不可信输入**：外部根（技能中央库）是唯一不受数据目录约束的文件根，所以它的落地目录只认**恢复前**本机设置里的 `SKILLS_CENTRAL_PATH`（`captureExternalRootDirs`），绝不采用归档里那一份 —— 否则一个"把备份发给别人排错"的文件，只要把该设置指向 `$HOME` 再带上 `data/files/skills-repo/.zshrc`，就能在用户从未授权的位置覆盖任意文件。归档只能决定**写哪些文件**，不能决定**写到哪个根**；两处路径不一致时会给出提示。同一原则贯穿归档解析：scrypt 参数与 tar 头里的条目长度都有上界（`checkedScryptParams` / `MAX_READ_EXACT`），`deleteBackup` 只认扩展名 + 备份魔数（`isBackupArchive`），清单字段缺失或类型不对在预览阶段就报错。
+- **恢复要求本机已建库**：恢复只做整表替换、不建表（内核不 import 数据层，拿不到那批迁移），所以目标库没有应用表结构时直接报错并提示"先启动一次应用"，而不是对每张表都判定"本机没有表"、最后交出一次"写回 0 条记录"的假成功。
 - **不依赖应用运行**：模块不 import `db/index.ts`（避免连带跑迁移）与 electrobun，独立进程可在应用起不来时备份 / 恢复（恢复要求应用已退出，避免两个写者）。
 - **加密**（`backup/crypto.ts`）：可选 AES-256-GCM + scrypt（N=2^15/r=8/p=1）。容器 = 明文头（魔数 `OMNBKP01`、KDF 参数、压缩标志、salt、iv、keyCheck）+ 密文 + 16 字节 GCM 标签；头部作为 AAD 参与认证。`keyCheck` 让"密码不对"在打开时就报明确错误（预览只读开头，流走不到结尾触发不了 GCM 校验）。密码不落盘。scrypt 派生与独立实现（Python `hashlib.scrypt`）逐字节对齐验证过。
 - **远端存储**（`backup/remote.ts`）：S3 兼容（AWS / R2 / MinIO / OSS / COS，自己实现 SigV4，只用到 PUT / GET / DELETE / ListObjectsV2，单次 PUT 上限 5 GB）与 WebDAV（坚果云 / Nextcloud / 群晖，Basic 认证 + PROPFIND 列表）。不引 SDK，凭据存本机 settings（键名带 KEY/SECRET，备份的剔除密钥会抹掉）。配置在设置页填写，支持"创建后自动上传 / 上传后删本地"，远端列表可直接下载并恢复。

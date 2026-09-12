@@ -56,6 +56,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 ### Fixed / 修复
 
+- **备份恢复：归档可以把文件写到任意目录（安全）**：技能中央库是唯一不受数据目录约束的文件根，而恢复写回文件时按「恢复后的设置」重新解析它的落地目录 —— 那份设置来自归档本身。于是一个做过手脚的备份只要把 `SKILLS_CENTRAL_PATH` 指向 `$HOME`（或 `~/Library/LaunchAgents`），再带上 `data/files/skills-repo/.zshrc`，就能在用户从未授权的位置覆盖任意文件；而这正是文档推荐的「把备份发给别人排错」场景。现在落地目录只认**恢复前**本机设置里的值：归档只能决定写哪些文件，不能决定写到哪个根，两处路径不一致时给出提示。
+- **备份恢复：离谱的 scrypt 参数能让进程吃光内存**：KDF 的 N / r / p 写在归档头部（外部输入），`unlock()` 直接喂给 `scryptSync`，而 `maxmem` 又是按 N×r 算出来的，内置护栏永远不会触发 —— 一个 147 字节的文件声明 `N=2^30` 就能让进程去申请 1 TiB，`N=2^28` 直接把线程挂死。现在打开归档时就按「单次派生 ≤ 256 MB」校验参数并拒绝，明文报「密钥派生参数不合法」。
+- **备份恢复：归档声明的条目长度能撑爆内存**：读取长度来自 tar 头，一个 61 KB 的 gzip 声明清单有 64 MiB，预览就要 1.2 GiB 内存、3 秒（128 MiB → 1.9 GiB / 11 秒，而备份列表会对每个文件都做一次），原因是读取时逐块 `Buffer.concat`（O(n²)）。现在单次读取有 8 MiB 上界，且攒够再拼一次。
+- **备份恢复：数据库已提交后整次恢复仍可能失败**：`rename` 失败一律退回复制，而目标是个目录（EISDIR）或源文件已被重复条目搬走（ENOENT）时复制同样失败，于是「数据库回来了、文件一个没写」。两个条目归一化到同一路径（`a/../b` 与 `b`）现在会在解包阶段识别并跳过后者，写回失败的单个文件改为记入警告继续（数据库事务此时已提交，不该让整次恢复失败）。
+- **备份恢复：新机器上恢复"成功"但什么都没恢复**：目标库不存在时，整表替换会对每张表判定「本机没有表」全部跳过，最后报告写回 0 条记录 0 个文件。恢复只做替换、不建表（内核刻意不依赖数据层，拿不到那批迁移），所以现在直接报错并提示「先启动一次应用让它建库，或改用应用内页面」，不再给出假成功。
+- **`omi backup restore` 无法用交互输入的密码恢复加密备份**：提示输入的密码只用于重新 `inspect`，传给 `restoreBackup` 的仍是原来的 `undefined`（另有一行 `effectivePassword` 算了却从没用过），于是终端里只有 `--password` / `--password-file` 能用。现在输入的密码会回流到恢复调用。
+- **`omi backup delete` 能删任意文件**：目录白名单取自调用方同时传入的 `dir`，把目标文件的父目录当 `dir` 传进来就绕过了守卫，且不校验扩展名。现在除目录边界外还要求「确实是备份文件」（`.omnibackup` 扩展名 + 备份魔数），非备份文件一律拒绝并说明原因。
+- **远端下载中断会在最终文件名上留下半截备份**：下载直接写目标路径、不校验长度，短包只会照常返回，流中断后列表里就多出一份「损坏的备份」（取消下载同样如此）。现在先写 `.part`、核对 content-length 后原子改名，失败即清理。
+- **S3 兼容存储列取备份必然 403**：`ListObjectsV2` 的签名用了去掉尾部斜杠的路径，而真正发出的请求仍带斜杠 —— SigV4 下 canonical URI 必须与请求逐字节一致（AWS 不做路径归一化），真实 S3 会直接拒绝；只有测试用的假服务端不校验 canonical URI 才没暴露出来。现在签名与请求共用同一个 path，查询串也改用同一套编码（`URLSearchParams` 会把空格编成 `+`，而签名用 `%20`，带空格的 prefix 同样对不上）。
+- **「创建后自动上传」是死开关**：`autoUpload` 会被保存、会渲染成开关，但没有任何代码读它，用户打开它之后备份并不会自动上传（文档还写着它会生效）。现在创建备份时真的会读它；恢复前自动生成的 `pre-restore-*` 回退点除外（就地兜底用，推远端既不符合预期，也会让恢复多受一次网络波动影响）。
+- **备份清单缺字段会让恢复页白屏**：预览只校验格式与版本，缺 `db` / `tables` / `scopes` 的清单能通过预览，随后在恢复面板渲染时抛 `TypeError`（整页空白），恢复本身也以 `Cannot read properties of undefined` 收场。现在这些字段在预览阶段就校验并提示「文件可能已损坏」。
+- **创建备份时传入的文件名可以越出目标目录**：`fileName` 来自 webview / CLI 且未净化，`../../x` 会把归档写到所选目录之外；现在只取 basename（缺扩展名时仍自动补 `.omnibackup`）。
 - **迁移 0013 在老库升级时被跳过**：drizzle 以「库内已记录的最大 `created_at`」判断是否跳过迁移，而 `0013_uneven_lester` 的 `when` 小于前一条 `0012`，导致从旧版本升级的用户（库内最大 `when` 已被后续迁移抬高）**不会建出 `user_prompts` 表**，「我的提示词」功能直接报错；现将其 `when` 调整为严格递增区间内，并把该迁移改写为幂等 DDL（`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`），使「已建表 / 曾被跳过 / 已升到最新」三种库都安全。
 - **知识库向量补齐**：`embedDocChunks` 内改为循环外复制一份配置对象（原写法在循环中展开累加，且可能污染调用方传入的对象）。
 - **手册漂移无人拦截**：`scripts/omi-docs-smoke.ts` 校验命令表 ↔ 帮助文本 ↔ 数据源 ↔ `docs/omi-cli.md` 四者同步，但它此前既不在 `test:smoke` 列表里、CI 也不会执行，文档漂移事实上不会被发现；现已纳入 `test:smoke`，随 CI 一起跑。
@@ -72,6 +84,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 - 新增主进程模块：`video-gen.ts`、`cloud-providers.ts`、`mcp.ts`、`mcp-playground.ts`、`kb-mcp.ts`、`knowledge.ts`、`memory.ts`、`memory-api.ts`、`memory-sync.ts`、`release-check.ts`、`skills/`（13 个文件：中央库 / 安装器 / 同步引擎 / 扫描 / 元数据 / 预设 / 项目 / 审计 / 备份等）、`backup/`（5 个文件：归档内核 / tar / 加密 / 远端存储 / 作用域归置，刻意不依赖数据层与 electrobun）、`media-tools.ts`（Agent 侧素材检索与生成工具，兼素材库内核）、`media-api.ts`（网关对外只读素材接口）、`media-setup.ts`（Agent 生成前的「需要用户介入」通道）、`model-scan.ts`（本地模型目录扫描）、`huggingface.ts`（市场检索的 HF / hf-mirror 数据源）。
 - 新增前端：`video-screen.tsx`、`dashboard-screen.tsx`、`memory-screen.tsx`、`kb/`（6 个文件）、`skills/`（9 个文件）、`main-layout/backup-tab.tsx`、`components/media-setup-dialog.tsx`、`components/{media-,}source-badge.tsx`、设置页各组面板与 `stores/{video,kb,memory-ui,skills,backup,market,media-setup}.ts`。
 - 新增脚本：`apps/studio/scripts/migrations-smoke.ts`（journal 单调性 + 全新库建表 + 重复打开幂等；本次正是它先暴露出 0013 的 `when` 倒挂）、`apps/studio/scripts/backup-smoke.ts`（加密备份往返 / 远端上传下载 / 坏库下的离线可用性）。
+- 备份内核新增「归档不可信输入」测试组（`backup/index.test.ts`）：伪造归档改写技能库落地目录、非法 KDF 参数、声明 1 GiB 的条目长度、缺字段清单、重复条目、非备份文件删除、`../` 文件名、空库恢复，各一条回归用例。
 - README 界面预览截图更新（模型云服务 / 编码工具集成 / 语音实时对话 / TTS / 模型选择向导），中英两份 README 同步重写。
 - 依赖：无新增运行时依赖（MCP 客户端手写、向量检索纯 JS、调试工作台单文件无 CDN）。
 

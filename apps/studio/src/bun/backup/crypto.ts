@@ -33,6 +33,20 @@ export const CONTAINER_VERSION = 1;
 export const KDF_SCRYPT = 1;
 /** scrypt 参数：N=2^15、r=8、p=1 ≈ 32 MB 内存、单次派生百毫秒量级。 */
 export const SCRYPT_DEFAULTS = { N: 1 << 15, r: 8, p: 1 } as const;
+/**
+ * 接受 scrypt 参数的边界。
+ *
+ * 这三个值写在归档头部里，而归档是外部输入：`unlock()` 直接把它们喂给
+ * `scryptSync`，而 `maxmem` 又是按 N*r 算出来的，所以内置的护栏永远不会触发 ——
+ * 一个 147 字节的文件声明 `N=2^30, r=8` 就能让进程去申请 1 TiB 内存，
+ * `N=2^28` 直接把线程挂死。上限按「派生一次 ≤ 256 MB 内存」定，
+ * 既堵住 DoS，也给未来调强默认参数留了 8 倍余量。
+ */
+const MAX_KDF_MEMORY = 256 * 1024 * 1024;
+const MAX_KDF_N = 1 << 18;
+const MIN_KDF_N = 1 << 10;
+const MAX_KDF_R = 32;
+const MAX_KDF_P = 16;
 const KEY_BYTES = 32;
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
@@ -72,6 +86,23 @@ function toBuffer(chunk: unknown): Buffer {
   if (Buffer.isBuffer(chunk)) return chunk;
   if (chunk instanceof Uint8Array) return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
   return Buffer.from(String(chunk));
+}
+
+/**
+ * 校验归档头部里的 scrypt 参数，拒绝会让进程吃光内存 / 挂死的取值。
+ * 返回值可直接交给 `deriveKey`。
+ */
+export function checkedScryptParams(header: { N: number; r: number; p: number }): { N: number; r: number; p: number } {
+  const { N, r, p } = header;
+  const bad = () =>
+    new BackupPasswordError("加密备份的密钥派生参数不合法（文件可能已损坏或被伪造）");
+  if (!Number.isInteger(N) || !Number.isInteger(r) || !Number.isInteger(p)) throw bad();
+  // scrypt 要求 N 是大于 1 的 2 的幂。
+  if (N < MIN_KDF_N || N > MAX_KDF_N || (N & (N - 1)) !== 0) throw bad();
+  if (r < 1 || r > MAX_KDF_R) throw bad();
+  if (p < 1 || p > MAX_KDF_P) throw bad();
+  if (128 * N * r > MAX_KDF_MEMORY) throw bad();
+  return { N, r, p };
 }
 
 export function deriveKey(password: string, salt: Buffer, params?: { N?: number; r?: number; p?: number }): Buffer {
@@ -147,12 +178,16 @@ export async function readHeader(path: string): Promise<EncryptedHeader> {
     throw new BackupPasswordError(`加密备份由更新版本的应用创建（容器 v${parsed.version}），请先升级 OmniStudio`);
   }
   if (parsed.kdf !== KDF_SCRYPT) throw new BackupPasswordError(`不支持的密钥派生算法：${parsed.kdf}`);
+  // 打开时就挡住离谱的 KDF 参数：调用方（预览 / 列表）拿到 header 后才会 unlock，
+  // 不该让一个 100 多字节的文件把进程拖进几百 MB 的内存分配。
+  checkedScryptParams(parsed);
   return parsed;
 }
 
 /** 派生密钥并核对 keyCheck；密码不对立刻抛错，不用等到流结尾。 */
 export function unlock(path: string, header: EncryptedHeader, password: string): Buffer {
-  const key = deriveKey(password, header.salt, { N: header.N, r: header.r, p: header.p });
+  // 再校验一次：unlock 的 header 可能不是 readHeader 给的，而这里的结果直接进 scryptSync。
+  const key = deriveKey(password, header.salt, checkedScryptParams(header));
   const expected = keyCheckOf(key);
   if (expected.length !== header.keyCheck.length || !timingSafeEqual(expected, header.keyCheck)) {
     throw new BackupPasswordError("密码错误（或该文件不是用这个密码加密的）");

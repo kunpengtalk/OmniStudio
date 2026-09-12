@@ -178,6 +178,16 @@ export async function* tarChunks(
 // 读取
 // ---------------------------------------------------------------------------
 
+/**
+ * 单次 `readExact` 的上限。
+ *
+ * 读取长度来自 tar 头里的 size 字段，而归档是外部输入：一个几十 KB 的 gzip
+ * 可以声明条目有 1 GiB，读取时就会边读边拼、把进程的内存吃光（gzip 的
+ * 解压放大让"小文件"完全不说明问题）。目前只有 manifest.json 与 GNU 长名
+ * 走这条路径，两者都是 KB 级别，8 MiB 留足了余量。
+ */
+const MAX_READ_EXACT = 8 * 1024 * 1024;
+
 /** 顺序字节读取器：在异步迭代器之上提供"精确取 N 字节 / 跳过 N 字节"。 */
 class ByteReader {
   private buf: Buffer = EMPTY;
@@ -186,15 +196,22 @@ class ByteReader {
   constructor(private readonly src: AsyncIterator<Uint8Array>) {}
 
   private async fill(min: number): Promise<boolean> {
-    while (this.buf.length < min && !this.ended) {
+    if (this.buf.length >= min) return true;
+    // 先攒够再拼一次：逐块 concat 会让取 N 字节变成 O(N²) 的拷贝。
+    const parts: Buffer[] = this.buf.length ? [this.buf] : [];
+    let total = this.buf.length;
+    while (total < min && !this.ended) {
       const next = await this.src.next();
       if (next.done) {
         this.ended = true;
         break;
       }
       const chunk = Buffer.from(next.value);
-      this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
+      if (!chunk.length) continue;
+      parts.push(chunk);
+      total += chunk.length;
     }
+    this.buf = parts.length === 1 ? parts[0]! : Buffer.concat(parts, total);
     return this.buf.length >= min;
   }
 
@@ -215,6 +232,9 @@ class ByteReader {
   /** 精确读取 n 字节；流提前结束返回 null。 */
   async readExact(n: number): Promise<Buffer | null> {
     if (n === 0) return EMPTY;
+    if (n > MAX_READ_EXACT) {
+      throw new Error(`归档声明的条目长度异常（${n} 字节），已拒绝读取`);
+    }
     const ok = await this.fill(n);
     if (!ok) return null;
     const out = this.buf.subarray(0, n);

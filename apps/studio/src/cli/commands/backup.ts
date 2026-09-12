@@ -298,7 +298,9 @@ async function cmdRestore(parsed: ParsedArgs): Promise<void> {
   }
 
   const ctx = backupContext();
-  const password = await readPassword(parsed);
+  // 交互输入的密码必须回流到这个变量：restoreBackup 会拿它重新解包归档，
+  // 只把 info 换掉而这里仍是 undefined 的话，加密备份在终端里永远恢复不了。
+  let password = await readPassword(parsed);
   let info;
   try {
     info = await inspectBackup({ path: file, password });
@@ -310,12 +312,12 @@ async function cmdRestore(parsed: ParsedArgs): Promise<void> {
         process.exitCode = 1;
         return;
       }
-      info = await inspectBackup({ path: file, password: prompt });
+      password = prompt;
+      info = await inspectBackup({ path: file, password });
     } else {
       throw err;
     }
   }
-  const effectivePassword = password ?? (await readPassword(parsed));
   const raw = optString(parsed.options, "scopes");
   let scopes = info.scopes;
   if (raw !== undefined) {

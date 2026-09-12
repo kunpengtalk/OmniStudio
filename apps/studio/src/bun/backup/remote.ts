@@ -12,7 +12,7 @@
  */
 import { createHash, createHmac } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { rename, rm, stat } from "node:fs/promises";
 
 import type { BackupRemoteConfig, BackupRemoteEntry } from "../../shared/backup";
 
@@ -147,10 +147,8 @@ export function signS3Request(opts: {
     .join("");
   const signedHeaders = sortedNames.join(";");
 
-  const queryEntries = Object.entries(opts.query ?? {})
-    .map(([k, v]) => [uriEncode(k), uriEncode(v)] as const)
-    .sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : 1) : a[0] < b[0] ? -1 : 1));
-  const canonicalQuery = queryEntries.map(([k, v]) => `${k}=${v}`).join("&");
+  // 与 s3Url 共用同一个实现：签名用的查询串必须与真正发出去的一模一样。
+  const canonicalQuery = canonicalQueryString(opts.query);
 
   const canonicalRequest = [
     opts.method.toUpperCase(),
@@ -192,7 +190,22 @@ export function objectKey(config: BackupRemoteConfig, fileName: string): string 
   return prefix ? `${prefix}/${fileName}` : fileName;
 }
 
-/** S3 请求 URL（path-style 或 virtual-host）。 */
+/**
+ * 查询串按 SigV4 规则编码并排序（`%20` 而非 `+`，`/` 也编码）。
+ *
+ * 不能用 `URLSearchParams` 拼：它把空格编成 `+`，而签名用的是 `%20` —— 带空格的
+ * prefix 会让签名与真正发出的请求对不上，服务端一律 403。排序规则与
+ * `signS3Request` 的 canonical query 必须完全一致，所以两边共用一个实现。
+ */
+export function canonicalQueryString(query?: Record<string, string>): string {
+  return Object.entries(query ?? {})
+    .map(([k, v]) => [uriEncode(k), uriEncode(v)] as const)
+    .sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : 1) : a[0] < b[0] ? -1 : 1))
+    .map(([k, v]) => `${k}=${v}`)
+    .join("&");
+}
+
+/** S3 请求 URL（path-style 或 virtual-host）。签名必须用这里返回的 `path`。 */
 export function s3Url(config: BackupRemoteConfig, key: string, query?: Record<string, string>): { url: URL; host: string; path: string } {
   const endpoint = new URL(config.endpoint.trim());
   const bucket = config.bucket.trim();
@@ -200,13 +213,13 @@ export function s3Url(config: BackupRemoteConfig, key: string, query?: Record<st
     .split("/")
     .map((seg) => uriEncode(seg))
     .join("/");
+  const search = canonicalQueryString(query);
   if (config.forcePathStyle) {
     const basePath = endpoint.pathname.replace(/\/+$/, "");
     const path = `${basePath}/${uriEncode(bucket)}/${encodedKey}`;
     const url = new URL(endpoint.toString());
     url.pathname = path;
-    url.search = "";
-    for (const [k, v] of Object.entries(query ?? {})) url.searchParams.append(k, v);
+    url.search = search;
     return { url, host: endpoint.host, path };
   }
   const host = `${bucket}.${endpoint.host}`;
@@ -214,8 +227,7 @@ export function s3Url(config: BackupRemoteConfig, key: string, query?: Record<st
   const url = new URL(endpoint.toString());
   url.host = host;
   url.pathname = path;
-  url.search = "";
-  for (const [k, v] of Object.entries(query ?? {})) url.searchParams.append(k, v);
+  url.search = search;
   return { url, host, path };
 }
 
@@ -370,11 +382,12 @@ export async function listRemoteBackups(params: {
   if (config.kind === "s3") {
     const listPrefix = prefix ? `${prefix}/` : "";
     const { url, host, path } = s3Url(config, "", { "list-type": "2", prefix: listPrefix });
-    // s3Url 会拼出一个尾部斜杠的 key，这里按前缀形式重建路径
-    const listPath = path.replace(/\/$/, "");
+    // 签名必须用 url 上真实的 path。此前这里为了「前缀形式」把尾部斜杠去掉了，
+    // 但去的是签名用的副本、请求仍带斜杠 —— SigV4 下两者必须逐字节相同，
+    // 真实 S3 会直接 403（只有自己写的假服务端才不校验 canonical URI）。
     const signed = signS3Request({
       method: "GET",
-      path: listPath,
+      path,
       query: { "list-type": "2", prefix: listPrefix },
       host,
       region: config.region.trim(),
@@ -472,24 +485,35 @@ export async function downloadBackup(params: {
 
   const total = Number(res.headers.get("content-length")) || 0;
   let received = 0;
+  const partPath = `${destPath}.part`;
   const reader = res.body.getReader();
-  const writer = Bun.file(destPath).writer();
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) {
-        await writer.write(value);
-        received += value.length;
-        params.onProgress?.({
-          transferred: received,
-          total,
-          percent: total > 0 ? Math.min(100, Math.round((received / total) * 100)) : 0,
-        });
+    // 先写 .part 再原子改名：直接写目标路径时，中断/短包会在最终文件名上留下
+    // 半截文件，而它会被列表当成一份（损坏的）备份显示出来。
+    await rm(partPath, { force: true }).catch(() => {});
+    const writer = Bun.file(partPath).writer();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          await writer.write(value);
+          received += value.length;
+          params.onProgress?.({
+            transferred: received,
+            total,
+            percent: total > 0 ? Math.min(100, Math.round((received / total) * 100)) : 0,
+          });
+        }
       }
+    } finally {
+      await writer.end();
     }
-  } finally {
-    await writer.end();
+    if (total > 0 && received !== total) throw new Error(`下载不完整：收到 ${received} / ${total} 字节`);
+    await rename(partPath, destPath);
+  } catch (err) {
+    await rm(partPath, { force: true }).catch(() => {});
+    throw err;
   }
   return { bytes: received };
 }

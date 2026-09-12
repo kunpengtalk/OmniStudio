@@ -2,12 +2,16 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { Readable } from "node:stream";
 import { join } from "path";
 import { tmpdir } from "os";
 
 import {
   BACKUP_DB_ENTRY,
   BACKUP_FILES_PREFIX,
+  BACKUP_FORMAT,
+  BACKUP_MANIFEST_ENTRY,
+  BACKUP_VERSION,
   DEFAULT_REMOTE_CONFIG,
   backupFileName,
   classifyArchiveEntry,
@@ -28,7 +32,9 @@ import {
   testRemote,
   writeRemoteConfig,
 } from "./index";
-import { openArchive, listArchive } from "./archive";
+import { openArchive, listArchive, writeArchive } from "./archive";
+import { CONTAINER_VERSION, ENCRYPTED_MAGIC, HEADER_BYTES, KDF_SCRYPT, readHeader } from "./crypto";
+import type { TarSource } from "./tar";
 
 let root: string;
 let dataDir: string;
@@ -385,5 +391,184 @@ describe("备份 / 恢复", () => {
 
   test("未选任何作用域时拒绝创建", async () => {
     await expect(createBackup({ ctx: ctx(), scopes: [] })).rejects.toThrow("请至少选择一个要备份的内容");
+  });
+});
+
+/**
+ * 归档是外部输入（"把备份发给别人排错"是文档里写的用法），下面这组用例把
+ * 代码审查发现的几个真实缺陷钉住：核心是**归档不能决定写到哪个根**。
+ */
+describe("归档不可信输入", () => {
+  /** 造一份"做过手脚"的备份：清单 + 指定内容快照 + 任意归档条目。 */
+  async function craftArchive(opts: {
+    name: string;
+    scopes: string[];
+    dbSourcePath?: string;
+    files?: { name: string; data: string }[];
+    manifestPatch?: Record<string, unknown>;
+  }) {
+    const manifest = {
+      format: BACKUP_FORMAT,
+      version: BACKUP_VERSION,
+      appVersion: "0.0.0-evil",
+      createdAt: Date.now(),
+      platform: "darwin",
+      sourceDataDir: "/Users/someone/Library/Application Support/OmniStudio",
+      redacted: false,
+      scopes: opts.scopes,
+      db: { entry: BACKUP_DB_ENTRY, bytes: 0, tables: {} },
+      files: [],
+      totals: { files: 0, filesBytes: 0, bytes: 0 },
+      ...(opts.manifestPatch ?? {}),
+    };
+    const entries: TarSource[] = [];
+    entries.push({ name: BACKUP_MANIFEST_ENTRY, data: Buffer.from(JSON.stringify(manifest)) });
+    if (opts.dbSourcePath) {
+      entries.push({ name: BACKUP_DB_ENTRY, source: opts.dbSourcePath, size: readFileSync(opts.dbSourcePath).length });
+    }
+    for (const f of opts.files ?? []) entries.push({ name: `${BACKUP_FILES_PREFIX}${f.name}`, data: Buffer.from(f.data) });
+
+    const out = join(root, opts.name);
+    await writeArchive(out, Readable.from(entries));
+    return out;
+  }
+
+  /** 造一个"设置里把技能库指向 victim 目录"的数据库快照。 */
+  function hostileSnapshot(victimDir: string): string {
+    const path = join(root, `hostile-${Math.random().toString(36).slice(2)}.db`);
+    const db = createSchema(path);
+    db.exec(`insert into settings (key, value) values ('SKILLS_CENTRAL_PATH', ?)`, [victimDir]);
+    db.close();
+    return path;
+  }
+
+  test("归档把技能库指向别处时，文件仍写在本机原有目录（不能越界写任意路径）", async () => {
+    const victim = join(root, "victim-home");
+    await mkdir(victim, { recursive: true });
+    const hostileDb = hostileSnapshot(victim);
+    const archive = await craftArchive({
+      name: "evil.omnibackup",
+      scopes: ["settings", "skills"],
+      dbSourcePath: hostileDb,
+      files: [{ name: "skills-repo/.zshrc", data: "pwned\n" }],
+      // 让快照里的 settings 真的被写回（否则这次攻击连设置都改不动）
+      manifestPatch: {
+        db: { entry: BACKUP_DB_ENTRY, bytes: readFileSync(hostileDb).length, tables: { settings: 1 } },
+      },
+    });
+
+    const result = await restoreBackup({ ctx: ctx(), path: archive, safety: false });
+
+    // 受害目录一个字节都不该被写进去
+    expect(existsSync(join(victim, ".zshrc"))).toBe(false);
+    // 文件落在"恢复前"本机配置的技能库里，并给出提示
+    expect(await readFile(join(skillsRepo, ".zshrc"), "utf8")).toBe("pwned\n");
+    expect(result.warnings.join("\n")).toMatch(/技能库位置/);
+  });
+
+  test("归档里的非法 KDF 参数被拒绝（不会拿它去分配内存）", async () => {
+    const archive = await craftArchive({ name: "kdf.omnibackup", scopes: ["settings"] });
+    const withHeader = join(root, "kdf-enc.omnibackup");
+    // 手工拼一个只声明离谱参数的加密头（N=2^28 → 明文要求的内存是 32 GiB）
+    const head = Buffer.alloc(HEADER_BYTES);
+    head.write(ENCRYPTED_MAGIC, 0, 8, "ascii");
+    head.writeUInt8(CONTAINER_VERSION, 8);
+    head.writeUInt8(KDF_SCRYPT, 9);
+    head.writeUInt32BE(1 << 28, 10);
+    head.writeUInt32BE(8, 14);
+    head.writeUInt32BE(1, 18);
+    await writeFile(withHeader, head);
+
+    await expect(inspectBackup({ path: withHeader, password: "pw" })).rejects.toThrow(/密钥派生参数不合法/);
+    await expect(readHeader(withHeader)).rejects.toThrow(/密钥派生参数不合法/);
+    expect(archive).toBeTruthy();
+  });
+
+  test("归档声明的条目长度异常时拒绝读取（不把内存吃光）", async () => {
+    // 手写一个 tar 头：manifest.json 声明 1 GiB，实际没有正文。
+    const block = Buffer.alloc(1024);
+    block.write("manifest.json", 0, 100, "utf8");
+    block.write("0000644\0", 100, 8, "ascii");
+    block.write("0000000\0", 108, 8, "ascii");
+    block.write("0000000\0", 116, 8, "ascii");
+    block.write(`${(1 << 30).toString(8).padStart(11, "0")}\0`, 124, 12, "ascii");
+    block.write("00000000000\0", 136, 12, "ascii");
+    block.write("        ", 148, 8, "ascii"); // 校验和按 8 个空格计算后再写回
+    block.write("0", 156, 1, "ascii");
+    block.write("ustar\0" + "00", 257, 8, "ascii");
+    let sum = 0;
+    for (const byte of block.subarray(0, 512)) sum += byte;
+    block.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
+
+    const bogus = join(root, "huge-size.omnibackup");
+    await writeFile(bogus, block);
+    await expect(inspectBackup({ path: bogus })).rejects.toThrow(/长度异常/);
+  });
+
+  test("归档缺少数据库条目信息时明确报错（而不是渲染时崩）", async () => {
+    const noDb = await craftArchive({
+      name: "nodb.omnibackup",
+      scopes: ["settings"],
+      manifestPatch: { db: undefined },
+    });
+    await expect(inspectBackup({ path: noDb })).rejects.toThrow(/缺少数据库条目/);
+
+    const badScopes = await craftArchive({
+      name: "badscopes.omnibackup",
+      scopes: ["settings"],
+      manifestPatch: { scopes: "settings" },
+    });
+    await expect(inspectBackup({ path: badScopes })).rejects.toThrow(/缺少内容分组/);
+  });
+
+  test("归档里重复条目不会让恢复在数据库提交后半途失败", async () => {
+    const archive = await craftArchive({
+      name: "dup.omnibackup",
+      scopes: ["media"],
+      files: [
+        { name: "uploads/same.txt", data: "first\n" },
+        { name: "uploads/sub/../same.txt", data: "second\n" },
+      ],
+    });
+
+    const result = await restoreBackup({ ctx: ctx(), path: archive, safety: false });
+    expect(result.bytes).toBeGreaterThanOrEqual(0);
+    // 后一条重复条目被跳过并留下说明，但整体恢复仍然成功
+    expect(result.warnings.join("\n")).toMatch(/重复条目/);
+    expect(result.files).toBe(1);
+  });
+
+  test("目标库没有表结构时明确拒绝恢复（新机器不会静默恢复出 0 条）", async () => {
+    const created = await createBackup({ ctx: ctx(), scopes: ["settings"] });
+    const freshDir = join(root, "fresh-data");
+    await mkdir(freshDir, { recursive: true });
+    await expect(
+      restoreBackup({ ctx: { ...ctx(), dataDir: freshDir, dbPath: join(freshDir, "omni-studio.db") }, path: created.path, safety: false }),
+    ).rejects.toThrow(/还没有 OmniStudio 数据库/);
+  });
+
+  test("删除只认备份文件：非备份文件即便目录对得上也拒绝", async () => {
+    const backupDir = join(dataDir, "backups");
+    await mkdir(backupDir, { recursive: true });
+    const precious = join(backupDir, "important.omnibackup");
+    await writeFile(precious, "这不是备份，只是恰好叫这个名字\n");
+    const notBackup = join(backupDir, "notes.txt");
+    await writeFile(notBackup, "普通文件\n");
+
+    expect((await deleteBackup({ path: precious, dir: backupDir })).ok).toBe(false);
+    expect(existsSync(precious)).toBe(true);
+    expect((await deleteBackup({ path: notBackup, dir: backupDir })).ok).toBe(false);
+    expect(existsSync(notBackup)).toBe(true);
+
+    // 真备份仍然能删
+    const created = await createBackup({ ctx: ctx(), scopes: ["settings"] });
+    expect((await deleteBackup({ path: created.path, dir: backupDir })).ok).toBe(true);
+    expect(existsSync(created.path)).toBe(false);
+  });
+
+  test("创建时传入的 fileName 不能借 ../ 越出目标目录", async () => {
+    const created = await createBackup({ ctx: ctx(), scopes: ["settings"], fileName: "../../OUTSIDE/evil" });
+    expect(created.path.startsWith(join(dataDir, "backups"))).toBe(true);
+    expect(existsSync(join(root, "OUTSIDE", "evil.omnibackup"))).toBe(false);
   });
 });

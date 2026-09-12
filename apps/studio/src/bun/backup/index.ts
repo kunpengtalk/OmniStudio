@@ -15,7 +15,7 @@
  */
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { existsSync, statSync } from "node:fs";
-import { copyFile, mkdir, readdir, rename, rm, stat, statfs, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, open, readdir, rename, rm, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 
@@ -26,6 +26,7 @@ import {
   BACKUP_FILES_PREFIX,
   BACKUP_FORMAT,
   BACKUP_MANIFEST_ENTRY,
+  BACKUP_FILE_EXT,
   BACKUP_FILE_ROOTS,
   BACKUP_SCOPES,
   BACKUP_VERSION,
@@ -135,6 +136,68 @@ function rootDirOf(root: BackupFileRoot, ctx: BackupContext, conn: Database | nu
     return statSync(dir).isDirectory() ? dir : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * 恢复时先钉住「外部根落在哪」——只认**恢复前**本机设置里的 SKILLS_CENTRAL_PATH。
+ *
+ * 外部根是唯一一个目录不受数据目录约束的文件根，而恢复后的 settings 表来自归档
+ * （外部输入）。若拿恢复后的值当落地目录，一个做过手脚的备份只要把
+ * SKILLS_CENTRAL_PATH 指到 $HOME、再带上 `data/files/skills-repo/.zshrc`，就能在
+ * 用户从未授权的位置覆盖任意文件（连 ~/Library/LaunchAgents 都行）。
+ *
+ * 因此把「路径从哪来」钉死在本机原有配置上：归档只能决定**写哪些文件**，
+ * 不能决定**写到哪个根**。跨机器恢复仍然成立 —— 落地目录是本机当前配置的技能库
+ * （用户本来就在用的那个），而不是归档里那一台机器的路径。
+ */
+function captureExternalRootDirs(ctx: BackupContext, conn: Database | null): Map<string, string | null> {
+  const own = conn ? null : existsSync(ctx.dbPath) ? new Database(ctx.dbPath, { readonly: true }) : null;
+  const src = conn ?? own;
+  const out = new Map<string, string | null>();
+  try {
+    for (const root of BACKUP_FILE_ROOTS) {
+      if (root.rel) continue;
+      const dir = resolveExternalRoot(root, src);
+      let usable: string | null = null;
+      if (dir) {
+        try {
+          usable = statSync(dir).isDirectory() ? dir : null;
+        } catch {
+          usable = null;
+        }
+      }
+      out.set(root.id, usable);
+    }
+  } finally {
+    own?.close();
+  }
+  return out;
+}
+
+/**
+ * 归档把外部根指向了别处时给出提示。
+ *
+ * 不阻止恢复（设置本身是用户数据，恢复它就该生效），但要让人知道"文件写到的
+ * 位置"和"恢复后设置里的位置"已经不是同一个，否则下次备份会从新设置里去找文件
+ * 却找不到。
+ */
+function warnIfExternalRootMoved(
+  liveConn: Database | null,
+  pinned: Map<string, string | null>,
+  warnings: string[],
+): void {
+  for (const root of BACKUP_FILE_ROOTS) {
+    if (root.rel || !root.external) continue;
+    const now = resolveExternalRoot(root, liveConn);
+    const before = pinned.get(root.id);
+    if (now && before && resolve(now) !== resolve(before)) {
+      warnings.push(
+        `备份里的技能库位置（${now}）与本机原有位置（${before}）不一致：文件已写入原有位置，请在设置里确认技能库路径`,
+      );
+    } else if (now && !before) {
+      warnings.push(`备份把技能库指向 ${now}，但该目录当前不可用：文件未能写入，请检查设置`);
+    }
   }
 }
 
@@ -254,7 +317,7 @@ function runTask(
       broadcast({ type: "finished", taskId, kind, ok: true, result });
     } catch (err) {
       const canceled = controller.signal.aborted;
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errText(err);
       sink({ phase: "error", percent: null, message });
       broadcast({ type: "finished", taskId, kind, ok: false, canceled, error: message });
     } finally {
@@ -670,6 +733,14 @@ export interface CreateBackupParams extends BackupCreateRequest {
   ctx?: Partial<BackupContext>;
   onProgress?: (p: Omit<BackupProgress, "taskId" | "kind">) => void;
   signal?: AbortSignal;
+  /**
+   * 跳过「创建后自动上传」设置。
+   *
+   * 恢复前自动生成的 pre-restore 回退点用它：那份快照是就地兜底用的，
+   * 把它推到远端既不符合用户预期，也会让恢复多受一次网络波动的影响
+   * （上传失败会直接中断恢复）。
+   */
+  skipAutoUpload?: boolean;
 }
 
 export async function createBackup(params: CreateBackupParams): Promise<BackupCreateResult> {
@@ -683,7 +754,8 @@ export async function createBackup(params: CreateBackupParams): Promise<BackupCr
   };
 
   const destDir = params.destinationDir ? resolve(expandHome(params.destinationDir)) : defaultBackupDir(ctx.dataDir);
-  const fileName = params.fileName?.trim() || backupFileName();
+  // fileName 来自 webview / CLI：`../../x` 会越过 destinationDir 写到别处，只取 basename。
+  const fileName = safeBaseName(params.fileName?.trim() || "") ?? backupFileName();
   const outPath = join(destDir, fileName.endsWith(".omnibackup") ? fileName : `${fileName}.omnibackup`);
   const tmpDir = join(defaultBackupDir(ctx.dataDir), `.tmp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
 
@@ -811,9 +883,11 @@ export async function createBackup(params: CreateBackupParams): Promise<BackupCr
       // 5. 上传到远端（可选）
       let uploaded: BackupCreateResult["uploaded"];
       let localDeleted = false;
-      if (params.upload) {
+      // 「创建后自动上传」是设置里的常开开关：勾了它就不用每次在创建表单里再勾一次。
+      const remoteConfig = readRemoteConfig(ctx);
+      const autoUpload = !params.skipAutoUpload && remoteConfig.enabled && remoteConfig.autoUpload;
+      if (params.upload || autoUpload) {
         aborted();
-        const remoteConfig = readRemoteConfig(ctx);
         if (!remoteConfig.enabled) throw new Error("已勾选上传，但远端备份未启用或未配置完整");
         report({ phase: "upload", percent: 0, current: basename(outPath), totalBytes: bytes });
         const result = await Remote.uploadBackup({
@@ -874,9 +948,21 @@ export async function inspectBackup(params: {
   }
   if (!manifest) throw new Error("不是有效的 OmniStudio 备份：缺少 manifest.json");
   if (manifest.format !== BACKUP_FORMAT) throw new Error(`备份格式不匹配：${manifest.format}`);
+  if (!Number.isInteger(manifest.version) || manifest.version < 1) {
+    throw new Error("备份清单里的版本号不合法（文件可能已损坏）");
+  }
   if (manifest.version > BACKUP_VERSION) {
     throw new Error(`备份由更新版本的应用创建（v${manifest.version}），请先升级 OmniStudio`);
   }
+  // 清单是归档里的 JSON：字段可能缺失或类型不对。这里一次挡掉，
+  // 免得 `manifest.db.tables` 这种取值在恢复页渲染时变成 TypeError（整页白屏）。
+  if (!manifest.db || typeof manifest.db !== "object" || typeof manifest.db.entry !== "string") {
+    throw new Error("备份清单缺少数据库条目信息（文件可能已损坏）");
+  }
+  if (manifest.db.tables !== undefined && (typeof manifest.db.tables !== "object" || manifest.db.tables === null)) {
+    throw new Error("备份清单里的表统计不合法（文件可能已损坏）");
+  }
+  if (!Array.isArray(manifest.scopes)) throw new Error("备份清单缺少内容分组信息（文件可能已损坏）");
   const warnings: string[] = [];
   if (manifest.sourceDataDir && resolve(manifest.sourceDataDir) !== resolve(getDataDir())) {
     warnings.push(
@@ -911,8 +997,7 @@ function tableColumns(conn: Database, table: string): string[] {
   }
 }
 
-/** 整表替换：删除当前行 → 从快照灌入（列取交集，兼容老版本备份）。 */
-function replaceTable(dst: Database, src: Database, table: string): number {
+/** 整表替换：删除当前行 → 从快照灌入（列取交集，兼容老版本备份）。 */function replaceTable(dst: Database, src: Database, table: string): number {
   const dstCols = tableColumns(dst, table);
   const srcCols = new Set(tableColumns(src, table));
   const cols = dstCols.filter((c) => srcCols.has(c));
@@ -929,6 +1014,51 @@ function replaceTable(dst: Database, src: Database, table: string): number {
   return rows;
 }
 
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * 目标库是否已经有应用表结构。
+ *
+ * 恢复只做「整表替换」，不建表（内核刻意不 import 数据层，所以拿不到那批迁移）。
+ * 数据库还不存在时（新机器、重装后应用从未启动过），替换会对每张表都判定
+ * 「本机没有表」并跳过 —— 结果是一次「成功」的恢复，写回 0 条记录 0 个文件，
+ * 用户却以为数据回来了。这是备份功能里最不能出错的一条路，宁可明确拒绝。
+ */
+function hasAppSchema(dbPath: string): boolean {
+  if (!existsSync(dbPath)) return false;
+  try {
+    const conn = new Database(dbPath, { readonly: true });
+    try {
+      const row = conn.query("select name from sqlite_master where type = 'table' and name = 'settings'").get();
+      return Boolean(row);
+    } finally {
+      conn.close();
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 把暂存文件搬到目标路径（恢复语义：同名覆盖）。
+ *
+ * `rename` 失败只有 EXDEV（暂存目录与目标不在同一文件系统）才值得退回复制。
+ * 目标是个目录（EISDIR）或源文件已被前一条重复条目搬走（ENOENT）时复制一样失败，
+ * 而那时数据库事务已经提交，会把整次恢复变成「数据回来了但文件一个没写」。
+ */
+async function writeBackFile(stagedPath: string, dest: string): Promise<void> {
+  try {
+    await rename(stagedPath, dest);
+    return;
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code !== "EXDEV") throw err;
+  }
+  await copyFile(stagedPath, dest);
+  await unlink(stagedPath).catch(() => {});
+}
+
 export async function restoreBackup(params: RestoreBackupParams): Promise<BackupRestoreResult> {
   const ctx = currentBackupContext(params.ctx);
   const signal = params.signal;
@@ -942,6 +1072,17 @@ export async function restoreBackup(params: RestoreBackupParams): Promise<Backup
   const wanted = sanitizeScopes(params.scopes?.length ? params.scopes : info.manifest.scopes);
   const available = wanted.filter((s) => info.scopes.includes(s));
   if (!available.length) throw new Error("所选作用域在该备份里不存在");
+
+  // 外部根（技能库）在数据库被覆盖前先钉住落地目录 —— 见 captureExternalRootDirs。
+  const pinnedExternalRoots = captureExternalRootDirs(ctx, ctx.connection ?? null);
+
+  if (!ctx.connection && !hasAppSchema(ctx.dbPath)) {
+    throw new Error(
+      "本机还没有 OmniStudio 数据库，恢复无法建表（它只做整表替换）。\n" +
+        "请先启动一次 OmniStudio 让它在本地初始化数据库，退出后再恢复；" +
+        "或直接在应用内「设置 → 数据 → 备份与恢复」里恢复。",
+    );
+  }
 
   const staging = join(defaultBackupDir(ctx.dataDir), `.restore-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
   let stagedDb: string | null = null;
@@ -959,6 +1100,7 @@ export async function restoreBackup(params: RestoreBackupParams): Promise<Backup
         scopes: available,
         fileName: `pre-restore-${backupFileName()}`,
         note: `恢复前自动备份（来源：${info.path}）`,
+        skipAutoUpload: true,
         onProgress: (p) => report({ ...p, phase: "safety", message: "恢复前自动备份当前数据" }),
         signal,
       });
@@ -970,6 +1112,7 @@ export async function restoreBackup(params: RestoreBackupParams): Promise<Backup
     report({ phase: "unpack", percent: 0, totalBytes: info.bytes });
     await mkdir(staging, { recursive: true });
     const stagedFiles: { root: BackupFileRoot; relInRoot: string; stagedPath: string }[] = [];
+    const seenStaged = new Set<string>();
     const dbEntry = info.manifest.db.entry || BACKUP_DB_ENTRY;
     let read = 0;
 
@@ -997,6 +1140,14 @@ export async function restoreBackup(params: RestoreBackupParams): Promise<Backup
         warnings.push(`已跳过可疑路径：${entry.name}`);
         continue;
       }
+      // `a/../b` 与 `b` 归一化到同一个暂存路径：后者会让先落盘的文件被覆盖、
+      // 写回时 rename 又找不到源文件，整次恢复在数据库已提交后半途失败。
+      if (seenStaged.has(stagedPath)) {
+        await entry.discard();
+        warnings.push(`归档里有重复条目，已跳过：${entry.name}`);
+        continue;
+      }
+      seenStaged.add(stagedPath);
       await entry.saveTo(stagedPath);
       stagedFiles.push({ root, relInRoot: classified.relInRoot, stagedPath });
       restoredBytes += entry.size;
@@ -1048,14 +1199,16 @@ export async function restoreBackup(params: RestoreBackupParams): Promise<Backup
     aborted();
     if (stagedFiles.length) {
       report({ phase: "files", percent: 72, totalItems: stagedFiles.length });
-      // 外部根（技能仓库）按「恢复后的设置」解析：跨机器恢复时路径可能已经变了。
+      // 数据目录内的根按当前数据目录拼；外部根用恢复前钉住的目录（不看归档里的设置）。
       const liveConn = existsSync(ctx.dbPath) ? new Database(ctx.dbPath, { readonly: true }) : null;
       let done = 0;
       try {
         const dirCache = new Map<string, string | null>();
+        const resolveRootDir = (root: BackupFileRoot): string | null =>
+          root.rel ? rootDirOf(root, ctx, null) : (pinnedExternalRoots.get(root.id) ?? null);
         for (const item of stagedFiles) {
           aborted();
-          if (!dirCache.has(item.root.id)) dirCache.set(item.root.id, rootDirOf(item.root, ctx, liveConn));
+          if (!dirCache.has(item.root.id)) dirCache.set(item.root.id, resolveRootDir(item.root));
           const rootDir = dirCache.get(item.root.id);
           if (!rootDir) {
             if (!warnings.includes(`目标目录不存在，已跳过：${item.root.id}`)) {
@@ -1070,11 +1223,12 @@ export async function restoreBackup(params: RestoreBackupParams): Promise<Backup
           }
           await mkdir(dirname(dest), { recursive: true });
           try {
-            await rename(item.stagedPath, dest);
-          } catch {
-            // 跨设备时退回复制（恢复语义是覆盖同名文件）
-            await copyFile(item.stagedPath, dest);
-            await unlink(item.stagedPath).catch(() => {});
+            await writeBackFile(item.stagedPath, dest);
+          } catch (err) {
+            // 数据库事务此时已提交，单个文件写不进去不该让整次恢复失败；
+            // 如实报出来，用户至少知道哪个文件没落盘。
+            warnings.push(`文件写入失败，已跳过：${item.root.id}/${item.relInRoot}（${errText(err)}）`);
+            continue;
           }
           restoredFiles += 1;
           report({
@@ -1086,6 +1240,7 @@ export async function restoreBackup(params: RestoreBackupParams): Promise<Backup
           });
         }
       } finally {
+        warnIfExternalRootMoved(liveConn, pinnedExternalRoots, warnings);
         liveConn?.close();
       }
     }
@@ -1176,7 +1331,7 @@ export async function listBackups(params?: { dir?: string; password?: string }):
       summary.totals = info.manifest.totals;
     } catch (err) {
       if (!encrypted || !isBackupPasswordError(err)) {
-        summary.error = err instanceof Error ? err.message : String(err);
+        summary.error = errText(err);
       }
       summary.createdAt = summary.bytes ? statSync(path).mtimeMs : 0;
     }
@@ -1186,16 +1341,39 @@ export async function listBackups(params?: { dir?: string; password?: string }):
   return { dir, backups };
 }
 
+/**
+ * 这个文件是不是一份备份归档 —— 删除前必须确认。
+ *
+ * 只校验「在不在调用方给的目录里」没有意义：`dir` 与 `path` 来自同一个调用方
+ * （webview / 控制通道），把任意文件的父目录当 dir 传进来就绕过了。真正的护栏是
+ * 「文件本身必须是备份」：扩展名 + 备份魔数（明文 gzip / 加密容器）都对才允许删。
+ */
+async function isBackupArchive(path: string): Promise<boolean> {
+  if (!path.endsWith(`.${BACKUP_FILE_EXT}`)) return false;
+  if (await isEncryptedFile(path)) return true;
+  const handle = await open(path, "r");
+  try {
+    const head = Buffer.alloc(2);
+    const { bytesRead } = await handle.read(head, 0, 2, 0);
+    return bytesRead === 2 && head[0] === 0x1f && head[1] === 0x8b;
+  } catch {
+    return false;
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function deleteBackup(params: { path: string; dir?: string }): Promise<{ ok: boolean; error?: string }> {
   const path = resolve(expandHome(params.path));
-  // 只允许删自己目录下的备份文件：路径来自 webview / 控制通道，不可信。
+  // 路径来自 webview / 控制通道，不可信：先看目录边界，再确认它确实是备份文件。
   const dir = params.dir ? resolve(expandHome(params.dir)) : defaultBackupDir();
   if (!isInsideDir(dir, path)) return { ok: false, error: "只能删除备份目录内的文件" };
+  if (!(await isBackupArchive(path))) return { ok: false, error: "只能删除备份文件（*.omnibackup）" };
   try {
     await rm(path, { force: true });
     return { ok: true };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: errText(err) };
   }
 }
 
@@ -1242,7 +1420,7 @@ export async function checkWritableDir(dir: string): Promise<{ ok: boolean; erro
     const fsStat = await statfs(target);
     return { ok: true, freeBytes: Number(fsStat.bavail) * Number(fsStat.bsize) };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: errText(err) };
   }
 }
 
