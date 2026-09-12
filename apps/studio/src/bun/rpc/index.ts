@@ -49,7 +49,17 @@ import type {
 import * as ModelStore from "../model-store";
 import type { InstalledModel } from "../model-store";
 import { getServerStats, type ServerStats } from "../stats";
-import { runBenchmark, type BenchmarkParams, type BenchmarkResult } from "../benchmark";
+import {
+  startBenchmark,
+  getBenchmarkRun,
+  cancelBenchmark,
+  listBenchmarkRecords,
+  deleteBenchmarkRecord,
+  clearBenchmarkRecords,
+  type BenchmarkParams,
+  type BenchmarkRunState,
+  type BenchmarkRecordRow,
+} from "../benchmark";
 import { downloadManager, type DownloadTask } from "../download-manager";
 import * as Voice from "../voice";
 import type { VoiceRecordRow, VoiceRecordKind, VoiceClone } from "../voice";
@@ -795,9 +805,30 @@ export type AppRPC = {
           dataDir: string;
         };
       };
-      runBenchmark: {
+      // Benchmark（速度扫描：异步任务 + 历史记录）
+      startBenchmark: {
         params: BenchmarkParams;
-        response: BenchmarkResult;
+        response: { runId: string } | { error: string };
+      };
+      getBenchmarkRun: {
+        params: { runId: string };
+        response: { run: BenchmarkRunState | null };
+      };
+      cancelBenchmark: {
+        params: { runId: string };
+        response: { ok: boolean };
+      };
+      listBenchmarkRecords: {
+        params: undefined;
+        response: { records: BenchmarkRecordRow[] };
+      };
+      deleteBenchmarkRecord: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      clearBenchmarkRecords: {
+        params: undefined;
+        response: { ok: boolean };
       };
       // Voice (TTS / ASR / voice cloning)
       listVoiceRecords: {
@@ -2663,8 +2694,23 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         };
       },
 
-      runBenchmark: async (params) => {
-        return runBenchmark(params);
+      startBenchmark: async (params) => {
+        return startBenchmark(params);
+      },
+      getBenchmarkRun: async ({ runId }) => {
+        return { run: getBenchmarkRun(runId) };
+      },
+      cancelBenchmark: async ({ runId }) => {
+        return cancelBenchmark(runId);
+      },
+      listBenchmarkRecords: async () => {
+        return { records: listBenchmarkRecords() };
+      },
+      deleteBenchmarkRecord: async ({ id }) => {
+        return deleteBenchmarkRecord(id);
+      },
+      clearBenchmarkRecords: async () => {
+        return clearBenchmarkRecords();
       },
 
       // Voice

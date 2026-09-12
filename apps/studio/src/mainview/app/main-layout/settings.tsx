@@ -5,7 +5,6 @@ import {
   CpuIcon,
   GaugeIcon,
   BlocksIcon,
-  ActivityIcon,
   GlobeIcon,
   CheckIcon,
   XCircleIcon,
@@ -130,7 +129,6 @@ type SettingsTab =
   | "gateway"
   | "performance"
   | "integrations"
-  | "benchmark"
   | "logs"
   | "stats"
   | "websearch"
@@ -151,7 +149,6 @@ const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
   gateway: { icon: <WaypointsIcon className="size-4" />, labelKey: "settings.gateway" },
   performance: { icon: <GaugeIcon className="size-4" />, labelKey: "settings.performance" },
   integrations: { icon: <BlocksIcon className="size-4" />, labelKey: "settings.integrations" },
-  benchmark: { icon: <ActivityIcon className="size-4" />, labelKey: "settings.benchmark" },
   logs: { icon: <TerminalSquareIcon className="size-4" />, labelKey: "settings.logs" },
   stats: { icon: <LayoutDashboardIcon className="size-4" />, labelKey: "settings.dashboard" },
   websearch: { icon: <GlobeIcon className="size-4" />, labelKey: "settings.webSearch.title" },
@@ -173,7 +170,7 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
   },
   {
     labelKey: "settings.group.services",
-    tabs: ["gateway", "integrations", "benchmark", "performance"],
+    tabs: ["gateway", "integrations", "performance"],
   },
   { labelKey: "settings.group.tools", tabs: ["websearch", "memory", "mcp", "cli"] },
   { labelKey: "settings.group.prefs", tabs: ["general", "appearance", "about"] },
@@ -476,206 +473,6 @@ function IntegrationsSettings({
   );
 }
 
-const BENCHMARK_PRESET_CONTEXTS = [1024, 4096, 8192, 16384, 32768];
-
-function BenchmarkSettings({ form }: { form: SettingsFormState }) {
-  const t = useT();
-  const [model, setModel] = useState("");
-  const [genLength, setGenLength] = useState(128);
-  const [batchSize, setBatchSize] = useState(1);
-  const [contexts, setContexts] = useState<number[]>(BENCHMARK_PRESET_CONTEXTS);
-
-  const { data: installed } = useQuery({
-    queryKey: ["installed-models"],
-    queryFn: () => rpcClient.listInstalledModels(),
-  });
-
-  const runMutation = useMutation({
-    mutationFn: () =>
-      rpcClient.runBenchmark({
-        model: model || (form.CHAT_MODEL ?? "") || "local",
-        genLength,
-        batchSize,
-        contexts,
-      }),
-  });
-
-  const toggleContext = (c: number) => {
-    setContexts((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c].sort((a, b) => a - b)));
-  };
-
-  const models = installed?.models ?? [];
-  const modelOptions = Array.from(new Set(models.map((m) => m.fileName.replace(/\.gguf$/i, "")))).filter(Boolean);
-  const effectiveModel = model || (form.CHAT_MODEL ?? "") || modelOptions[0] || "";
-
-  const rows = runMutation.data?.rows ?? [];
-  const maxTps = Math.max(...rows.map((r) => r.tps), 0.0001);
-
-  return (
-    <div className="flex flex-col gap-5">
-      <div>
-        <p className="mb-3 text-xs text-muted-foreground">{t("settings.benchmark.desc")}</p>
-        <div className="flex flex-col gap-3">
-          <div>
-            <Label htmlFor="benchModel" className="mb-1 text-xs">{t("settings.benchmark.model")}</Label>
-            <Input
-              id="benchModel"
-              placeholder={modelOptions[0] ?? "model name"}
-              value={effectiveModel}
-              onChange={(e) => setModel(e.target.value)}
-              className="h-8 text-xs"
-            />
-            {modelOptions.length > 0 && (
-              <p className="mt-1 flex flex-wrap gap-1">
-                {modelOptions.slice(0, 8).map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => setModel(m)}
-                    className={cn(
-                      "rounded-full border px-2 py-0.5 text-[10px] transition-colors",
-                      effectiveModel === m
-                        ? "border-primary bg-primary/10 text-primary"
-                        : "border-border text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    {m}
-                  </button>
-                ))}
-              </p>
-            )}
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <Label htmlFor="benchGen" className="mb-1 text-xs">{t("settings.benchmark.genLength")}</Label>
-              <Input
-                id="benchGen"
-                type="text"
-                inputMode="numeric"
-                value={String(genLength)}
-                onChange={(e) => setGenLength(parseInt(e.target.value || "0", 10) || 16)}
-                className="h-8 text-xs"
-              />
-            </div>
-            <div>
-              <Label htmlFor="benchBatch" className="mb-1 text-xs">{t("settings.benchmark.batchSize")}</Label>
-              <Input
-                id="benchBatch"
-                type="text"
-                inputMode="numeric"
-                value={String(batchSize)}
-                onChange={(e) => setBatchSize(parseInt(e.target.value || "0", 10) || 1)}
-                className="h-8 text-xs"
-              />
-            </div>
-          </div>
-          <div>
-            <Label className="mb-1 block text-xs">{t("settings.benchmark.contexts")}</Label>
-            <div className="flex flex-wrap gap-1.5">
-              {BENCHMARK_PRESET_CONTEXTS.map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  onClick={() => toggleContext(c)}
-                  className={cn(
-                    "rounded-full border px-2.5 py-1 text-xs transition-colors",
-                    contexts.includes(c)
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-                  )}
-                >
-                  {c >= 1000 ? `${(c / 1000).toFixed(c % 1000 === 0 ? 0 : 1)}k` : c}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <Button size="sm" onClick={() => runMutation.mutate()} disabled={runMutation.isPending || contexts.length === 0}>
-              {runMutation.isPending ? (
-                <Spinner data-icon="inline-start" />
-              ) : (
-                <ActivityIcon data-icon="inline-start" />
-              )}
-              {runMutation.isPending
-                ? t("settings.benchmark.running")
-                : runMutation.isSuccess
-                  ? t("settings.benchmark.runDone")
-                  : t("settings.benchmark.run")}
-            </Button>
-            {runMutation.isError && (
-              <span className="flex items-center gap-1.5 text-xs text-destructive">
-                <XCircleIcon className="size-3.5" /> {String(runMutation.error)}
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {runMutation.data?.error && (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-xs text-destructive">
-          {runMutation.data.error}
-        </div>
-      )}
-
-      <div>
-        <h3 className="mb-2 text-sm font-medium">{t("settings.benchmark.results")}</h3>
-        {rows.length === 0 ? (
-          <p className="rounded-lg border border-dashed px-4 py-6 text-center text-xs text-muted-foreground">
-            {t("settings.benchmark.noResults")}
-          </p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="border-b text-left text-muted-foreground">
-                  <th className="px-2 py-1.5 font-medium">{t("settings.benchmark.col.context")}</th>
-                  <th className="px-2 py-1.5 font-medium">{t("settings.benchmark.col.batch")}</th>
-                  <th className="px-2 py-1.5 text-right font-medium">{t("settings.benchmark.col.ttft")}</th>
-                  <th className="px-2 py-1.5 text-right font-medium">{t("settings.benchmark.col.tpot")}</th>
-                  <th className="px-2 py-1.5 text-right font-medium">{t("settings.benchmark.col.tps")}</th>
-                  <th className="px-2 py-1.5 text-right font-medium">{t("settings.benchmark.col.tokens")}</th>
-                  <th className="px-2 py-1.5 text-right font-medium">{t("settings.benchmark.col.total")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => (
-                  <tr key={r.contextLength} className="border-b border-muted/50">
-                    <td className="px-2 py-1.5 tabular-nums">
-                      {r.contextLength >= 1000 ? `${(r.contextLength / 1000).toFixed(0)}k` : r.contextLength}
-                    </td>
-                    <td className="px-2 py-1.5 tabular-nums">{r.batchSize}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums">{r.ttftMs}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums">{r.tpotMs}</td>
-                    <td className="px-2 py-1.5 text-right font-semibold tabular-nums text-primary">{r.tps}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums">{r.tokens}</td>
-                    <td className="px-2 py-1.5 text-right tabular-nums">{r.totalMs}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div className="mt-3 flex flex-col gap-1.5">
-              {rows.map((r) => (
-                <div key={r.contextLength} className="flex items-center gap-2">
-                  <span className="w-10 shrink-0 text-right font-mono text-[10px] text-muted-foreground">
-                    {r.contextLength >= 1000 ? `${(r.contextLength / 1000).toFixed(0)}k` : r.contextLength}
-                  </span>
-                  <div className="h-2.5 flex-1 rounded-full bg-muted">
-                    <div
-                      className="h-full rounded-full bg-primary/70"
-                      style={{ width: `${(r.tps / maxTps) * 100}%` }}
-                    />
-                  </div>
-                  <span className="w-14 shrink-0 font-mono text-[10px] tabular-nums">{r.tps} tps</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 export function SettingsScreen() {
   const t = useT();
   const [activeTab, setActiveTab] = useState<SettingsTab>("stats");
@@ -836,8 +633,6 @@ export function SettingsScreen() {
             {activeTab === "integrations" && (
               <IntegrationsSettings form={form} updateField={updateField} saveMutation={saveIntegrations} />
             )}
-
-            {activeTab === "benchmark" && <BenchmarkSettings form={form} />}
 
             {activeTab === "websearch" && (
               <WebSearchTab form={form} updateField={updateField} />

@@ -24,6 +24,7 @@ import {
   FileTextIcon,
   FileIcon,
   LayoutListIcon,
+  GaugeIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -56,6 +57,7 @@ import { useVoiceStore, type VoiceTab } from "@stores/voice";
 import { useImageStore } from "@stores/image";
 import { useVideoStore } from "@stores/video";
 import { useOcrStore } from "@stores/ocr";
+import { useBenchmarkStore } from "@stores/benchmark";
 import { useT } from "@stores/ui-lang";
 import { useTranslateStore } from "@stores/translate";
 import { usePromptStore } from "@stores/prompt";
@@ -328,6 +330,132 @@ function SingleToolEntry({ icon, label }: { icon: React.ReactNode; label: string
       {icon}
       <span className="leading-none">{label}</span>
     </div>
+  );
+}
+
+/** 基准测试页左侧历史记录：每条 = 模型 + 平均 TPS + 时间，点击在结果区回放。 */
+function BenchmarkRecordList() {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const { setRoute } = useRouter();
+  const { setActiveApp } = useAppStore();
+  const selectedRecordId = useBenchmarkStore((s) => s.selectedRecordId);
+  const setSelectedRecordId = useBenchmarkStore((s) => s.setSelectedRecordId);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["benchmark-records"],
+    queryFn: () => rpcClient.listBenchmarkRecords(undefined),
+  });
+  const records = data?.records ?? [];
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => rpcClient.deleteBenchmarkRecord({ id }),
+    onSuccess: (_, id) => {
+      if (selectedRecordId === id) setSelectedRecordId(null);
+      queryClient.invalidateQueries({ queryKey: ["benchmark-records"] });
+    },
+  });
+  const clearMutation = useMutation({
+    mutationFn: () => rpcClient.clearBenchmarkRecords(undefined),
+    onSuccess: () => {
+      setSelectedRecordId(null);
+      setConfirmClear(false);
+      queryClient.invalidateQueries({ queryKey: ["benchmark-records"] });
+    },
+  });
+
+  // 清空是破坏性操作：按钮两段式确认，3 秒未确认自动复原。
+  useEffect(() => {
+    if (!confirmClear) return;
+    const timer = setTimeout(() => setConfirmClear(false), 3000);
+    return () => clearTimeout(timer);
+  }, [confirmClear]);
+
+  const fmtRecordTime = (ms: number) => {
+    const d = new Date(ms);
+    const sameYear = d.getFullYear() === new Date().getFullYear();
+    const md = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    return sameYear ? `${md} ${hm}` : `${d.getFullYear()}-${md} ${hm}`;
+  };
+
+  return (
+    <SidebarGroup className="min-h-0 flex-1 gap-1">
+      <div className="px-1 pb-1">
+        <SingleToolEntry icon={<GaugeIcon className="size-4" />} label={t("apps.benchmark")} />
+      </div>
+      <SidebarGroupLabel>
+        <span className="flex items-center gap-1.5">
+          {t("benchmark.history")}
+          <Badge variant="secondary" className="h-5 px-1.5 text-[10px] tabular-nums">
+            {records.length}
+          </Badge>
+        </span>
+        {records.length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ml-auto h-6 shrink-0 px-2 text-[11px] hover:text-destructive"
+            disabled={clearMutation.isPending}
+            onClick={() => (confirmClear ? clearMutation.mutate() : setConfirmClear(true))}
+          >
+            {confirmClear ? t("benchmark.clearConfirm") : t("benchmark.clear")}
+          </Button>
+        )}
+      </SidebarGroupLabel>
+
+      <ScrollArea className="min-h-0 flex-1">
+        <SidebarMenu className="gap-0.5">
+          {isLoading ? (
+            <div className="flex justify-center py-6">
+              <Spinner className="size-3.5" />
+            </div>
+          ) : records.length === 0 ? (
+            <div className="py-8 text-center text-xs text-muted-foreground">{t("benchmark.noRecords")}</div>
+          ) : (
+            records.map((r) => (
+              <SidebarMenuItem key={r.id} className="group/bench-record">
+                <SidebarMenuButton
+                  isActive={selectedRecordId === r.id}
+                  onClick={() => {
+                    setSelectedRecordId(r.id);
+                    setActiveApp("benchmark");
+                    setRoute({ path: "index" });
+                  }}
+                  tooltip={r.model}
+                >
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="min-w-0 truncate text-xs font-medium leading-none">{r.model}</span>
+                    <span className="flex items-center gap-1 text-[10px] leading-none text-muted-foreground">
+                      {r.summary ? (
+                        <span className="font-medium tabular-nums text-primary">{r.summary.avgTps} tok/s</span>
+                      ) : (
+                        <span>{t(`benchmark.status.${r.status}`)}</span>
+                      )}
+                      <span className="tabular-nums">{fmtRecordTime(r.createdAt)}</span>
+                    </span>
+                  </span>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    tooltip={t("benchmark.deleteRecord")}
+                    className="size-6 shrink-0 opacity-0 transition-opacity group-hover/bench-record:opacity-100"
+                    disabled={deleteMutation.isPending}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteMutation.mutate(r.id);
+                    }}
+                  >
+                    <Trash2Icon className="size-3.5" />
+                  </Button>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            ))
+          )}
+        </SidebarMenu>
+      </ScrollArea>
+    </SidebarGroup>
   );
 }
 
@@ -1306,6 +1434,8 @@ export function AppSidebar() {
           <KbSidebar />
         ) : activeApp === "memory" ? (
           <MemorySidebar />
+        ) : activeApp === "benchmark" ? (
+          <BenchmarkRecordList />
         ) : (
           <ConversationRecordList app={activeApp} />
         )}

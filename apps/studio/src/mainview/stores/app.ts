@@ -12,7 +12,8 @@ export type AppId =
   | "prompt"
   | "skills"
   | "kb"
-  | "memory";
+  | "memory"
+  | "benchmark";
 
 type AppState = {
   activeApp: AppId;

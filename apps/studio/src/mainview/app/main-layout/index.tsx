@@ -24,6 +24,7 @@ import { SkillsScreen } from "../skills";
 import { MemoryScreen } from "../memory-screen";
 import { KbScreen } from "../kb";
 import { ModelsScreen } from "../models-screen";
+import { BenchmarkScreen } from "../benchmark-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { DownloadsButton } from "@components/download-panel";
 import { MediaSetupDialog } from "@components/media-setup-dialog";
@@ -57,6 +58,8 @@ const renderActiveApp = (activeApp: AppId): ReactNode => {
       return <MemoryScreen />;
     case "kb":
       return <KbScreen />;
+    case "benchmark":
+      return <BenchmarkScreen />;
     default:
       return <ChatWindow />;
   }

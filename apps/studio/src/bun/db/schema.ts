@@ -676,3 +676,35 @@ export const memoryMetrics = sqliteTable("memory_metrics", {
   value: int("value").notNull().default(0),
 });
 
+// ---------------------------------------------------------------------------
+// 基准测试（Benchmark）：模型速度扫描与后续本地能力评测的统一记录表。
+// kind='speed' 存 TTFT/TPOT/TPS/并发吞吐扫描；后续 MMLU/GSM8K 等本地评测
+// 脚本以 kind='eval' 复用，rows/params/summary 均为 JSON 快照。
+// ---------------------------------------------------------------------------
+
+export const benchmarkRecords = sqliteTable("benchmark_records", {
+  id: int("id").primaryKey({ autoIncrement: true }),
+  kind: text("kind")
+    .$type<"speed" | "eval">()
+    .notNull()
+    .$defaultFn(() => "speed"),
+  model: text("model").notNull(),
+  /** 目标服务快照：local（引擎+端口）/ remote（API Base）。 */
+  serverMode: text("server_mode"),
+  engine: text("engine"),
+  /** JSON：{ genLength, batchSize, contexts, temperature }。 */
+  params: text("params"),
+  /** JSON：每档上下文的指标行数组。 */
+  rows: text("rows"),
+  /** JSON：跨档汇总（平均 TPS / 峰值 / 最佳 TTFT 等）。 */
+  summary: text("summary"),
+  status: text("status")
+    .$type<"done" | "cancelled" | "error">()
+    .notNull()
+    .$defaultFn(() => "done"),
+  durationMs: int("duration_ms"),
+  error: text("error"),
+  createdAt: int("created_at").$defaultFn(() => Date.now()),
+});
+
+export type BenchmarkRecord = typeof benchmarkRecords.$inferSelect;

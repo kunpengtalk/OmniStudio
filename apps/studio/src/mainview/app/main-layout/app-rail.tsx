@@ -12,6 +12,7 @@ import {
   BlocksIcon,
   LibraryIcon,
   BrainIcon,
+  GaugeIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
 
@@ -36,6 +37,7 @@ const APP_IDS: AppId[] = [
   "skills",
   "kb",
   "memory",
+  "benchmark",
 ];
 
 // 抽象几何风格图标，区别于参考原型（气泡/麦克风/风景画）的具象图标
@@ -52,6 +54,7 @@ const APP_ICONS: Record<AppId, ReactNode> = {
   skills: <BlocksIcon className="size-5" />,
   kb: <LibraryIcon className="size-5" />,
   memory: <BrainIcon className="size-5" />,
+  benchmark: <GaugeIcon className="size-5" />,
 };
 
 function RailButton({
