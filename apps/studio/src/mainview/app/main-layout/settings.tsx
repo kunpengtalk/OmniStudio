@@ -117,6 +117,7 @@ const LAUNCHER_TOOLS: { key: string; labelKey: string; tool: string }[] = [
   { key: "LAUNCHER_HERMES_MODEL", labelKey: "settings.integrations.hermes", tool: "hermes" },
   { key: "LAUNCHER_PI_MODEL", labelKey: "settings.integrations.pi", tool: "pi" },
   { key: "LAUNCHER_COPILOT_MODEL", labelKey: "settings.integrations.copilot", tool: "copilot" },
+  { key: "LAUNCHER_CHATGPT_MODEL", labelKey: "settings.integrations.chatgpt", tool: "chatgpt" },
 ];
 
 const CLAUDE_TIERS = [
@@ -1126,6 +1127,18 @@ function IntegrationsSettings({
   const mode: "local" | "cloud" =
     (form.LAUNCHER_CLAUDE_MODE as "local" | "cloud" | undefined) ?? "local";
 
+  // MODEL_KEYS 是全部 Agent 的模型档位字段；切换本地/云端时清空已选模型，
+  // 避免旧模式的模型名串到新模式导致启动报错。
+  const MODEL_KEYS = [
+    ...CLAUDE_TIERS.map((c) => c.key),
+    ...LAUNCHER_TOOLS.map((x) => x.key),
+  ];
+  const setMode = (m: "local" | "cloud") => {
+    if (m === mode) return;
+    updateField("LAUNCHER_CLAUDE_MODE", m);
+    for (const key of MODEL_KEYS) if (form[key]) updateField(key, "");
+  };
+
   return (
     <div className="flex flex-col gap-4">
       {/* 页面级模式：本地只给本地模型，云端只给云端/API 模型。 */}
@@ -1141,7 +1154,7 @@ function IntegrationsSettings({
                 variant={mode === m ? "default" : "outline"}
                 size="sm"
                 className="h-7 text-xs"
-                onClick={() => updateField("LAUNCHER_CLAUDE_MODE", m)}
+                onClick={() => setMode(m)}
               >
                 {m === "local" ? t("settings.integrations.mode.local") : t("settings.integrations.mode.cloud")}
               </Button>

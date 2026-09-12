@@ -5,6 +5,7 @@ import * as ServerManager from "./server-manager";
 import * as Gateway from "./gateway";
 import { getSetting, updateSettings, getAllSettings } from "./db/settings";
 import { listInstalledModels, setActiveModel, getActiveModelPath, slugModelFileName } from "./model-store";
+import { downloadManager } from "./download-manager";
 import { updateState } from "./updates";
 
 /**
@@ -116,6 +117,34 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
 
     case "checkBinary":
       return { ok: true, data: ServerManager.checkBinaryExists() };
+
+    case "downloadsList":
+      return { ok: true, data: { tasks: downloadManager.list() } };
+
+    case "downloadsResume": {
+      // 把所有 paused / failed 的下载任务重新入队（磁盘空间恢复后可一键续传）。
+      const tasks = downloadManager.list();
+      const resumed: string[] = [];
+      for (const t of tasks) {
+        if ((t.status === "paused" || t.status === "failed") && downloadManager.resume(t.id)) {
+          resumed.push(t.fileName);
+        }
+      }
+      return { ok: true, data: { resumed, total: tasks.length } };
+    }
+
+    case "downloadsStart": {
+      const repo = String(payload.repo ?? "");
+      const fileName = String(payload.fileName ?? "");
+      if (!repo || !fileName) return { ok: false, error: "缺少 repo / fileName" };
+      const task = downloadManager.start(
+        repo,
+        fileName,
+        typeof payload.category === "string" ? (payload.category as never) : undefined,
+        (payload.source as "modelscope" | "huggingface") ?? "modelscope",
+      );
+      return { ok: true, data: { task } };
+    }
 
     case "gatewayStart": {
       const result = await Gateway.startGateway();

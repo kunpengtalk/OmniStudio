@@ -1,10 +1,11 @@
-export type InferenceEngine = "llama.cpp" | "vllm" | "sglang";
+export type InferenceEngine = "llama.cpp" | "vllm" | "sglang" | "mlx";
 
 /** Options for the engine selector; labels reuse `settings.engine.*` i18n keys. */
 export const ENGINE_OPTIONS: { value: InferenceEngine; labelKey: string }[] = [
   { value: "llama.cpp", labelKey: "settings.engine.llamacpp" },
   { value: "vllm", labelKey: "settings.engine.vllm" },
   { value: "sglang", labelKey: "settings.engine.sglang" },
+  { value: "mlx", labelKey: "settings.engine.mlx" },
 ];
 
 /**
@@ -15,6 +16,7 @@ export const ENGINE_PORT_KEYS: Record<InferenceEngine, string> = {
   "llama.cpp": "SERVER_PORT",
   vllm: "VLLM_PORT",
   sglang: "SGLANG_PORT",
+  mlx: "MLX_PORT",
 };
 
 /** Per-engine extra-launch-args setting key (mirrors ENGINE_EXTRA_ARGS_KEYS in bun/db/settings.ts). */
@@ -22,6 +24,7 @@ export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, string> = {
   "llama.cpp": "SERVER_EXTRA_ARGS",
   vllm: "VLLM_EXTRA_ARGS",
   sglang: "SGLANG_EXTRA_ARGS",
+  mlx: "MLX_EXTRA_ARGS",
 };
 
 export type ModelFileKind = "gguf" | "safetensors" | "other";
@@ -38,7 +41,8 @@ export function fileKind(fileName: string): ModelFileKind {
 export function engineSupports(engine: InferenceEngine, kind: ModelFileKind): boolean {
   if (kind === "other") return true;
   if (kind === "gguf") return engine === "llama.cpp";
-  return engine === "vllm" || engine === "sglang";
+  // safetensors / MLX 目录由 vLLM、SGLang、MLX 加载。
+  return engine === "vllm" || engine === "sglang" || engine === "mlx";
 }
 
 /** Recommended engine for a model file, when its format makes it unambiguous. */
@@ -433,6 +437,25 @@ export const MODEL_PRESETS: readonly ChatPreset[] = [
     defaultQuant: "Q4_K_M",
     quants: [],
     engine: "all",
+  },
+  // MLX（Apple Silicon，mlx-lm 推理引擎）
+  {
+    app: "chat",
+    repo: "pipenetwork/DeepSeek-V4.1-Flash-MLX-mixed-4_8bit",
+    label: "DeepSeek V4.1 Flash (MLX 4/8bit)",
+    description: "DeepSeek V4.1 Flash 官方社区 MLX 版（4/8bit 混合，质量/占用平衡）",
+    defaultQuant: "",
+    quants: [],
+    engine: "mlx",
+  },
+  {
+    app: "chat",
+    repo: "Vontra/DeepSeek-V4.1-Flash-MLX-2bit-MTP",
+    label: "DeepSeek V4.1 Flash (MLX 2bit MTP)",
+    description: "DeepSeek V4.1 Flash MLX 极小版（2bit + MTP），体积小、速度快",
+    defaultQuant: "",
+    quants: [],
+    engine: "mlx",
   },
 ];
 

@@ -21,7 +21,7 @@ import { Input } from "@ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { useServerStore } from "@stores/server";
 import { useModelDownloadStore } from "@stores/model-download";
-import { matchQuant, safeRepoId, type InferenceEngine } from "@/shared/modelscope";
+import { MODEL_PRESETS, matchQuant, safeRepoId, type InferenceEngine } from "@/shared/modelscope";
 import type { SetupEnvironment } from "../../../bun/setup-env";
 
 import { SETUP_MODELS, formatBytes } from "./constants";
@@ -29,10 +29,13 @@ import { SetupHeader, ModeCard, LocalStartStep } from "./shared";
 
 type LocalStep = "mode" | "engine" | "model" | "start";
 
+const DEFAULT_MLX_REPO = "pipenetwork/DeepSeek-V4.1-Flash-MLX-mixed-4_8bit";
+
 const ENGINE_LABEL: Record<InferenceEngine, string> = {
   "llama.cpp": "llama-server",
   vllm: "vLLM",
   sglang: "SGLang",
+  mlx: "MLX",
 };
 
 type EngineChoice = {
@@ -80,12 +83,23 @@ const ENGINE_CHOICES: EngineChoice[] = [
         : "需要 NVIDIA GPU（CUDA）；当前未检测到，暂不推荐",
     installHint: () => "pip install sglang",
   },
+  {
+    id: "mlx",
+    label: "MLX",
+    sub: "Apple Silicon",
+    desc: (env) =>
+      env.platform === "darwin"
+        ? "Apple 官方 MLX 引擎（mlx-lm），在 Apple Silicon 上直接运行 MLX 模型（如 DeepSeek V4.1 Flash MLX）"
+        : "MLX 引擎仅支持 macOS（Apple Silicon）",
+    installHint: () => "pip install -U mlx-lm",
+  },
 ];
 
 function engineReady(engine: InferenceEngine, env?: SetupEnvironment): boolean {
   if (!env) return false;
   if (engine === "llama.cpp") return env.llama.found;
   if (engine === "vllm") return env.vllm.found;
+  if (engine === "mlx") return env.mlx.found;
   return env.sglang.found;
 }
 
@@ -121,6 +135,7 @@ export function LocalFlow({
   const [engine, setEngine] = useState<InferenceEngine>("llama.cpp");
   const [modelId, setModelId] = useState<string>(SETUP_MODELS[0]!.id);
   const [customHfModel, setCustomHfModel] = useState("");
+  const [mlxPresetRepo, setMlxPresetRepo] = useState<string>(DEFAULT_MLX_REPO);
   const [quants, setQuants] = useState<Record<string, string>>(
     Object.fromEntries(SETUP_MODELS.map((m) => [m.id, m.defaultQuant])),
   );
@@ -159,8 +174,9 @@ export function LocalFlow({
   }, [step]);
 
   // 解析下载计划：llama.cpp 选匹配量化的单个 GGUF；vLLM/SGLang 下载整个仓库。
+  // MLX 不生成文件下载计划——模型由 mlx-lm 首次启动时自动下载（HF 缓存，走镜像）。
   useEffect(() => {
-    if (step !== "start" || !env || isCustom) return;
+    if (step !== "start" || !env || isCustom || engine === "mlx") return;
     let cancelled = false;
     const model = SETUP_MODELS.find((m) => m.id === modelId);
     if (!model) return;
@@ -227,6 +243,21 @@ export function LocalFlow({
   };
 
   const handleStartLocal = async () => {
+    // MLX：无需文件下载，写入部署模型 repo 后由 mlx-lm 自动拉取。
+    if (engine === "mlx") {
+      const repo = isCustom ? customHfModel.trim() : mlxPresetRepo;
+      await rpcClient.updateSettings({
+        settings: {
+          SERVER_MODE: "local",
+          INFERENCE_ENGINE: "mlx",
+          MLX_MODEL: repo,
+          VLLM_MODEL_PROFILE: "none",
+          CUSTOM_HF_MODEL: "",
+        },
+      });
+      startServerMutation.mutate();
+      return;
+    }
     const model = SETUP_MODELS.find((m) => m.id === modelId);
     let localPath = "";
     if (!isCustom && plan) {
@@ -259,6 +290,7 @@ export function LocalFlow({
   };
 
   const ready = engineReady(engine, env);
+  const isMlx = engine === "mlx";
   const canPickModelNext = !isCustom || customHfModel.trim().length > 0;
 
   const planTasks = plan ? downloadTasks.filter((t) => t.repo === plan.repo) : [];
@@ -346,7 +378,7 @@ export function LocalFlow({
           ) : (
             <>
               <div className="flex flex-col gap-3">
-                {ENGINE_CHOICES.map((choice) => {
+                {ENGINE_CHOICES.filter((c) => c.id !== "mlx" || env.platform === "darwin").map((choice) => {
                   const selected = engine === choice.id;
                   const isReady = engineReady(choice.id, env);
                   return (
@@ -423,7 +455,39 @@ export function LocalFlow({
 
       {step === "model" && (
         <div className="flex flex-col gap-3">
-          {SETUP_MODELS.map((model) => {
+          {engine === "mlx"
+            ? MODEL_PRESETS.filter((p) => p.engine === "mlx" && p.app === "chat").map((p) => {
+                const mlxSelected = mlxPresetRepo === p.repo;
+                return (
+                  <div
+                    key={p.repo}
+                    role="button"
+                    tabIndex={0}
+                    className={`flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-left transition-colors ${
+                      mlxSelected
+                        ? "border-primary bg-primary/5"
+                        : "border-border hover:border-muted-foreground/40"
+                    }`}
+                    onClick={() => setMlxPresetRepo(p.repo)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") setMlxPresetRepo(p.repo);
+                    }}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">{p.label}</span>
+                        <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                          MLX
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-xs text-muted-foreground">{p.description}</p>
+                      <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/70">{p.repo}</p>
+                    </div>
+                    {mlxSelected && <CheckCircle2Icon className="mt-1 size-4 shrink-0 text-primary" />}
+                  </div>
+                );
+              })
+            : SETUP_MODELS.map((model) => {
             const selected = modelId === model.id;
             const repo =
               engine === "llama.cpp"
@@ -503,7 +567,9 @@ export function LocalFlow({
             <span className="text-xs text-muted-foreground">
               {engine === "llama.cpp"
                 ? "Enter a HuggingFace GGUF model, e.g. user/Model-GGUF:Q4_K_M"
-                : "Enter a HuggingFace safetensors model, e.g. Qwen/Qwen3.5-4B"}
+                : engine === "mlx"
+                  ? "Enter a HuggingFace MLX model repo, e.g. pipenetwork/DeepSeek-V4.1-Flash-MLX-mixed-4_8bit"
+                  : "Enter a HuggingFace safetensors model, e.g. Qwen/Qwen3.5-4B"}
             </span>
           </button>
           {isCustom && (
@@ -601,7 +667,7 @@ export function LocalFlow({
             </div>
           )}
 
-          {env && ready && !isCustom && !planLoading && !plan && (
+          {env && ready && !isCustom && !isMlx && !planLoading && !plan && (
             <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed py-8 text-center">
               <AlertTriangleIcon className="size-5 text-muted-foreground" />
               <p className="text-xs text-muted-foreground">无法获取模型文件信息</p>
@@ -697,7 +763,7 @@ export function LocalFlow({
             </div>
           )}
 
-          {env && ready && (isCustom || (plan !== null && downloaded)) && (
+          {env && ready && (isMlx || isCustom || (plan !== null && downloaded)) && (
             <LocalStartStep
               onBack={() => setStep("model")}
               onStart={handleStartLocal}

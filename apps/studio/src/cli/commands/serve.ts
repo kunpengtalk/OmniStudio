@@ -4,7 +4,7 @@ import type { ParsedArgs } from "../args";
 import { optString } from "../args";
 import { resolveDataDir } from "../data-dir";
 
-const ENGINES = ["llama.cpp", "vllm", "sglang"] as const;
+const ENGINES = ["llama.cpp", "vllm", "sglang", "mlx"] as const;
 type Engine = (typeof ENGINES)[number];
 
 /**

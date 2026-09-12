@@ -1,10 +1,13 @@
 import { randomBytes } from "crypto";
+import { readFileSync } from "fs";
+import path from "path";
 import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import * as ServerManager from "./server-manager";
 import * as TTSLocal from "./tts-local";
 import * as Asr from "./asr";
 import { getTTSProviderConfig, listProviderModels, runTTSEdge } from "./voice";
 import { listInstalledModels, slugModelFileName } from "./model-store";
+import * as Img from "./gateway-images";
 
 /**
  * 本地 API 网关。
@@ -21,6 +24,7 @@ import { listInstalledModels, slugModelFileName } from "./model-store";
  *   - POST /v1/messages                Anthropic Messages API（流式 + 非流式）
  *   - POST /v1/audio/speech            语音合成 TTS（本地 → 推理服务器 → 云端 provider → Edge 在线）
  *   - POST /v1/audio/transcriptions    语音识别 ASR（whisper-server → 远端 ASR）
+ *   - POST /v1/images/generations      文本生图（MLX 本地引擎 → OpenAI 兼容 API → ComfyUI）
  *   - GET  /health       健康检查
  *
  * 鉴权：设置 GATEWAY_API_KEY 后，所有 /v1/* 端点需要
@@ -1463,6 +1467,107 @@ async function handleTranscriptions(req: Request): Promise<Response> {
 }
 
 // ---------------------------------------------------------------------------
+// 文本生图（/v1/images/generations，OpenAI Images API）
+// ---------------------------------------------------------------------------
+
+/** OpenAI 生图响应里的 data 项：url 或 b64_json 二选一。 */
+type ImageGenDataItem = Record<string, string>;
+
+/**
+ * 解析 size 字符串（OpenAI 格式 "1024x1024"）为宽高；非法时返回 null。
+ */
+function parseImageSize(size: string): { width: number; height: number } | null {
+  const m = /^\s*(\d+)\s*[xX]\s*(\d+)\s*$/.exec(size);
+  if (!m) return null;
+  const width = Number(m[1]);
+  const height = Number(m[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return { width, height };
+}
+
+/** 从 imageUrl 逆向出 images 根目录下的相对路径（chatImageUrl 的 ref）。 */
+function refFromImageUrl(imageUrl: string): string | null {
+  const m = /^https?:\/\/[^/]+\/(.+)$/.exec(imageUrl);
+  return m ? decodeURIComponent(m[1]!) : null;
+}
+
+async function handleImageGeneration(req: Request): Promise<Response> {
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return apiError(400, "请求体必须是合法 JSON", "invalid_request_error");
+  }
+
+  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  if (!prompt) return apiError(400, "缺少 prompt 字段（文生图提示词）", "invalid_request_error");
+
+  const rawModel = typeof body.model === "string" ? body.model.trim() : "";
+  const n = typeof body.n === "number" && Number.isFinite(body.n) ? Math.max(1, Math.min(Math.floor(body.n), 8)) : 1;
+  const size = typeof body.size === "string" ? body.size : "1024x1024";
+  const parsedSize = parseImageSize(size);
+  if (!parsedSize) return apiError(400, `无效的 size：${size}（应为 WxH，如 1024x1024）`, "invalid_request_error");
+  const responseFormat = body.response_format === "b64_json" ? "b64_json" : "url";
+  const negativePrompt = typeof body.negative_prompt === "string" ? body.negative_prompt.trim() : undefined;
+  const seed = typeof body.seed === "number" && Number.isFinite(body.seed) && body.seed >= 0 ? body.seed : undefined;
+  const steps = typeof body.steps === "number" && Number.isFinite(body.steps) ? body.steps : undefined;
+
+  // 模型路由：
+  // - omni-image 别名 / 空 → 走已配置的生图后端（IMG_BACKEND + IMG_MODEL，即“当前模型”）；
+  // - 明确的 MLX 模型 id → 强制 mlx 后端；
+  // - 其它模型 id → 透传给已配置后端（api / comfyui 的模型名 / checkpoint）。
+  const cfg = Img.getImageGenConfig();
+  let backend: Img.ImageGenBackend = cfg.backend;
+  let model: string | undefined;
+  if (rawModel && rawModel !== "omni-image" && Img.lookupMlxModel(rawModel)) {
+    backend = "mlx";
+    model = rawModel;
+  } else if (rawModel && rawModel !== "omni-image") {
+    model = rawModel;
+  } else {
+    model = cfg.model || undefined;
+  }
+
+  const result = await Img.generateImage({
+    prompt,
+    negativePrompt,
+    width: parsedSize.width,
+    height: parsedSize.height,
+    count: n,
+    seed,
+    steps,
+    model,
+    config: { ...cfg, backend, model: model ?? cfg.model },
+    // 网关不落盘配置，避免 API 调用改写用户保存的生图设置。
+    persistConfig: false,
+  });
+
+  if (result.error) {
+    return apiError(502, result.error, "image_generation_error");
+  }
+
+  const created = Math.floor(Date.now() / 1000);
+  const data: ImageGenDataItem[] = [];
+  for (const record of result.records) {
+    if (responseFormat === "b64_json" && record.imagePath) {
+      const abs = path.join(Img.imagesBaseDir(), record.imagePath);
+      try {
+        data.push({ b64_json: readFileSync(abs).toString("base64") });
+        continue;
+      } catch {
+        // 文件缺失时回退到 url（若可用）。
+      }
+    }
+    if (record.imageUrl) data.push({ url: record.imageUrl });
+  }
+
+  if (data.length === 0) {
+    return apiError(502, "生图完成但未拿到可返回的图片", "image_generation_error");
+  }
+  return json({ created, data });
+}
+
+// ---------------------------------------------------------------------------
 // 模型列表（本地 + 云端 + TTS/ASR 能力模型）
 // ---------------------------------------------------------------------------
 
@@ -1529,8 +1634,16 @@ async function handleListModels(): Promise<Response> {
       description: "ASR 自动路由：whisper-server → 远端 ASR 服务",
     });
   }
-  // 文生图后端预留：始终声明，客户端可据此判断能力（调用后返回 501）。
-  add("omni-image", "omni-studio", "text-to-image");
+  // 文生图后端：MLX 本地模型（mflux）+ 能力别名。始终声明，客户端可据此发现/调用。
+  for (const m of Img.IMAGE_MODELS) {
+    add(m.id, "omni-studio", "text-to-image", {
+      name: m.label,
+      description: `${m.description}；本地 MLX（mflux），调用 /v1/images/generations`,
+    });
+  }
+  add("omni-image", "omni-studio", "text-to-image", {
+    description: "文生图自动路由：MLX 本地引擎 → OpenAI 兼容 API → ComfyUI（走已配置的 IMG_BACKEND / IMG_MODEL）",
+  });
 
   return json({ object: "list", data });
 }
@@ -1711,10 +1824,23 @@ function openApiSpec(): Record<string, unknown> {
       },
       "/v1/images/generations": {
         post: {
-          summary: "文本生图（预留）",
-          description: "文生图接口，网关侧尚未接入，当前返回 501。",
+          summary: "文本生图（OpenAI Images API）",
+          description:
+            "OpenAI 兼容文生图接口。模型自动路由：明确的 MLX 模型 id（z-image-turbo / flux-schnell / flux2-klein-9b / flux-dev）走本地 MLX 引擎，" +
+            "omni-image 别名或留空走已配置的生图后端（IMG_BACKEND + IMG_MODEL），其它模型 id 透传已配置的 API / ComfyUI 后端。" +
+            "response_format 支持 url（默认）与 b64_json。",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ImageGenerationRequest" },
+              },
+            },
+          },
           responses: {
-            "501": { description: "尚未实现" },
+            "200": { description: "生成的图片（created + data[]，url 或 b64_json）" },
+            "400": { description: "缺少 prompt / size 非法" },
+            "502": { description: "生图后端不可用或生成失败" },
           },
         },
       },
@@ -1753,6 +1879,24 @@ function openApiSpec(): Record<string, unknown> {
             voice: { type: "string", description: "音色（可选）" },
             response_format: { type: "string", enum: ["wav", "mp3"], default: "wav" },
             speed: { type: "number", default: 1 },
+          },
+        },
+        ImageGenerationRequest: {
+          type: "object",
+          required: ["prompt"],
+          properties: {
+            model: {
+              type: "string",
+              description:
+                "生图模型。omni-image 或留空=当前配置的后端模型（IMG_BACKEND+IMG_MODEL）；MLX 模型 id（z-image-turbo 等）走本地引擎；其它透传已配置后端",
+            },
+            prompt: { type: "string", description: "文生图提示词" },
+            negative_prompt: { type: "string", description: "反向提示词（可选）" },
+            n: { type: "integer", minimum: 1, maximum: 8, default: 1, description: "生成数量" },
+            size: { type: "string", default: "1024x1024", description: "输出尺寸 WxH，如 1024x1024 / 512x512" },
+            response_format: { type: "string", enum: ["url", "b64_json"], default: "url" },
+            seed: { type: "integer", description: "随机种子（可选）" },
+            steps: { type: "integer", description: "采样步数（可选，MLX 后端）" },
           },
         },
       },
@@ -1882,7 +2026,8 @@ async function route(req: Request): Promise<Response> {
       if (req.method !== "POST") return apiError(405, "Method Not Allowed");
       return handleTranscriptions(req);
     case "/v1/images/generations":
-      return apiError(501, "文本生图后端尚未接入", "not_implemented");
+      if (req.method !== "POST") return apiError(405, "Method Not Allowed");
+      return handleImageGeneration(req);
     default:
       return apiError(404, `未知路径 ${path}`, "not_found");
   }

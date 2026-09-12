@@ -9,7 +9,7 @@ export function serverErrorHint(t: T, error: string | null | undefined): string 
   if (/unknown model architecture|unsupported (model )?architecture/i.test(error)) {
     return t("server.error.hint.arch");
   }
-  if (/not found on path|not found\. install with|vllm not found|sglang not found/i.test(error)) {
+  if (/not found on path|not found\. install with|vllm not found|sglang not found|mlx 未安装/i.test(error)) {
     return t("server.error.hint.engine");
   }
   if (/no model configured/i.test(error)) {

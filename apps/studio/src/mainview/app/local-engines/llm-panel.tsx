@@ -13,6 +13,7 @@ import {
   HardDriveIcon,
   Loader2Icon,
   PlayIcon,
+  RocketIcon,
   SparklesIcon,
   SquareIcon,
   StarIcon,
@@ -67,6 +68,7 @@ const ENGINE_TAB_LABEL: Record<InferenceEngine, string> = {
   "llama.cpp": "llama.cpp",
   vllm: "vLLM",
   sglang: "SGLang",
+  mlx: "MLX",
 };
 
 // ---------------------------------------------------------------------------
@@ -114,6 +116,9 @@ const PARAM_FIELDS: Record<InferenceEngine, ParamField[]> = {
     { key: "SGLANG_CONTEXT_LENGTH", labelKey: "models.params.ctx" },
     { key: "SGLANG_TP_SIZE", labelKey: "models.params.tp" },
     { key: "SGLANG_MEM_FRACTION_STATIC", labelKey: "models.params.memFraction", step: "0.02" },
+  ],
+  mlx: [
+    { key: "MLX_CACHE_SIZE_GB", labelKey: "models.params.mlxCacheGb", step: "1" },
   ],
 };
 
@@ -317,40 +322,87 @@ function ModelConfigCard({ engine }: { engine: InferenceEngine }) {
   });
 
   const fields = PARAM_FIELDS[engine];
+  const mlxPresets = MODEL_PRESETS.filter((p) => p.engine === "mlx" && p.app === "chat");
 
   return (
     <PanelCard title={t("engine.modelSection")} icon={<HardDriveIcon className="size-4" />}>
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] text-muted-foreground">{t("engine.modelNamePath")}</span>
-          <Select
-            value={activePath || undefined}
-            onValueChange={(v) => setActiveMutation.mutate(v)}
-            disabled={setActiveMutation.isPending || busy}
-          >
-            <SelectTrigger className="h-8 text-xs">
-              <SelectValue placeholder={t("engine.modelPlaceholder")} />
-            </SelectTrigger>
-            <SelectContent className="max-h-72 max-w-sm">
-              {installedModels.map((m) => {
-                const kind = fileKind(m.fileName);
-                return (
-                  <SelectItem key={m.path} value={m.path}>
+        {engine === "mlx" ? (
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-muted-foreground">{t("engine.mlxModel")}</span>
+            <Select
+              value={mlxPresets.some((p) => p.repo === settings.MLX_MODEL) ? settings.MLX_MODEL : undefined}
+              onValueChange={(v) => patch.mutate({ MLX_MODEL: v })}
+              disabled={busy}
+            >
+              <SelectTrigger className="h-8 text-xs">
+                <SelectValue placeholder={t("engine.mlxSelectPlaceholder")} />
+              </SelectTrigger>
+              <SelectContent className="max-h-72 max-w-sm">
+                {mlxPresets.map((p) => (
+                  <SelectItem key={p.repo} value={p.repo}>
                     <span className="flex min-w-0 items-center gap-2">
-                      <span className="truncate">{m.fileName}</span>
-                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/70">
-                        {kind === "gguf" ? "GGUF" : kind === "safetensors" ? "safetensors" : "·"}
-                        {m.isActive ? ` · ${t("models.inUse")}` : ""}
-                      </span>
+                      <span className="truncate">{p.label}</span>
+                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/70">MLX</span>
                     </span>
                   </SelectItem>
-                );
-              })}
-            </SelectContent>
-          </Select>
-        </label>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+        ) : (
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-muted-foreground">{t("engine.modelNamePath")}</span>
+            <Select
+              value={activePath || undefined}
+              onValueChange={(v) => setActiveMutation.mutate(v)}
+              disabled={setActiveMutation.isPending || busy}
+            >
+              <SelectTrigger className="h-8 text-xs">
+                <SelectValue placeholder={t("engine.modelPlaceholder")} />
+              </SelectTrigger>
+              <SelectContent className="max-h-72 max-w-sm">
+                {installedModels
+                  .filter((m) => engineSupports(engine, fileKind(m.fileName)))
+                  .map((m) => {
+                    const kind = fileKind(m.fileName);
+                    return (
+                      <SelectItem key={m.path} value={m.path}>
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="truncate">{m.fileName}</span>
+                          <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/70">
+                            {kind === "gguf" ? "GGUF" : kind === "safetensors" ? "safetensors" : "·"}
+                            {m.isActive ? ` · ${t("models.inUse")}` : ""}
+                          </span>
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+              </SelectContent>
+            </Select>
+          </label>
+        )}
         <CommitInput label={t("engine.endpoint")} value={endpoint} readOnly mono />
       </div>
+
+      {engine === "mlx" && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <CommitInput
+            label={t("engine.mlxModelRepo")}
+            value={settings.MLX_MODEL ?? ""}
+            placeholder="user/Model-MLX 或本地目录路径"
+            mono
+            onCommit={(v) => patch.mutate({ MLX_MODEL: v.trim() })}
+          />
+          <CommitInput
+            label={t("engine.mlxHfEndpoint")}
+            value={settings.MLX_HF_ENDPOINT ?? ""}
+            placeholder="https://hf-mirror.com"
+            mono
+            onCommit={(v) => patch.mutate({ MLX_HF_ENDPOINT: v.trim() })}
+          />
+        </div>
+      )}
 
       {fields.length > 0 && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
@@ -414,6 +466,7 @@ function pickRecommendedFile(files: ModelScopeFile[], defaultQuant?: string): Mo
 function PresetRow({ preset, engine }: { preset: ChatPreset; engine: InferenceEngine }) {
   const t = useT();
   const queryClient = useQueryClient();
+  const settingsBlob = useSettingsBlob();
   const { data: installedData } = useQuery({
     queryKey: ["installed-models"],
     queryFn: () => rpcClient.listInstalledModels(),
@@ -424,7 +477,7 @@ function PresetRow({ preset, engine }: { preset: ChatPreset; engine: InferenceEn
   const filesQuery = useQuery({
     queryKey: ["modelscope-files", preset.repo],
     queryFn: () => rpcClient.listModelScopeFiles({ repo: preset.repo }),
-    enabled: !installedAny,
+    enabled: !installedAny && preset.engine !== "mlx",
   });
   const recommended = pickRecommendedFile(filesQuery.data?.files ?? [], preset.defaultQuant);
 
@@ -434,6 +487,36 @@ function PresetRow({ preset, engine }: { preset: ChatPreset; engine: InferenceEn
       queryClient.invalidateQueries({ queryKey: ["installed-models"] });
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
+  });
+
+  // MLX 预设没有单文件下载：一键部署 = 切换 MLX 引擎 + 写入 repo + 启动服务
+  // （首次启动由 mlx-lm 自动经 HF 下载到本地缓存，日志可见进度）。
+  const mlxSettings = settingsBlob.data?.settings ?? {};
+  const mlxActive =
+    preset.engine === "mlx" &&
+    mlxSettings.INFERENCE_ENGINE === "mlx" &&
+    mlxSettings.MLX_MODEL === preset.repo;
+  const [deployError, setDeployError] = useState<string | null>(null);
+  const deployMutation = useMutation({
+    mutationFn: async () => {
+      setDeployError(null);
+      await rpcClient.updateSettings({
+        settings: { INFERENCE_ENGINE: "mlx", MLX_MODEL: preset.repo, SERVER_MODE: "local" },
+      });
+      await queryClient.invalidateQueries({ queryKey: ["settings"] });
+      const st = useServerStore.getState().status;
+      const res =
+        st === "running" || st === "starting" || st === "downloading"
+          ? await rpcClient.restartServer()
+          : await rpcClient.startServer();
+      if (!res.ok) throw new Error(res.error || "Failed to start MLX server");
+      return res;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["installed-models"] });
+    },
+    onError: (err: unknown) =>
+      setDeployError(err instanceof Error ? err.message.replace(/^Error:\s*/i, "") : String(err)),
   });
 
   const openDetail = () => {
@@ -454,21 +537,42 @@ function PresetRow({ preset, engine }: { preset: ChatPreset; engine: InferenceEn
             </Badge>
           )}
           <span className="text-[11px] text-muted-foreground">
-            {engineSupports(engine, preset.engine === "vllm" ? "safetensors" : "gguf")
-              ? preset.engine === "vllm"
-                ? "safetensors"
-                : "GGUF"
-              : "·"}
+            {preset.engine === "mlx" ? "MLX" : preset.engine === "vllm" ? "safetensors" : "GGUF"}
           </span>
+          {mlxActive && (
+            <Badge variant="default" className="gap-1 text-[10px]">
+              <CheckCircle2Icon className="size-3" /> {t("engine.inUse")}
+            </Badge>
+          )}
         </div>
         <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{preset.description}</p>
         <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/60">{preset.repo}</p>
+        {deployError && (
+          <p className="mt-1 text-[11px] text-destructive/80">{deployError}</p>
+        )}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
         <Button variant="ghost" size="icon-sm" tooltip={t("engine.details")} onClick={openDetail}>
           <ExternalLinkIcon className="size-3.5" />
         </Button>
-        {installedAny && bestInstalled ? (
+        {preset.engine === "mlx" ? (
+          <Button
+            variant={mlxActive ? "default" : "outline"}
+            size="sm"
+            className="h-7 text-xs"
+            disabled={deployMutation.isPending}
+            onClick={() => deployMutation.mutate()}
+          >
+            {deployMutation.isPending ? (
+              <Loader2Icon data-icon="inline-start" className="animate-spin" />
+            ) : mlxActive ? (
+              <CheckIcon data-icon="inline-start" />
+            ) : (
+              <RocketIcon data-icon="inline-start" />
+            )}
+            {mlxActive ? t("engine.inUse") : t("engine.deploy")}
+          </Button>
+        ) : installedAny && bestInstalled ? (
           <>
             <Badge variant="secondary" className="gap-1 text-[10px]">
               <CheckCircle2Icon className="size-3" /> {t("engine.installed")}
@@ -508,6 +612,7 @@ function SupportedModels({ engine }: { engine: InferenceEngine }) {
   const presets = MODEL_PRESETS.filter((p) => {
     if (p.app !== "chat") return false;
     if (engine === "llama.cpp") return p.engine === "llama.cpp";
+    if (engine === "mlx") return p.engine === "mlx";
     return p.engine === "vllm";
   });
   if (presets.length === 0) return null;
@@ -990,12 +1095,21 @@ export function DefaultModelConfig() {
 export function LlmPanel() {
   const t = useT();
   const { engine: activeEngine } = useEngine();
+  const settingsBlob = useSettingsBlob();
+  // MLX 只面向 macOS（mlx-lm 基于 Apple Silicon），非 mac 上不提供该引擎标签。
+  const isMac = settingsBlob.data?.platform === "darwin";
+  const engineOptions = ENGINE_OPTIONS.filter((o) => o.value !== "mlx" || isMac);
   const [tab, setTab] = useState<InferenceEngine>(activeEngine);
+
+  // 当前引擎若是非 mac 上不可用的 MLX（如旧配置残留），回退到默认标签。
+  useEffect(() => {
+    if (!engineOptions.some((o) => o.value === tab)) setTab("llama.cpp");
+  }, [engineOptions, tab]);
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-1.5">
-        {ENGINE_OPTIONS.map((o) => (
+        {engineOptions.map((o) => (
           <button
             key={o.value}
             type="button"

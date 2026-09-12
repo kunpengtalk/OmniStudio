@@ -1,4 +1,4 @@
-export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台（llama.cpp · vLLM · SGLang）
+export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台（llama.cpp · vLLM · SGLang · MLX）
 
 用法：omi <command> [options]
 
@@ -8,14 +8,14 @@ export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台
   stop [name]          停止推理服务器
   restart              重启推理服务器
   serve [options]      前台独立运行推理服务器（OpenAI 兼容）
-  launch <tool>        启动编码工具（codex / opencode / openclaw / hermes / pi / copilot / claude）
+  launch <tool>        启动编码工具（codex / opencode / openclaw / hermes / pi / copilot / claude / chatgpt）
   model [options]      打开应用里的模型列表选模型；--list 列出已装模型，--select 终端选择
   cloud [options]      查看 / 配置云端模型服务
   models               列出本地与云端模型
   model-info <name>    查看模型详情
   status               查看服务器 / 网关状态
   server <action>      管理服务器：list | start | stop | restart | info | logs
-  install              检查推理引擎依赖（llama.cpp / vLLM / SGLang）
+  install              检查推理引擎依赖（llama.cpp / vLLM / SGLang / MLX）
   version              显示版本
   update               检查更新
   help                 显示帮助
@@ -46,21 +46,21 @@ export const CMD_HELP: Record<string, string> = {
   restart: `重启推理服务器（需要应用在运行）。
 
 用法：omi restart`,
-  serve: `前台独立运行推理服务器，不依赖 GUI 应用（复用 llama.cpp / vLLM / SGLang 运行时）。
+  serve: `前台独立运行推理服务器，不依赖 GUI 应用（复用 llama.cpp / vLLM / SGLang / MLX 运行时）。
 
 用法：omi serve [options]
 
 选项：
   --port <n>    服务器端口（默认读设置 SERVER_PORT）
   --host <ip>   监听地址（默认 127.0.0.1）
-  --engine <e>  推理引擎：llama.cpp | vllm | sglang
+  --engine <e>  推理引擎：llama.cpp | vllm | sglang | mlx
   --model <p>   模型文件路径（同时写为活动模型）
   --api-key <k> 设置网关 API key`,
   launch: `启动编码工具并接入当前模型的 OpenAI/Anthropic 兼容接口。
 
 用法：omi launch <tool> [options] [-- 工具参数...]
 
-工具：codex | opencode | openclaw | hermes | pi | copilot | claude
+工具：codex | opencode | openclaw | hermes | pi | copilot | claude | chatgpt
 
 选项：
   --model <name|path>  直接指定模型（已装模型名 / 服务名 / 文件路径）；
@@ -106,7 +106,7 @@ actions:
   restart     重启推理服务器
   info        查看服务器详情（状态 / pid / 端口 / 引擎）
   logs        打印服务器日志尾部`,
-  install: `检查推理引擎依赖（llama.cpp / vLLM / SGLang），缺失时打印安装命令。
+  install: `检查推理引擎依赖（llama.cpp / vLLM / SGLang / MLX），缺失时打印安装命令。
 
 用法：omi install`,
   version: `显示版本号（读仓库根 package.json / 应用版本）。

@@ -103,7 +103,7 @@ export type AppRPC = {
     requests: {
       getSettings: {
         params: undefined;
-        response: { configured: boolean; settings: Record<string, string> };
+        response: { configured: boolean; settings: Record<string, string>; platform: string };
       };
       updateSettings: {
         params: { settings: Record<string, string> };
@@ -895,6 +895,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       getSettings: async () => ({
         configured: isConfigured(),
         settings: getAllSettings(),
+        // 主进程平台信息，供 UI 做 macOS 专属引擎（MLX）的门控。
+        platform: process.platform,
       }),
 
       updateSettings: async ({ settings }) => {

@@ -2,7 +2,7 @@ import { existsSync } from "fs";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
 
-import { getSetting, updateSettings } from "./db/settings";
+import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import { getModelProfile } from "../shared/model-profiles";
 import {
   fileKind,
@@ -28,6 +28,13 @@ export function getChatModelName(): string {
     const localName = getSetting("LOCAL_MODEL_NAME");
     if (localName) return localName.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
 
+    // MLX 引擎：部署的 HF repo id 即服务名（mlx_lm.server 的 --model 原样作为模型 id）。
+    const engine = getSetting("INFERENCE_ENGINE");
+    if (engine === "mlx") {
+      const mlxModel = getSetting("MLX_MODEL");
+      if (mlxModel) return mlxModel;
+    }
+
     const customHf = getSetting("CUSTOM_HF_MODEL");
     if (customHf) return customHf.split(":")[0] ?? customHf;
 
@@ -43,7 +50,8 @@ export function getChatModel(): LanguageModel {
   const isLocal = getSetting("SERVER_MODE") === "local";
 
   if (isLocal) {
-    const port = getSetting("SERVER_PORT");
+    // 按活动引擎的实际监听端口构造本地端点（mlx / vllm / sglang 各有独立端口）。
+    const port = getActiveServerPort();
     const provider = createOpenAICompatible({
       name: "omni-studio",
       baseURL: `http://localhost:${port}/v1`,
@@ -120,6 +128,21 @@ export async function listChatModels(): Promise<{ models: ChatModelOption[] }> {
       engine: resolveEngineForModel(m.fileName, engine),
     });
   }
+  // MLX 引擎：部署模型是 HF repo id（不是本地文件），单独作为选项展示并绑定 CHAT_MODEL。
+  if (engine === "mlx") {
+    const mlxModel = getSetting("MLX_MODEL");
+    if (mlxModel && !localSeen.has(mlxModel)) {
+      localSeen.add(mlxModel);
+      models.push({
+        type: "local",
+        value: mlxModel,
+        label: mlxModel,
+        detail: "MLX (mlx-lm)",
+        isActive: getChatModelName() === mlxModel,
+        engine: "mlx",
+      });
+    }
+  }
   // 当前配置的本地模型不在已安装列表中时（如内置 profile 或文件被排除出分组），
   // 仍作为选项展示，避免选择器为空。
   if (mode === "local" && chatModel && !localSeen.has(activePath)) {
@@ -176,8 +199,13 @@ export async function selectChatModel(
       const result = ModelStore.setActiveModel(value);
       if (!result.ok) return result;
     } else {
-      // 没有对应本地文件的模型名（如内置 profile），只记录名称，保持现有解析逻辑。
-      updateSettings({ CHAT_MODEL: value });
+      // 没有对应本地文件的模型名（如内置 profile / MLX repo id），只记录名称，保持现有解析逻辑。
+      // 命中 MLX 部署模型时同时切到 MLX 引擎，避免用 llama.cpp 去加载 safetensors 仓库。
+      const mlxModel = getSetting("MLX_MODEL");
+      updateSettings({
+        CHAT_MODEL: value,
+        ...(value === mlxModel ? { INFERENCE_ENGINE: "mlx" } : {}),
+      });
     }
     updateSettings({ SERVER_MODE: "local" });
 

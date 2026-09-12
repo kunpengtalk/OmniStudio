@@ -2,16 +2,18 @@ import { getSetting } from "../db/settings";
 import { LlamaRuntime } from "./llama";
 import { VllmRuntime } from "./vllm";
 import { SglangRuntime } from "./sglang";
+import { MlxRuntime } from "./mlx";
 import type { Runtime } from "./types";
 
 export type { Runtime, ServerStatus, StartResult, BinaryCheckResult } from "./types";
 
-export type InferenceEngine = "llama.cpp" | "vllm" | "sglang";
+export type InferenceEngine = "llama.cpp" | "vllm" | "sglang" | "mlx";
 
 const runtimes: Record<InferenceEngine, () => Runtime> = {
   "llama.cpp": () => new LlamaRuntime(),
   vllm: () => new VllmRuntime(),
   sglang: () => new SglangRuntime(),
+  mlx: () => new MlxRuntime(),
 };
 
 let activeRuntime: Runtime | null = null;

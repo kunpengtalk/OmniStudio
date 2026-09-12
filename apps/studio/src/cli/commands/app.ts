@@ -136,7 +136,7 @@ export async function cmdServer(parsed: ParsedArgs) {
   }
   switch (action) {
     case "list": {
-      const engines = ["llama.cpp", "vllm", "sglang"];
+      const engines = ["llama.cpp", "vllm", "sglang", "mlx"];
       const settings = await getAllSettingsFallback().catch(() => ({} as Record<string, string>));
       const active = settings.INFERENCE_ENGINE || "llama.cpp";
       console.log("可用推理引擎：");

@@ -15,16 +15,20 @@ export type SetupEnvironment = {
   llama: { found: boolean; path?: string };
   vllm: { found: boolean };
   sglang: { found: boolean };
+  /** Apple MLX（mlx-lm）——仅在 macOS 上检测。 */
+  mlx: { found: boolean };
 };
 
 export async function getSetupEnvironment(): Promise<SetupEnvironment> {
   const platform = process.platform;
   const arch = process.arch;
 
-  const [llama, vllm, sglang] = await Promise.all([
+  const [llama, vllm, sglang, mlx] = await Promise.all([
     createRuntime("llama.cpp").checkBinary(),
     createRuntime("vllm").checkBinary(),
     createRuntime("sglang").checkBinary(),
+    // MLX 引擎只在 macOS 提供（mlx-lm 面向 Apple Silicon）。
+    platform === "darwin" ? createRuntime("mlx").checkBinary() : Promise.resolve({ found: false }),
   ]);
 
   return {
@@ -35,5 +39,6 @@ export async function getSetupEnvironment(): Promise<SetupEnvironment> {
     llama: { found: llama.found, path: llama.path },
     vllm: { found: vllm.found },
     sglang: { found: sglang.found },
+    mlx: { found: mlx.found },
   };
 }

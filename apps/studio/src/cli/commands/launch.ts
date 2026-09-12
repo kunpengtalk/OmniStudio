@@ -25,6 +25,7 @@ const TOOL_SPECS: Record<string, ToolKind> = {
   copilot: "openai",
   hermes: "generic",
   pi: "generic",
+  chatgpt: "openai",
 };
 
 /** 工具 → 设置键（把选中的模型写回设置，GUI 设置页能看到）。 */
@@ -36,6 +37,7 @@ const TOOL_SETTING_KEY: Record<string, string> = {
   hermes: "LAUNCHER_HERMES_MODEL",
   pi: "LAUNCHER_PI_MODEL",
   copilot: "LAUNCHER_COPILOT_MODEL",
+  chatgpt: "LAUNCHER_CHATGPT_MODEL",
 };
 
 const LAUNCHER_CONFIG_DIR = join(homedir(), ".omni", "launcher");
@@ -160,6 +162,23 @@ export async function cmdLaunch(parsed: ParsedArgs) {
     `启动 ${tool}（模型：${model.name}，接口：${gatewayBase}${agentKey ? "，已鉴权" : ""}）` +
       (gatewayNotice ? `\n提示：${gatewayNotice}` : ""),
   );
+
+  // ChatGPT：把配置写进 Codex 共用的 ~/.codex（ChatGPT 桌面端与 codex CLI 都读），
+  // 然后打开桌面客户端。不走下面“找 CLI 二进制 + 前台接管”的通用路径。
+  if (tool === "chatgpt") {
+    configureChatgpt(`${gatewayBase}/v1`, agentKey, model.name);
+    const appPath = CHATGPT_APP_PATHS.find((p) => existsSync(p));
+    if (!appPath) {
+      fail("未找到 ChatGPT 桌面端。请先安装：https://chatgpt.com/download");
+    }
+    console.log(
+      `已写入 ~/.codex/config.toml 与 ~/.codex/models.json（模型：${model.name}）。\n` +
+        `若 ChatGPT 正在运行，请完全退出（macOS 按 ⌘Q，仅关窗口不算）后重新打开，配置才会生效。`,
+    );
+    console.log("正在启动 ChatGPT…");
+    Bun.spawn(["open", appPath], { stdio: ["ignore", "ignore", "ignore"] });
+    process.exit(0);
+  }
 
   // 6. 构造环境变量 / 参数并拉起工具。
   const toolBin = tool === "claude" ? "claude" : tool;
@@ -467,6 +486,259 @@ function configureOpenClaw(baseURL: string, apiKey: string, model: string): void
   config.agents = agents;
 
   writeJSONFile(OPENCLAW_CONFIG_FILE, config);
+}
+
+/**
+ * ChatGPT 桌面端与 Codex CLI 共用 ~/.codex 的配置：改主 config.toml + 写 models.json，
+ * 桌面端模型选择器里就会多出「自定义」/所选模型（照搬 DeepSeek 官方 setup 脚本的套路，
+ * 只是 base_url 指向本机网关、模型换成集成分页里选的那个）。
+ */
+const CHATGPT_APP_PATHS = [
+  join("/Applications", "ChatGPT.app"),
+  join(homedir(), "Applications", "ChatGPT.app"),
+];
+const CHATGPT_PROVIDER = "omni";
+const CODEX_MODELS_CATALOG = join(CODEX_DIR, "models.json");
+
+// config.toml 顶部会整体替换的键；值由所选模型 / 网关端点决定。
+const CHATGPT_TARGET_KEYS = [
+  "model",
+  "model_provider",
+  "preferred_auth_method",
+  "forced_login_method",
+  "model_reasoning_effort",
+  "web_search",
+  "model_catalog_json",
+];
+
+// 会劫持流量（profile / oss_provider / openai_base_url）或与 models.json 声明矛盾、
+// 残留会导致 400 / 静默错误的旧键 → 删除。
+const CHATGPT_DELETE_KEYS = [
+  "profile",
+  "oss_provider",
+  "openai_base_url",
+  "model_context_window",
+  "model_auto_compact_token_limit",
+  "model_auto_compact_token_limit_scope",
+  "base_instructions",
+  "model_instructions_file",
+  "compact_prompt",
+  "experimental_compact_prompt_file",
+  "service_tier",
+  "model_verbosity",
+  "model_reasoning_summary",
+  "plan_mode_reasoning_effort",
+  "experimental_use_unified_exec_tool",
+];
+
+/** 行级 TOML 扫描：跟踪方括号深度与多行字符串，用于区分节头与普通赋值行。 */
+function tomlScan(state: { depth: number; ml: string }, line: string): void {
+  let instr = "";
+  let i = 0;
+  const n = line.length;
+  while (i < n) {
+    const c = line[i]!;
+    if (state.ml) {
+      const c3 = line.slice(i, i + 3);
+      if ((state.ml === "basic" && c3 === '"""') || (state.ml === "literal" && c3 === "'''")) {
+        state.ml = "";
+        i += 3;
+        continue;
+      }
+      if (state.ml === "basic" && c === "\\") {
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (instr) {
+      if (instr === "basic") {
+        if (c === "\\") { i += 2; continue; }
+        if (c === '"') instr = "";
+      } else if (c === "'") instr = "";
+      i += 1;
+      continue;
+    }
+    const c3 = line.slice(i, i + 3);
+    if (c3 === '"""') { state.ml = "basic"; i += 3; continue; }
+    if (c3 === "'''") { state.ml = "literal"; i += 3; continue; }
+    if (c === "#") return; // 注释：行内剩下的都忽略
+    if (c === '"') instr = "basic";
+    else if (c === "'") instr = "literal";
+    else if (c === "[") state.depth += 1;
+    else if (c === "]") { if (state.depth > 0) state.depth -= 1; }
+    i += 1;
+  }
+}
+
+function tomlKey(line: string): string {
+  const l = line.trim();
+  if (!l || l.startsWith("#")) return "";
+  const eq = l.indexOf("=");
+  if (eq < 0) return "";
+  return l
+    .slice(0, eq)
+    .trim()
+    .replace(/^"(.*)"$/, "$1")
+    .replace(/^'(.*)'$/, "$1");
+}
+
+/**
+ * 精细改写 ~/.codex/config.toml：只替换顶部目标键、删掉旧 omni provider 区块并重建，
+ * 其余区块（mcp_servers / plugins / marketplaces …）逐字保留。
+ */
+function patchCodexConfig(
+  original: string,
+  values: Record<string, string>,
+  providerBlock: string,
+): string {
+  const lines = original.split("\n");
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const state = { depth: 0, ml: "" };
+  let inLeading = true;
+
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, "");
+    const trimmed = line.trim();
+    // 方括号深度 0 且不在多行字符串内、且以 [ 开头 → 节头
+    const isHeader = state.depth === 0 && !state.ml && trimmed.startsWith("[");
+
+    if (isHeader) {
+      const close = trimmed.indexOf("]");
+      const section =
+        close > 0 ? trimmed.slice(1, close).trim().replace(/^"(.*)"$/, "$1") : "";
+      if (
+        section === `model_providers.${CHATGPT_PROVIDER}` ||
+        section.startsWith(`model_providers.${CHATGPT_PROVIDER}.`)
+      ) {
+        // 旧 omni provider 区块整段丢弃，稍后用新值重建
+        tomlScan(state, line);
+        continue;
+      }
+      if (inLeading) {
+        // 进入第一个真正的区块前，把缺失的顶部键补上（保留原有顶部键如 notify）
+        let inserted = 0;
+        for (const k of CHATGPT_TARGET_KEYS) {
+          if (!seen.has(k)) {
+            out.push(`${k} = ${values[k]}`);
+            inserted++;
+          }
+        }
+        if (inserted > 0) out.push("");
+        inLeading = false;
+      }
+      out.push(line);
+      tomlScan(state, line);
+      continue;
+    }
+
+    // 多行字符串 / 内联数组的续行：原样保留
+    if (state.ml || state.depth !== 0) {
+      out.push(line);
+      tomlScan(state, line);
+      continue;
+    }
+
+    if (inLeading) {
+      const k = tomlKey(line);
+      if (k && CHATGPT_TARGET_KEYS.includes(k)) {
+        out.push(`${k} = ${values[k]}`);
+        seen.add(k);
+        tomlScan(state, line);
+        continue;
+      }
+      if (k && CHATGPT_DELETE_KEYS.includes(k)) {
+        tomlScan(state, line);
+        continue;
+      }
+    }
+    out.push(line);
+    tomlScan(state, line);
+  }
+
+  if (inLeading) {
+    // 文件里一个区块都没有：把缺失的顶部键追加到末尾
+    for (const k of CHATGPT_TARGET_KEYS) {
+      if (!seen.has(k)) out.push(`${k} = ${values[k]}`);
+    }
+  }
+
+  const body = out.join("\n").trimEnd();
+  return `${body}${body ? "\n\n" : ""}${providerBlock}`;
+}
+
+/** models.json 模型目录：ChatGPT 桌面端模型选择器读它，缺失会显示 "Unknown model"。 */
+function chatgptModelsJson(model: string): string {
+  return JSON.stringify(
+    {
+      models: [
+        {
+          slug: model,
+          display_name: model,
+          prefer_websockets: false,
+          support_verbosity: true,
+          default_verbosity: "low",
+          apply_patch_tool_type: "freeform",
+          web_search_tool_type: "text",
+          input_modalities: ["text"],
+          truncation_policy: { mode: "tokens", limit: 10000 },
+          supports_parallel_tool_calls: true,
+          multi_agent_version: "v2",
+          use_responses_lite: false,
+          include_skills_usage_instructions: false,
+          context_window: 128_000,
+          max_context_window: 128_000,
+          default_reasoning_summary: "none",
+          default_reasoning_level: "high",
+          supported_reasoning_levels: [
+            { effort: "low", description: "Fast responses with lighter reasoning" },
+            { effort: "high", description: "Extra high reasoning depth for complex problems" },
+          ],
+        },
+      ],
+    },
+    null,
+    2,
+  );
+}
+
+/** 把所选模型 + 网关端点写进 ChatGPT 桌面端共用的 Codex 配置（config.toml + models.json）。 */
+function configureChatgpt(baseURL: string, apiKey: string, model: string): void {
+  mkdirSync(CODEX_DIR, { recursive: true });
+
+  const cfgPath = join(CODEX_DIR, "config.toml");
+  const original = existsSync(cfgPath) ? readFileSync(cfgPath, "utf8") : "";
+
+  // 首次改写前备份一份原始 config.toml，方便手工还原。
+  const backupDir = join(CODEX_DIR, "backup-omni");
+  const backupCfg = join(backupDir, "config.toml");
+  if (original && !existsSync(backupCfg)) {
+    mkdirSync(backupDir, { recursive: true });
+    writeFileSync(backupCfg, original);
+  }
+
+  const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const values: Record<string, string> = {
+    model: `"${model}"`,
+    model_provider: `"${CHATGPT_PROVIDER}"`,
+    preferred_auth_method: `"apikey"`,
+    forced_login_method: `"api"`,
+    model_reasoning_effort: `"high"`,
+    web_search: `"disabled"`,
+    model_catalog_json: `"${CODEX_MODELS_CATALOG}"`,
+  };
+  const providerBlock = [
+    `[model_providers.${CHATGPT_PROVIDER}]`,
+    `name = "OmniStudio"`,
+    `base_url = "${esc(baseURL)}"`,
+    `wire_api = "responses"`,
+    `experimental_bearer_token = "${esc(apiKey)}"`,
+  ].join("\n");
+
+  writeFileSync(cfgPath, patchCodexConfig(original, values, providerBlock));
+  writeFileSync(CODEX_MODELS_CATALOG, chatgptModelsJson(model));
 }
 
 async function resolveModel(

@@ -78,6 +78,13 @@ function useFirstSuggestedPreset(engine: InferenceEngine): ChatPreset | null {
 function EngineSelector() {
   const t = useT();
   const { engine, setEngine, isSaving } = useEngine();
+  const { data } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => rpcClient.getSettings(undefined),
+  });
+  // MLX 只面向 macOS，非 mac 不展示该引擎选项。
+  const isMac = data?.platform === "darwin";
+  const options = ENGINE_OPTIONS.filter((o) => o.value !== "mlx" || isMac);
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border p-3">
@@ -91,7 +98,7 @@ function EngineSelector() {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {ENGINE_OPTIONS.map((o) => (
+            {options.map((o) => (
               <SelectItem key={o.value} value={o.value}>{t(o.labelKey)}</SelectItem>
             ))}
           </SelectContent>
@@ -148,6 +155,7 @@ const PARAM_FIELDS: Record<InferenceEngine, ParamField[]> = {
     { key: "SGLANG_TP_SIZE", labelKey: "models.params.tp" },
     { key: "SGLANG_MEM_FRACTION_STATIC", labelKey: "models.params.memFraction", step: "0.02" },
   ],
+  mlx: [{ key: "MLX_CACHE_SIZE_GB", labelKey: "models.params.mlxCacheGb", step: "1" }],
 };
 
 /** 数字参数输入：编辑中不写库，失焦 / Enter 时提交（下次启动生效）。 */
@@ -262,8 +270,12 @@ function ServerParamsPanel({ engine }: { engine: InferenceEngine }) {
 // 启动条
 // ---------------------------------------------------------------------------
 
-/** 启动条：选择已下载的模型 + 启动/重启服务器（使用上方所选引擎与启动参数）。 */
-function LaunchBar({ installedModels }: { installedModels: InstalledModel[] }) {
+/** 启动条：选择已下载的模型 + 启动/重启服务器（使用上方所选引擎与启动参数）。
+ * 只列出当前引擎能加载的模型，避免在 MLX 下选到 GGUF 等不兼容文件。 */
+function LaunchBar({ installedModels, engine }: { installedModels: InstalledModel[]; engine: InferenceEngine }) {
+  const compatibleModels = installedModels.filter((m) =>
+    engineSupports(engine, fileKind(m.fileName)),
+  );
   const t = useT();
   const queryClient = useQueryClient();
   const serverStatus = useServerStore((s) => s.status);
@@ -318,7 +330,7 @@ function LaunchBar({ installedModels }: { installedModels: InstalledModel[] }) {
               <SelectValue placeholder={t("models.chooseModelEmpty")} />
             </SelectTrigger>
             <SelectContent className="max-w-sm">
-              {installedModels.map((m) => {
+              {compatibleModels.map((m) => {
                 const kind = fileKind(m.fileName);
                 return (
                   <SelectItem key={m.path} value={m.path}>
@@ -610,7 +622,6 @@ const INSTALLED_TABS: { value: InstalledTab; labelKey: string }[] = [
 
 function InstalledModels({ engine }: { engine: InferenceEngine }) {
   const t = useT();
-  const [showAll, setShowAll] = useState(false);
   const [tab, setTab] = useState<InstalledTab>("all");
   const { data, isLoading } = useQuery({
     queryKey: ["installed-models"],
@@ -625,8 +636,10 @@ function InstalledModels({ engine }: { engine: InferenceEngine }) {
     );
   }
 
+  // 严格按当前引擎过滤：只显示该引擎能加载的推理模型；`other`（TTS/ASR/生图
+  // 等非推理模型）不属于推理引擎加载，始终展示，由分类 tab 分组。
   const allModels = (data?.models ?? []).filter(
-    (m) => showAll || fileKind(m.fileName) === "other" || engineSupports(engine, fileKind(m.fileName)),
+    (m) => fileKind(m.fileName) === "other" || engineSupports(engine, fileKind(m.fileName)),
   );
   const models =
     tab === "all" ? allModels : allModels.filter((m) => (m.category ?? "other") === tab);
@@ -651,15 +664,6 @@ function InstalledModels({ engine }: { engine: InferenceEngine }) {
           <p className="text-xs text-muted-foreground">
             {allModels.length === 0 ? t("models.noInstalled") : t("models.noInstalledInCat")}
           </p>
-          {!showAll && allModels.length === 0 && (
-            <button
-              type="button"
-              onClick={() => setShowAll(true)}
-              className="text-xs text-primary underline-offset-2 hover:underline"
-            >
-              {t("models.showAllFormats")}
-            </button>
-          )}
         </div>
       ) : (
         <div className="flex flex-col gap-2">
@@ -890,7 +894,7 @@ export function LocalModelsScreen() {
 
         <EngineSelector />
         <ServerParamsPanel engine={engine} />
-        <LaunchBar installedModels={installedModels} />
+        <LaunchBar installedModels={installedModels} engine={engine} />
 
         <div>
           <div className="mb-2 flex items-center justify-between gap-2">

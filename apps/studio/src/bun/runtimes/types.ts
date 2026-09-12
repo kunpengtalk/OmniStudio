@@ -5,7 +5,7 @@ export type StatusListener = (status: ServerStatus) => void;
 
 export type StartResult = { ok: boolean; error?: string };
 
-export type BinaryCheckResult = { found: boolean; path?: string };
+export type BinaryCheckResult = { found: boolean; path?: string; mode?: string };
 
 export interface Runtime {
   readonly id: string;

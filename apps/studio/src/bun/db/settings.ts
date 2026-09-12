@@ -52,6 +52,11 @@ export type SettingsKey =
   | "MAX_VLLM_FAILURE_RETRIES"
   | "PAGE_CONCURRENCY"
   | "INFERENCE_ENGINE"
+  | "MLX_PORT"
+  | "MLX_EXTRA_ARGS"
+  | "MLX_MODEL"
+  | "MLX_CACHE_SIZE_GB"
+  | "MLX_HF_ENDPOINT"
   | "VLLM_MAX_MODEL_LEN"
   | "VLLM_TENSOR_PARALLEL_SIZE"
   | "VLLM_GPU_MEMORY_UTILIZATION"
@@ -162,6 +167,13 @@ const DEFAULTS: Record<SettingsKey, string> = {
   MAX_VLLM_FAILURE_RETRIES: "0",
   PAGE_CONCURRENCY: "3",
   INFERENCE_ENGINE: "llama.cpp",
+  MLX_PORT: "18010",
+  MLX_EXTRA_ARGS: "",
+  // DeepSeek V4.1 Flash 官方社区 MLX（4/8bit 混合）——MLX 引擎的默认部署模型。
+  MLX_MODEL: "pipenetwork/DeepSeek-V4.1-Flash-MLX-mixed-4_8bit",
+  MLX_CACHE_SIZE_GB: "8",
+  // 国内环境优先走 hf-mirror，置空则使用 HuggingFace 官方。
+  MLX_HF_ENDPOINT: "https://hf-mirror.com",
   VLLM_MAX_MODEL_LEN: "8192",
   VLLM_TENSOR_PARALLEL_SIZE: "1",
   VLLM_GPU_MEMORY_UTILIZATION: "0.9",
@@ -268,6 +280,7 @@ export const ENGINE_PORT_KEYS: Record<InferenceEngine, SettingsKey> = {
   "llama.cpp": "SERVER_PORT",
   vllm: "VLLM_PORT",
   sglang: "SGLANG_PORT",
+  mlx: "MLX_PORT",
 };
 
 /** The extra-launch-args key for each LLM engine (whitespace-separated flags appended last). */
@@ -275,6 +288,7 @@ export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, SettingsKey> = {
   "llama.cpp": "SERVER_EXTRA_ARGS",
   vllm: "VLLM_EXTRA_ARGS",
   sglang: "SGLANG_EXTRA_ARGS",
+  mlx: "MLX_EXTRA_ARGS",
 };
 
 /** The configured listen port of the given engine. */

@@ -152,18 +152,21 @@ function ImageCard({
       </div>
     );
   }
+  // 按图片真实比例显示（用户选了 16:9 / 9:16 就展示成 16:9 / 9:16），
+  // 不再用固定正方形裁切 —— 否则竖图/横图都会被裁成正方形，看起来像比例没生效。
+  // 尺寸边界：高不超过 70vh、宽不超出容器，比例由图片自身决定。
   return (
     <div
       className={cn(
-        "group relative aspect-square overflow-hidden rounded-xl border bg-muted/40 transition-shadow",
+        "group relative w-fit max-w-full overflow-hidden rounded-xl border bg-muted/40 transition-shadow",
         highlight && "ring-2 ring-primary",
       )}
     >
       <img
         src={record.imageUrl}
         alt={record.prompt ?? ""}
-        className="size-full object-cover"
         loading="lazy"
+        className="max-h-[70vh] max-w-full object-contain"
       />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-2 bg-gradient-to-t from-black/70 to-transparent p-2 opacity-0 transition-opacity group-hover:opacity-100">
         <p className="line-clamp-2 text-[10px] leading-tight text-white/90">{record.prompt}</p>
@@ -1439,7 +1442,15 @@ function GenerateTab() {
         {/* 右上角：当前结果的悬浮预览卡 */}
         {latest && latest.imageUrl && (
           <div className="absolute right-5 top-5 z-20 w-44 overflow-hidden rounded-xl border bg-card/95 shadow-lg backdrop-blur">
-            <div className="relative aspect-video overflow-hidden bg-muted">
+            <div
+              className="relative w-full overflow-hidden bg-muted"
+              style={{
+                aspectRatio:
+                  latest.width && latest.height && latest.width > 0 && latest.height > 0
+                    ? latest.width / latest.height
+                    : 16 / 9,
+              }}
+            >
               <img src={latest.imageUrl} alt={latest.prompt ?? ""} className="size-full object-cover" />
               <span className="absolute left-1.5 top-1.5 rounded-md bg-black/55 px-1.5 py-0.5 text-[9px] font-medium text-white">
                 {latest.status}

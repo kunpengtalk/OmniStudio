@@ -46,6 +46,8 @@ export type ImageRecordRow = {
   seed: number | null;
   steps: number | null;
   imageUrl: string | null;
+  /** 生成图片在 images 根目录下的相对路径（如 gen/xxx.png），供网关 b64_json 直读。 */
+  imagePath: string | null;
   error: string | null;
   createdAt: number;
 };
@@ -74,6 +76,8 @@ export type GenerateImageParams = {
   referenceImageRef?: string;
   /** 前端当前页面的实时配置。若提供则优先使用（避免读取到未保存的旧配置），并顺带落盘。 */
   config?: Partial<ImageGenConfig>;
+  /** 是否把本次生效配置落盘到 settings（默认 true；网关等只读调用传 false 避免改写用户配置）。 */
+  persistConfig?: boolean;
 };
 
 type RecordRow = typeof imageRecords.$inferSelect;
@@ -182,6 +186,7 @@ function toRow(r: RecordRow): ImageRecordRow {
     seed: r.seed,
     steps: r.steps,
     imageUrl: r.imagePath ? chatImageUrl(r.imagePath) : null,
+    imagePath: r.imagePath,
     error: r.error,
     createdAt: r.createdAt ?? 0,
   };
@@ -585,9 +590,12 @@ export async function generateImage(
         : dbCfg.comfyBase,
   };
   // 把页面上的实时配置落盘（含 backend），确保下次打开仍是这次用的配置。
-  try {
-    saveImageGenConfig(cfg);
-  } catch {}
+  // 网关调用时传 persistConfig: false，避免 API 请求改写用户保存的图像配置。
+  if (params.persistConfig !== false) {
+    try {
+      saveImageGenConfig(cfg);
+    } catch {}
+  }
 
   const prompt = params.prompt?.trim() ?? "";
   if (!prompt) {

@@ -73,6 +73,8 @@ const SETTINGS: Record<string, string> = {
   VLLM_API_KEY: "EMPTY",
   VLLM_API_BASE: `http://127.0.0.1:${CLOUD_PORT}/v1`,
   GATEWAY_API_KEY: "",
+  IMG_BACKEND: "mlx",
+  IMG_MODEL: "z-image-turbo",
 };
 
 mock.module("./db/settings", () => ({
@@ -80,6 +82,38 @@ mock.module("./db/settings", () => ({
   updateSettings: (values: Record<string, string>) => Object.assign(SETTINGS, values),
   getAllSettings: () => ({ ...SETTINGS }),
   getActiveServerPort: () => SETTINGS.SERVER_PORT || String(LOCAL_PORT),
+}));
+
+// 桩掉网关生图适配层（gateway-images）：让 /v1/images/generations 不依赖真实 mflux，
+// 也避免直接 mock ./image-gen —— 后者会泄漏给 image-gen.test.ts（它需要真实模块）。
+let IMG_GEN_PARAMS: Record<string, unknown> | null = null;
+let IMG_GEN_RESULT: { records: any[]; error?: string } = { records: [] };
+const IMG_GEN_CONFIG = { backend: "mlx", apiBase: "", apiKey: "", model: "z-image-turbo", comfyBase: "" };
+
+// 经由函数读取：让 TS 以声明类型（而非收窄后的 null）参与类型检查。
+const readImgParams = (): Record<string, unknown> | null => IMG_GEN_PARAMS;
+
+// 桩掉图片落盘目录：b64_json 读取用测试临时目录。
+const TMP_IMG_DIR = (() => {
+  const { mkdtempSync } = require("fs");
+  const { tmpdir } = require("os");
+  const { join } = require("path");
+  return mkdtempSync(join(tmpdir(), "gw-img-"));
+})();
+
+mock.module("./gateway-images", () => ({
+  getImageGenConfig: () => ({ ...IMG_GEN_CONFIG }),
+  generateImage: async (params: unknown) => {
+    IMG_GEN_PARAMS = params as Record<string, unknown>;
+    return IMG_GEN_RESULT;
+  },
+  lookupMlxModel: (id: string) =>
+    id === "flux-schnell" || id === "z-image-turbo" || id === "flux-dev" ? { id } : null,
+  IMAGE_MODELS: [
+    { id: "z-image-turbo", label: "Z-Image Turbo (6B)", cmd: "", modelArg: null, defaultSteps: 9, approxSizeGb: 6, description: "" },
+    { id: "flux-schnell", label: "FLUX.1 Schnell (12B)", cmd: "", modelArg: "schnell", defaultSteps: 4, approxSizeGb: 12, description: "" },
+  ],
+  imagesBaseDir: () => TMP_IMG_DIR,
 }));
 
 // 桩掉「已装本地模型」：默认空 → 所有模型名都走"非本地已装"的旧路由逻辑；
@@ -425,13 +459,93 @@ describe("OpenAI-compatible endpoints", () => {
     expect(res.status).toBe(501);
   });
 
-  test("POST /v1/images/generations is reserved (501)", async () => {
+  test("POST /v1/images/generations returns OpenAI-style url items with default config", async () => {
+    IMG_GEN_PARAMS = null;
+    IMG_GEN_RESULT = {
+      records: [
+        { id: 1, status: "done", backend: "mlx", model: "z-image-turbo", imageUrl: "http://127.0.0.1:1234/gen/a.png", imagePath: "gen/a.png", createdAt: 1700000000000 },
+      ],
+    };
     const res = await fetch(`${GATEWAY_BASE}/v1/images/generations`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt: "a cat" }),
+      body: JSON.stringify({ model: "omni-image", prompt: "a cat", n: 1, size: "512x512" }),
     });
-    expect(res.status).toBe(501);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { created: number; data: { url: string }[] };
+    expect(body.created).toBeGreaterThan(0);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]?.url).toContain("/gen/a.png");
+    // 路由到当前已配置的后端/模型（IMG_BACKEND=mlx, IMG_MODEL=z-image-turbo）。
+    expect((readImgParams()?.config as { backend?: string })?.backend).toBe("mlx");
+    expect(readImgParams()?.model).toBe("z-image-turbo");
+    expect(readImgParams()?.width).toBe(512);
+    expect(readImgParams()?.height).toBe(512);
+    expect(readImgParams()?.count).toBe(1);
+  });
+
+  test("POST /v1/images/generations routes an explicit MLX model id to mlx backend", async () => {
+    IMG_GEN_PARAMS = null;
+    IMG_GEN_RESULT = {
+      records: [{ id: 2, status: "done", backend: "mlx", model: "flux-schnell", imageUrl: "http://127.0.0.1:1234/gen/b.png", imagePath: "gen/b.png", createdAt: 1700000000000 }],
+    };
+    const res = await fetch(`${GATEWAY_BASE}/v1/images/generations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "flux-schnell", prompt: "an astronaut", n: 2 }),
+    });
+    expect(res.status).toBe(200);
+    expect((readImgParams()?.config as { backend?: string })?.backend).toBe("mlx");
+    expect(readImgParams()?.model).toBe("flux-schnell");
+    expect(readImgParams()?.count).toBe(2);
+  });
+
+  test("POST /v1/images/generations returns b64_json when requested", async () => {
+    // 在测试临时目录里放一个假图片文件，网关按 imagePath 读取。
+    const { mkdirSync, writeFileSync } = require("fs");
+    const { join } = require("path");
+    mkdirSync(join(TMP_IMG_DIR, "gen"), { recursive: true });
+    writeFileSync(join(TMP_IMG_DIR, "gen", "b64.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    IMG_GEN_RESULT = {
+      records: [{ id: 3, status: "done", backend: "mlx", model: "z-image-turbo", imageUrl: "http://127.0.0.1:1234/gen/b64.png", imagePath: "gen/b64.png", createdAt: 1700000000000 }],
+    };
+    const res = await fetch(`${GATEWAY_BASE}/v1/images/generations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "omni-image", prompt: "a cat", response_format: "b64_json" }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { b64_json?: string; url?: string }[] };
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]?.b64_json).toBe(Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64"));
+  });
+
+  test("POST /v1/images/generations returns 502 with the backend error on failure", async () => {
+    IMG_GEN_RESULT = { records: [], error: "模型「FLUX.1 Dev」尚未下载，请先点击「下载模型」" };
+    const res = await fetch(`${GATEWAY_BASE}/v1/images/generations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "flux-dev", prompt: "an astronaut" }),
+    });
+    expect(res.status).toBe(502);
+    const body = (await res.json()) as { error: { message: string; type: string } };
+    expect(body.error.message).toContain("尚未下载");
+    expect(body.error.type).toBe("image_generation_error");
+  });
+
+  test("POST /v1/images/generations rejects missing prompt and invalid size", async () => {
+    const noPrompt = await fetch(`${GATEWAY_BASE}/v1/images/generations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "omni-image" }),
+    });
+    expect(noPrompt.status).toBe(400);
+    const badSize = await fetch(`${GATEWAY_BASE}/v1/images/generations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt: "a cat", size: "big" }),
+    });
+    expect(badSize.status).toBe(400);
   });
 
   test("falls back to the next free port when the configured port is busy", async () => {

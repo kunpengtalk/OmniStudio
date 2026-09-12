@@ -779,7 +779,8 @@ async function cmdDoctor(ctx: Ctx) {
   const engine = backend.settings.getSetting("INFERENCE_ENGINE") as
     | "llama.cpp"
     | "vllm"
-    | "sglang";
+    | "sglang"
+    | "mlx";
   const bin = await backend.runtimes.createRuntime(engine).checkBinary();
   checks.push({
     name: `引擎二进制 (${engine})`,
