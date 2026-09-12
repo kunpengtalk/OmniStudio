@@ -109,7 +109,7 @@ test("sendMessage streams, persists content+tokens and emits stats", async () =>
   expect(res.ok).toBe(true);
   expect(deltas.join("")).toBe("你好世界");
   expect(events.length).toBeGreaterThan(0);
-  expect(events.at(-1)).toBe("done");
+  expect(events[events.length - 1]).toBe("done");
   expect(stats).toEqual([4]);
 
   const { messages } = getConversation(conv.id);

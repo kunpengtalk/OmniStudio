@@ -1,33 +1,19 @@
-export type InferenceEngine = "llama.cpp" | "vllm" | "sglang" | "mlx";
+import { engineSupports, type InferenceEngine, type ModelFileKind } from "./engines";
 
-/** Options for the engine selector; labels reuse `settings.engine.*` i18n keys. */
-export const ENGINE_OPTIONS: { value: InferenceEngine; labelKey: string }[] = [
-  { value: "llama.cpp", labelKey: "settings.engine.llamacpp" },
-  { value: "vllm", labelKey: "settings.engine.vllm" },
-  { value: "sglang", labelKey: "settings.engine.sglang" },
-  { value: "mlx", labelKey: "settings.engine.mlx" },
-];
-
-/**
- * Per-engine listen-port setting key (mirrors ENGINE_PORT_KEYS in bun/db/settings.ts).
- * Used by the UI to display/resolve each engine's port from the settings blob.
- */
-export const ENGINE_PORT_KEYS: Record<InferenceEngine, string> = {
-  "llama.cpp": "SERVER_PORT",
-  vllm: "VLLM_PORT",
-  sglang: "SGLANG_PORT",
-  mlx: "MLX_PORT",
-};
-
-/** Per-engine extra-launch-args setting key (mirrors ENGINE_EXTRA_ARGS_KEYS in bun/db/settings.ts). */
-export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, string> = {
-  "llama.cpp": "SERVER_EXTRA_ARGS",
-  vllm: "VLLM_EXTRA_ARGS",
-  sglang: "SGLANG_EXTRA_ARGS",
-  mlx: "MLX_EXTRA_ARGS",
-};
-
-export type ModelFileKind = "gguf" | "safetensors" | "other";
+// 引擎相关的定义统一放在 shared/engines.ts（唯一真源），这里只做转出，
+// 保持既有 `@/shared/modelscope` 的导入路径不变。
+export {
+  availableEngines,
+  ENGINE_EXTRA_ARGS_KEYS,
+  ENGINE_IDS,
+  ENGINE_INSTALL_HINTS,
+  ENGINE_OPTIONS,
+  ENGINE_PORT_KEYS,
+  ENGINE_SPECS,
+  engineSpec,
+  engineSupports,
+} from "./engines";
+export type { EngineSpec, InferenceEngine, ModelFileKind } from "./engines";
 
 /** Classify a model file by extension (frontend mirror of the bun-side fileKind). */
 export function fileKind(fileName: string): ModelFileKind {
@@ -35,14 +21,6 @@ export function fileKind(fileName: string): ModelFileKind {
   if (name.endsWith(".gguf") || name.endsWith(".ggml")) return "gguf";
   if (name.endsWith(".safetensors")) return "safetensors";
   return "other";
-}
-
-/** Whether a file kind can be loaded by the given inference engine. */
-export function engineSupports(engine: InferenceEngine, kind: ModelFileKind): boolean {
-  if (kind === "other") return true;
-  if (kind === "gguf") return engine === "llama.cpp";
-  // safetensors / MLX 目录由 vLLM、SGLang、MLX 加载。
-  return engine === "vllm" || engine === "sglang" || engine === "mlx";
 }
 
 /** Recommended engine for a model file, when its format makes it unambiguous. */

@@ -1,4 +1,5 @@
 import { getSetting } from "../db/settings";
+import type { InferenceEngine } from "../../shared/engines";
 import { LlamaRuntime } from "./llama";
 import { VllmRuntime } from "./vllm";
 import { SglangRuntime } from "./sglang";
@@ -6,8 +7,8 @@ import { MlxRuntime } from "./mlx";
 import type { Runtime } from "./types";
 
 export type { Runtime, ServerStatus, StartResult, BinaryCheckResult } from "./types";
-
-export type InferenceEngine = "llama.cpp" | "vllm" | "sglang" | "mlx";
+// 引擎类型定义在 shared/engines.ts（唯一真源），这里转出保持既有导入路径可用。
+export type { InferenceEngine } from "../../shared/engines";
 
 const runtimes: Record<InferenceEngine, () => Runtime> = {
   "llama.cpp": () => new LlamaRuntime(),

@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, join, resolve } from "path";
+import type { InferenceEngine } from "../shared/engines";
 
 const APP_SUPPORT = "omni-studio.kunpengtalk.com";
 const DB_FILE = "omni-studio.db";
@@ -776,11 +777,7 @@ async function cmdDoctor(ctx: Ctx) {
   });
 
   // 推理引擎二进制
-  const engine = backend.settings.getSetting("INFERENCE_ENGINE") as
-    | "llama.cpp"
-    | "vllm"
-    | "sglang"
-    | "mlx";
+  const engine = backend.settings.getSetting("INFERENCE_ENGINE") as InferenceEngine;
   const bin = await backend.runtimes.createRuntime(engine).checkBinary();
   checks.push({
     name: `引擎二进制 (${engine})`,

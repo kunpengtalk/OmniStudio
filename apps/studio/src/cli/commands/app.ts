@@ -3,6 +3,7 @@ import { optBool, optString } from "../args";
 import { controlRequest, ensureAppRunning } from "../client";
 import type { ControlResult } from "../client";
 import { getAllSettingsFallback } from "../db";
+import { availableEngines } from "../../shared/engines";
 import { CMD_HELP } from "../help";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -136,7 +137,7 @@ export async function cmdServer(parsed: ParsedArgs) {
   }
   switch (action) {
     case "list": {
-      const engines = ["llama.cpp", "vllm", "sglang", "mlx"];
+      const engines = availableEngines();
       const settings = await getAllSettingsFallback().catch(() => ({} as Record<string, string>));
       const active = settings.INFERENCE_ENGINE || "llama.cpp";
       console.log("可用推理引擎：");

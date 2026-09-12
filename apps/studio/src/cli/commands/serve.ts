@@ -3,9 +3,9 @@ import { join } from "path";
 import type { ParsedArgs } from "../args";
 import { optString } from "../args";
 import { resolveDataDir } from "../data-dir";
+import { ENGINE_IDS, ENGINE_PORT_KEYS, type InferenceEngine } from "../../shared/engines";
 
-const ENGINES = ["llama.cpp", "vllm", "sglang", "mlx"] as const;
-type Engine = (typeof ENGINES)[number];
+const ENGINES = ENGINE_IDS;
 
 /**
  * 前台独立运行推理服务器（不依赖 GUI）。复用主进程的 runtimes /
@@ -28,14 +28,22 @@ export async function cmdServe(parsed: ParsedArgs) {
   const apiKey = optString(parsed.options, "api-key");
 
   const updates: Record<string, string> = {};
+  let nextEngine: InferenceEngine | null = null;
   if (engine) {
     if (!(ENGINES as readonly string[]).includes(engine)) {
       console.error(`未知引擎「${engine}」。可用：${ENGINES.join(" / ")}`);
       process.exit(1);
     }
+    nextEngine = engine as InferenceEngine;
     updates.INFERENCE_ENGINE = engine;
   }
-  if (port) updates.SERVER_PORT = port;
+  // 端口要写进"目标引擎自己的端口键"：vLLM / SGLang / MLX 各读 VLLM_PORT /
+  // SGLANG_PORT / MLX_PORT，一律写 SERVER_PORT 会让 --port 静默失效。
+  if (port) {
+    const targetEngine =
+      nextEngine ?? ((settingsMod.getSetting("INFERENCE_ENGINE") as InferenceEngine) || "llama.cpp");
+    updates[ENGINE_PORT_KEYS[targetEngine]] = port;
+  }
   if (host) updates.SERVER_HOST = host;
   if (apiKey) updates.GATEWAY_API_KEY = apiKey;
   if (model) {

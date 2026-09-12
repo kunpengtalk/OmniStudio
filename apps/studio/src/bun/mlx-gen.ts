@@ -8,6 +8,7 @@ import {
 } from "fs";
 import path from "path";
 import { getDataDir } from "./paths";
+import { getSetting } from "./db/settings";
 
 /**
  * MLX 本地生图引擎（Apple Silicon）。
@@ -870,6 +871,32 @@ type ActiveWorker = {
 
 let activeWorker: ActiveWorker | null = null;
 
+/**
+ * 空闲自动卸载：常驻 worker 会一直占着数 GB 内存/显存，空闲超过
+ * IMG_MLX_IDLE_MINUTES 分钟就让它退出（0 = 不自动卸载）。
+ */
+let idleUnloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cancelIdleUnload(): void {
+  if (idleUnloadTimer) {
+    clearTimeout(idleUnloadTimer);
+    idleUnloadTimer = null;
+  }
+}
+
+function scheduleIdleUnload(): void {
+  cancelIdleUnload();
+  if (!activeWorker) return;
+  const minutes = Number(getSetting("IMG_MLX_IDLE_MINUTES") ?? "");
+  if (!Number.isFinite(minutes) || minutes <= 0) return;
+  idleUnloadTimer = setTimeout(() => {
+    idleUnloadTimer = null;
+    if (!activeWorker || activeWorker.pendingGen || activeWorker.pendingLoad) return;
+    emitLog(`MLX 生图已空闲 ${minutes} 分钟，自动卸载模型释放内存（可在设置 IMG_MLX_IDLE_MINUTES 调整）。`);
+    void stopMlxModel();
+  }, minutes * 60_000);
+}
+
 function mlxWorkerScript(): string {
   return path.join(import.meta.dir, "mlx-worker.py");
 }
@@ -1030,12 +1057,24 @@ export async function startMlxModel(
     activeWorker!.pendingLoad = { resolve };
   });
   // worker 在加载完成前意外退出 → 兜底报错而不是永远 pending。
+  // 生成过程中退出（OOM / 崩溃）同样立即结算：否则 UI 要等 30 分钟超时才知道失败。
   void proc.exited.then((code) => {
     const w = activeWorker;
-    if (w && w.pendingLoad) {
-      w.pendingLoad.resolve({ ok: false, error: `worker 进程提前退出（退出码 ${code}）` });
+    if (!w) return;
+    if (w.pendingLoad) {
+      const l = w.pendingLoad;
       w.pendingLoad = null;
+      l.resolve({ ok: false, error: `worker 进程提前退出（退出码 ${code}）` });
     }
+    if (w.pendingGen) {
+      const g = w.pendingGen;
+      w.pendingGen = null;
+      g.resolve({ ok: false, error: `worker 进程在生成过程中退出（退出码 ${code}）` });
+    }
+    // 死掉的 worker 不能再接指令：清引用，后续生图自动回落 CLI 路径。
+    if (activeWorker === w) activeWorker = null;
+    cancelIdleUnload();
+    emitPhase({ modelId: w.modelId, phase: "error", message: `worker 退出（退出码 ${code}）` });
   });
   try {
     await workerSend({ msg: "load", model: model.id, quantize: q });
@@ -1045,6 +1084,8 @@ export async function startMlxModel(
   const r = await loadResult;
   if (r.ok) {
     emitLog(`模型 ${model.label} 已加载完成，可快速生图。`);
+    // 加载完就进入空闲计时：用户只是加载后没生图时，别让模型一直常驻。
+    scheduleIdleUnload();
   } else {
     emitLog(`模型 ${model.label} 加载失败：${r.error}`);
   }
@@ -1053,6 +1094,7 @@ export async function startMlxModel(
 
 /** 停止常驻 worker，释放显存/内存。 */
 export async function stopMlxModel(): Promise<{ ok: boolean }> {
+  cancelIdleUnload();
   const w = activeWorker;
   activeWorker = null;
   if (!w) return { ok: true };
@@ -1133,7 +1175,7 @@ export type MlxGenerateParams = {
 };
 
 /** 调用 mflux CLI 生成一张图片（阻塞直到进程退出）。 */
-export async function generateWithMlx(
+async function generateWithMlxInner(
   params: MlxGenerateParams,
 ): Promise<{ ok: boolean; error?: string }> {
   const model = findMlxModel(params.modelId) ?? MLX_MODELS[0]!;
@@ -1218,5 +1260,17 @@ export async function generateWithMlx(
   } finally {
     clearTimeout(timer);
     activeGenerate = null;
+  }
+}
+
+/** 生图入口：生成期间取消空闲计时，结束后重新计时（见 scheduleIdleUnload）。 */
+export async function generateWithMlx(
+  params: MlxGenerateParams,
+): Promise<{ ok: boolean; error?: string }> {
+  cancelIdleUnload();
+  try {
+    return await generateWithMlxInner(params);
+  } finally {
+    scheduleIdleUnload();
   }
 }

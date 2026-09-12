@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { InferenceEngine } from "../../shared/modelscope";
+import { ENGINE_IDS, ENGINE_SPECS } from "../../shared/engines";
 import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
@@ -102,6 +103,7 @@ export type SettingsKey =
   | "IMG_API_KEY"
   | "IMG_MODEL"
   | "IMG_COMFY_BASE"
+  | "IMG_MLX_IDLE_MINUTES"
   // AI 视频生成（video-gen.ts）
   | "VIDEO_BACKEND"
   | "VIDEO_MINIMAX_BASE"
@@ -254,6 +256,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   IMG_API_KEY: "",
   IMG_MODEL: "",
   IMG_COMFY_BASE: "",
+  // MLX 生图常驻 worker 空闲多少分钟后自动卸载（0 = 一直常驻）：模型会占数 GB 内存。
+  IMG_MLX_IDLE_MINUTES: "10",
   // MiniMax（H3）默认走官方 API；自部署的 MiniMax 兼容服务改 Base 即可（参照 OmniLabs）。
   VIDEO_BACKEND: "minimax",
   VIDEO_MINIMAX_BASE: "https://api.minimaxi.com",
@@ -338,21 +342,15 @@ export function isConfigured(): boolean {
   return row?.value === "1";
 }
 
-/** The port key each LLM inference engine reads (mirrored on the UI by ENGINE_PORT_KEYS). */
-export const ENGINE_PORT_KEYS: Record<InferenceEngine, SettingsKey> = {
-  "llama.cpp": "SERVER_PORT",
-  vllm: "VLLM_PORT",
-  sglang: "SGLANG_PORT",
-  mlx: "MLX_PORT",
-};
+/** The port key each LLM inference engine reads (derived from shared/engines.ts). */
+export const ENGINE_PORT_KEYS: Record<InferenceEngine, SettingsKey> = Object.fromEntries(
+  ENGINE_IDS.map((id) => [id, ENGINE_SPECS[id].portKey]),
+) as Record<InferenceEngine, SettingsKey>;
 
 /** The extra-launch-args key for each LLM engine (whitespace-separated flags appended last). */
-export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, SettingsKey> = {
-  "llama.cpp": "SERVER_EXTRA_ARGS",
-  vllm: "VLLM_EXTRA_ARGS",
-  sglang: "SGLANG_EXTRA_ARGS",
-  mlx: "MLX_EXTRA_ARGS",
-};
+export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, SettingsKey> = Object.fromEntries(
+  ENGINE_IDS.map((id) => [id, ENGINE_SPECS[id].extraArgsKey]),
+) as Record<InferenceEngine, SettingsKey>;
 
 /** The configured listen port of the given engine. */
 export function getServerPort(engine: InferenceEngine): string {
