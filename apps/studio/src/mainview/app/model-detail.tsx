@@ -23,8 +23,18 @@ import { useRouter } from "@stores/router";
 import { useModelDetailStore } from "@stores/model-detail";
 import { useModelDownloadStore } from "@stores/model-download";
 import { useT } from "@stores/ui-lang";
-import { classifyModel, engineSupports, matchQuant } from "../../shared/modelscope";
-import type { ModelFileKind, ModelScopeFile } from "../../shared/modelscope";
+import {
+  MODEL_SOURCES,
+  MODEL_SOURCE_META,
+  classifyModel,
+  engineSupports,
+  fileBaseName,
+  matchQuant,
+  type MarketFile,
+  type ModelSource,
+} from "../../shared/modelscope";
+import type { ModelFileKind } from "../../shared/modelscope";
+import { SourceBadge } from "@components/source-badge";
 import { cn } from "@/mainview/lib/utils";
 
 function formatBytes(bytes: number): string {
@@ -41,7 +51,10 @@ function formatParams(params: number): string {
   return String(params);
 }
 
-const FORMAT_CLS: Record<ModelScopeFile["kind"], string> = {
+/** 加载必需的配套文件（config / tokenizer / chat template 等）。 */
+const SUPPORT_FILE_RE = /\.(json|model|txt|jinja|spm|ya?ml)$/i;
+
+const FORMAT_CLS: Record<MarketFile["kind"], string> = {
   gguf: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400",
   safetensors: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
   other: "bg-muted text-muted-foreground",
@@ -50,11 +63,14 @@ const FORMAT_CLS: Record<ModelScopeFile["kind"], string> = {
 function FileRow({
   file,
   repo,
+  source,
   category,
   engine,
 }: {
-  file: ModelScopeFile;
+  file: MarketFile;
   repo: string;
+  /** 列文件与下载走同一个平台：这里的来源就是下载来源。 */
+  source: ModelSource;
   category: import("../../shared/modelscope").ModelCategory;
   engine: import("../../shared/modelscope").InferenceEngine;
 }) {
@@ -67,10 +83,12 @@ function FileRow({
   });
 
   const installedPaths = new Set((installedModels.data?.models ?? []).map((m) => m.fileName));
+  // 已安装列表存的是文件名，仓库里的文件可能是 `BF16/xxx.gguf` 这样的子目录路径。
+  const isInstalledHere = installedPaths.has(fileBaseName(file.name));
   const task = tasks.find((t) => t.repo === repo && t.fileName === file.name && t.status !== "canceled");
 
   const startMutation = useMutation({
-    mutationFn: () => rpcClient.startModelDownload({ repo, fileName: file.name, category }),
+    mutationFn: () => rpcClient.startModelDownload({ repo, fileName: file.name, category, source }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] }),
   });
   const pauseMutation = useMutation({
@@ -111,6 +129,8 @@ function FileRow({
           {formatBytes(file.size)}
           {task?.speed ? ` · ${formatBytes(task.speed)}/s` : ""}
         </p>
+        {/* 任务的下载源和本页不一致时标出来（例如之前从另一个平台开始下的）。 */}
+        {task && task.source !== source && <SourceBadge source={task.source} className="mt-1" />}
         {task && (task.status === "downloading" || task.status === "paused") && (
           <div className="mt-1.5 h-1.5 w-full max-w-56 overflow-hidden rounded-full bg-muted">
             <div
@@ -124,7 +144,7 @@ function FileRow({
         )}
       </div>
 
-      {installedPaths.has(file.name) ? (
+      {isInstalledHere ? (
         <Badge variant="secondary" className="shrink-0 text-[10px]">
           <CheckCircle2Icon className="size-3" /> {t("models.downloaded")}
         </Badge>
@@ -184,7 +204,7 @@ function FileRow({
           ) : (
             <DownloadIcon data-icon="inline-start" />
           )}
-          {t("models.download")}
+          {t("market.downloadFrom", { source: MODEL_SOURCE_META[source].label })}
         </Button>
       )}
       {active && <span className="sr-only" />}
@@ -206,10 +226,16 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
   const [formatFilter, setFormatFilter] = useState<"all" | ModelFileKind | null>(null);
 
   const repo = source?.kind === "preset" ? source.preset.repo : source?.kind === "search" ? source.model.id : null;
+  // 列文件与下载必须用同一个 source，否则会出现"列的是 A 站的文件、下的是 B 站的字节"
+  // （同一仓库在两个平台的文件名/目录结构并不一致）。默认取该模型被发现时所在的平台，
+  // 用户可以在文件区手动切到另一个平台。
+  const originSource: ModelSource = source?.kind === "search" ? source.model.source : "modelscope";
+  const [sourceOverride, setSourceOverride] = useState<ModelSource | null>(null);
+  const modelSource: ModelSource = sourceOverride ?? originSource;
 
   const filesQuery = useQuery({
-    queryKey: ["modelscope-files", repo],
-    queryFn: () => rpcClient.listModelScopeFiles({ repo: repo! }),
+    queryKey: ["market-files", modelSource, repo],
+    queryFn: () => rpcClient.listModelFiles({ repo: repo!, source: modelSource }),
     enabled: !!repo,
   });
 
@@ -238,7 +264,7 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
     // file — works for GGUF / safetensors / bin / pt / onnx / ckpt.
     const weights = visibleFiles.filter((f) => f.isWeight);
     if (weights.length === 0) return null;
-    return weights.reduce<ModelScopeFile>(
+    return weights.reduce<MarketFile>(
       (best, f) => (best.size < f.size ? f : best),
       weights[0]!,
     );
@@ -252,15 +278,33 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
     () => new Set((installedData?.models ?? []).map((m) => m.fileName)),
     [installedData],
   );
-  const pendingFiles = useMemo(
-    () => visibleFiles.filter((f) => !installedNames.has(f.name)),
-    [visibleFiles, installedNames],
+
+  // safetensors / MLX 这类"整仓库"模型：权重分片必须和 config / tokenizer 一起下载，
+  // 否则 vLLM / SGLang / mlx-lm 加载不了（只下一个 safetensors 是跑不起来的）。
+  const supportFiles = useMemo(
+    () =>
+      effectiveFilter === "gguf"
+        ? []
+        : files.filter((f) => f.kind === "other" && SUPPORT_FILE_RE.test(fileBaseName(f.name))),
+    [files, effectiveFilter],
   );
+  const pendingFiles = useMemo(() => {
+    const byPath = new Map<string, MarketFile>();
+    for (const f of [...visibleFiles, ...supportFiles]) {
+      if (!installedNames.has(fileBaseName(f.name))) byPath.set(f.path, f);
+    }
+    return [...byPath.values()];
+  }, [visibleFiles, supportFiles, installedNames]);
 
   const downloadAll = useMutation({
     mutationFn: async () => {
       for (const f of pendingFiles) {
-        await rpcClient.startModelDownload({ repo: repo!, fileName: f.name, category: category ?? undefined });
+        await rpcClient.startModelDownload({
+          repo: repo!,
+          fileName: f.name,
+          category: category ?? undefined,
+          source: modelSource,
+        });
       }
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] }),
@@ -295,7 +339,10 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
               <h2 className="text-lg font-semibold tracking-tight">{name}</h2>
-              <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground/80">{repo}</p>
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <SourceBadge source={modelSource} />
+                <span className="font-mono text-xs text-muted-foreground/80">{repo}</span>
+              </div>
             </div>
             {category && (
               <span className="inline-flex h-6 items-center rounded-full bg-primary/10 px-2 text-xs font-medium text-primary">
@@ -316,9 +363,21 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
                     {formatParams(source.model.params)} params
                   </Badge>
                 )}
-                <Badge variant="secondary" className="text-[10px]">
-                  {formatBytes(source.model.fileSize)} total
-                </Badge>
+                {source.model.fileSize > 0 && (
+                  <Badge variant="secondary" className="text-[10px]">
+                    {formatBytes(source.model.fileSize)} total
+                  </Badge>
+                )}
+                {source.model.fileCount > 0 && (
+                  <Badge variant="secondary" className="text-[10px]">
+                    {t("market.fileCount", { count: String(source.model.fileCount) })}
+                  </Badge>
+                )}
+                {source.model.formats.map((f) => (
+                  <Badge key={f} variant="secondary" className="text-[10px]">
+                    {t(`models.format.${f}`)}
+                  </Badge>
+                ))}
                 <Badge variant="secondary" className="text-[10px]">
                   {source.model.downloads} downloads
                 </Badge>
@@ -354,19 +413,31 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
           )}
 
           {/* Big download button */}
-          <div className="mt-4 flex items-center gap-2 border-t pt-4">
+          <div className="mt-4 flex flex-wrap items-center gap-2 border-t pt-4">
             {recommended ? (
-              <DownloadRecommendedButton repo={repo} file={recommended} category={category} />
+              <DownloadRecommendedButton
+                repo={repo}
+                file={recommended}
+                source={modelSource}
+                category={category}
+                repoFiles={pendingFiles.length > 0 ? pendingFiles : [recommended]}
+              />
             ) : (
               <p className="text-xs text-muted-foreground">{t("models.noFiles")}</p>
             )}
+            <span className="text-[11px] text-muted-foreground/70">
+              {t("market.allFrom", {
+                source: MODEL_SOURCE_META[modelSource].label,
+                host: MODEL_SOURCE_META[modelSource].host,
+              })}
+            </span>
           </div>
         </div>
 
         {/* Files */}
         <div>
           <div className="mb-2 flex items-end justify-between gap-3">
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col gap-1.5">
               <h3 className="flex items-center gap-2 text-sm font-medium">
                 <HardDriveIcon className="size-4" />
                 {t("models.files")}
@@ -375,6 +446,52 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
                 </span>
               </h3>
               <p className="text-[11px] text-muted-foreground">{t("models.formatHint")}</p>
+              {effectiveFilter !== "gguf" && (
+                <p className="text-[11px] text-muted-foreground/70">
+                  {t("models.supportFilesHint")}
+                </p>
+              )}
+              {/* 平台选择：列文件与下载都按它走，两个平台的文件路径不同，不能混用 */}
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] text-muted-foreground">
+                  {t("market.filesSourceLabel")}
+                </span>
+                <div className="inline-flex rounded-lg border p-0.5">
+                  {MODEL_SOURCES.map((s) => {
+                    const active = modelSource === s;
+                    const meta = MODEL_SOURCE_META[s];
+                    return (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() => setSourceOverride(s)}
+                        title={meta.host}
+                        className={cn(
+                          "flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] transition-colors",
+                          active
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {meta.label}
+                        <span
+                          className={cn(
+                            "font-mono text-[9px]",
+                            active ? "text-primary-foreground/70" : "text-muted-foreground/60",
+                          )}
+                        >
+                          {meta.host}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {sourceOverride && sourceOverride !== originSource && (
+                  <span className="text-[11px] text-muted-foreground/70">
+                    {t("market.originWas", { source: MODEL_SOURCE_META[originSource].label })}
+                  </span>
+                )}
+              </div>
             </div>
             {visibleFiles.length > 0 && (
               <Button
@@ -449,7 +566,14 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
             ) : (
             <div className="flex flex-col gap-2">
               {visibleFiles.map((f) => (
-                <FileRow key={f.path} file={f} repo={repo} category={category ?? "other"} engine={engine} />
+                <FileRow
+                  key={f.path}
+                  file={f}
+                  repo={repo}
+                  source={modelSource}
+                  category={category ?? "other"}
+                  engine={engine}
+                />
               ))}
             </div>
           )}
@@ -462,11 +586,16 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
 function DownloadRecommendedButton({
   repo,
   file,
+  source,
   category,
+  repoFiles,
 }: {
   repo: string;
-  file: ModelScopeFile;
+  file: MarketFile;
+  source: ModelSource;
   category: import("../../shared/modelscope").ModelCategory | null;
+  /** 非 GGUF：整仓库一起下（分片 + config/tokenizer），否则引擎加载不了。 */
+  repoFiles: MarketFile[];
 }) {
   const t = useT();
   const queryClient = useQueryClient();
@@ -474,11 +603,23 @@ function DownloadRecommendedButton({
     queryKey: ["installed-models"],
     queryFn: () => rpcClient.listInstalledModels(),
   });
-  const installedPaths = new Set((installed.data?.models ?? []).map((m) => m.fileName));
-  const isInstalled = installedPaths.has(file.name);
+  const installedNames = new Set((installed.data?.models ?? []).map((m) => m.fileName));
+
+  const singleFile = file.kind === "gguf";
+  const targets = singleFile ? [file] : repoFiles.length > 0 ? repoFiles : [file];
+  const isInstalled = targets.every((f) => installedNames.has(fileBaseName(f.name)));
 
   const mutation = useMutation({
-    mutationFn: () => rpcClient.startModelDownload({ repo, fileName: file.name, category: category ?? undefined }),
+    mutationFn: async () => {
+      for (const f of targets) {
+        await rpcClient.startModelDownload({
+          repo,
+          fileName: f.name,
+          category: category ?? undefined,
+          source,
+        });
+      }
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] }),
   });
 
@@ -486,7 +627,7 @@ function DownloadRecommendedButton({
     return (
       <Badge variant="default" className="h-8 gap-1.5 px-3 text-xs">
         <CheckCircle2Icon className="size-4" />
-        {t("models.downloaded")} · {file.name}
+        {t("models.downloaded")} · {singleFile ? file.name : repo}
       </Badge>
     );
   }
@@ -498,7 +639,9 @@ function DownloadRecommendedButton({
       ) : (
         <DownloadIcon data-icon="inline-start" />
       )}
-      {t("models.downloadRecommended")} · {file.name}
+      {singleFile
+        ? `${t("market.downloadFrom", { source: MODEL_SOURCE_META[source].label })} · ${file.name}`
+        : t("models.downloadRepoSet", { count: String(targets.length) })}
     </Button>
   );
 }

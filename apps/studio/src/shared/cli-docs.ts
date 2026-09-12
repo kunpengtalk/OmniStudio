@@ -357,6 +357,103 @@ export const CLI_SECTIONS: CliSection[] = [
     ],
   },
   {
+    id: "backup",
+    titleZh: "备份与恢复",
+    titleEn: "Backup and restore",
+    descZh: "把设置、云端模型、技能、提示词、聊天、记忆与生成的媒体打包成一个文件，换机或重装后恢复。",
+    descEn: "Pack settings, cloud models, skills, prompts, chats, memory and generated media into one file, then restore it after a move or a reinstall.",
+    entries: [
+      {
+        cmd: "omi backup create [--scopes a,b] [--out <目录>] [--note <备注>] [--password <密码>] [--upload] [--redact]",
+        zh:
+          "创建备份：数据库走 VACUUM INTO 快照（应用在运行时也是一致副本），选中的文件流式写入 tar + gzip。" +
+          "--password 用 AES-256-GCM 加密（密码不落盘，忘了就解不开，适合放 S3 / 网盘）；" +
+          "--upload 创建后传到已配置的远端存储；--redact 把明文 API Key 抹成空值（要把备份发给别人排错时用）。",
+        en:
+          "Create a backup: the database is snapshotted with VACUUM INTO (consistent even while the app is running) and the selected files stream into tar + gzip. " +
+          "--password encrypts with AES-256-GCM (the password is never stored — if you forget it the backup is unreadable, which is what you want on S3 or a cloud drive); " +
+          "--upload sends it to the configured remote storage; --redact blanks plaintext API keys for sharing a backup when troubleshooting.",
+        notes: [
+          {
+            zh:
+              "模型权重（models/）与推理引擎（engines/）不参与备份：体积大且可重新下载；" +
+              "生成的音频 / 图片 / 视频默认也不备份（显式加 --scopes media 才会带上）。",
+            en:
+              "Model weights (models/) and engine binaries (engines/) are excluded: large and re-downloadable. " +
+              "Generated audio / images / video are off by default too — add --scopes media to include them.",
+          },
+        ],
+        examples: [
+          {
+            cmd: "omi backup create --out ~/Backups --note \"换机前\"",
+            zh: "整机备份到 ~/Backups，带备注。",
+            en: "Full backup into ~/Backups with a note.",
+          },
+          {
+            cmd: "omi backup create --scopes settings,skills,chats,prompts,memory",
+            zh: "只备份配置、技能、聊天、提示词与记忆（不含大体积媒体）。",
+            en: "Back up only config, skills, chats, prompts and memory (skip bulky media).",
+          },
+        ],
+      },
+      {
+        cmd: "omi backup list [--dir <目录>]  ·  omi backup inspect <file>",
+        zh: "列出备份文件，或预览某份备份的内容、来源机器与警告（不改动任何数据）。",
+        en: "List backup files, or preview a backup's contents, source machine and warnings without touching any data.",
+      },
+      {
+        cmd: "omi backup remote <list|test|download>",
+        zh:
+          "远端存储（S3 兼容对象存储 / WebDAV 网盘）：list 列出远端备份、test 测试连接、download 把远端备份拉到本地。" +
+          "配置在应用内「设置 → 数据 → 备份与恢复 → 远端存储」填一次（S3: Endpoint/Bucket/Region/AK/SK；" +
+          "WebDAV: 目录 URL/用户名/应用密码，坚果云即 dav.jianguoyun.com）；凭据只存本机，且备份自身会把它们剔除。",
+        en:
+          "Remote storage (S3-compatible object storage / WebDAV): list shows remote backups, test checks the connection, download pulls one to the local backup folder. " +
+          "Configure it once in Settings → Data → Backup & restore → Remote storage (S3: endpoint/bucket/region/keys; " +
+          "WebDAV: folder URL + username + app password, e.g. dav.jianguoyun.com for Nutstore). Credentials stay on this machine and are stripped from backups.",
+        examples: [
+          {
+            cmd: "omi backup remote test",
+            zh: "验证远端凭据与目录是否可用。",
+            en: "Verify remote credentials and folder access.",
+          },
+          {
+            cmd: "omi backup create --password-file ~/.omni-pass --upload",
+            zh: "加密备份并直接上传到远端。",
+            en: "Encrypt a backup and upload it straight to the remote.",
+          },
+        ],
+      },
+      {
+        cmd: "omi backup restore <file> [--password <密码>] [--scopes a,b] [--yes]",
+        zh:
+          "从备份恢复：默认先自动备份当前数据（pre-restore-*.omnibackup），再整表替换所选分组。" +
+          "恢复要求应用已退出（需要独占数据库）；应用内「设置 → 数据 → 备份与恢复」支持在线恢复并显示实时进度。",
+        en:
+          "Restore from a backup: current data is backed up first (pre-restore-*.omnibackup), then the selected groups are replaced table by table. " +
+          "The app must be closed (it needs exclusive access to the database); the in-app Settings → Data → Backup & restore page can restore while running, with live progress.",
+        examples: [
+          {
+            cmd: "omi backup restore ~/Backups/OmniStudio-20260912-101500.omnibackup --scopes settings,skills",
+            zh: "只把设置与技能恢复回来。",
+            en: "Restore only settings and skills.",
+          },
+        ],
+      },
+      {
+        cmd: "omi backup create|list|inspect  ·  应用内「设置 → 数据 → 备份与恢复」",
+        zh:
+          "备份 / 列表 / 预览不需要应用在运行（内核不依赖应用进程与迁移层，应用起不来时也能先把数据备出来）；" +
+          "界面版另外支持按分组勾选内容、看体积预估、选保存位置、设置密码、配置远端存储并一键上传、" +
+          "远端备份列表直接下载并恢复、剔除密钥、恢复前预览与备份记录管理。",
+        en:
+          "Backup, list and inspect work without the app running (the engine does not depend on the app process or migrations, so you can still get your data out when the app fails to start). " +
+          "The UI additionally offers grouped selection, size estimates, a destination picker, password encryption, remote storage with one-click upload, " +
+          "restoring straight from the remote list, secret redaction, restore preview and backup history management.",
+      },
+    ],
+  },
+  {
     id: "engine",
     titleZh: "引擎依赖、版本与手册",
     titleEn: "Engine deps, version, manual",

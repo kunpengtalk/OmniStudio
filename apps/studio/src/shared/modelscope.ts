@@ -1,4 +1,9 @@
-import { engineSupports, type InferenceEngine, type ModelFileKind } from "./engines";
+import {
+  engineSupports,
+  type InferenceEngine,
+  type ModelFileKind,
+  type SearchFormat,
+} from "./engines";
 
 // 引擎相关的定义统一放在 shared/engines.ts（唯一真源），这里只做转出，
 // 保持既有 `@/shared/modelscope` 的导入路径不变。
@@ -10,10 +15,12 @@ export {
   ENGINE_OPTIONS,
   ENGINE_PORT_KEYS,
   ENGINE_SPECS,
+  SEARCH_FORMATS,
+  engineSearchFormat,
   engineSpec,
   engineSupports,
 } from "./engines";
-export type { EngineSpec, InferenceEngine, ModelFileKind } from "./engines";
+export type { EngineSpec, InferenceEngine, ModelFileKind, SearchFormat } from "./engines";
 
 /** Classify a model file by extension (frontend mirror of the bun-side fileKind). */
 export function fileKind(fileName: string): ModelFileKind {
@@ -23,12 +30,16 @@ export function fileKind(fileName: string): ModelFileKind {
   return "other";
 }
 
-/** Recommended engine for a model file, when its format makes it unambiguous. */
-export function engineForModelFile(fileName: string): InferenceEngine | null {
-  const kind = fileKind(fileName);
+/** Recommended engine for a weight format, when the format makes it unambiguous. */
+export function engineForModelKind(kind: ModelFileKind): InferenceEngine | null {
   if (kind === "gguf") return "llama.cpp";
   if (kind === "safetensors") return "vllm";
   return null;
+}
+
+/** Recommended engine for a model file. */
+export function engineForModelFile(fileName: string): InferenceEngine | null {
+  return engineForModelKind(fileKind(fileName));
 }
 
 /**
@@ -46,16 +57,94 @@ export function resolveEngineForModel(
   return engineForModelFile(fileName) ?? currentEngine;
 }
 
-/** Best-effort format hint for a repository id (search results don't list files). */
-export function repoFormatHint(repoId: string): ModelFileKind | "unknown" {
-  const id = repoId.toLowerCase();
-  if (id.includes("gguf")) return "gguf";
-  return "unknown";
+/** 模型来源平台 —— 检索走哪个站点、下载走哪条链路、UI 上打的哪个标都由它决定。 */
+export type ModelSource = "modelscope" | "huggingface";
+
+export type ModelSourceMeta = {
+  /** 展示名（品牌名，不翻译）。 */
+  label: string;
+  /** 检索 / 下载实际使用的域名，明确告诉用户"这是从哪儿下的"。 */
+  host: string;
+  /** 结果行、详情页、下载任务上的来源标签样式。 */
+  badgeClass: string;
+};
+
+export const MODEL_SOURCE_META: Record<ModelSource, ModelSourceMeta> = {
+  modelscope: {
+    label: "ModelScope",
+    host: "modelscope.cn",
+    badgeClass: "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300",
+  },
+  huggingface: {
+    label: "Hugging Face",
+    host: "hf-mirror.com",
+    badgeClass: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+  },
+};
+
+export const MODEL_SOURCES: ModelSource[] = ["modelscope", "huggingface"];
+
+/** 平台无关的格式维度（= 引擎检索格式），用于市场里的格式筛选与徽标。 */
+export const MODEL_FORMATS: { value: SearchFormat; labelKey: string }[] = [
+  { value: "gguf", labelKey: "models.format.gguf" },
+  { value: "safetensors", labelKey: "models.format.safetensors" },
+  { value: "mlx", labelKey: "models.format.mlx" },
+];
+
+/**
+ * 从平台返回的元数据里读出一个仓库支持的格式。
+ *
+ * 两个平台都用标签声明权重格式，这是平台自己的过滤维度，不是从模型名猜出来的：
+ * - Hugging Face: `tags` 含 `gguf` / `mlx` / `safetensors`，`library_name` 同名；
+ * - ModelScope:   `tags` 含 `library:gguf` / `library:mlx` / `library:safetensors`
+ *                 （MLX 仓库还会带 `custom_tag:mlx`）。
+ *
+ * `fileNames` 可选（HF 搜索结果带 siblings、本地已下载目录也有文件列表），
+ * 有文件列表时再按实际文件后缀补一次，同样属于元数据而非猜测。
+ */
+export function modelFormats(
+  tags: readonly string[],
+  fileNames: readonly string[] = [],
+): SearchFormat[] {
+  const lower = new Set(tags.map((t) => t.toLowerCase()));
+  const has = (...keys: string[]) => keys.some((k) => lower.has(k));
+
+  const found = new Set<SearchFormat>();
+  if (has("gguf", "library:gguf", "custom_tag:gguf")) found.add("gguf");
+  if (has("mlx", "library:mlx", "custom_tag:mlx")) found.add("mlx");
+  if (has("safetensors", "library:safetensors", "custom_tag:safetensors")) found.add("safetensors");
+
+  for (const name of fileNames) {
+    const kind = fileKind(name);
+    if (kind === "gguf") found.add("gguf");
+    else if (kind === "safetensors") found.add("safetensors");
+  }
+
+  return MODEL_FORMATS.map((f) => f.value).filter((f) => found.has(f));
+}
+
+/** 该仓库是否声明/包含指定格式（用于按格式筛选检索结果）。 */
+export function matchFormat(
+  modelFormatsOfRepo: readonly SearchFormat[],
+  format: SearchFormat,
+): boolean {
+  // 元数据缺失时不下结论：宁可多给一个结果，也不把没有格式标签的仓库误判为不匹配。
+  return modelFormatsOfRepo.length === 0 || modelFormatsOfRepo.includes(format);
 }
 
 /** Directory name used for a downloaded repo under the models base dir. */
 export function safeRepoId(repo: string): string {
   return repo.replace(/[/\\:\s]+/g, "__");
+}
+
+/**
+ * 仓库内路径 → 落盘文件名。
+ * Hugging Face 的仓库会有 `BF16/xxx.gguf` 这类子目录路径，而已安装列表登记的是
+ * 文件名（basename），判断"是否已下载"时必须先取 basename 再比对。
+ */
+export function fileBaseName(filePath: string): string {
+  const i = filePath.lastIndexOf("/");
+  return i < 0 ? filePath : filePath.slice(i + 1);
 }
 
 const MODEL_WEIGHT_EXTS = [
@@ -82,7 +171,8 @@ export function matchQuant(fileName: string, quant: string): boolean {
   return b.length > 0 && a.includes(b);
 }
 
-export type ModelScopeModel = {
+/** 一条市场检索结果。`source` 记录它来自哪个平台，后续列文件/下载都按它走。 */
+export type MarketModel = {
   id: string;
   name: string;
   description: string;
@@ -95,18 +185,37 @@ export type ModelScopeModel = {
   params: number;
   createdAt: string;
   lastModified: string;
+  /** 检索它时使用的平台。 */
+  source: ModelSource;
+  /** 平台元数据里声明的权重格式（gguf / safetensors / mlx）。 */
+  formats: SearchFormat[];
+  /** 仓库文件数（HF 的 siblings / MS 的 fileCount），未知为 0。 */
+  fileCount: number;
 };
 
-export type ModelScopeFile = {
+/** 仓库里的一个文件。可能来自 ModelScope，也可能来自 Hugging Face。 */
+export type MarketFile = {
   name: string;
   path: string;
   size: number;
   isLfs: boolean;
-  /** gguf → llama.cpp；safetensors → vLLM / SGLang；other → 其它文件 */
+  /** gguf → llama.cpp；safetensors → vLLM / SGLang / MLX；other → 其它文件（bin/pt/config 等） */
   kind: ModelFileKind;
   /** 是否为模型权重文件 */
   isWeight: boolean;
 };
+
+/** 一次市场检索的结果。`hasMore` 用于"加载更多"。 */
+export type MarketSearchResult = {
+  models: MarketModel[];
+  /** 命中总数；`totalExact: false`（Hugging Face）时只是"已取到的条数"下界。 */
+  total: number;
+  totalExact: boolean;
+  hasMore: boolean;
+};
+
+/** 本地模型来自哪个位置。 */
+export type ModelOrigin = "managed" | "external" | "hf-cache";
 
 export type InstalledModel = {
   repo: string;
@@ -115,8 +224,18 @@ export type InstalledModel = {
   size: number;
   isActive: boolean;
   isChatModel: boolean;
-  category?: ModelCategory;
-  favorite?: boolean;
+  category: ModelCategory;
+  favorite: boolean;
+  /** 该模型从哪个平台下载而来（老数据没有记录时为 undefined）。 */
+  source?: ModelSource;
+  /** 来源位置：应用下载目录 / 用户添加的目录 / Hugging Face 缓存。 */
+  origin: ModelOrigin;
+  /** path 是目录（HF 缓存按仓库聚合）时为 true。 */
+  isDir: boolean;
+  /** 权重格式，目录条目按其内容判定。 */
+  kind: ModelFileKind;
+  /** 推理引擎实际加载的路径（目录或文件）。 */
+  runtimeTarget: string;
 };
 
 export type ModelCategory = "chat" | "tts" | "asr" | "image" | "other";
@@ -437,14 +556,18 @@ export const MODEL_PRESETS: readonly ChatPreset[] = [
   },
 ];
 
-export function classifyModel(model: ModelScopeModel): ModelCategory {
+export function classifyModel(model: MarketModel): ModelCategory {
   const tags = [...model.tags, ...model.tasks.map((t) => `task:${t}`)];
   const id = model.id.toLowerCase();
   const joined = tags.join(" ").toLowerCase();
 
+  // 标签形态两个平台不同：ModelScope 用 `task:text-generation` 前缀，
+  // Hugging Face 直接在 tags 里放 pipeline tag（`text-generation`）。两者都要认。
+  const hasTag = (...names: string[]) =>
+    names.some((n) => tags.includes(n) || tags.includes(`task:${n}`) || tags.includes(`custom_tag:${n}`));
+
   if (
-    tags.some((t) => t === "task:text-to-speech") ||
-    tags.some((t) => t === "task:audio-generation") ||
+    hasTag("text-to-speech", "audio-generation", "text-to-audio") ||
     id.includes("cosyvoice") ||
     id.includes("sovits") ||
     id.includes("tts")
@@ -453,8 +576,7 @@ export function classifyModel(model: ModelScopeModel): ModelCategory {
   }
 
   if (
-    tags.some((t) => t === "task:auto-speech-recognition") ||
-    tags.some((t) => t === "task:automatic-speech-recognition") ||
+    hasTag("auto-speech-recognition", "automatic-speech-recognition", "audio-classification") ||
     id.includes("whisper") ||
     id.includes("sensevoice") ||
     id.includes("paraformer") ||
@@ -464,9 +586,7 @@ export function classifyModel(model: ModelScopeModel): ModelCategory {
   }
 
   if (
-    tags.some((t) => t === "task:text-to-image-synthesis") ||
-    tags.some((t) => t === "task:text-to-image") ||
-    tags.some((t) => t === "custom_tag:text-to-image") ||
+    hasTag("text-to-image-synthesis", "text-to-image", "image-to-image") ||
     id.includes("stable-diffusion") ||
     id.includes("kolors") ||
     id.includes("flux") ||
@@ -476,13 +596,15 @@ export function classifyModel(model: ModelScopeModel): ModelCategory {
   }
 
   if (
-    tags.some((t) => t === "task:text-generation") ||
-    tags.some((t) => t === "custom_tag:chat") ||
+    hasTag("text-generation", "image-text-to-text", "chat", "conversational") ||
     id.includes("llama") ||
     id.includes("qwen") ||
     id.includes("chat") ||
     id.includes("instruct") ||
-    id.includes("cogvlm")
+    id.includes("cogvlm") ||
+    id.includes("deepseek") ||
+    id.includes("glm") ||
+    id.includes("mistral")
   ) {
     return "chat";
   }
@@ -490,7 +612,7 @@ export function classifyModel(model: ModelScopeModel): ModelCategory {
   return "other";
 }
 
-export function matchCategory(model: ModelScopeModel, category: ModelCategory | "all"): boolean {
+export function matchCategory(model: MarketModel, category: ModelCategory | "all"): boolean {
   if (category === "all") return true;
   return classifyModel(model) === category;
 }

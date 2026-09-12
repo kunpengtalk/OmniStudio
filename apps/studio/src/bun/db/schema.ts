@@ -102,12 +102,19 @@ export const agentEvents = sqliteTable("agent_events", {
   convIdx: index("agent_events_conversation_id_idx").on(t.conversationId),
 }));
 
+/**
+ * 素材来源：manual = 用户在界面里手工生成，agent = 内置 Pi Agent / 外部 agent
+ * 经本地网关生成。Agent 的媒体工具据此区分"你（用户）做的"和"它自己做的"。
+ */
+export type MediaSource = "manual" | "agent";
+
 export const imageRecords = sqliteTable("image_records", {
   id: int("id").primaryKey({ autoIncrement: true }),
   status: text("status")
     .$type<"done" | "failed">()
     .$defaultFn(() => "done")
     .notNull(),
+  source: text("source").$type<MediaSource>().default("manual").notNull(),
   backend: text("backend").$type<"api" | "comfyui" | "mlx">(),
   model: text("model"),
   prompt: text("prompt"),
@@ -132,6 +139,7 @@ export const videoRecords = sqliteTable("video_records", {
     .$type<"processing" | "done" | "failed">()
     .$defaultFn(() => "processing")
     .notNull(),
+  source: text("source").$type<MediaSource>().default("manual").notNull(),
   backend: text("backend").$type<"comfyui" | "minimax" | "seedance">(),
   model: text("model"),
   prompt: text("prompt"),
@@ -172,6 +180,7 @@ export const voiceRecords = sqliteTable("voice_records", {
     .$type<"done" | "failed">()
     .$defaultFn(() => "done")
     .notNull(),
+  source: text("source").$type<MediaSource>().default("manual").notNull(),
   model: text("model"),
   voice: text("voice"),
   text: text("text"),

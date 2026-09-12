@@ -41,6 +41,14 @@ sqlite.exec("PRAGMA busy_timeout = 5000;");
 sqlite.exec("PRAGMA synchronous = NORMAL;");
 export const db = drizzle({ client: sqlite, schema: schema });
 
+/**
+ * 原始 bun:sqlite 连接。
+ *
+ * 备份恢复需要"应用这一条"写连接：另开一条连接会变成两个写者，
+ * 与运行中的应用抢锁，恢复这种批量写入尤其容易撞 SQLITE_BUSY。
+ */
+export const sqliteClient = sqlite;
+
 // 连接建立即迁移：gateway/rpc 等模块在 import 阶段就会读表，
 // 若等 bun/index.ts 的顶层代码再 migrate，空库首次启动会先崩在 settings 表缺失上。
 // 打包后所有模块合并进 app/bun/index.js，import.meta.dir 即 app/bun，路径带 db/ 前缀；

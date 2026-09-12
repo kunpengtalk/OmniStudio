@@ -21,6 +21,8 @@ import { getChatBaseUrl, getHistory, ensureServerReady } from "./chat";
 import { getChatModelName } from "./chat-model";
 import { recordUsage } from "./stats";
 import { buildAgentTools, buildReadOnlyTools } from "./agent-tools";
+import { buildMediaGenTools, buildMediaReadTools } from "./media-tools";
+import { cancelMediaSetup } from "./media-setup";
 import { buildMcpAgentTools } from "./mcp";
 import { buildMemoryAgentTools, memoryEnabled, memoryPromptSection, memoryRecallSection } from "./memory";
 import * as Chat from "./chat";
@@ -294,6 +296,19 @@ const MODE_INSTRUCTION: Record<AgentMode, string> = {
 };
 
 function buildSystemPrompt(mode: AgentMode, workspace: string): string {
+  const guidelines = [
+    "1. 路径尽量用相对工作区的相对路径；绝对路径只允许落在工作区内用于写操作。",
+    "2. 一次只调用当下最需要的工具，拿到结果再决定下一步，不要成批猜测。",
+    "3. 修改既有代码前先读取相关片段，保证 old_str 精确匹配。",
+    "4. 最终回答用简洁的中文总结：做了什么、改了哪些文件、如何验证。",
+  ];
+  // Plan 模式不给生成类工具，"先找现成素材"的引导也只对能动手的模式有意义。
+  if (mode !== "plan") {
+    guidelines.push(
+      "5. 应用里存着用户和 Agent 生成过的图片 / 语音 / 视频：写文档要配图配声时，先用 media_search 找现成的复用" +
+        "（用 media_export 复制到工作区后按相对路径引用），确实没有再 generate_image / generate_speech / generate_video 生成。",
+    );
+  }
   const sections = [
     "你是 OmniStudio 内置的 Pi Agent —— 一个在用户本机工作区里执行任务的 AI 智能体。",
     currentTimeLine(),
@@ -301,10 +316,7 @@ function buildSystemPrompt(mode: AgentMode, workspace: string): string {
     `运行环境：${os.type()} ${os.release()}（${os.arch()}），shell：${process.env.SHELL ?? "/bin/sh"}。`,
     "",
     "工作准则：",
-    "1. 路径尽量用相对工作区的相对路径；绝对路径只允许落在工作区内用于写操作。",
-    "2. 一次只调用当下最需要的工具，拿到结果再决定下一步，不要成批猜测。",
-    "3. 修改既有代码前先读取相关片段，保证 old_str 精确匹配。",
-    "4. 最终回答用简洁的中文总结：做了什么、改了哪些文件、如何验证。",
+    ...guidelines,
   ];
   // 常驻记忆（启用且有内容时）：置顶/高热记忆作为核心上下文注入。
   const memorySection = memoryPromptSection();
@@ -314,14 +326,17 @@ function buildSystemPrompt(mode: AgentMode, workspace: string): string {
 }
 
 /**
- * 工具集 = 内置工具 + 记忆工具 + 已启用 MCP 服务器的工具（连接失败的服务器自动跳过）。
- * Plan 模式只保留内置只读工具，记忆 / MCP 工具可能有副作用，不参与"先出方案"阶段。
+ * 工具集 = 内置工具 + 素材工具 + 记忆工具 + 已启用 MCP 服务器的工具
+ * （连接失败的服务器自动跳过）。Plan 模式只保留内置只读工具与素材检索：
+ * 生成 / 导出与记忆 / MCP 工具都可能有副作用，不参与"先出方案"阶段。
  */
 async function toolsForMode(mode: AgentMode, workspace: string, conversationId?: number): Promise<AgentTool<any>[]> {
   const allowShell = getSetting("AGENT_ALLOW_SHELL") !== "0";
   const ctx = { workspace, allowShell: allowShell && mode !== "plan" };
   const base = mode === "plan" ? buildReadOnlyTools(ctx) : buildAgentTools(ctx);
-  if (mode === "plan") return base;
+  // 素材检索是只读的（看看用户和 Agent 都生成过什么），三模式都给。
+  const mediaRead = buildMediaReadTools();
+  if (mode === "plan") return [...base, ...mediaRead];
   // 记忆工具带上下文：写入记项目作用域（按工作区隔离）与审计来源（哪个会话写的）。
   const extras = memoryEnabled()
     ? buildMemoryAgentTools({
@@ -330,7 +345,7 @@ async function toolsForMode(mode: AgentMode, workspace: string, conversationId?:
       })
     : [];
   const mcpTools = await buildMcpAgentTools();
-  return [...base, ...extras, ...mcpTools];
+  return [...base, ...mediaRead, ...buildMediaGenTools(ctx), ...extras, ...mcpTools];
 }
 
 export async function listAgentTools(mode: AgentMode = getAgentMode()): Promise<AgentToolInfo[]> {
@@ -369,6 +384,8 @@ export function resetAgentSession(conversationId: number): void {
     }
     sessions.delete(conversationId);
   }
+  // 生图弹窗还在等用户确认时，会话被重置就把等待一并收尾。
+  cancelMediaSetup();
 }
 
 /** 把库里的历史消息（仅 user / assistant 正文）回填成 Pi Agent 的 transcript。 */
@@ -686,6 +703,8 @@ export async function runAgentTurn(opts: {
 
 /** 中断当前运行（UI 的"停止"按钮）。 */
 export function stopAgentRun(conversationId: number): { ok: boolean } {
+  // 正在等用户确认的生图弹窗先收尾，否则工具会一直挂到超时。
+  cancelMediaSetup();
   const session = sessions.get(conversationId);
   if (!session) return { ok: false };
   try {

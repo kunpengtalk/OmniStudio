@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { SourceBadge } from "@components/source-badge";
 import { useEngine } from "@lib/use-engine";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
@@ -44,8 +45,9 @@ import {
   safeRepoId,
   type ChatPreset,
   type InferenceEngine,
+  type MarketFile,
   type ModelCategory,
-  type ModelScopeFile,
+  type ModelSource,
 } from "@/shared/modelscope";
 import { MODEL_PROFILES } from "@/shared/model-profiles";
 import { MODEL_QUANTS } from "../setup-screen/constants";
@@ -452,7 +454,7 @@ function ModelConfigCard({ engine }: { engine: InferenceEngine }) {
 // 支持的模型（按引擎过滤的精选模型 + 下载 / 使用）
 // ---------------------------------------------------------------------------
 
-function pickRecommendedFile(files: ModelScopeFile[], defaultQuant?: string): ModelScopeFile | null {
+function pickRecommendedFile(files: MarketFile[], defaultQuant?: string): MarketFile | null {
   if (files.length === 0) return null;
   const weights = files.filter((f) => f.isWeight);
   const pool = weights.length > 0 ? weights : files;
@@ -460,7 +462,7 @@ function pickRecommendedFile(files: ModelScopeFile[], defaultQuant?: string): Mo
     const hit = pool.find((f) => matchQuant(f.name, defaultQuant));
     if (hit) return hit;
   }
-  return pool.reduce<ModelScopeFile | null>((best, f) => (best === null || best.size < f.size ? f : best), null);
+  return pool.reduce<MarketFile | null>((best, f) => (best === null || best.size < f.size ? f : best), null);
 }
 
 function PresetRow({ preset, engine }: { preset: ChatPreset; engine: InferenceEngine }) {
@@ -474,9 +476,10 @@ function PresetRow({ preset, engine }: { preset: ChatPreset; engine: InferenceEn
   const installed = (installedData?.models ?? []).filter((m) => m.repo === safeRepoId(preset.repo));
   const installedAny = installed.length > 0;
 
+  // 精选模型默认从 ModelScope 列文件 + 下载（DownloadControls 的 source 默认值一致）。
   const filesQuery = useQuery({
-    queryKey: ["modelscope-files", preset.repo],
-    queryFn: () => rpcClient.listModelScopeFiles({ repo: preset.repo }),
+    queryKey: ["market-files", "modelscope", preset.repo],
+    queryFn: () => rpcClient.listModelFiles({ repo: preset.repo, source: "modelscope" }),
     enabled: !installedAny && preset.engine !== "mlx",
   });
   const recommended = pickRecommendedFile(filesQuery.data?.files ?? [], preset.defaultQuant);
@@ -656,6 +659,8 @@ function InstalledModelRow({
     isChatModel: boolean;
     category: ModelCategory;
     favorite: boolean;
+    /** 下载来源平台（老数据可能没有）。 */
+    source?: ModelSource;
   };
   engine: InferenceEngine;
 }) {
@@ -754,6 +759,7 @@ function InstalledModelRow({
               {t("models.autoSwitchEngine")}
             </span>
           )}
+          {model.source && <SourceBadge source={model.source} />}
           {model.isActive && (
             <Badge variant="default" className="gap-1 text-[10px]">
               <SparklesIcon className="size-3" /> {t("models.inUse")}

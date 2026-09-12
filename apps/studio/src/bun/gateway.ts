@@ -10,6 +10,7 @@ import { listInstalledModels, slugModelFileName } from "./model-store";
 import * as Memory from "./memory";
 import type { MemoryCategory } from "../shared/memory";
 import { handleMcpRequest } from "./kb-mcp";
+import { searchMediaAssetsFromQuery } from "./media-api";
 import * as Img from "./gateway-images";
 import { isLocalOrigin, isLoopbackHost } from "../shared/server-info";
 
@@ -1329,6 +1330,8 @@ async function handleSpeech(req: Request): Promise<Response> {
         text,
         voice: body.voice,
         model: useModel,
+        // 走网关的都是程序调用（外部 agent / 第三方客户端），与界面手工生成区分开。
+        source: "agent",
       });
       if (record.audioUrl) {
         const audio = await fetch(record.audioUrl, { signal: AbortSignal.timeout(120_000) });
@@ -1414,7 +1417,7 @@ async function handleSpeech(req: Request): Promise<Response> {
 
   // 4) Edge 在线 TTS（免费、无需 Key，最终兜底；输出为 mp3）
   try {
-    const record = await runTTSEdge({ text, voice: body.voice ?? "" });
+    const record = await runTTSEdge({ text, voice: body.voice ?? "", source: "agent" });
     if (!record.audioUrl) return apiError(500, "Edge TTS 完成但无法定位音频文件", "tts_error");
     const audio = await fetch(record.audioUrl, { signal: AbortSignal.timeout(120_000) });
     if (!audio.ok) return apiError(502, `Edge TTS 音频读取失败 (${audio.status})`, "tts_error");
@@ -1570,6 +1573,8 @@ async function handleImageGeneration(req: Request): Promise<Response> {
     config: { ...cfg, backend, model: model ?? cfg.model },
     // 网关不落盘配置，避免 API 调用改写用户保存的生图设置。
     persistConfig: false,
+    // 走网关的都是程序调用（外部 agent / 第三方客户端）。
+    source: "agent",
   });
 
   if (result.error) {
@@ -1692,7 +1697,8 @@ function openApiSpec(): Record<string, unknown> {
       description:
         "OmniStudio 统一模型网关。聚合本机推理后端（llama.cpp / vLLM / SGLang、whisper-server、audio.cpp TTS）" +
         "与已配置的云端 OpenAI 兼容 API，提供 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三套对话协议，" +
-        "以及 TTS / ASR 端点。设置 GATEWAY_API_KEY 后 /v1/* 端点需要 Bearer Token 或 x-api-key 鉴权。",
+        "以及 TTS / ASR 端点，另有共享记忆与本地素材库（图片 / 语音 / 视频）查询端点。" +
+        "设置 GATEWAY_API_KEY 后 /v1/* 端点需要 Bearer Token 或 x-api-key 鉴权。",
     },
     servers: [{ url: `http://${host}:${port}` }],
     security: [{ bearerAuth: [] }],
@@ -1751,10 +1757,26 @@ function openApiSpec(): Record<string, unknown> {
           responses: { "200": { description: "已删除" } },
         },
       },
+      "/v1/media": {
+        get: {
+          summary: "检索本地素材库",
+          description:
+            "查询用户在本机生成过的图片 / 语音 / 视频 —— 界面手工生成的与 Agent 生成的都在内，`source` 区分。" +
+            "同时返回结构化列表（含 images 目录下的绝对路径与可播放 URL）与一份可读文本。只读。",
+          parameters: [
+            { name: "q", in: "query", schema: { type: "string" }, description: "关键词（提示词 / 语音文本 / 模型名），省略则按时间倒序列出最近的" },
+            { name: "kind", in: "query", schema: { type: "string", enum: ["image", "video", "audio"] } },
+            { name: "source", in: "query", schema: { type: "string", enum: ["manual", "agent"] } },
+            { name: "days", in: "query", schema: { type: "integer" }, description: "只看最近 N 天生成的" },
+            { name: "limit", in: "query", schema: { type: "integer", default: 12 } },
+          ],
+          responses: { "200": { description: "素材列表（assets / count / text）" } },
+        },
+      },
       "/mcp": {
         post: {
           summary: "OmniStudio MCP 端点（Streamable HTTP）",
-          description: "JSON-RPC 2.0：initialize / tools/list / tools/call。工具：kb_search / kb_list（知识库检索）+ memory_search / memory_save / memory_forget / memory_list（共享记忆读写，写入自动判重合并）。任何 MCP 客户端把本端点配置为远程（type=http）服务器即可使用；浏览器直接打开（GET）为调试工作台。",
+          description: "JSON-RPC 2.0：initialize / tools/list / tools/call。工具：kb_search / kb_list（知识库检索）+ memory_search / memory_save / memory_forget / memory_list（共享记忆读写，写入自动判重合并）+ media_search（本地素材库检索，只读）。任何 MCP 客户端把本端点配置为远程（type=http）服务器即可使用；浏览器直接打开（GET）为调试工作台。",
           responses: { "200": { description: "JSON-RPC 响应" } },
         },
       },
@@ -2055,6 +2077,16 @@ async function handleMemoryList(url: URL): Promise<Response> {
   return json({ memories, count: memories.length });
 }
 
+/**
+ * 素材库 REST：程序侧查询用户在本机生成过的图片 / 语音 / 视频
+ * （界面手工生成的与 Agent 生成的都在内，`source` 区分）。
+ * 与内置 Agent 的 media_search、网关 MCP 的 media_search 共用同一份检索实现。
+ */
+async function handleMediaSearch(url: URL): Promise<Response> {
+  const { assets, count, text } = searchMediaAssetsFromQuery(url);
+  return json({ assets, count, text });
+}
+
 async function handleMemoryCreate(req: Request): Promise<Response> {
   let body: { content?: unknown; category?: unknown; tags?: unknown; supersedes?: unknown };
   try {
@@ -2162,7 +2194,11 @@ async function route(req: Request): Promise<Response> {
       if (req.method === "GET") return await handleMemoryList(url);
       if (req.method === "POST") return handleMemoryCreate(req);
       return apiError(405, "Method Not Allowed");
-    // OmniStudio MCP 服务（Streamable HTTP）：知识库检索 + 共享记忆读写。
+    // 本地素材库 REST（只读）：外部程序 / Agent 查询本机生成过的图片 / 语音 / 视频。
+    case "/v1/media":
+      if (req.method !== "GET") return apiError(405, "Method Not Allowed");
+      return await handleMediaSearch(url);
+    // OmniStudio MCP 服务（Streamable HTTP）：知识库检索 + 共享记忆读写 + 素材检索。
     case "/mcp":
       return handleMcpRequest(req);
     default: {

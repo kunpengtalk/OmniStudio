@@ -135,13 +135,20 @@ apps/
 
 ### 4.3 模型库与下载器
 
-**来源**：ModelScope 为主（搜索、列仓库文件、下载），HuggingFace 为辅（走 hf-mirror 镜像，用于 audio.cpp / whisper / TTS 等不在 ModelScope 的资源）。
+**来源**：两个平台对等可选（市场顶部切换 ModelScope / HuggingFace），HuggingFace 走 hf-mirror 镜像优先、官方兜底。格式过滤是两个平台各自的能力：HuggingFace 有服务端 `filter=gguf|safetensors|mlx`；ModelScope 的检索接口忽略一切过滤参数（实测 `filter` / `tags` / `library` / `SingleCriterion` 均无效），只能把格式词并进检索词再按返回的 `library:*` 标签二次确认 —— 差异在 UI 上有文案说明，实现见 `bun/huggingface.ts` 与 `bun/modelscope.ts`。
 
-**落盘**：`<userData>/models/<safeRepoId>/<file>`，`safeRepoId` 把 `/ : 空格` 换成 `__`。所有落盘与删除都必须过 `modelDestPath()` / `safeJoin()` —— repo 和文件名来自 RPC 与控制 socket，不做校验就能删到数据目录外的任意文件。
+**落盘**：市场下载（两个平台都是）落在 `<userData>/models/<safeRepoId>/<file>`，`safeRepoId` 把 `/ : 空格` 换成 `__`。**列文件与下载必须是同一个平台**：同一个仓库在 HF 与 ModelScope 上的文件路径并不一致（HF 常见 `BF16/xxx.gguf` 子目录，ModelScope 平铺），混用会出现"列表里有、下载 404"。所有落盘与删除都必须过 `modelDestPath()` / `safeJoin()` —— repo 和文件名来自 RPC 与控制 socket，不做校验就能删到数据目录外的任意文件。
 
-**`model-store.ts`** 负责扫描已装模型（递归找权重文件，标注分类/收藏/是否活动）、激活（必要时自动切引擎并写 `LOCAL_MODEL_PATH` / `LOCAL_MODEL_NAME` / `CHAT_MODEL`）、删除、导入。
+**`model-scan.ts`** 是本地模型的发现层，三类来源合成一个列表（`origin` 区分）：`managed` 应用下载目录、`external` 用户添加的目录（settings `MODEL_DIRS`）、`hf-cache` HuggingFace 官方缓存（`~/.cache/huggingface/hub`，尊重 `HF_HOME` / `HUGGINGFACE_HUB_CACHE`）。扫描不要求标准目录结构：任意深度、符号链接（缓存的 snapshot 全是指向 blobs 的软链）、文件直接放在根目录都能识别；缓存按仓库聚合一行（`isDir`），因为 MLX / vLLM 模型本来就是整目录。
 
-**`download-manager.ts`** 是持久化队列：最大 2 并发，任务写进 settings 的 `MODEL_DOWNLOADS`，重启后靠磁盘上的 `.part` 分片续传。底层是 8 路 Range 并行分片，服务器不支持 Range 时回退单流。进度事件 400ms 节流 —— 因为 webview 每条进度都会写 store 并重渲染。
+**`model-store.ts`** 负责列表（分类/收藏/是否活动/来源标注）、激活、删除、导入。两个关键点：
+
+- **激活存的是"运行时加载目标"而不是列表里那个文件**（`resolveRuntimeTarget`）：目录里有 `config.json` 就存目录（vLLM / SGLang / MLX 加载的是整仓库，单个分片文件加载不了），GGUF 存文件本身。`getLaunchCommand` 用同一套解析，保证"复制的命令"和"实际启动的"一致。
+- **删除走白名单**（应用下载目录 / 用户已添加的目录 / HF 缓存）：路径来自 webview 与控制 socket，不校验就是一个任意文件删除漏洞；删 HF 缓存时删的是整个 `models--org--repo` 条目，因为 snapshot 里全是软链，删软链一个字节都释放不出来。
+
+**`download-manager.ts`** 是持久化队列：最大 2 并发，任务写进 settings 的 `MODEL_DOWNLOADS`，重启后靠磁盘上的 `.part` 分片续传。底层是 8 路 Range 并行分片，服务器不支持 Range 时回退单流。进度事件 400ms 节流 —— 因为 webview 每条进度都会写 store 并重渲染。下载完成时把分类与来源平台写进仓库的 `.vllm-meta.json`，本地列表据此显示"从哪儿下的"。
+
+**整仓库下载规则**：safetensors / MLX 这类模型，"下载全部"会额外带上 `config.json` / tokenizer 等加载必需文件（`SUPPORT_FILE_RE`）—— 只下权重分片是跑不起来的；GGUF 是单文件模型，只需要那一个量化文件。
 
 ### 4.4 智能层
 
@@ -151,13 +158,24 @@ apps/
 - **历史回填时只回填 user/assistant 正文，不回放工具调用轨迹。** 轨迹写 `agent_events` 表，纯粹用于 UI 展示和审计。
 - 每步工具调用先 `recordEvent` 落库再广播；步数上限 `AGENT_MAX_STEPS`（默认 40）。
 - Agent 的正文流复用 chat 的 chunk/done/stats 通道，工具事件走独立的 `agentEvent`。
+- **需要用户拍板的动作会停下来问**：`generate_image` 在开跑前检查生图后端是否就绪，缺配置 / 缺模型 / 本地引擎没装 / 有多个候选模型可选时，主进程推 `mediaSetup` 消息给界面弹出配置窗（`media-setup.ts` + `components/media-setup-dialog.tsx`），用户确认后经 RPC `resolveMediaSetup` 回传，**同一次工具调用接着往下跑**。用户没指定模型时会扫一遍候选，多于一个就再弹一次确认用哪个。用户点取消（或超时 10 分钟、或按停止 / 会话重置）则工具立即收尾并告诉模型"别再自行重试"。没有界面在监听时（CLI、测试）直接按取消返回，不会挂起。
 
 **工具的安全模型**（`agent-tools.ts`）：工作区外**可读**（方便读用户提到的文件），但有一份凭据路径黑名单硬拦 —— `~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.kube`、`.netrc`、`.npmrc`、`.git-credentials`、`~/.omni`、应用自身数据目录等。理由写在注释里：工具结果会回喂模型，而网页与 MCP 返回的内容可能构成提示词注入。**写操作**则一律 `assertInsideWorkspace`。`bash` 每条命令先写审计日志，且受 `AGENT_ALLOW_SHELL` 开关控制。
+
+**素材工具**（`media-tools.ts`）把应用里已经产生的媒体资产接进 Agent —— 用户在界面手工生成的和 Agent 生成的图片 / 语音 / 视频记在同一批表里，`source` 字段（`manual` / `agent`）区分来源，所以「用户之前做过什么」对 Agent 是可见的：
+
+- `media_search`：按时间 / 关键词 / 类型 / 来源检索（默认最近优先，结果带 `ref`、绝对路径与提示词，末尾附复用方式）；
+- `media_export`：把库里的素材复制进工作区，写文档时按相对路径引用（自动防重名）；
+- `generate_image` / `generate_speech` / `generate_video`：直接调用「图像 / 语音 / 视频」页已配置好的后端，产物照常入库（`source: "agent"`，之后可被 `media_search` 检索）。
+
+生成类工具会写文件、可能产生云端费用，因此**只在 Agent / Goal 模式注入**；`media_search` 只读，Plan 模式也有。引用解析只认 `media_search` 给出的 ref / `image#12` 句柄 / 工作区内的图片文件（自动暂存），一律经 `images` 根目录的目录穿越校验。
+
+检索实现（`searchMediaLibrary`）同时供三处使用：内置 Agent 工具、网关 MCP 的 `media_search`（`bun/media-api.ts`）与 REST `GET /v1/media` —— 外部智能体（`omi launch` 拉起的 Claude / Codex、Cursor 等）拿到的是同一份结果，附带绝对路径与可播放 URL，可以直接读取或复制，不需要再问用户要图。界面侧，图片 / 视频 / 语音三处列表用 `MediaSourceBadge` 标出 Agent 生成的那些，图片与视频的生成历史还带来源筛选。
 
 **MCP 是双向的**：
 
 - *作为客户端*（`bun/mcp.ts`）：stdio / Streamable HTTP / 旧版 SSE 三种传输**全是手写协议实现**，刻意不引官方 SDK —— 理由是 Electrobun 定制 Bun 运行时的 node 兼容层风险。已连接服务器的工具以 `mcp_*` 前缀注入 Agent。启动 stdio 服务器时会屏蔽 `NODE_OPTIONS` / `PYTHONPATH` / `LD_*` / `DYLD_*` 等进程加载器注入类环境变量，因为 MCP 配置是 webview 提交上来的。
-- *作为服务端*（`bun/kb-mcp.ts`）：挂在网关 `POST /mcp`（Streamable HTTP，无状态），对外暴露知识库 `kb_search` / `kb_list` 与记忆 `memory_*` 工具。浏览器 `GET /mcp` 打开内置调试工作台。
+- *作为服务端*（`bun/kb-mcp.ts`）：挂在网关 `POST /mcp`（Streamable HTTP，无状态），对外暴露知识库 `kb_search` / `kb_list`、记忆 `memory_*` 与素材 `media_search`（`bun/media-api.ts`，只读，让外部智能体也能复用本机素材）。浏览器 `GET /mcp` 打开内置调试工作台。
 
 ### 4.5 知识库与记忆
 
@@ -239,6 +257,7 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 - 对话：`/v1/chat/completions`、`/v1/responses`、`/v1/messages`（Anthropic）三套协议，按模型名路由到本地推理服务或云端 API
 - 语音：`/v1/audio/speech`、`/v1/audio/transcriptions`（各有四级/多级回退链）
 - 图像：`/v1/images/generations`
+- 素材：`/v1/media`（只读检索本机素材库，与内置 Agent 的 `media_search` 同一份实现）
 - 记忆与知识库：`/v1/memories`、`POST /mcp`
 - 文档：`/health`、`/openapi.json`、`/docs`、`/redoc`
 
@@ -278,7 +297,7 @@ omi <cmd>
   └─ serve / install → 完全不走 socket，前台常驻运行
 ```
 
-命令表在 `src/cli/index.ts` 的 `COMMANDS`（`start` / `stop` / `restart` / `serve` / `launch` / `memory` / `model` / `cloud` / `models` / `model-info` / `status` / `server` / `install` / `guide` / `version` / `update`）。
+命令表在 `src/cli/index.ts` 的 `COMMANDS`（`start` / `stop` / `restart` / `serve` / `launch` / `memory` / `backup` / `model` / `cloud` / `models` / `model-info` / `status` / `server` / `install` / `guide` / `version` / `update`）。表里的值是「取处理函数的异步工厂」—— 命令模块按需 `import`，避免解析参数时把别人的依赖（尤其是 import 即跑迁移的数据层）一起拖进来；`omi backup` 正是靠这一点在数据库迁移失败、应用起不来时照常工作。
 
 **帮助体系是数据驱动的**：`src/shared/cli-docs.ts` 是唯一数据源，`omi guide`（文本 / `--md` / `--json` / `--lang en`）、`docs/omi-cli.md`、应用内「设置 → 工具 → 命令行」页三处都从它渲染，因此永远一致。`scripts/omi-docs-smoke.ts` 校验命令表 ↔ 帮助文本 ↔ 数据源 ↔ 磁盘上的文档四者同步。
 
@@ -301,7 +320,7 @@ omi <cmd>
 | 知识库运维 | `kb_ingest_jobs`（摄取队列）、`kb_events`（审计流水） |
 | 记忆 | `memories`、`memory_events`、`memory_metrics` |
 
-迁移在 `src/bun/db/migrations/`（0000–0023）。**加了新迁移要留意 drizzle 的 `when` 排序** —— 曾出现过新迁移的 `when` 小于前一条，导致老库升级时被整条跳过。
+迁移在 `src/bun/db/migrations/`（0000–0024）。**加了新迁移要留意 drizzle 的 `when` 排序** —— 曾出现过新迁移的 `when` 小于前一条，导致老库升级时被整条跳过。
 
 **数据目录布局**（`<userData>`，macOS 上是 `~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>`）：
 
@@ -311,9 +330,19 @@ models/<repo>/...       模型权重
 engines/{paddleocr,mflux,whispercpp,audiocpp,tessdata}/   各本地引擎
 images/{<docId>,chat,gen,edit,ocr,audio,videos}/          媒体产物
 uploads/                上传的原始文件
+backups/                全局备份文件（*.omnibackup，可加密）+ 恢复时的临时目录
 mlx-downloads/          MLX 权重下载进度（支持"继续下载"）
 omni-control.sock       CLI 控制通道
 ```
+
+**全局备份 / 恢复**（`src/bun/backup/`，设置 → 数据 → 备份与恢复 / `omi backup`）把数据分成 7 个**作用域**（`shared/backup.ts`：settings / chats / prompts / skills / memory / knowledge / media），每个作用域 = 一组不可拆分的表 + 若干文件根。归档是 gzip + tar（`backup/tar.ts` 自己实现，`Bun.Archive` 当前版本会把 `Bun.file()` 条目写成 0 字节且不支持 gzip），内含 `manifest.json` + `data/omni-studio.db` + `data/files/<根>/<相对路径>`：
+
+- **快照**：`VACUUM INTO`（只读连接即可，WAL 下与应用并发也一致）；未勾选作用域的表会被 `secure_delete` 删除再 `VACUUM`，所以"没勾选"既不在体积里也不在文件残页里。
+- **恢复**：先自动做一份 `pre-restore-*.omnibackup`，再把快照按表整表替换（列取交集，兼容旧版本备份），文件同名覆盖、不删除备份里没有的文件；外部根（技能中央库）按恢复后的设置重新解析，归档条目一律过 `path-safety` 校验防越界。
+- **不依赖应用运行**：模块不 import `db/index.ts`（避免连带跑迁移）与 electrobun，独立进程可在应用起不来时备份 / 恢复（恢复要求应用已退出，避免两个写者）。
+- **加密**（`backup/crypto.ts`）：可选 AES-256-GCM + scrypt（N=2^15/r=8/p=1）。容器 = 明文头（魔数 `OMNBKP01`、KDF 参数、压缩标志、salt、iv、keyCheck）+ 密文 + 16 字节 GCM 标签；头部作为 AAD 参与认证。`keyCheck` 让"密码不对"在打开时就报明确错误（预览只读开头，流走不到结尾触发不了 GCM 校验）。密码不落盘。scrypt 派生与独立实现（Python `hashlib.scrypt`）逐字节对齐验证过。
+- **远端存储**（`backup/remote.ts`）：S3 兼容（AWS / R2 / MinIO / OSS / COS，自己实现 SigV4，只用到 PUT / GET / DELETE / ListObjectsV2，单次 PUT 上限 5 GB）与 WebDAV（坚果云 / Nextcloud / 群晖，Basic 认证 + PROPFIND 列表）。不引 SDK，凭据存本机 settings（键名带 KEY/SECRET，备份的剔除密钥会抹掉）。配置在设置页填写，支持"创建后自动上传 / 上传后删本地"，远端列表可直接下载并恢复。
+- 模型权重（`models/`）与引擎（`engines/`）不参与备份：体积大且可重新下载；生成的音频 / 图片 / 视频（`media`）默认也不备份。冒烟见 `scripts/backup-smoke.ts`（含加密、上传、坏库隔离三组场景）。
 
 ## 9. 端到端数据流
 
@@ -322,6 +351,8 @@ omni-control.sock       CLI 控制通道
 **一次文档 OCR**：上传落盘 → 建 `documents` 行 → 逐页建 `pages(pending)` → 信号量并发 3 → 每页 VLM 识别 → 解析 HTML/Markdown + 裁图落 `images/<docId>/` → 更新计数并广播 `documentChanged` 让前端重查。
 
 **一次生图**：参数校验 → MLX 后端确认权重已下载（**不再允许生成时自动下载**）→ 复用已加载的常驻 worker，否则一次性 CLI → JSON-lines 交互，stderr 解析 tqdm 步进 → 落 `images/gen/<uuid>.png` → 写 `image_records`。
+
+**一次「带配图的写作」**：Agent 先 `media_search` 看有没有现成素材（没有就 `generate_image` / `generate_speech` 生成，`save_to` 直接落进工作区）→ `media_export` 把选中的素材复制到 `assets/` → `write_file` 写正文并引用相对路径。生成物同时留在素材库里，下次还能被检索到。
 
 **一次 `omi launch codex`**：控制 socket 确认应用在线 → 解析模型 → 确保网关与推理服务 → 写 `~/.codex` 配置 + 刷新 AGENTS.md 记忆区块 + 挂 `omni-memory` MCP → spawn codex 并透传退出码。
 

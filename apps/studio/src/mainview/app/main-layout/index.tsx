@@ -26,6 +26,7 @@ import { KbScreen } from "../kb";
 import { ModelsScreen } from "../models-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { DownloadsButton } from "@components/download-panel";
+import { MediaSetupDialog } from "@components/media-setup-dialog";
 import { StatusPill } from "@components/status-pill";
 import { ErrorBoundary } from "@components/error-boundary";
 import { useAppStore, type AppId } from "@stores/app";
@@ -142,6 +143,8 @@ export function MainLayout() {
 
         <Outlet />
       </SidebarInset>
+      {/* Agent 生图前需要用户介入（配后端 / 装引擎 / 选模型）：挂在全局，任何页面都能弹。 */}
+      <MediaSetupDialog />
     </SidebarProvider>
   );
 }

@@ -73,7 +73,7 @@ function truncate(text: string, max = MAX_OUTPUT_CHARS): string {
 }
 
 /** 把用户/模型给的路径解析成绝对路径。相对路径基于工作区。 */
-function resolvePath(workspace: string, input: string): string {
+export function resolvePath(workspace: string, input: string): string {
   const trimmed = input.trim();
   const expanded = trimmed.startsWith("~")
     ? path.join(process.env.HOME ?? "/", trimmed.slice(1))
@@ -122,18 +122,18 @@ function assertNotSecret(workspace: string, target: string): void {
 }
 
 /** 写操作必须落在工作区内。 */
-function assertInsideWorkspace(workspace: string, target: string) {
+export function assertInsideWorkspace(workspace: string, target: string) {
   const root = path.resolve(workspace);
   if (target !== root && !target.startsWith(root + path.sep)) {
     throw new Error(`Path outside workspace is not writable: ${target}`);
   }
 }
 
-function textResult(text: string) {
+export function textResult(text: string) {
   return { content: [{ type: "text" as const, text: truncate(text) }], details: {} };
 }
 
-function errorResult(message: string) {
+export function errorResult(message: string) {
   return { content: [{ type: "text" as const, text: message }], details: { error: message } };
 }
 

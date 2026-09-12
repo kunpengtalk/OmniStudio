@@ -64,12 +64,17 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   it against the data directory — inputs arrive from the webview and the control socket.
 - Adding an inference engine means editing `src/shared/engines.ts` plus one `Runtime`
   implementation; do not hardcode engine checks elsewhere.
+- `src/bun/backup/*` must not import `db/index.ts` or `electrobun` — that isolation is what
+  lets `omi backup` work when the app won't start (migrations failed). Entry points that
+  need the data layer belong in `src/cli/commands/backup.ts`, not in the kernel.
+- Backup archives are untrusted input on restore: every extracted path goes through
+  `path-safety` against the resolved root.
 
 ## CLI (`omi`)
 
 - `apps/studio/bin/omi.ts` + `src/cli/*` is a standalone Bun CLI that talks to the
   running app over a Unix socket (`<dataDir>/omni-control.sock`, served by
-  `src/bun/control-server.ts`). Commands: `start/stop/restart/serve/launch/memory/model/
+  `src/bun/control-server.ts`). Commands: `start/stop/restart/serve/launch/memory/backup/model/
   cloud/models/model-info/status/server/install/guide/version/update`.
 - When the app is not running, read-only data access falls back to direct
   SQLite imports (`src/cli/db.ts`) — it sets `OMNI_DATA_DIR`/`OMNI_DB_PATH` first.

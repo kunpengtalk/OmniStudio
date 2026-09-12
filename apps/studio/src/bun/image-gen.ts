@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 import { desc, eq } from "drizzle-orm";
 
 import { db } from "./db";
-import { imageRecords } from "./db/schema";
+import { imageRecords, type MediaSource } from "./db/schema";
 import { getSetting, updateSettings } from "./db/settings";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
@@ -37,6 +37,7 @@ export type ImageGenBackend = "mlx" | "api" | "comfyui";
 export type ImageRecordRow = {
   id: number;
   status: "done" | "failed";
+  source: MediaSource;
   backend: ImageGenBackend | null;
   model: string | null;
   prompt: string | null;
@@ -78,6 +79,8 @@ export type GenerateImageParams = {
   config?: Partial<ImageGenConfig>;
   /** 是否把本次生效配置落盘到 settings（默认 true；网关等只读调用传 false 避免改写用户配置）。 */
   persistConfig?: boolean;
+  /** 调用方来源：界面手工生成（manual，默认）还是 agent（内置 Pi Agent / 网关）。 */
+  source?: MediaSource;
 };
 
 type RecordRow = typeof imageRecords.$inferSelect;
@@ -177,6 +180,7 @@ function toRow(r: RecordRow): ImageRecordRow {
   return {
     id: r.id,
     status: r.status,
+    source: r.source,
     backend: r.backend ?? null,
     model: r.model,
     prompt: r.prompt,
@@ -221,6 +225,7 @@ export function deleteImageRecord(id: number): { ok: boolean } {
 
 function insertImageRecord(data: {
   status?: "done" | "failed";
+  source?: MediaSource;
   backend?: ImageGenBackend | null;
   model?: string | null;
   prompt?: string | null;
@@ -236,6 +241,7 @@ function insertImageRecord(data: {
     .insert(imageRecords)
     .values({
       status: data.status ?? "done",
+      source: data.source ?? "manual",
       backend: data.backend ?? null,
       model: data.model ?? null,
       prompt: data.prompt ?? null,
@@ -618,6 +624,7 @@ export async function generateImage(
       toRow(
         insertImageRecord({
           status: "done",
+          source: params.source ?? "manual",
           backend: cfg.backend,
           model: params.model?.trim() || cfg.model || null,
           prompt,
@@ -635,6 +642,7 @@ export async function generateImage(
     const message = e instanceof Error ? e.message : String(e);
     insertImageRecord({
       status: "failed",
+      source: params.source ?? "manual",
       backend: cfg.backend,
       model: params.model?.trim() || cfg.model || null,
       prompt,

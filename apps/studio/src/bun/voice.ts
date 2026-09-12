@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
 import path from "path";
 import { desc, eq } from "drizzle-orm";
 import { db } from "./db";
-import { voiceRecords } from "./db/schema";
+import { voiceRecords, type MediaSource } from "./db/schema";
 import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
@@ -16,10 +16,13 @@ export type VoiceRecordRow = {
   id: number;
   kind: VoiceRecordKind;
   status: "done" | "failed";
+  source: MediaSource;
   model: string | null;
   voice: string | null;
   text: string | null;
   audioUrl: string | null;
+  /** 音频在 images 根目录下的相对路径（如 audio/tts-xxx.mp3），供复用与读取。 */
+  audioPath: string | null;
   refAudioPath: string | null;
   durationMs: number | null;
   error: string | null;
@@ -84,10 +87,12 @@ export function voiceRecordToRow(r: RecordRow): VoiceRecordRow {
     id: r.id,
     kind: r.kind,
     status: r.status,
+    source: r.source,
     model: r.model,
     voice: r.voice,
     text: r.text,
     audioUrl: r.audioPath ? chatImageUrl(r.audioPath) : null,
+    audioPath: r.audioPath,
     refAudioPath: r.refAudioPath,
     durationMs: r.durationMs,
     error: r.error,
@@ -97,6 +102,7 @@ export function voiceRecordToRow(r: RecordRow): VoiceRecordRow {
 
 export function insertVoiceRecord(data: {
   kind: VoiceRecordKind;
+  source?: MediaSource;
   model?: string | null;
   voice?: string | null;
   text?: string | null;
@@ -109,6 +115,7 @@ export function insertVoiceRecord(data: {
     .insert(voiceRecords)
     .values({
       kind: data.kind,
+      source: data.source ?? "manual",
       model: data.model ?? null,
       voice: data.voice ?? null,
       text: data.text ?? null,
@@ -296,6 +303,7 @@ export async function runTTS(input: {
   base?: string;
   apiKey?: string;
   referenceAudioRef?: string;
+  source?: MediaSource;
 }): Promise<VoiceRecordRow> {
   const buf = await synthesizeOpenAiAudio(input);
   const dir = getAudioBaseDir();
@@ -307,6 +315,7 @@ export async function runTTS(input: {
   const hasRef = !!input.referenceAudioRef;
   const record = insertVoiceRecord({
     kind: "tts",
+    source: input.source,
     model: input.model?.trim() || getSetting("TTS_MODEL") || null,
     voice: input.voice?.trim() || (hasRef ? "" : getSetting("TTS_VOICE") || "alloy"),
     text: input.text,
@@ -317,7 +326,11 @@ export async function runTTS(input: {
 }
 
 /** 微软 Edge 在线 TTS（免费、无需密钥）。 */
-export async function runTTSEdge(input: { text: string; voice: string }): Promise<VoiceRecordRow> {
+export async function runTTSEdge(input: {
+  text: string;
+  voice: string;
+  source?: MediaSource;
+}): Promise<VoiceRecordRow> {
   const voice = input.voice?.trim() || getSetting("TTS_EDGE_VOICE") || "zh-CN-XiaoxiaoNeural";
   const buf = await edgeSynthesize(input.text, voice);
   const dir = getAudioBaseDir();
@@ -328,6 +341,7 @@ export async function runTTSEdge(input: { text: string; voice: string }): Promis
   const ref = `audio/${name}`;
   const record = insertVoiceRecord({
     kind: "tts",
+    source: input.source,
     model: "Edge TTS（在线免费）",
     voice,
     text: input.text,

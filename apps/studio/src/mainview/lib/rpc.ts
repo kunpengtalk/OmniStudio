@@ -11,11 +11,14 @@ import { useGatewayStore } from "../stores/gateway";
 import { useMlxInstallStore } from "../stores/mlx-install";
 import { useMlxModelDownloadStore } from "../stores/mlx-model-download";
 import { useMlxModelRunStore } from "../stores/mlx-model-run";
+import { useMediaSetupStore } from "../stores/media-setup";
 import { usePpOcrInstallStore } from "../stores/ppocr-install";
 import { usePpOcrDownloadStore } from "../stores/ppocr-download";
 import { useTessInstallStore } from "../stores/tess-install";
 import { useSkillsStore } from "../stores/skills";
+import { useBackupStore } from "../stores/backup";
 import { useRouter } from "../stores/router";
+import { t } from "../stores/ui-lang";
 
 const knownCompletedIds = new Set<string>();
 
@@ -64,6 +67,10 @@ const rpc = Electroview.defineRPC<AppRPC>({
       // Agent 运行轨迹：工具调用 / 状态 / 错误
       agentEvent: (event) => {
         useAgentStore.getState().appendEvent(event);
+      },
+      // Agent 生图前需要用户介入：弹出配置 / 选模型弹窗，确认后回传主进程
+      mediaSetup: (payload) => {
+        useMediaSetupStore.getState().setRequest(payload);
       },
       // 实时语音通话：增量字幕 / 定稿 / 阶段 / TTS 音频与打断
       voicecallPartial: ({ conversationId, text }) => {
@@ -202,6 +209,23 @@ const rpc = Electroview.defineRPC<AppRPC>({
         ) {
           useRouter.getState().setRoute({ path });
         }
+      },
+      backupProgress: (progress) => {
+        useBackupStore.getState().setProgress(progress);
+      },
+      backupFinished: (event) => {
+        useBackupStore.getState().setFinished(event);
+        queryClient.invalidateQueries({ queryKey: ["backups"] });
+        queryClient.invalidateQueries({ queryKey: ["backup-estimate"] });
+        if (!event.ok) return;
+        // 恢复会整表替换数据：所有列表类查询都可能过期，直接全量失效。
+        if (event.kind === "restore") {
+          queryClient.invalidateQueries();
+          useBackupStore.getState().setNotice(t("backup.restoredNotice"));
+        }
+      },
+      backupChanged: () => {
+        queryClient.invalidateQueries({ queryKey: ["backups"] });
       },
     },
   },

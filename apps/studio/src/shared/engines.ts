@@ -11,6 +11,11 @@ export type InferenceEngine = "llama.cpp" | "vllm" | "sglang" | "mlx";
 
 export type ModelFileKind = "gguf" | "safetensors" | "other";
 
+/** 模型市场检索用的格式维度，与各平台（ModelScope / Hugging Face）的库标签一一对应。 */
+export type SearchFormat = "gguf" | "safetensors" | "mlx";
+
+export const SEARCH_FORMATS: SearchFormat[] = ["gguf", "safetensors", "mlx"];
+
 export type EngineSpec = {
   id: InferenceEngine;
   /** 引擎名对应的 i18n key（settings.engine.*）。 */
@@ -21,6 +26,12 @@ export type EngineSpec = {
   extraArgsKey: string;
   /** 能加载的模型文件格式。 */
   supports: ModelFileKind[];
+  /**
+   * 该引擎原生消费的权重格式 —— 模型市场据此向平台注入格式过滤条件
+   * （`filter=gguf` / `filter=safetensors` / `filter=mlx`），而不是靠模型名猜。
+   * 与 `supports` 的区别：supports 是"能不能加载"，searchFormat 是"该去检索哪一种"。
+   */
+  searchFormat: SearchFormat;
   /** 仅 macOS（Apple Silicon）提供，非 mac 平台不展示也不检测。 */
   macOnly?: boolean;
   /** 缺失时的安装提示（omi install）。 */
@@ -34,6 +45,7 @@ export const ENGINE_SPECS: Record<InferenceEngine, EngineSpec> = {
     portKey: "SERVER_PORT",
     extraArgsKey: "SERVER_EXTRA_ARGS",
     supports: ["gguf", "other"],
+    searchFormat: "gguf",
     installHint: "brew install llama.cpp",
   },
   vllm: {
@@ -42,6 +54,7 @@ export const ENGINE_SPECS: Record<InferenceEngine, EngineSpec> = {
     portKey: "VLLM_PORT",
     extraArgsKey: "VLLM_EXTRA_ARGS",
     supports: ["safetensors", "other"],
+    searchFormat: "safetensors",
     installHint: "pip install vllm  （或 uv pip install vllm）",
   },
   sglang: {
@@ -50,6 +63,7 @@ export const ENGINE_SPECS: Record<InferenceEngine, EngineSpec> = {
     portKey: "SGLANG_PORT",
     extraArgsKey: "SGLANG_EXTRA_ARGS",
     supports: ["safetensors", "other"],
+    searchFormat: "safetensors",
     installHint: "pip install 'sglang[all]'",
   },
   mlx: {
@@ -58,6 +72,7 @@ export const ENGINE_SPECS: Record<InferenceEngine, EngineSpec> = {
     portKey: "MLX_PORT",
     extraArgsKey: "MLX_EXTRA_ARGS",
     supports: ["safetensors", "other"],
+    searchFormat: "mlx",
     macOnly: true,
     installHint: "pip install -U mlx-lm  （Apple Silicon / macOS）",
   },
@@ -100,4 +115,12 @@ export const ENGINE_INSTALL_HINTS: Record<InferenceEngine, string> = Object.from
 export function engineSupports(engine: InferenceEngine, kind: ModelFileKind): boolean {
   if (kind === "other") return true;
   return ENGINE_SPECS[engine].supports.includes(kind);
+}
+
+/**
+ * 引擎 → 市场检索格式。用户在"在线模型市场"里选择"跟随引擎"时，
+ * 检索请求就带上这里的格式，交给平台侧元数据过滤，而不是本地遍历结果去猜。
+ */
+export function engineSearchFormat(engine: InferenceEngine): SearchFormat {
+  return ENGINE_SPECS[engine].searchFormat;
 }

@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 import { desc, eq, inArray } from "drizzle-orm";
 
 import { db } from "./db";
-import { videoRecords } from "./db/schema";
+import { videoRecords, type MediaSource } from "./db/schema";
 import { getSetting, updateSettings } from "./db/settings";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
@@ -40,6 +40,7 @@ export type VideoGenBackend = "comfyui" | "minimax" | "seedance";
 export type VideoRecordRow = {
   id: number;
   status: "processing" | "done" | "failed";
+  source: MediaSource;
   backend: VideoGenBackend | null;
   model: string | null;
   prompt: string | null;
@@ -54,6 +55,8 @@ export type VideoRecordRow = {
   steps: number | null;
   firstFrameUrl: string | null;
   videoUrl: string | null;
+  /** 成片在 images 根目录下的相对路径（如 videos/xxx.mp4），供复用与读取。 */
+  videoPath: string | null;
   error: string | null;
   createdAt: number;
   /** 上游报告的进度（0~1），仅轮询时返回，不落库。 */
@@ -95,6 +98,8 @@ export type SubmitVideoParams = {
   watermark?: boolean;
   /** 前端当前页面的实时配置。若提供则优先使用（避免读到未保存的旧配置），并顺带落盘。 */
   config?: Partial<VideoGenConfig>;
+  /** 调用方来源：界面手工生成（manual，默认）还是 agent（内置 Pi Agent）。 */
+  source?: MediaSource;
 };
 
 type RecordRow = typeof videoRecords.$inferSelect;
@@ -242,6 +247,7 @@ function toRow(
   return {
     id: r.id,
     status: r.status,
+    source: r.source,
     backend: r.backend ?? null,
     model: r.model,
     prompt: r.prompt,
@@ -256,6 +262,7 @@ function toRow(
     steps: r.steps,
     firstFrameUrl: r.firstFramePath ? chatImageUrl(r.firstFramePath) : null,
     videoUrl: r.videoPath ? chatImageUrl(r.videoPath) : null,
+    videoPath: r.videoPath,
     error: r.error,
     createdAt: r.createdAt ?? 0,
     progress,
@@ -292,6 +299,7 @@ export function deleteVideoRecord(id: number): { ok: boolean } {
 
 function insertVideoRecord(data: {
   status?: "processing" | "done" | "failed";
+  source?: MediaSource;
   backend?: VideoGenBackend | null;
   model?: string | null;
   prompt?: string | null;
@@ -312,6 +320,7 @@ function insertVideoRecord(data: {
     .insert(videoRecords)
     .values({
       status: data.status ?? "processing",
+      source: data.source ?? "manual",
       backend: data.backend ?? null,
       model: data.model ?? null,
       prompt: data.prompt ?? null,
@@ -674,6 +683,7 @@ export async function submitVideoGeneration(
   if (!prompt) return { error: "请先输入提示词" };
 
   const common = {
+    source: params.source ?? "manual",
     backend: cfg.backend,
     model:
       params.model?.trim() ||

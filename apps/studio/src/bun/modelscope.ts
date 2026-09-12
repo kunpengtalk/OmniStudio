@@ -1,43 +1,43 @@
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "fs";
 import path from "path";
-import { isModelWeightExt, safeRepoId } from "../shared/modelscope";
+import {
+  isModelWeightExt,
+  matchFormat,
+  modelFormats,
+  safeRepoId,
+  type MarketFile,
+  type MarketModel,
+  type MarketSearchResult,
+  type SearchFormat,
+} from "../shared/modelscope";
 import { getDataDir } from "./paths";
 import { safeJoin } from "./path-safety";
 
 export { isModelWeightExt, safeRepoId };
+export type { MarketFile, MarketModel };
 
 const MODELSCOPE_BASE = "https://modelscope.cn";
 const OPENAPI_BASE = `${MODELSCOPE_BASE}/openapi/v1`;
 
-export type ModelScopeModel = {
+/** 搜索接口返回项（openapi/v1/models），字段与内部类型同名但为 snake_case。 */
+type ModelScopeApiModel = {
   id: string;
-  name: string;
-  description: string;
-  downloads: number;
-  likes: number;
-  license: string;
-  tasks: string[];
-  tags: string[];
-  fileSize: number;
-  params: number;
-  createdAt: string;
-  lastModified: string;
+  display_name?: string;
+  description?: string;
+  downloads?: number;
+  likes?: number;
+  license?: string;
+  tasks?: string[];
+  tags?: string[];
+  file_size?: number;
+  params?: number;
+  created_at?: string;
+  last_modified?: string;
 };
 
-export type ModelScopeFile = {
-  name: string;
-  path: string;
-  size: number;
-  isLfs: boolean;
-  /** gguf → llama.cpp；safetensors → vLLM / SGLang；other → 其它文件（bin/pt/config 等） */
-  kind: "gguf" | "safetensors" | "other";
-  /** 是否为模型权重文件（可用于任一推理引擎加载） */
-  isWeight: boolean;
-};
-
-function fileKind(name: string): ModelScopeFile["kind"] {
+function fileKind(name: string): MarketFile["kind"] {
   const n = name.toLowerCase();
-  if (n.endsWith(".gguf")) return "gguf";
+  if (n.endsWith(".gguf") || n.endsWith(".ggml")) return "gguf";
   if (n.endsWith(".safetensors")) return "safetensors";
   return "other";
 }
@@ -76,60 +76,77 @@ export function splitRepo(repo: string): { owner: string; name: string } {
   return { owner: repo.slice(0, idx), name: repo.slice(idx + 1) };
 }
 
+/**
+ * ModelScope 搜索 URL。
+ *
+ * 格式过滤：ModelScope 的检索接口**不支持**按库标签过滤（`filter` / `tags` /
+ * `library` / `SingleCriterion` 参数实测都被忽略，返回同样的结果集），所以只能
+ * 把格式关键词并进检索词（`qwen3` + gguf → `qwen3 gguf`），让平台按相关性排序，
+ * 再用结果里的 `library:*` 标签二次确认（见 searchModels 的 filtered）。
+ * Hugging Face 走的是真·服务端过滤（huggingface.ts），两边差异在 UI 上有说明。
+ */
+export function buildSearchUrl(
+  query: string,
+  page: number,
+  pageSize: number,
+  format?: SearchFormat,
+): URL {
+  const url = new URL(`${OPENAPI_BASE}/models`);
+  url.searchParams.set("search", format ? `${query} ${format}` : query);
+  url.searchParams.set("page", String(page));
+  url.searchParams.set("page_size", String(pageSize));
+  return url;
+}
+
 export async function searchModels(
   query: string,
   page = 1,
   pageSize = 20,
-): Promise<{ models: ModelScopeModel[]; total: number }> {
-  const url = new URL(`${OPENAPI_BASE}/models`);
-  url.searchParams.set("search", query);
-  url.searchParams.set("page", String(page));
-  url.searchParams.set("page_size", String(pageSize));
+  format?: SearchFormat,
+): Promise<MarketSearchResult> {
+  const url = buildSearchUrl(query, page, pageSize, format);
 
   const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
   if (!res.ok) throw new Error(`ModelScope search failed: ${res.status}`);
 
   const body = (await res.json()) as {
-    data?: {
-      models?: Array<{
-        id: string;
-        display_name?: string;
-        description?: string;
-        downloads?: number;
-        likes?: number;
-        license?: string;
-        tasks?: string[];
-        tags?: string[];
-        file_size?: number;
-        params?: number;
-        created_at?: string;
-        last_modified?: string;
-      }>;
-      total?: number;
-    };
+    data?: { models?: ModelScopeApiModel[]; total_count?: number; total?: number };
   };
 
   const list = body.data?.models ?? [];
-  return {
-    models: list.map((m) => ({
+  const models: MarketModel[] = list.map((m) => {
+    const tags = m.tags ?? [];
+    return {
       id: m.id ?? "",
-      name: m.display_name ?? m.id ?? "",
+      name: m.display_name || m.id || "",
       description: m.description ?? "",
       downloads: m.downloads ?? 0,
       likes: m.likes ?? 0,
       license: m.license ?? "",
       tasks: m.tasks ?? [],
-      tags: m.tags ?? [],
+      tags,
       fileSize: m.file_size ?? 0,
       params: m.params ?? 0,
       createdAt: m.created_at ?? "",
       lastModified: m.last_modified ?? "",
-    })),
-    total: body.data?.total ?? list.length,
+      source: "modelscope" as const,
+      formats: modelFormats(tags),
+      fileCount: 0,
+    };
+  });
+
+  const filtered = format ? models.filter((m) => matchFormat(m.formats, format)) : models;
+  // 接口返回的是 total_count（不是 total）——之前读错字段导致分页总数永远是当前页条数。
+  const total = body.data?.total_count ?? body.data?.total ?? filtered.length;
+  return {
+    models: filtered,
+    total,
+    totalExact: true,
+    hasMore: page * pageSize < total && filtered.length > 0,
   };
 }
 
-export async function listRepoFiles(repo: string): Promise<ModelScopeFile[]> {
+export async function listRepoFiles(repo: string): Promise<MarketFile[]> {
   const { owner, name } = splitRepo(repo);
   const url = `${MODELSCOPE_BASE}/api/v1/models/${owner}/${name}/repo/files?Revision=master&Recursive=true`;
 

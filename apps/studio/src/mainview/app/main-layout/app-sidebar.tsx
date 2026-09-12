@@ -28,6 +28,7 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { AudioDownloadButton, audioFileName } from "@components/audio-download";
+import { MediaSourceBadge } from "@components/media-source-badge";
 import type { DocumentStatus } from "@lib/constants";
 import { Badge } from "@ui/badge";
 import { ScrollArea } from "@ui/scroll-area";
@@ -472,6 +473,7 @@ function VoiceRecordList() {
                         {r.voice}
                       </span>
                     )}
+                    <MediaSourceBadge source={r.source} className="px-1" />
                     <span className="ml-auto text-[10px] text-muted-foreground/70 tabular-nums">
                       {new Date(r.createdAt).toLocaleTimeString([], {
                         hour: "2-digit",
@@ -827,11 +829,14 @@ function ImageRecordList() {
                     <span className="line-clamp-2 text-[11px] leading-snug text-foreground/80">
                       {r.prompt || t("image.error")}
                     </span>
-                    <span className="text-[10px] text-muted-foreground/70 tabular-nums">
-                      {new Date(r.createdAt).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
+                    <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70 tabular-nums">
+                      <span>
+                        {new Date(r.createdAt).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </span>
+                      <MediaSourceBadge source={r.source} />
                     </span>
                   </span>
                 </button>
@@ -943,6 +948,7 @@ function VideoRecordList() {
                           minute: "2-digit",
                         })}
                       </span>
+                      <MediaSourceBadge source={r.source} />
                     </span>
                   </span>
                 </button>

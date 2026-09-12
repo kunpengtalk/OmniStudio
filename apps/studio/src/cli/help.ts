@@ -25,6 +25,7 @@ export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台
   models               列出本地与云端模型
   model-info <name>    查看模型详情
   memory <子命令>      共享记忆：add / search / list / stats / maintain / forget / export / import / mcp
+  backup <子命令>      全局备份 / 恢复：list / create / inspect / restore
   status               查看服务器 / 网关状态
   server <action>      管理服务器：list | start | stop | restart | info | logs
   install              检查推理引擎依赖（llama.cpp / vLLM / SGLang / MLX）
@@ -41,6 +42,7 @@ export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台
   omi start --server                 启动应用与推理服务器
   omi model --select                 终端里选择活动模型
   omi memory add "偏好用中文回答"     写入一条共享记忆
+  omi backup create --out ~/Backups  把设置 / 技能 / 聊天 / 记忆等打包备份
   omi launch claude --model qwen3-4b  用当前模型启动 Claude Code
 
 运行 'omi help <命令>' 查看单命令详情，'omi guide' 查看完整手册（含记忆接入与 code 加载）。`;
@@ -190,6 +192,53 @@ actions:
   logs        打印服务器日志尾部（最近 200 行）
 
 子命令帮助：omi help server <action>`,
+  backup: `全局备份 / 恢复：把应用设置与云端模型、本地技能、提示词、聊天记录、
+记忆库、生成的音频 / 图片 / 视频打包成一个文件，换机或重装后恢复。
+
+用法：omi backup <list|create|inspect|restore|remote> [options]
+
+子命令：
+  list [--dir <目录>] [--json]
+              列出备份文件（默认是数据目录下的 backups/）
+  create [--scopes a,b] [--out <目录>] [--name <文件名>] [--note <备注>]
+         [--password <密码>|--password-file <文件>] [--upload]
+         [--redact] [--no-compress] [--json]
+              创建备份；--password 加密（AES-256-GCM，忘密码=数据打不开），
+              --upload 创建后传到已配置的远端存储
+  inspect <file> [--password <密码>] [--json]
+              预览备份内容、来源机器与警告（不改动任何数据）
+  restore <file> [--password <密码>] [--scopes a,b] [--no-safety] [--yes] [--json]
+              从备份恢复；默认先自动备份当前数据（pre-restore-*.omnibackup）
+  remote <list|test|download> [--json]
+              远端存储：列出远端备份 / 测试连接 / 下载到本地备份目录
+
+内容分组（--scopes，逗号分隔）：
+  settings   应用设置与云端模型（含 API Key、MCP 服务器）
+  chats      聊天与 Agent 会话（含聊天附件图片）
+  prompts    提示词库
+  skills     本地技能（含技能中央仓库文件，不含 .git）
+  memory     记忆库
+  knowledge  知识库（文档 / 分块 / 向量；默认不含，体积可能很大）
+  media      音频 / 图片 / 视频 / 文档（默认不含：体积大）
+
+说明：
+  list / create / inspect 不需要应用在运行 —— 备份内核不依赖应用进程与数据库
+  迁移层，因此应用起不来时也能先把数据备份出来；restore 需要独占数据库，
+  应用在运行时会拒绝执行，可在应用内「设置 → 数据 → 备份与恢复」里恢复
+  （那里有实时进度，跑完自动刷新界面）。
+  模型权重（models/）与推理引擎（engines/）不参与备份：体积大且可重新下载；
+  生成的音频 / 图片 / 视频默认也不备份（要的话显式加 --scopes media）。
+  远端存储（S3 兼容 / WebDAV，如坚果云）在应用内配置一次，之后 --upload 即可。
+
+示例：
+  omi backup create --out ~/Backups
+  omi backup create --scopes settings,skills,chats,memory --password-file ~/.omni-pass
+  omi backup create --password "口令" --upload           加密并上传到远端
+  omi backup list
+  omi backup inspect ~/Backups/OmniStudio-20260912-101500.omnibackup
+  omi backup restore ~/Backups/OmniStudio-20260912-101500.omnibackup
+  omi backup remote list                                 看远端有哪些备份
+  omi backup remote download OmniStudio-20260912-101500.omnibackup`,
   guide: `打印完整使用手册：安装、启动、模型加载、记忆调用、编码工具（code）加载等。
 
 用法：omi guide [options]
@@ -216,6 +265,71 @@ actions:
  * launch 的工具条目是模板填充，见 launchToolHelp。
  */
 export const TOPIC_HELP: Record<string, string> = {
+  "backup create": `创建一份全局备份（单个 .omnibackup 文件，内含数据库快照 + 选中的文件）。
+
+用法：omi backup create [options]
+
+选项：
+  --scopes <a,b,c>  要包含的内容分组，默认 settings,chats,prompts,skills,memory
+  --out <目录>      保存目录，默认数据目录下的 backups/
+  --name <文件名>   自定义文件名（默认 OmniStudio-<时间戳>.omnibackup）
+  --note <备注>     写进备份清单，inspect / 应用内列表都能看到
+  --password <密码> 加密备份（AES-256-GCM + scrypt）。密码不落盘，忘了就解不开
+  --password-file <文件>
+                    从文件读密码（推荐：不进 shell 历史 / ps 输出）
+  --upload          创建完成后上传到已配置的远端存储
+  --redact          剔除明文 API Key / Token（要把备份发给别人排错时用）
+  --no-compress     不压缩（默认 gzip；媒体文件收益有限时可用它省时间）
+  --json            输出结构化结果（脚本用）
+
+说明：
+  数据库快照用 SQLite 的 VACUUM INTO 生成，应用在运行（WAL）时也能拿到一致副本；
+  未勾选的分组不会被打包 —— 表会被删掉（secure_delete）再压缩，不留残影。
+
+示例：
+  omi backup create --out ~/Backups --note "换机前"
+  omi backup create --scopes settings,skills,chats,prompts,memory`,
+  "backup restore": `从备份恢复（破坏性：整表替换所选分组的数据）。
+
+用法：omi backup restore <file.omnibackup> [options]
+
+选项：
+  --password <密码> 加密备份的密码（也可用 --password-file <文件>，或交互输入）
+  --scopes <a,b,c>  只恢复其中一部分分组，默认恢复备份里的全部
+  --no-safety       不预先备份当前数据（默认会生成 pre-restore-*.omnibackup）
+  --yes             跳过交互确认（非 TTY 环境必须加）
+  --json            输出结构化结果（脚本用）
+
+说明：
+  恢复要求 OmniStudio 已退出：恢复过程会直接写数据库，应用在运行时有自己的
+  连接与缓存，两个写者会互相踩。应用里的「设置 → 数据 → 备份与恢复」页面
+  支持在线恢复（带进度、完成后自动刷新界面）。
+  恢复只覆盖备份里有的同名文件，不会删除备份里没有的文件。
+
+示例：
+  omi backup restore ~/Backups/OmniStudio-20260912-101500.omnibackup
+  omi backup restore backup.omnibackup --scopes settings,skills --yes`,
+  "backup remote": `远端存储（S3 兼容 / WebDAV）：列出远端备份、测试连接、下载到本地。
+
+用法：omi backup remote <list|test|download> [options]
+
+子命令：
+  list [--json]          列出远端已有的备份（文件名 / 时间 / 体积）
+  test                   测试当前配置能否访问（列一次目录）
+  download <文件名>       把远端的一份备份下载到本地备份目录，随后可 inspect / restore
+
+说明：
+  远端配置（类型 S3 或 WebDAV、地址、Bucket、凭据、目录前缀、自动上传）在应用内
+  「设置 → 数据 → 备份与恢复 → 远端存储」里填写并保存；凭据只存在本机数据库，
+  且备份自身会把它们剔除（分享备份不会泄露）。
+  S3 用 Signature V4 签名；WebDAV 用 Basic 认证（坚果云请用「应用密码」）。
+  单次上传走 S3 的 PUT，上限 5 GB —— 超过请减少备份内容或改走本地。
+
+示例：
+  omi backup remote test
+  omi backup remote list
+  omi backup remote download OmniStudio-20260912-101500.omnibackup
+  omi backup restore ~/Library/Application\ Support/omni-studio.kunpengtalk.com/dev/backups/OmniStudio-20260912-101500.omnibackup`,
   "memory add": `写入一条共享记忆（外部 Agent 的写回通道）。
 
 用法：omi memory add <内容> [options]

@@ -1,14 +1,14 @@
 import { existsSync, readdirSync, rmSync, statSync } from "fs";
 import path from "path";
 import { downloadFile, downloadHuggingFaceFile, modelDestPath, type DownloadProgress } from "./modelscope";
-import { setModelCategory } from "./model-store";
+import { setModelMeta } from "./model-store";
 import { getSetting, updateSettings } from "./db/settings";
-import type { ModelCategory } from "../shared/modelscope";
+import type { ModelCategory, ModelSource } from "../shared/modelscope";
 
 export type DownloadStatus = "queued" | "downloading" | "paused" | "completed" | "failed" | "canceled";
 
-/** 下载源：ModelScope（默认）或 HuggingFace 镜像（audio.cpp GGUF 等）。 */
-export type DownloadSource = "modelscope" | "huggingface";
+/** 下载源：ModelScope（默认）或 HuggingFace（优先走 hf-mirror 镜像）。 */
+export type DownloadSource = ModelSource;
 
 export type DownloadTask = {
   id: string;
@@ -291,7 +291,8 @@ export class DownloadManager {
       task.status = "completed";
       task.percent = 100;
       task.speed = 0;
-      if (task.category) setModelCategory(task.repo, task.fileName, task.category);
+      // 落盘后把分类和来源平台一起写进仓库元数据，本地模型列表才能显示"从哪儿下的"。
+      setModelMeta(task.repo, { category: task.category, source: task.source });
       this.emit(true);
     } catch (e) {
       if (ac.signal.aborted) {

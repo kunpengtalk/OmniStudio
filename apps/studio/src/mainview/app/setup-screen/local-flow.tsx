@@ -184,7 +184,7 @@ export function LocalFlow({
     setPlanLoading(true);
     (async () => {
       try {
-        const { files } = await rpcClient.listModelScopeFiles({ repo });
+        const { files } = await rpcClient.listModelFiles({ repo, source: "modelscope" });
         if (cancelled) return;
         const picked =
           engine === "llama.cpp"
@@ -231,13 +231,14 @@ export function LocalFlow({
 
   const handleDownload = async () => {
     if (!plan) return;
-    // 国内用户为主：默认走 hf-mirror.com（HF 镜像）下载。
+    // 下载必须和上面列文件用同一个平台（ModelScope）：
+    // 两边仓库的文件名不一定一致，混用会出现"列表里有、下载 404"。
     for (const f of plan.files) {
       await rpcClient.startModelDownload({
         repo: plan.repo,
         fileName: f.name,
         category: "chat",
-        source: "huggingface",
+        source: "modelscope",
       });
     }
   };
@@ -704,6 +705,9 @@ export function LocalFlow({
                       {plan.files[0].name}
                     </p>
                   )}
+                  <p className="mt-0.5 text-[11px] text-muted-foreground/70">
+                    文件与下载均来自 ModelScope（modelscope.cn）
+                  </p>
                 </div>
               </div>
 

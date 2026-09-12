@@ -17,9 +17,12 @@ import {
   SlidersHorizontalIcon,
   ChevronDownIcon,
   StoreIcon,
+  FolderIcon,
+  FolderPlusIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { SourceBadge } from "@components/source-badge";
 import { useEngine } from "@lib/use-engine";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
@@ -42,7 +45,10 @@ import {
   type InstalledModel,
   type InferenceEngine,
   type ModelCategory,
+  type ModelOrigin,
+  type ModelSource,
 } from "@/shared/modelscope";
+
 import { MODEL_PROFILES } from "@/shared/model-profiles";
 import { MODEL_QUANTS } from "./setup-screen/constants";
 import { serverErrorHint } from "@/mainview/lib/server-error";
@@ -273,9 +279,8 @@ function ServerParamsPanel({ engine }: { engine: InferenceEngine }) {
 /** 启动条：选择已下载的模型 + 启动/重启服务器（使用上方所选引擎与启动参数）。
  * 只列出当前引擎能加载的模型，避免在 MLX 下选到 GGUF 等不兼容文件。 */
 function LaunchBar({ installedModels, engine }: { installedModels: InstalledModel[]; engine: InferenceEngine }) {
-  const compatibleModels = installedModels.filter((m) =>
-    engineSupports(engine, fileKind(m.fileName)),
-  );
+  // 目录条目（HF 缓存里的整仓库）按它自己的格式判断兼容性，文件名没有扩展名。
+  const compatibleModels = installedModels.filter((m) => engineSupports(engine, m.kind));
   const t = useT();
   const queryClient = useQueryClient();
   const serverStatus = useServerStore((s) => s.status);
@@ -417,15 +422,24 @@ function InstalledModelRow({
     isChatModel: boolean;
     category: ModelCategory;
     favorite: boolean;
+    /** 下载来源平台（老数据可能没有）。 */
+    source?: ModelSource;
+    /** 模型来自哪个位置：应用下载 / 本地目录 / HF 缓存。 */
+    origin: ModelOrigin;
+    /** 整目录条目（HF 缓存里的模型目录）。 */
+    isDir: boolean;
+    /** 权重格式，目录条目按内容判定。 */
+    kind: import("../../shared/modelscope").ModelFileKind;
   };
   engine: InferenceEngine;
 }) {
   const queryClient = useQueryClient();
   const t = useT();
   const serverStatus = useServerStore((s) => s.status);
-  const kind = fileKind(model.fileName);
+  const kind = model.kind ?? fileKind(model.fileName);
   const compatible = engineSupports(engine, kind);
   const [startError, setStartError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const setActiveMutation = useMutation({
     mutationFn: () => rpcClient.setActiveModel({ path: model.path }),
@@ -438,7 +452,14 @@ function InstalledModelRow({
   });
   const deleteMutation = useMutation({
     mutationFn: () => rpcClient.deleteLocalModel({ path: model.path }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["installed-models"] }),
+    onSuccess: (res) => {
+      if (!res.ok) {
+        setDeleteError(res.error ?? t("models.deleteFailed"));
+        return;
+      }
+      setDeleteError(null);
+      queryClient.invalidateQueries({ queryKey: ["installed-models"] });
+    },
   });
   const favoriteMutation = useMutation({
     mutationFn: () => rpcClient.toggleFavoriteModel({ path: model.path }),
@@ -515,6 +536,8 @@ function InstalledModelRow({
               {t("models.autoSwitchEngine")}
             </span>
           )}
+          <OriginBadge origin={model.origin} />
+          {model.source && model.origin !== "hf-cache" && <SourceBadge source={model.source} />}
           {model.isActive && (
             <Badge variant="default" className="gap-1 text-[10px]">
               <SparklesIcon className="size-3" /> {t("models.inUse")}
@@ -529,9 +552,18 @@ function InstalledModelRow({
         <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/70">
           {model.repo}
         </p>
-        <p className="mt-0.5 text-[11px] text-muted-foreground">
-          {formatBytes(model.size)}
+        <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span>{formatBytes(model.size)}</span>
+          {model.isDir && (
+            <span className="rounded bg-muted px-1 text-[10px]">{t("models.wholeRepo")}</span>
+          )}
         </p>
+        {deleteError && (
+          <p className="mt-1 flex items-start gap-1 text-[11px] text-destructive">
+            <AlertTriangleIcon className="mt-0.5 size-3 shrink-0" />
+            <span className="min-w-0 break-words">{deleteError}</span>
+          </p>
+        )}
         {startError && (
           <div className="mt-1 space-y-0.5">
             {startErrorHint && (
@@ -598,7 +630,16 @@ function InstalledModelRow({
         <Button
           variant="ghost"
           size="icon-sm"
-          tooltip={t("common.delete")}
+          tooltip={t("models.showInFolder")}
+          onClick={() => void rpcClient.showInExplorer({ filePath: model.path })}
+          className="text-muted-foreground"
+        >
+          <FolderOpenIcon className="size-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          tooltip={model.origin === "hf-cache" ? t("models.deleteCacheEntry") : t("common.delete")}
           onClick={() => deleteMutation.mutate()}
           disabled={deleteMutation.isPending}
         >
@@ -623,6 +664,7 @@ const INSTALLED_TABS: { value: InstalledTab; labelKey: string }[] = [
 function InstalledModels({ engine }: { engine: InferenceEngine }) {
   const t = useT();
   const [tab, setTab] = useState<InstalledTab>("all");
+  const [origin, setOrigin] = useState<ModelOrigin | "all">("all");
   const { data, isLoading } = useQuery({
     queryKey: ["installed-models"],
     queryFn: () => rpcClient.listInstalledModels(),
@@ -639,15 +681,41 @@ function InstalledModels({ engine }: { engine: InferenceEngine }) {
   // 严格按当前引擎过滤：只显示该引擎能加载的推理模型；`other`（TTS/ASR/生图
   // 等非推理模型）不属于推理引擎加载，始终展示，由分类 tab 分组。
   const allModels = (data?.models ?? []).filter(
-    (m) => fileKind(m.fileName) === "other" || engineSupports(engine, fileKind(m.fileName)),
+    (m) => m.kind === "other" || engineSupports(engine, m.kind),
   );
+  const byOrigin =
+    origin === "all" ? allModels : allModels.filter((m) => m.origin === origin);
   const models =
-    tab === "all" ? allModels : allModels.filter((m) => (m.category ?? "other") === tab);
+    tab === "all" ? byOrigin : byOrigin.filter((m) => (m.category ?? "other") === tab);
   const countFor = (value: InstalledTab) =>
-    value === "all" ? allModels.length : allModels.filter((m) => (m.category ?? "other") === value).length;
+    value === "all" ? byOrigin.length : byOrigin.filter((m) => (m.category ?? "other") === value).length;
+  const originCount = (value: ModelOrigin) => allModels.filter((m) => m.origin === value).length;
 
   return (
     <Tabs value={tab} onValueChange={(v) => setTab(v as InstalledTab)} className="gap-3">
+      {/* 来源筛选：应用下载 / 本地目录 / HF 缓存 —— 一眼看出模型是从哪儿来的 */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {(["all", "managed", "external", "hf-cache"] as const).map((o) => {
+          const active = origin === o;
+          const count = o === "all" ? allModels.length : originCount(o);
+          return (
+            <button
+              key={o}
+              type="button"
+              onClick={() => setOrigin(o)}
+              className={cn(
+                "rounded-full border px-2.5 py-1 text-[11px] transition-colors",
+                active
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
+              )}
+            >
+              {o === "all" ? t("models.cat.all") : t(ORIGIN_LABEL_KEYS[o])}
+              <span className="ml-1 tabular-nums opacity-60">{count}</span>
+            </button>
+          );
+        })}
+      </div>
       <TabsList className="w-fit max-w-full overflow-x-auto">
         {INSTALLED_TABS.map((tb) => (
           <TabsTrigger key={tb.value} value={tb.value} className="gap-1.5 text-xs">
@@ -677,6 +745,212 @@ function InstalledModels({ engine }: { engine: InferenceEngine }) {
 }
 
 // ---------------------------------------------------------------------------
+// 本地模型目录管理：默认扫描应用下载目录 + HF 缓存，用户可再添加自己的目录
+// ---------------------------------------------------------------------------
+
+const ORIGIN_LABEL_KEYS: Record<ModelOrigin, string> = {
+  managed: "models.origin.managed",
+  external: "models.origin.external",
+  "hf-cache": "models.origin.hfCache",
+};
+
+/** 目录来源标签：应用下载目录 / HF 缓存 / 用户自己加的目录。 */
+function OriginBadge({ origin, className }: { origin: ModelOrigin; className?: string }) {
+  const t = useT();
+  const cls =
+    origin === "hf-cache"
+      ? "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
+      : origin === "external"
+        ? "bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300"
+        : "bg-muted text-muted-foreground";
+  return (
+    <span
+      className={cn(
+        "inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-1.5 text-[10px] font-medium",
+        cls,
+        className,
+      )}
+    >
+      <FolderIcon className="size-2.5" />
+      {t(ORIGIN_LABEL_KEYS[origin])}
+    </span>
+  );
+}
+
+/**
+ * 目录管理：
+ * - 应用下载目录与 HF 缓存默认就在扫描范围里（HF / ModelScope 下载的模型都能看到）；
+ * - "添加目录"走系统选择器 → 先扫描预览（认不出模型就不加），避免把整个磁盘加进来。
+ */
+function ModelDirsManager() {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const [pending, setPending] = useState<{ dir: string; count: number; totalSize: number; files: { name: string; repo: string; size: number; kind: string }[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const dirsQuery = useQuery({
+    queryKey: ["model-dirs"],
+    queryFn: () => rpcClient.getModelDirs(),
+  });
+  const entries = dirsQuery.data?.entries ?? [];
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["model-dirs"] });
+    queryClient.invalidateQueries({ queryKey: ["installed-models"] });
+  };
+
+  const pickMutation = useMutation({
+    mutationFn: async () => {
+      const { path: dir } = await rpcClient.openDirectoryDialog(undefined);
+      if (!dir) return null;
+      return { dir, preview: await rpcClient.scanModelDir({ dir }) };
+    },
+    onSuccess: (res) => {
+      setNotice(null);
+      if (!res) return;
+      if (!res.preview.ok) {
+        setError(res.preview.error ?? t("models.dirs.scanFailed"));
+        setPending(null);
+        return;
+      }
+      setError(null);
+      setPending({ dir: res.dir, ...res.preview });
+    },
+    onError: (e: unknown) => setError(String(e)),
+  });
+
+  const addMutation = useMutation({
+    mutationFn: (dir: string) => rpcClient.addModelDir({ dir }),
+    onSuccess: (res, dir) => {
+      if (!res.ok) {
+        setError(res.error ?? t("models.dirs.scanFailed"));
+        return;
+      }
+      setError(null);
+      setPending(null);
+      setNotice(t("models.dirs.added", { count: String(res.count ?? 0), dir }));
+      invalidate();
+    },
+    onError: (e: unknown) => setError(String(e)),
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: (dir: string) => rpcClient.removeModelDir({ dir }),
+    onSuccess: (res) => {
+      if (!res.ok) setError(res.error ?? null);
+      else setNotice(null);
+      invalidate();
+    },
+  });
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-xs">{t("models.dirs.title")}</Label>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 text-xs"
+          disabled={pickMutation.isPending}
+          onClick={() => pickMutation.mutate()}
+        >
+          {pickMutation.isPending ? (
+            <Loader2Icon data-icon="inline-start" className="animate-spin" />
+          ) : (
+            <FolderPlusIcon data-icon="inline-start" className="size-3.5" />
+          )}
+          {t("models.dirs.add")}
+        </Button>
+      </div>
+      <p className="text-[11px] text-muted-foreground">{t("models.dirs.hint")}</p>
+
+      <div className="flex flex-col gap-1.5">
+        {entries.map((entry) => (
+          <div key={entry.path} className="flex items-center gap-2 rounded-lg border px-3 py-2">
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-mono text-[11px]">{entry.path}</p>
+              <p className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                <span>
+                  {entry.kind === "primary"
+                    ? t("models.dirs.primary")
+                    : entry.kind === "hf-cache"
+                      ? t("models.dirs.hfCache")
+                      : t("models.dirs.extra")}
+                </span>
+                <span>·</span>
+                {entry.exists ? (
+                  <>
+                    <span>{t("models.dirs.count", { count: String(entry.count) })}</span>
+                    <span>·</span>
+                    <span>{formatBytes(entry.size)}</span>
+                  </>
+                ) : (
+                  <span className="text-amber-600 dark:text-amber-400">
+                    {t("models.dirs.missing")}
+                  </span>
+                )}
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              tooltip={t("models.showInFolder")}
+              onClick={() => void rpcClient.showInExplorer({ filePath: entry.path })}
+            >
+              <FolderOpenIcon className="size-3.5" />
+            </Button>
+            {entry.kind === "extra" && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                tooltip={t("models.dirs.remove")}
+                disabled={removeMutation.isPending}
+                onClick={() => removeMutation.mutate(entry.path)}
+              >
+                <Trash2Icon className="size-3.5" />
+              </Button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {pending && (
+        <div className="flex flex-col gap-2 rounded-lg border border-primary/40 bg-primary/5 px-3 py-2">
+          <p className="text-xs">
+            {t("models.dirs.previewTitle", { count: String(pending.count), size: formatBytes(pending.totalSize) })}
+          </p>
+          <p className="truncate font-mono text-[11px] text-muted-foreground">{pending.dir}</p>
+          <ul className="flex flex-col gap-0.5">
+            {pending.files.slice(0, 5).map((f) => (
+              <li key={`${f.repo}/${f.name}`} className="truncate text-[11px] text-muted-foreground">
+                {f.repo} / {f.name}
+              </li>
+            ))}
+            {pending.count > 5 && (
+              <li className="text-[11px] text-muted-foreground">
+                {t("models.dirs.moreFiles", { count: String(pending.count - 5) })}
+              </li>
+            )}
+          </ul>
+          <div className="flex gap-2">
+            <Button size="sm" className="h-7 text-xs" disabled={addMutation.isPending} onClick={() => addMutation.mutate(pending.dir)}>
+              {t("models.dirs.confirmAdd")}
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setPending(null)}>
+              {t("common.cancel")}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {error && <p className="text-[11px] text-destructive">{error}</p>}
+      {notice && <p className="text-[11px] text-emerald-600 dark:text-emerald-400">{notice}</p>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 默认模型与目录（从设置页迁入）
 // ---------------------------------------------------------------------------
 
@@ -687,10 +961,6 @@ function DefaultModelConfig() {
   const { data } = useQuery({
     queryKey: ["settings"],
     queryFn: () => rpcClient.getSettings(undefined),
-  });
-  const { data: modelDirs } = useQuery({
-    queryKey: ["model-dirs"],
-    queryFn: () => rpcClient.getModelDirs(),
   });
   const settings = data?.settings ?? {};
   const [form, setForm] = useState<Record<string, string>>({});
@@ -703,7 +973,7 @@ function DefaultModelConfig() {
 
   const saveMutation = useMutation({
     mutationFn: () => {
-      const keys = ["VLLM_MODEL_PROFILE", "CUSTOM_HF_MODEL", "MODEL_DIRS"] as const;
+      const keys = ["VLLM_MODEL_PROFILE", "CUSTOM_HF_MODEL"] as const;
       const patch: Record<string, string> = {};
       for (const k of keys) if (form[k] !== undefined) patch[k] = form[k];
       return rpcClient.updateSettings({ settings: patch });
@@ -726,7 +996,6 @@ function DefaultModelConfig() {
     return quantInfo?.defaultQuant ?? "";
   })();
 
-  const dirs = modelDirs?.dirs ?? [];
   const ALL_PROFILES = [
     ...MODEL_PROFILES.map((p) => ({ id: p.id, label: p.label })),
     { id: "none" as const, label: "None (raw output)" },
@@ -811,22 +1080,7 @@ function DefaultModelConfig() {
             </div>
           )}
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <Label htmlFor="modelDirPrimary" className="mb-1 text-xs">{t("settings.modelDirs.primary")}</Label>
-              <Input id="modelDirPrimary" value={dirs[0] ?? ""} readOnly className="h-8 font-mono text-xs" />
-            </div>
-            <div>
-              <Label htmlFor="modelDirExtra" className="mb-1 text-xs">{t("settings.modelDirs.extra")}</Label>
-              <Input
-                id="modelDirExtra"
-                placeholder="/path/one,/path/two"
-                value={form.MODEL_DIRS ?? ""}
-                onChange={(e) => updateField("MODEL_DIRS", e.target.value)}
-                className="h-8 font-mono text-xs"
-              />
-            </div>
-          </div>
+          <ModelDirsManager />
 
           <div className="flex items-center gap-3 border-t pt-3">
             <Button size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>

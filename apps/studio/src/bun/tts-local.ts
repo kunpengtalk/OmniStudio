@@ -8,6 +8,7 @@ import {
   localModelPath,
 } from "./modelscope";
 import { AUDIOCPP_REPO, AUDIOCPP_ENGINE_VERSION } from "../shared/audiocpp";
+import type { MediaSource } from "./db/schema";
 
 /** 通话 TTS 调试日志（便于排查无声问题）。 */
 const CALL_TTS_LOG = "/tmp/omni-voicecall.log";
@@ -587,6 +588,7 @@ export async function runTTSLocal(input: {
   emotion?: string;
   language?: string;
   instruct?: string;
+  source?: MediaSource;
 }): Promise<VoiceRecordRow> {
   const modelId = input.model?.trim() || getSetting("TTS_LOCAL_MODEL");
   const entry = modelEntry(modelId);
@@ -644,6 +646,7 @@ export async function runTTSLocal(input: {
 
   const record = insertVoiceRecord({
     kind: "tts",
+    source: input.source,
     model: `${entry.name} (audio.cpp)`,
     voice: input.voice ?? null,
     text: input.text,

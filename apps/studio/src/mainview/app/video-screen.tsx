@@ -47,8 +47,10 @@ import {
 } from "@ui/collapsible";
 import { Switch } from "@ui/switch";
 import { useT } from "@stores/ui-lang";
+import { MediaSourceBadge, MediaSourceFilter } from "@components/media-source-badge";
 import { useVideoStore } from "@stores/video";
 import type { VideoGenBackend, VideoRecordRow } from "../../bun/video-gen";
+import type { MediaSource } from "../../bun/db/schema";
 import { cn } from "@/mainview/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -406,6 +408,7 @@ function HistoryCard({
             <span className="truncate">{record.model}</span>
           </>
         )}
+        <MediaSourceBadge source={record.source} className="ml-auto" />
       </p>
     </div>
   );
@@ -421,6 +424,7 @@ function HistoryScreen() {
     queryFn: () => rpcClient.listVideoRecords(undefined),
   });
   const [toDelete, setToDelete] = useState<VideoRecordRow | null>(null);
+  const [source, setSource] = useState<MediaSource | "all">("all");
   const del = useMutation({
     mutationFn: (id: number) => rpcClient.deleteVideoRecord({ id }),
     onSuccess: () => {
@@ -428,7 +432,9 @@ function HistoryScreen() {
       queryClient.invalidateQueries({ queryKey: ["video-records"] });
     },
   });
-  const records = (data?.records ?? []).filter((r) => r.status === "done" && r.videoUrl);
+  const records = (data?.records ?? [])
+    .filter((r) => r.status === "done" && r.videoUrl)
+    .filter((r) => source === "all" || r.source === source);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -445,6 +451,7 @@ function HistoryScreen() {
         <Badge variant="secondary" className="h-5 text-[10px]">
           {records.length}
         </Badge>
+        <MediaSourceFilter value={source} onChange={setSource} className="ml-auto" />
       </div>
 
       {isLoading ? (

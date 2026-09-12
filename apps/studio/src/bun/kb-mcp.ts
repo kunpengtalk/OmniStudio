@@ -1,10 +1,12 @@
 /**
  * OmniStudio MCP 服务（挂在本地网关的 /mcp 端点上，Streamable HTTP 传输）：
  * 让 Claude Code / Cursor 等任意 MCP 客户端把 OmniStudio 的本地能力当作
- * 外部工具来用。当前提供两组工具：
+ * 外部工具来用。当前提供三组工具：
  * - 知识库：kb_search / kb_list（检索本地导入的文档资料）；
  * - 记忆：memory_search / memory_save / memory_list（所有 Agent 共享的长期记忆，
- *   与内置 Agent 工具、`omi memory` CLI 读写同一个库）。
+ *   与内置 Agent 工具、`omi memory` CLI 读写同一个库）；
+ * - 素材：media_search（用户在界面手工生成的与 Agent 生成的图片 / 语音 / 视频，
+ *   返回绝对路径供外部智能体直接复用，只读）。
  *
  * 鉴权与 /v1/* 一致：设置 GATEWAY_API_KEY 后需要 Bearer Token / x-api-key；
  * 未设置时本机开放访问。
@@ -15,6 +17,7 @@
 import { listKnowledgeBases, recall } from "./knowledge";
 import { mcpPlaygroundHtml } from "./mcp-playground";
 import { MEMORY_MCP_TOOLS, handleMemoryMcpCall, isMemoryMcpTool } from "./memory-api";
+import { MEDIA_MCP_TOOLS, handleMediaMcpCall, isMediaMcpTool } from "./media-api";
 
 const PROTOCOL_VERSION = "2025-03-26";
 const SERVER_INFO = { name: "omnistudio", version: "1.0.0" };
@@ -54,10 +57,6 @@ function rpcResult(id: unknown, result: unknown): Response {
 
 function rpcError(id: unknown, code: number, message: string): Response {
   return Response.json({ jsonrpc: "2.0", id, error: { code, message } });
-}
-
-function textContent(text: string) {
-  return { content: [{ type: "text", text }] };
 }
 
 function truncate(text: string, max = 700): string {
@@ -146,7 +145,7 @@ function handleRpc(msg: {
     case "ping":
       return rpcResult(id, {});
     case "tools/list":
-      return rpcResult(id, { tools: [TOOL_SEARCH, TOOL_LIST, ...MEMORY_MCP_TOOLS] });
+      return rpcResult(id, { tools: [TOOL_SEARCH, TOOL_LIST, ...MEMORY_MCP_TOOLS, ...MEDIA_MCP_TOOLS] });
     // tools/call 涉及异步检索，在 handleMcpRequest 入口单独处理，不会走到这里。
     default:
       return rpcError(id, -32601, `Method not found: ${method}`);
@@ -191,19 +190,26 @@ export async function handleMcpRequest(req: Request): Promise<Response> {
       const name = String(m.params?.name ?? "");
       const args = (m.params?.arguments ?? {}) as Record<string, unknown>;
       try {
-        const text = name === "kb_search" ? await toolSearch(args) : name === "kb_list" ? toolList() : null;
-        if (text === null && isMemoryMcpTool(name)) {
-          const { text: memText, isError } = await handleMemoryMcpCall(name, args);
+        let text: string | null =
+          name === "kb_search" ? await toolSearch(args) : name === "kb_list" ? toolList() : null;
+        let isError = false;
+        // 记忆与素材工具各自带回 { text, isError }，统一在这里排版。
+        if (text === null && (isMemoryMcpTool(name) || isMediaMcpTool(name))) {
+          const handled = isMemoryMcpTool(name)
+            ? await handleMemoryMcpCall(name, args)
+            : await handleMediaMcpCall(name, args);
+          text = handled.text;
+          isError = handled.isError ?? false;
+        }
+        if (text === null) {
+          outputs.push(rpcError(m.id, -32602, `Unknown tool: ${name}`));
+        } else {
           outputs.push(
             rpcResult(m.id, {
-              content: [{ type: "text", text: memText }],
+              content: [{ type: "text", text }],
               ...(isError ? { isError: true } : {}),
             }),
           );
-        } else if (text === null) {
-          outputs.push(rpcError(m.id, -32602, `Unknown tool: ${name}`));
-        } else {
-          outputs.push(rpcResult(m.id, textContent(text)));
         }
       } catch (e) {
         outputs.push(

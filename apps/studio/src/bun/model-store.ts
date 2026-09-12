@@ -1,26 +1,37 @@
-import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import path from "path";
-import { getModelsBaseDir, safeRepoId, splitRepo, installedModelSize, isModelWeightExt } from "./modelscope";
-import { getSetting, updateSettings } from "./db/settings";
+import { getModelsBaseDir, safeRepoId, isModelWeightExt } from "./modelscope";
 import {
+  dirModelKind,
+  getExtraModelDirs,
+  getHfHubCacheDir,
+  getScanDirs,
+  resolveRuntimeTarget,
+  scanModelSources,
+} from "./model-scan";
+import type { InstalledModel, ModelOrigin } from "../shared/modelscope";
+import { getSetting, updateSettings } from "./db/settings";
+import { isInsideDir } from "./path-safety";
+import {
+  engineForModelKind,
+  engineSupports,
   fileKind,
-  resolveEngineForModel,
   type InferenceEngine,
   type ModelCategory,
+  type ModelFileKind,
+  type ModelSource,
 } from "../shared/modelscope";
 
-export type InstalledModel = {
-  repo: string;
-  fileName: string;
-  path: string;
-  size: number;
-  isActive: boolean;
-  isChatModel: boolean;
-  category: ModelCategory;
-  favorite: boolean;
-};
+// 类型真源在 shared（前端也用同一份），这里只做转出。
+export type { InstalledModel };
 
 const META_FILE = ".vllm-meta.json";
+
+/** 每个仓库目录下的 `.vllm-meta.json`：记录分类与下载来源。 */
+type RepoMeta = {
+  category?: ModelCategory;
+  source?: ModelSource;
+};
 
 export function getModelsBaseDirForRuntime(): string {
   return getModelsBaseDir();
@@ -39,28 +50,6 @@ export function getModelsDirs(): string[] {
   return [primary, ...extra];
 }
 
-function listInstalledModelsRecursive(dir: string, repo: string, out: { repo: string; fileName: string; path: string; size: number }[]): void {
-  try {
-    const entries = readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        listInstalledModelsRecursive(full, entry.name, out);
-      } else if (isModelWeightExt(entry.name)) {
-        const size = installedModelSize(repo, entry.name);
-        out.push({
-          repo,
-          fileName: entry.name,
-          path: full,
-          size: size ?? 0,
-        });
-      }
-    }
-  } catch {
-    // ignore
-  }
-}
-
 /** Fallback classification from the file name when no persisted category exists. */
 export function classifyInstalledFilename(fileName: string): ModelCategory {
   const name = fileName.toLowerCase();
@@ -72,36 +61,51 @@ export function classifyInstalledFilename(fileName: string): ModelCategory {
 }
 
 const VALID_CATEGORIES: ModelCategory[] = ["chat", "tts", "asr", "image", "other"];
+const VALID_SOURCES: ModelSource[] = ["modelscope", "huggingface"];
 
-function readCategory(repoDir: string, fileName: string): ModelCategory {
-  try {
-    const metaPath = path.join(repoDir, META_FILE);
-    if (existsSync(metaPath)) {
-      const meta = JSON.parse(readFileSync(metaPath, "utf8")) as { category?: ModelCategory };
-      if (meta.category && VALID_CATEGORIES.includes(meta.category)) return meta.category;
-    }
-  } catch {
-    // fall through
+/**
+ * 从文件所在目录往上找到最近的 `.vllm-meta.json`（分类 / 下载来源）。
+ * 下载落盘时写在仓库顶层目录，嵌套子目录里的文件要靠向上查找才能命中。
+ */
+function readRepoMetaFor(filePath: string, root: string): RepoMeta {
+  let dir = path.dirname(filePath);
+  const stop = path.resolve(root);
+  // 最多向上 8 层，且不越过扫描根目录
+  for (let i = 0; i < 8; i += 1) {
+    const meta = readRepoMeta(dir);
+    if (meta.category || meta.source) return meta;
+    const parent = path.dirname(dir);
+    if (parent === dir || !isInsideDir(stop, dir)) break;
+    dir = parent;
   }
-  return classifyInstalledFilename(fileName);
+  return {};
 }
 
-/** Persist the category of a downloaded model so the installed list can group by it. */
-export function setModelCategory(repo: string, fileName: string, category: ModelCategory) {
-  if (!VALID_CATEGORIES.includes(category)) return;
-  const repoDir = path.join(getModelsBaseDir(), safeRepoId(repo));
+function readRepoMeta(repoDir: string): RepoMeta {
   try {
     const metaPath = path.join(repoDir, META_FILE);
-    let meta: { category?: ModelCategory } = {};
     if (existsSync(metaPath)) {
-      try {
-        meta = JSON.parse(readFileSync(metaPath, "utf8")) as { category?: ModelCategory };
-      } catch {
-        meta = {};
-      }
+      const meta = JSON.parse(readFileSync(metaPath, "utf8")) as RepoMeta;
+      return meta && typeof meta === "object" ? meta : {};
     }
-    meta.category = category;
-    writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  } catch {
+    // fall through — 元数据损坏时退回按文件名分类
+  }
+  return {};
+}
+
+/**
+ * 持久化下载出来的模型的分类与来源平台。
+ * `.vllm-meta.json` 按仓库目录存一份：同一仓库的文件来自同一平台，写一次即可。
+ * 老文件只有 `category` 字段，读到 source 为 undefined 时不显示来源标签。
+ */
+export function setModelMeta(repo: string, patch: RepoMeta) {
+  const repoDir = path.join(getModelsBaseDir(), safeRepoId(repo));
+  try {
+    const meta = readRepoMeta(repoDir);
+    if (patch.category && VALID_CATEGORIES.includes(patch.category)) meta.category = patch.category;
+    if (patch.source && VALID_SOURCES.includes(patch.source)) meta.source = patch.source;
+    writeFileSync(path.join(repoDir, META_FILE), JSON.stringify(meta, null, 2));
   } catch {
     // ignore
   }
@@ -135,40 +139,42 @@ export function toggleFavorite(pathToModel: string): void {
   persistFavorites(favs);
 }
 
+/**
+ * 本地模型列表：应用下载目录 + 用户添加的目录 + Hugging Face 缓存。
+ * 目录结构任意深度都能识别（见 model-scan.ts），不再要求 `<dir>/<repo>/<file>` 布局。
+ */
 export function listInstalledModels(): InstalledModel[] {
-  const baseDirs = getModelsDirs();
-  if (baseDirs.length === 0) return [];
-
   const activePath = getSetting("LOCAL_MODEL_PATH");
   const chatModel = getSetting("CHAT_MODEL");
   const favorites = getFavorites();
+  const roots = new Map(getScanDirs().map((d) => [d.origin, d.dir]));
 
-  const results: InstalledModel[] = [];
-
-  for (const baseDir of baseDirs) {
-    if (!existsSync(baseDir)) continue;
-    for (const repoDirName of readdirSync(baseDir, { withFileTypes: true })) {
-      if (!repoDirName.isDirectory()) continue;
-      const repoDir = path.join(baseDir, repoDirName.name);
-      const files: { repo: string; fileName: string; path: string; size: number }[] = [];
-      listInstalledModelsRecursive(repoDir, repoDirName.name, files);
-      for (const f of files) {
-        const isActive = f.path === activePath;
-        results.push({
-          repo: f.repo,
-          fileName: f.fileName,
-          path: f.path,
-          size: f.size,
-          isActive,
-          isChatModel: isActive && chatModel === f.fileName,
-          category: readCategory(repoDir, f.fileName),
-          favorite: favorites.has(f.path),
-        });
-      }
-    }
-  }
-
-  return results;
+  return scanModelSources().map((m) => {
+    // 激活目标既可能是文件，也可能是目录（vLLM/SGLang/MLX 加载整个仓库目录）。
+    const isActive = m.path === activePath || m.runtimeTarget === activePath;
+    const meta =
+      m.origin === "hf-cache"
+        ? {}
+        : readRepoMetaFor(m.path, roots.get(m.origin) ?? getModelsBaseDir());
+    return {
+      repo: m.repo,
+      fileName: m.fileName,
+      path: m.path,
+      size: m.size,
+      isActive,
+      isChatModel: isActive && chatModel === slugModelFileName(m.fileName),
+      category:
+        meta.category && VALID_CATEGORIES.includes(meta.category)
+          ? meta.category
+          : classifyInstalledFilename(m.fileName),
+      favorite: favorites.has(m.path),
+      source: meta.source && VALID_SOURCES.includes(meta.source) ? meta.source : m.source,
+      origin: m.origin,
+      isDir: m.isDir,
+      kind: m.kind,
+      runtimeTarget: m.runtimeTarget,
+    };
+  });
 }
 
 /**
@@ -183,41 +189,136 @@ export function slugModelFileName(fileName: string): string {
     .replace(/[^a-z0-9_.-]/g, "-");
 }
 
-/** Switch the inference engine when the current one cannot load the model file. */
-function ensureEngineForModelFile(pathToModel: string): void {
-  const fileName = path.basename(pathToModel);
+/** Switch the inference engine when the current one cannot load this format. */
+function ensureEngineForKind(kind: ModelFileKind): void {
   const current = (getSetting("INFERENCE_ENGINE") as InferenceEngine) || "llama.cpp";
-  const suggested = resolveEngineForModel(fileName, current);
-  if (suggested !== current) {
-    updateSettings({ INFERENCE_ENGINE: suggested });
-  }
+  if (engineSupports(current, kind)) return;
+  const suggested = engineForModelKind(kind);
+  if (suggested) updateSettings({ INFERENCE_ENGINE: suggested });
 }
 
+/** 服务端模型名：目录条目取仓库名（HF 缓存路径的 sha 目录不能当名字用）。 */
+function servedNameForTarget(target: string, isDir: boolean): string {
+  if (!isDir) return slugModelFileName(path.basename(target));
+  let name = path.basename(target);
+  if (/^[0-9a-f]{7,64}$/i.test(name)) {
+    const snapshots = path.dirname(target);
+    if (path.basename(snapshots) === "snapshots") {
+      const entry = path.basename(path.dirname(snapshots));
+      name = entry.replace(/^models--/, "").split("--").pop() || entry;
+    }
+  }
+  return slugModelFileName(name);
+}
+
+/**
+ * 设为当前模型。
+ *
+ * 存放的是**运行时加载目标**而不是列表里那个文件：仓库目录（含 config.json）交给
+ * vLLM / SGLang / MLX 整目录加载，GGUF 这类单文件模型仍然指向文件本身。
+ * 这也是"非标准目录结构也能启动"的关键 —— 分片 safetensors 单拿一个文件是加载不了的。
+ */
 export function setActiveModel(pathToModel: string): { ok: boolean; error?: string } {
-  if (!existsSync(pathToModel)) return { ok: false, error: "Model file does not exist" };
-  ensureEngineForModelFile(pathToModel);
-  const name = slugModelFileName(path.basename(pathToModel));
+  if (!existsSync(pathToModel)) return { ok: false, error: "模型路径不存在" };
+  const target = resolveRuntimeTarget(pathToModel);
+  let isDir = false;
+  try {
+    isDir = statSync(target).isDirectory();
+  } catch {
+    return { ok: false, error: "模型路径不可读" };
+  }
+  // 目录条目按目录内容判定格式（HF 缓存里的模型目录），单文件按扩展名。
+  const kind: ModelFileKind = isDir ? dirModelKind(target) : fileKind(path.basename(pathToModel));
+  ensureEngineForKind(kind);
+  const name = servedNameForTarget(target, isDir);
   updateSettings({
-    LOCAL_MODEL_PATH: pathToModel,
+    LOCAL_MODEL_PATH: target,
     LOCAL_MODEL_NAME: name,
     CHAT_MODEL: name,
   });
   return { ok: true };
 }
 
-export function deleteLocalModel(pathToModel: string): { ok: boolean } {
+/** 目录占用（删除 HF 缓存条目时用来告诉用户释放了多少空间）。 */
+function dirSize(dir: string, depth = 0): number {
+  if (depth > 12) return 0;
+  let total = 0;
+  let entries;
   try {
-    rmSync(pathToModel, { force: true });
-    const dir = path.dirname(pathToModel);
-    const remaining = readdirSync(dir).filter((n) => isModelWeightExt(n));
-    if (remaining.length === 0) rmSync(path.join(dir, META_FILE), { force: true });
+    entries = readdirSync(dir, { withFileTypes: true });
   } catch {
-    // ignore
+    return 0;
   }
-  if (getSetting("LOCAL_MODEL_PATH") === pathToModel) {
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    try {
+      const st = statSync(full);
+      if (st.isDirectory()) total += dirSize(full, depth + 1);
+      else total += st.size;
+    } catch {
+      // ignore
+    }
+  }
+  return total;
+}
+
+/**
+ * 删除本地模型。
+ *
+ * 路径来自 webview / 控制通道，不可信，所以只允许删除这三类位置：
+ *   1. 应用下载目录内的文件（我们自己下下来的）；
+ *   2. 用户显式添加过的本地目录（MODEL_DIRS）内的文件；
+ *   3. Hugging Face 缓存：删除的是整个 `models--org--repo` 条目（blobs + snapshots），
+ *      因为 snapshot 里全是软链，只删软链一个字节都释放不出来。
+ * 其他任何路径一律拒绝 —— 否则一个 `path: "/etc/..."` 就能变成任意文件删除。
+ */
+export function deleteLocalModel(pathToModel: string): { ok: boolean; error?: string; freed?: number } {
+  const abs = path.resolve(pathToModel);
+  if (!existsSync(abs)) return { ok: false, error: "文件不存在" };
+
+  const hub = getHfHubCacheDir();
+  const cacheEntry = isInsideDir(hub, abs) ? findHfCacheEntry(abs, hub) : null;
+
+  let freed = 0;
+  try {
+    if (cacheEntry) {
+      freed = dirSize(cacheEntry);
+      rmSync(cacheEntry, { recursive: true, force: true });
+    } else {
+      const allowed = [getModelsBaseDir(), ...getExtraModelDirs()];
+      if (!allowed.some((root) => isInsideDir(root, abs))) {
+        return {
+          ok: false,
+          error: "只允许删除应用下载目录、已添加的本地目录或 Hugging Face 缓存里的模型",
+        };
+      }
+      const st = statSync(abs);
+      freed = st.isDirectory() ? dirSize(abs) : st.size;
+      rmSync(abs, { recursive: true, force: true });
+      // 仓库目录里没有权重文件了就顺手把元数据一起清掉。
+      const dir = path.dirname(abs);
+      if (existsSync(dir) && readdirSync(dir).filter((n) => isModelWeightExt(n)).length === 0) {
+        rmSync(path.join(dir, META_FILE), { force: true });
+      }
+    }
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+
+  // 删掉的正是当前模型（或当前模型所在目录）时清空调用配置。
+  const activePath = getSetting("LOCAL_MODEL_PATH");
+  if (activePath && (activePath === abs || isInsideDir(abs, activePath) || !existsSync(activePath))) {
     updateSettings({ LOCAL_MODEL_PATH: "", LOCAL_MODEL_NAME: "", CHAT_MODEL: "" });
   }
-  return { ok: true };
+  return { ok: true, freed };
+}
+
+/** 从缓存内的任意路径定位它所属的 `models--org--repo` 条目目录。 */
+function findHfCacheEntry(target: string, hub: string): string | null {
+  const rel = path.relative(path.resolve(hub), path.resolve(target));
+  const first = rel.split(path.sep)[0];
+  if (!first || !first.startsWith("models--")) return null;
+  return path.join(path.resolve(hub), first);
 }
 
 export function getActiveModelPath(): string {

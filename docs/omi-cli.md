@@ -201,6 +201,49 @@ omi launch claude  ·  codex  ·  opencode  ·  openclaw  ·  hermes  ·  pi  ·
 - chatgpt 会改写 ~/.codex/config.toml（首次改写前备份到 ~/.codex/backup-omni/config.toml），然后打开桌面客户端；请先完全退出 ChatGPT（⌘Q）再让它重读配置。
 - 每次启动的模型 / 端点记录在 ~/.omni/launcher/<工具>.json，方便排查。
 
+## 备份与恢复
+
+把设置、云端模型、技能、提示词、聊天、记忆与生成的媒体打包成一个文件，换机或重装后恢复。
+
+```bash
+omi backup create [--scopes a,b] [--out <目录>] [--note <备注>] [--password <密码>] [--upload] [--redact]
+```
+
+创建备份：数据库走 VACUUM INTO 快照（应用在运行时也是一致副本），选中的文件流式写入 tar + gzip。--password 用 AES-256-GCM 加密（密码不落盘，忘了就解不开，适合放 S3 / 网盘）；--upload 创建后传到已配置的远端存储；--redact 把明文 API Key 抹成空值（要把备份发给别人排错时用）。
+- 模型权重（models/）与推理引擎（engines/）不参与备份：体积大且可重新下载；生成的音频 / 图片 / 视频默认也不备份（显式加 --scopes media 才会带上）。
+
+`omi backup create --out ~/Backups --note "换机前"` — 整机备份到 ~/Backups，带备注。
+`omi backup create --scopes settings,skills,chats,prompts,memory` — 只备份配置、技能、聊天、提示词与记忆（不含大体积媒体）。
+
+```bash
+omi backup list [--dir <目录>]  ·  omi backup inspect <file>
+```
+
+列出备份文件，或预览某份备份的内容、来源机器与警告（不改动任何数据）。
+
+```bash
+omi backup remote <list|test|download>
+```
+
+远端存储（S3 兼容对象存储 / WebDAV 网盘）：list 列出远端备份、test 测试连接、download 把远端备份拉到本地。配置在应用内「设置 → 数据 → 备份与恢复 → 远端存储」填一次（S3: Endpoint/Bucket/Region/AK/SK；WebDAV: 目录 URL/用户名/应用密码，坚果云即 dav.jianguoyun.com）；凭据只存本机，且备份自身会把它们剔除。
+
+`omi backup remote test` — 验证远端凭据与目录是否可用。
+`omi backup create --password-file ~/.omni-pass --upload` — 加密备份并直接上传到远端。
+
+```bash
+omi backup restore <file> [--password <密码>] [--scopes a,b] [--yes]
+```
+
+从备份恢复：默认先自动备份当前数据（pre-restore-*.omnibackup），再整表替换所选分组。恢复要求应用已退出（需要独占数据库）；应用内「设置 → 数据 → 备份与恢复」支持在线恢复并显示实时进度。
+
+`omi backup restore ~/Backups/OmniStudio-20260912-101500.omnibackup --scopes settings,skills` — 只把设置与技能恢复回来。
+
+```bash
+omi backup create|list|inspect  ·  应用内「设置 → 数据 → 备份与恢复」
+```
+
+备份 / 列表 / 预览不需要应用在运行（内核不依赖应用进程与迁移层，应用起不来时也能先把数据备出来）；界面版另外支持按分组勾选内容、看体积预估、选保存位置、设置密码、配置远端存储并一键上传、远端备份列表直接下载并恢复、剔除密钥、恢复前预览与备份记录管理。
+
 ## 引擎依赖、版本与手册
 
 排查引擎二进制、检查更新、随时打印完整手册。

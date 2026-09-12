@@ -1,9 +1,10 @@
 import { create } from "zustand";
-import type { ChatPreset, ModelScopeModel } from "../../shared/modelscope";
+import type { ChatPreset, MarketModel } from "../../shared/modelscope";
 
 export type ModelDetailSource =
   | { kind: "preset"; preset: ChatPreset }
-  | { kind: "search"; model: ModelScopeModel };
+  /** 市场检索结果：`model.source` 决定详情页从哪个平台列文件、下载。 */
+  | { kind: "search"; model: MarketModel };
 
 type ModelDetailState = {
   source: ModelDetailSource | null;

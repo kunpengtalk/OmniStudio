@@ -3,7 +3,7 @@ import { asc, eq, desc, like, sql, inArray } from "drizzle-orm";
 import path from "path";
 import { existsSync, rmSync, copyFileSync, mkdirSync, appendFileSync } from "fs";
 
-import { db } from "../db";
+import { db, sqliteClient } from "../db";
 import { documents, pages } from "../db/schema";
 import { getAllSettings, getSetting, isConfigured, updateSettings } from "../db/settings";
 import { getImagesBaseDir, getUploadsBaseDir } from "../image-server";
@@ -38,7 +38,14 @@ import { listChatModels, selectChatModel, type ChatModelOption } from "../chat-m
 import * as CloudProviders from "../cloud-providers";
 import type { CloudModelEntry, CloudProviderInfo } from "../../shared/cloud-providers";
 import * as ModelScope from "../modelscope";
-import type { ModelScopeModel, ModelScopeFile } from "../modelscope";
+import * as HuggingFace from "../huggingface";
+import * as ModelScan from "../model-scan";
+import type {
+  MarketFile,
+  MarketSearchResult,
+  ModelSource,
+  SearchFormat,
+} from "../../shared/modelscope";
 import * as ModelStore from "../model-store";
 import type { InstalledModel } from "../model-store";
 import { getServerStats, type ServerStats } from "../stats";
@@ -61,6 +68,8 @@ import * as PpOcr from "../ppocr";
 import type { PpOcrModelSize } from "../../shared/ocr";
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
+import * as MediaSetup from "../media-setup";
+import type { MediaSetupCandidate, MediaSetupPayload } from "../media-setup";
 import * as VideoGen from "../video-gen";
 import type {
   VideoGenConfig,
@@ -95,6 +104,19 @@ import type { SkillUpdateStatus as SkillUpdateStatusView } from "../skills/insta
 import type { CentralInfo as SkillsCentralInfo } from "../skills/central-repo";
 import * as Knowledge from "../knowledge";
 import type { KbCitation, KbEventEntry, KbHit, KbIndexStats } from "../../shared/knowledge";
+import * as Backup from "../backup";
+import type {
+  BackupCreateRequest,
+  BackupDownloadRequest,
+  BackupEstimate,
+  BackupFinishedEvent,
+  BackupInspectResult,
+  BackupProgress,
+  BackupRemoteConfig,
+  BackupRemoteEntry,
+  BackupRestoreRequest,
+  BackupSummary,
+} from "../../shared/backup";
 
 export type GitPreviewItem = { relPath: string; name: string; description: string | null };
 
@@ -683,21 +705,22 @@ export type AppRPC = {
         params: { ref: string };
         response: { ok: boolean };
       };
-      // ModelScope search / install
-      searchModelScope: {
-        params: { query: string; page?: number };
-        response: { models: ModelScopeModel[]; total: number };
+      // 模型市场：检索 / 列仓库文件（ModelScope 与 HuggingFace 共用同一组接口，
+      // 由 `source` 决定请求打到哪个平台，返回值里的 source/formats 决定 UI 怎么标注）。
+      searchMarketModels: {
+        params: { query: string; page?: number; source?: ModelSource; format?: SearchFormat };
+        response: MarketSearchResult;
       };
-      listModelScopeFiles: {
-        params: { repo: string };
-        response: { files: ModelScopeFile[] };
+      listModelFiles: {
+        params: { repo: string; source?: ModelSource };
+        response: { files: MarketFile[] };
       };
       listDownloads: {
         params: undefined;
         response: { tasks: DownloadTask[] };
       };
       startModelDownload: {
-        params: { repo: string; fileName: string; category?: ModelCategory; source?: "modelscope" | "huggingface" };
+        params: { repo: string; fileName: string; category?: ModelCategory; source?: ModelSource };
         response: { task: DownloadTask };
       };
       pauseModelDownload: {
@@ -730,7 +753,7 @@ export type AppRPC = {
       };
       deleteLocalModel: {
         params: { path: string };
-        response: { ok: boolean };
+        response: { ok: boolean; error?: string; freed?: number };
       };
       importModelFile: {
         params: { sourcePath: string };
@@ -738,7 +761,29 @@ export type AppRPC = {
       };
       getModelDirs: {
         params: undefined;
-        response: { dirs: string[] };
+        response: {
+          dirs: string[];
+          /** 每个扫描目录的详情（模型数 / 体积），用于"本地模型目录"管理。 */
+          entries: { path: string; kind: "primary" | "extra" | "hf-cache"; exists: boolean; count: number; size: number }[];
+        };
+      };
+      scanModelDir: {
+        params: { dir: string };
+        response: {
+          ok: boolean;
+          error?: string;
+          count: number;
+          totalSize: number;
+          files: { name: string; repo: string; size: number; kind: string }[];
+        };
+      };
+      addModelDir: {
+        params: { dir: string };
+        response: { ok: boolean; error?: string; count?: number };
+      };
+      removeModelDir: {
+        params: { dir: string };
+        response: { ok: boolean; error?: string };
       };
       getAboutInfo: {
         params: undefined;
@@ -1068,6 +1113,24 @@ export type AppRPC = {
       listImageGenModels: {
         params: { backend?: ImageGenBackend; base?: string; apiKey?: string } | undefined;
         response: { models: string[]; error?: string };
+      };
+      /** Agent 生图弹窗：用户点了确认 / 取消后回传，主进程继续那次工具调用。 */
+      resolveMediaSetup: {
+        params: {
+          id: string;
+          action: "confirm" | "cancel";
+          backend?: string;
+          model?: string;
+          apiBase?: string;
+          apiKey?: string;
+          comfyBase?: string;
+        };
+        response: { ok: boolean };
+      };
+      /** Agent 生图弹窗里的「扫描模型」：用表单当前值探测，不落盘配置。 */
+      scanMediaSetupCandidates: {
+        params: { kind?: string; backend?: string; base?: string; apiKey?: string } | undefined;
+        response: { candidates: MediaSetupCandidate[]; error?: string };
       };
       // AI 视频生成（comfyui 本地 / minimax / seedance 云端，提交任务 + 轮询）
       submitVideoGeneration: {
@@ -1557,6 +1620,83 @@ export type AppRPC = {
         params: undefined;
         response: { ok: boolean; path: string };
       };
+      /** 全局备份 / 恢复（设置 → 数据 → 备份与恢复）。 */
+      backupList: {
+        params: { dir?: string } | undefined;
+        response: { dir: string; backups: BackupSummary[] };
+      };
+      /** 各作用域当前体积 / 行数估算，创建前预览用。 */
+      backupEstimate: {
+        params: undefined;
+        response: BackupEstimate;
+      };
+      /** 备份目录 + 进行中的任务（刷新页面后仍能显示进度）。 */
+      backupOverview: {
+        params: undefined;
+        response: { dir: string; appVersion: string; active: BackupProgress | null };
+      };
+      backupChooseDir: {
+        params: undefined;
+        response: { dir: string | null; error?: string; freeBytes?: number };
+      };
+      /** 选一个 .omnibackup 文件（恢复来源）。 */
+      backupChooseFile: {
+        params: undefined;
+        response: { path: string | null };
+      };
+      /** 预览备份内容；不落地、不改动任何数据。 */
+      backupInspect: {
+        params: { path: string };
+        response: BackupInspectResult;
+      };
+      /** 启动创建任务：立即返回 taskId，进度与结果走 backupProgress / backupFinished 事件。 */
+      backupCreate: {
+        params: BackupCreateRequest;
+        response: { taskId: string };
+      };
+      /** 启动恢复任务（破坏性：覆盖所选作用域，默认先自动备份当前数据）。 */
+      backupRestore: {
+        params: BackupRestoreRequest;
+        response: { taskId: string };
+      };
+      backupCancel: {
+        params: { taskId: string };
+        response: { ok: boolean };
+      };
+      backupDelete: {
+        params: { path: string; dir?: string };
+        response: { ok: boolean; error?: string };
+      };
+      backupReveal: {
+        params: { path: string };
+        response: { ok: boolean };
+      };
+      /** 远端存储（S3 / WebDAV）配置。 */
+      backupRemoteGet: {
+        params: undefined;
+        response: { config: BackupRemoteConfig; configured: boolean };
+      };
+      backupRemoteSave: {
+        params: { config: BackupRemoteConfig };
+        response: { ok: boolean; error?: string };
+      };
+      backupRemoteTest: {
+        params: undefined;
+        response: { ok: boolean; error?: string; detail?: string };
+      };
+      backupRemoteList: {
+        params: undefined;
+        response: { entries: BackupRemoteEntry[]; error?: string };
+      };
+      /** 远端备份下载到本地（长任务，进度走 backupProgress 事件）。 */
+      backupRemoteDownload: {
+        params: BackupDownloadRequest;
+        response: { taskId: string };
+      };
+      backupRemoteDelete: {
+        params: { fileName: string };
+        response: { ok: boolean; error?: string };
+      };
     };
     messages: {};
   }>;
@@ -1586,6 +1726,8 @@ export type AppRPC = {
       knowledgeChanged: { kbId?: number; docId?: number };
       chatStats: ChatStats;
       agentEvent: AgentEventRow;
+      /** Agent 生图前需要用户介入（配后端 / 选模型）：界面弹窗，用户点确认后回传结果。 */
+      mediaSetup: MediaSetupPayload;
       voicecallPartial: { conversationId: number; text: string };
       voicecallUtterance: { conversationId: number; messageId: number; text: string };
       voicecallState: { conversationId: number; phase: VoiceCallPhase };
@@ -1626,6 +1768,11 @@ export type AppRPC = {
       skillsChanged: { reason?: string };
       /** CLI（`omi`）请求跳转到某个页面：models / settings / server / stats / chat / index。 */
       navigate: { path: string };
+      /** 全局备份 / 恢复进度（节流推送）与终态。 */
+      backupProgress: BackupProgress;
+      backupFinished: BackupFinishedEvent;
+      /** 备份文件列表发生变化（创建 / 删除 / 恢复完成）。 */
+      backupChanged: { reason?: string };
     };
   }>;
 };
@@ -2412,13 +2559,20 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { files };
       },
 
-      // ModelScope
-      searchModelScope: async ({ query, page }) => {
-        return ModelScope.searchModels(query, page ?? 1);
+      // 模型市场
+      searchMarketModels: async ({ query, page, source, format }) => {
+        const p = page ?? 1;
+        return source === "huggingface"
+          ? await HuggingFace.searchModels(query, p, 20, format)
+          : await ModelScope.searchModels(query, p, 20, format);
       },
 
-      listModelScopeFiles: async ({ repo }) => {
-        return { files: await ModelScope.listRepoFiles(repo) };
+      listModelFiles: async ({ repo, source }) => {
+        const files =
+          source === "huggingface"
+            ? await HuggingFace.listRepoFiles(repo)
+            : await ModelScope.listRepoFiles(repo);
+        return { files };
       },
 
       listDownloads: async () => {
@@ -2458,6 +2612,18 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return ModelStore.setActiveModel(path);
       },
 
+      scanModelDir: async ({ dir }) => {
+        return ModelScan.previewModelDir(dir);
+      },
+
+      addModelDir: async ({ dir }) => {
+        return ModelScan.addModelDir(dir);
+      },
+
+      removeModelDir: async ({ dir }) => {
+        return ModelScan.removeModelDir(dir);
+      },
+
       deleteLocalModel: async ({ path }) => {
         return ModelStore.deleteLocalModel(path);
       },
@@ -2467,7 +2633,21 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       getModelDirs: async () => {
-        return { dirs: ModelStore.getModelsDirs() };
+        const primary = ModelStore.getModelsBaseDirForRuntime();
+        const hfCache = ModelScan.getHfHubCacheDir();
+        const extra = ModelScan.getExtraModelDirs();
+        return {
+          dirs: [primary, ...extra],
+          entries: [
+            { path: primary, kind: "primary" as const, ...ModelScan.describeModelDir(primary) },
+            ...extra.map((d) => ({
+              path: d,
+              kind: "extra" as const,
+              ...ModelScan.describeModelDir(d),
+            })),
+            { path: hfCache, kind: "hf-cache" as const, ...ModelScan.describeHfCache() },
+          ],
+        };
       },
 
       getAboutInfo: async () => {
@@ -2964,6 +3144,15 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         }
       },
 
+      // Agent 生图弹窗（media-setup）：用户点确认 / 取消后回传，弹窗里也可扫描候选模型
+      resolveMediaSetup: async (params) => {
+        return { ok: MediaSetup.resolveMediaSetup(params.id, params) };
+      },
+
+      scanMediaSetupCandidates: async (params) => {
+        return MediaSetup.scanSetupCandidates(params ?? {});
+      },
+
       // AI 视频生成
       submitVideoGeneration: async (params) => {
         return VideoGen.submitVideoGeneration(params);
@@ -3416,10 +3605,127 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
           return { ok: false, path: dir };
         }
       },
+
+      // ---------------------------------------------------------------------
+      // 全局备份 / 恢复
+      // ---------------------------------------------------------------------
+
+      backupList: async ({ dir } = {}) => Backup.listBackups({ dir }),
+
+      backupEstimate: async () => Backup.estimateBackup(),
+
+      backupOverview: async () => ({
+        dir: Backup.defaultBackupDir(),
+        appVersion: updateState.currentVersion,
+        active: Backup.activeBackupTask(),
+      }),
+
+      backupChooseDir: async () => {
+        const dirs = await Utils.openFileDialog({
+          canChooseFiles: false,
+          canChooseDirectory: true,
+          allowsMultipleSelection: false,
+          startingFolder: Backup.defaultBackupDir(),
+        });
+        const dir = (dirs ?? [])[0]?.trim();
+        if (!dir) return { dir: null };
+        // 选完立刻试写一次：只读盘 / 沙箱目录在创建到一半时才发现就太晚了
+        const check = await Backup.checkWritableDir(dir);
+        return { dir, error: check.error, freeBytes: check.freeBytes };
+      },
+
+      backupChooseFile: async () => {
+        // 不过滤扩展名：.omnibackup 不是系统已知类型，按扩展名过滤会让文件在选择器里
+        // 变灰；合法性交给 inspectBackup 校验（不是备份会明确报错）。
+        const paths = await Utils.openFileDialog({
+          allowedFileTypes: "*",
+          canChooseFiles: true,
+          canChooseDirectory: false,
+          allowsMultipleSelection: false,
+          startingFolder: Backup.defaultBackupDir(),
+        });
+        return { path: (paths ?? [])[0]?.trim() ?? null };
+      },
+
+      backupInspect: async ({ path }) => Backup.inspectBackup({ path }),
+
+      backupCreate: async (params: BackupCreateRequest) => {
+        // 结果通过事件回传：GB 级媒体可能要跑几分钟，不能挂在一次请求上。
+        return Backup.startCreateBackup({ ...params, ctx: backupCtx() });
+      },
+
+      backupRestore: async (params: BackupRestoreRequest) => Backup.startRestoreBackup({ ...params, ctx: backupCtx() }),
+
+      backupCancel: async ({ taskId }) => ({ ok: Backup.cancelBackupTask(taskId) }),
+
+      backupDelete: async ({ path, dir }) => Backup.deleteBackup({ path, dir }),
+
+      backupReveal: async ({ path }) => {
+        try {
+          Utils.showItemInFolder(path);
+          return { ok: true };
+        } catch {
+          return { ok: false };
+        }
+      },
+
+      backupRemoteGet: async () => {
+        const config = Backup.readRemoteConfig({ connection: sqliteClient });
+        return { config, configured: Backup.isRemoteConfigured(config) };
+      },
+
+      backupRemoteSave: async ({ config }) => {
+        try {
+          Backup.writeRemoteConfig(config, { connection: sqliteClient });
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+
+      backupRemoteTest: async () => Backup.testRemote({ connection: sqliteClient }),
+
+      backupRemoteList: async () => {
+        try {
+          return { entries: await Backup.listRemoteBackups({ connection: sqliteClient }) };
+        } catch (err) {
+          return { entries: [], error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+
+      backupRemoteDownload: async (params: BackupDownloadRequest) =>
+        Backup.startDownloadRemoteBackup({ ...params, ctx: backupCtx() }),
+
+      backupRemoteDelete: async ({ fileName }) => {
+        try {
+          await Backup.deleteRemoteBackup(fileName);
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
     },
     messages: {},
   },
 });
+
+/**
+ * 备份上下文：复用应用自己的 SQLite 连接（单写者，避免恢复时与运行中的应用抢锁），
+ * 版本号取当前应用版本，写进清单便于排错。
+ */
+function backupCtx(): Partial<Backup.BackupContext> {
+  return { appVersion: updateState.currentVersion, connection: sqliteClient };
+}
+
+/** 备份进度 / 终态推送到 webview。 */
+export function initBackupBroadcast(win: BrowserWindowWithRPC) {
+  Backup.subscribeBackupEvents((event) => {
+    try {
+      if (event.type === "progress") win.webview.rpc?.send.backupProgress(event.progress);
+      else win.webview.rpc?.send.backupFinished(event);
+    } catch {}
+  });
+}
 
 /**
  * webview 重新加载（刷新 / HMR）后补推一次当前状态。
@@ -3584,6 +3890,15 @@ export function initMlxModelDownloadBroadcast(win: BrowserWindowWithRPC) {
   MlxGen.onMlxGenPhase((p) => {
     try {
       win.webview.rpc?.send.mlxGenPhase(p);
+    } catch {}
+  });
+}
+
+/** Agent 生图前的「需要用户介入」弹窗：推给界面，用户确认后走 RPC resolveMediaSetup 回传。 */
+export function initMediaSetupBroadcast(win: BrowserWindowWithRPC) {
+  MediaSetup.onMediaSetup((payload) => {
+    try {
+      win.webview.rpc?.send.mediaSetup(payload);
     } catch {}
   });
 }

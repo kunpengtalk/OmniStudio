@@ -51,11 +51,13 @@ import {
   CollapsibleTrigger,
 } from "@ui/collapsible";
 import { useT } from "@stores/ui-lang";
+import { MediaSourceBadge, MediaSourceFilter } from "@components/media-source-badge";
 import { useImageStore } from "@stores/image";
 import { useMlxInstallStore } from "@stores/mlx-install";
 import { useMlxModelDownloadStore } from "@stores/mlx-model-download";
 import { useMlxModelRunStore } from "@stores/mlx-model-run";
 import type { ImageGenBackend, ImageRecordRow } from "../../bun/image-gen";
+import type { MediaSource } from "../../bun/db/schema";
 import type { MlxModelInfo, MlxGenStatus, MlxGenPhase } from "../../bun/mlx-gen";
 import { cn } from "@/mainview/lib/utils";
 
@@ -444,6 +446,7 @@ function HistoryCard({ record, onDelete }: { record: ImageRecordRow; onDelete: (
             <span className="truncate">{record.model}</span>
           </>
         )}
+        <MediaSourceBadge source={record.source} className="ml-auto" />
       </p>
     </div>
   );
@@ -459,6 +462,7 @@ function HistoryScreen() {
     queryFn: () => rpcClient.listImageRecords(undefined),
   });
   const [toDelete, setToDelete] = useState<ImageRecordRow | null>(null);
+  const [source, setSource] = useState<MediaSource | "all">("all");
   const del = useMutation({
     mutationFn: (id: number) => rpcClient.deleteImageRecord({ id }),
     onSuccess: () => {
@@ -466,7 +470,9 @@ function HistoryScreen() {
       queryClient.invalidateQueries({ queryKey: ["image-records"] });
     },
   });
-  const records = (data?.records ?? []).filter((r) => r.status === "done" && r.imageUrl);
+  const records = (data?.records ?? [])
+    .filter((r) => r.status === "done" && r.imageUrl)
+    .filter((r) => source === "all" || r.source === source);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -483,6 +489,7 @@ function HistoryScreen() {
         <Badge variant="secondary" className="h-5 text-[10px]">
           {records.length}
         </Badge>
+        <MediaSourceFilter value={source} onChange={setSource} className="ml-auto" />
       </div>
 
       {isLoading ? (

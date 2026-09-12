@@ -323,6 +323,7 @@ describe("gateway meta endpoints", () => {
       "/v1/audio/speech",
       "/v1/audio/transcriptions",
       "/v1/images/generations",
+      "/v1/media",
       "/health",
     ]) {
       expect(paths).toContain(p);

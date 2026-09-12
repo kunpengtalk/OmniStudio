@@ -16,6 +16,7 @@ import { Button } from "@ui/button";
 import { ScrollArea } from "@ui/scroll-area";
 import { useModelDownloadStore } from "@stores/model-download";
 import { useT } from "@stores/ui-lang";
+import { SourceBadge } from "./source-badge";
 import type { DownloadTask } from "../../bun/download-manager";
 import { cn } from "@/mainview/lib/utils";
 
@@ -69,9 +70,13 @@ function TaskRow({ task }: { task: DownloadTask }) {
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <p className="truncate text-xs font-medium">{task.fileName}</p>
-          <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/70">
-            {task.repo}
-          </p>
+          <div className="mt-0.5 flex items-center gap-1.5">
+            {/* 每个任务都能看出字节是从哪个站拉下来的 */}
+            <SourceBadge source={task.source} />
+            <span className="truncate font-mono text-[10px] text-muted-foreground/70">
+              {task.repo}
+            </span>
+          </div>
           <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
             {formatBytes(task.received)}
             {task.total ? ` / ${formatBytes(task.total)}` : ""}
