@@ -4,7 +4,7 @@ import { controlRequest, ensureAppRunning } from "../client";
 import type { ControlResult } from "../client";
 import { getAllSettingsFallback } from "../db";
 import { availableEngines } from "../../shared/engines";
-import { CMD_HELP } from "../help";
+import { helpFor } from "../help";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -131,8 +131,13 @@ function printStatus(r: ControlResult) {
 
 export async function cmdServer(parsed: ParsedArgs) {
   const [action, name] = parsed.positionals;
-  if (!action || parsed.options.help) {
-    console.log(CMD_HELP.server);
+  if (action === "help" || (!action && parsed.options.help)) {
+    // `omi server help <action>` / `omi help server <action>`。
+    console.log(helpFor(["server", action === "help" ? name : undefined]));
+    return;
+  }
+  if (!action) {
+    console.log(helpFor(["server"]));
     return;
   }
   switch (action) {
@@ -184,7 +189,7 @@ export async function cmdServer(parsed: ParsedArgs) {
     default:
       if (name) console.log(`注意：当前只有一个本地推理服务器，${action} ${name} 中 "${name}" 会被忽略。`);
       console.error(`未知操作：${action}\n`);
-      console.log(CMD_HELP.server);
+      console.log(helpFor(["server"]));
       process.exitCode = 1;
   }
 }

@@ -3,12 +3,15 @@
  * 跑法：OMNI_DATA_DIR=/tmp/mcp-smoke bun run scripts/mcp-smoke.ts
  * （原理同 skills-smoke：db/index.ts 自行计算数据目录，兼容源码运行。）
  */
-import { mkdirSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
 // 先准备环境再 import 业务模块（db 打开即跑迁移）。
-const dataDir = process.env.OMNI_DATA_DIR ?? path.join(tmpdir(), "omni-mcp-smoke");
+// 每次运行用独立目录：固定目录名会让第二轮运行读到上一轮写入的服务器配置与
+// echo-server.ts 残留 —— 冒烟脚本必须可重复运行。
+const providedDataDir = process.env.OMNI_DATA_DIR;
+const dataDir = providedDataDir ?? mkdtempSync(path.join(tmpdir(), "omni-mcp-smoke-"));
 mkdirSync(dataDir, { recursive: true });
 process.env.OMNI_DATA_DIR = dataDir;
 
@@ -148,6 +151,13 @@ if (addTool) {
 }
 deleteMcpServer(httpSaved.id!);
 httpServer.stop(true);
+
+// 只清理自己建的临时目录；调用方显式指定 OMNI_DATA_DIR 时保留现场。
+if (!providedDataDir) {
+  try {
+    rmSync(dataDir, { recursive: true, force: true });
+  } catch {}
+}
 
 console.log(failed === 0 ? "\nMCP smoke 全部通过" : `\n${failed} 项失败`);
 process.exit(failed === 0 ? 0 : 1);

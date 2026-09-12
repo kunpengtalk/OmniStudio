@@ -1,5 +1,5 @@
 import { parseArgs, optBool } from "./args";
-import { CMD_HELP, HELP_TEXT } from "./help";
+import { HELP_TEXT, helpFor } from "./help";
 import {
   cmdRestart,
   cmdServer,
@@ -13,10 +13,12 @@ import { cmdServe } from "./commands/serve";
 import { cmdInstall } from "./commands/install";
 import { cmdUpdate, cmdVersion } from "./commands/meta";
 import { cmdMemory } from "./commands/memory";
+import { cmdGuide } from "./commands/guide";
 
 type Handler = (parsed: ReturnType<typeof parseArgs>) => Promise<void>;
 
-const COMMANDS: Record<string, Handler> = {
+/** 命令表（导出供 scripts/omi-docs-smoke.ts 校验帮助文本与实现一致）。 */
+export const COMMANDS: Record<string, Handler> = {
   start: cmdStart,
   stop: cmdStop,
   restart: cmdRestart,
@@ -30,6 +32,7 @@ const COMMANDS: Record<string, Handler> = {
   status: cmdStatus,
   server: cmdServer,
   install: cmdInstall,
+  guide: cmdGuide,
   version: cmdVersion,
   update: cmdUpdate,
 };
@@ -49,8 +52,7 @@ export async function main(argv: string[]): Promise<number> {
     return 0;
   }
   if (cmd === "help") {
-    const target = rest[0];
-    console.log(target ? CMD_HELP[target] ?? HELP_TEXT : HELP_TEXT);
+    console.log(helpFor(rest));
     return 0;
   }
 
@@ -61,16 +63,20 @@ export async function main(argv: string[]): Promise<number> {
     return 1;
   }
 
-  // 子命令帮助：`omi <cmd> -h/--help` 优先于全局帮助
+  // 子命令帮助：`omi <cmd> [子命令] -h/--help` 优先于全局帮助
+  // （`omi memory add -h`、`omi help memory add`、`omi launch claude -h` 等价）。
   if (optBool(parsed.options, "help") || parsed.options.h === true) {
-    console.log(CMD_HELP[cmd] ?? HELP_TEXT);
+    console.log(helpFor([cmd, rest[0]]));
     return 0;
   }
 
   try {
     // 命令处理函数里 positionals 从用户参数开始（不含命令名本身）。
     await handler({ ...parsed, positionals: rest });
-    return 0;
+    // 处理函数用 process.exitCode 标记「已打印错误、但参数解析本身成功」
+    // （未知子命令等）；这里把它翻译成 main 的返回值，否则会被
+    // bin/omi.ts 的 process.exit(0) 覆盖掉。
+    return process.exitCode ? 1 : 0;
   } catch (err) {
     console.error(`omi ${cmd} 执行出错：${err instanceof Error ? err.message : String(err)}`);
     return 1;

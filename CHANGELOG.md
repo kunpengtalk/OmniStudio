@@ -20,6 +20,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 - **OCR · PP-OCRv6 本地引擎（PaddleOCR）**：新增第三套本地 OCR 引擎，走 ONNX / PaddlePaddle CPU 装入独立 venv（`userData/engines/paddleocr`），主进程启动常驻 Python worker（`ppocr-worker.py`，JSON-lines stdio 协议），模型加载一次常驻内存、识别不阻塞界面；内置 PP-OCRv6 **medium** 档（约 140 MB，34.5M 参数）一键安装与首载自动下载，安装日志与加载 / 识别阶段实时推送到界面，全程离线无需 API Key。
 - **OCR · 三引擎补全与模型详情**：Tesseract（一键安装 + 多语言 LSTM 语言包）/ PaddleOCR / VLM 三个引擎页签补齐引擎状态、安装与下载进度、识别记录；模型详情改为原地打开（不再跳页）。
 - **翻译 · 同传翻译**：翻译页新增「同传翻译」——打开麦克风实时转写（复用 whisper.cpp / audio.cpp / OpenAI 兼容三套 ASR 引擎），并同步输出多种目标语言译文同屏滚动。
+- **设置 · 命令行手册页**：设置 → 工具 → 命令行，把 `omi` 的完整用法搬进应用——安装启用、启动应用与推理服务器、模型加载与切换、共享记忆（CLI / stdio MCP / HTTP MCP / REST）、编码工具（code）加载、引擎依赖与版本检查，每条命令与记忆接入片段都可一键复制（MCP / REST 片段里的网关地址取自当前设置）；内容与 `omi guide`、`docs/omi-cli.md` 同源（`src/shared/cli-docs.ts`），中英双语跟随界面语言。
+- **架构文档**：新增 `docs/architecture.md` —— 面向维护者的结构说明：进程模型与五类进程边界、主进程各层（RPC / 推理运行时 / 模型库 / 智能层 / 媒体管线）、对外接口面（网关 / 图片服务 / 控制 socket 及端口与鉴权）、前端与 CLI 架构、数据层与目录布局、四条端到端数据流、不变量清单与已知架构债。
 
 ### Changed / 变更
 
@@ -29,14 +31,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 - **对话**：发送消息可挂载知识库（`kbIds`）并在重新生成时复用检索；assistant 消息新增 `citations` 字段承载引用溯源。
 - **网关文档**：OpenAPI 补充 `/v1/memories`、`/mcp` 端点说明；`/v1/models` 聚合不变。
 - **`omi` CLI**：新增 `omi memory`（`add` / `search` / `list` / `mcp`）——应用运行时走控制 socket（`memoryAdd` / `memorySearch` / `memoryList`），未运行时直连 SQLite；`omi help memory` 有完整用法。
+- **`omi` 帮助体系与手册**：新增 `omi guide`（纯文本 / `--md` / `--json` / `--lang en`）打印完整手册（安装、启动、模型加载、记忆调用、编码工具加载），`docs/omi-cli.md` 由同一份数据源生成（`omi guide --md`，`scripts/omi-docs-smoke.ts` 校验命令表、帮助文本与文档三者同步）；`omi help` 支持子命令与工具级帮助（`omi help memory add` / `omi help launch claude` / `omi server help logs`），`omi memory <子命令> -h` 等价；总览补齐此前遗漏的 `memory`、`guide` 与常用示例，`omi launch --list` 与错误提示指向对应帮助。
 - **SQLite 并发**：数据库启用 WAL、`busy_timeout=5000` 与 `synchronous=NORMAL`，支撑 `omi memory` / MCP 桥接在应用之外直连同一个库读写。
 - **媒体分发**：图片服务器为视频容器补全 MIME（`.mp4` / `.webm` / `.mov` / `.mkv` 返回 `video/*`，成片可用 `<video>` 播放）。
 - **国际化**：中英双语词条补齐新应用与设置页（`shared/i18n.ts` 新增 1255 行）。
+- **文档口径对齐**：`ROADMAP.md` 完成度重估（生图闭环 / 视频生成 / 知识库 / 记忆 / MCP / Skills / 下载持久化 / `omi launch` 等已落地项从"未启动"移入已完成，vLLM / SGLang 一键安装与实测、内存生命周期、平台支持改为按实际状态标注，并注明 `scripts/backlog.tsv` 是一次性导入载荷、看板状态以 GitHub Projects 为准）；`AGENTS.md` 补齐遗漏的 `memory` / `guide` 命令、Agent SDK 与 MLX 引擎，并新增「Hard Rules」一节固化跨进程边界约定；README 中英双份的技术栈表补上 Agent SDK 与 MLX、修正残留的 `omni` 提法，并挂上架构文档入口。
 
 ### Fixed / 修复
 
 - **迁移 0013 在老库升级时被跳过**：drizzle 以「库内已记录的最大 `created_at`」判断是否跳过迁移，而 `0013_uneven_lester` 的 `when` 小于前一条 `0012`，导致从旧版本升级的用户（库内最大 `when` 已被后续迁移抬高）**不会建出 `user_prompts` 表**，「我的提示词」功能直接报错；现将其 `when` 调整为严格递增区间内，并把该迁移改写为幂等 DDL（`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`），使「已建表 / 曾被跳过 / 已升到最新」三种库都安全。
 - **知识库向量补齐**：`embedDocChunks` 内改为循环外复制一份配置对象（原写法在循环中展开累加，且可能污染调用方传入的对象）。
+- **手册漂移无人拦截**：`scripts/omi-docs-smoke.ts` 校验命令表 ↔ 帮助文本 ↔ 数据源 ↔ `docs/omi-cli.md` 四者同步，但它此前既不在 `test:smoke` 列表里、CI 也不会执行，文档漂移事实上不会被发现；现已纳入 `test:smoke`，随 CI 一起跑。
+- **冒烟脚本不可重复运行**：`memory-smoke` / `mcp-smoke` / `omi-docs-smoke` 用固定名字的临时目录且从不清理，第二次运行时 `memory-smoke` 的计数断言（列表 2 条 / 检索命中 / 删除后剩 2 条）会读到上一轮残留数据而失败，"重跑一遍 test:smoke 就红"；现统一改为 `mkdtempSync` 建一次性目录并在结束时清理（与 `kb-*` / `video-gen` 冒烟脚本一致），调用方显式传 `OMNI_DATA_DIR` 时仍保留现场。
 
 ### Internal / 内部
 

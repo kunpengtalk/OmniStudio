@@ -2,11 +2,14 @@
  * 记忆功能冒烟：临时数据目录 → 迁移 → CRUD → 检索热度 → Agent 工具 → 系统提示注入 → 开关。
  * 跑法：OMNI_DATA_DIR=/tmp/omni-memory-smoke bun run scripts/memory-smoke.ts
  */
-import { mkdirSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
-const dataDir = process.env.OMNI_DATA_DIR ?? path.join(tmpdir(), "omni-memory-smoke");
+// 每次运行用独立目录：固定目录名会让第二轮运行的计数断言（列表 2 条 / 检索命中 /
+// 删除后剩 2 条）读到上一轮的残留数据而失败 —— 冒烟脚本必须可重复运行。
+const providedDataDir = process.env.OMNI_DATA_DIR;
+const dataDir = providedDataDir ?? mkdtempSync(path.join(tmpdir(), "omni-memory-smoke-"));
 mkdirSync(dataDir, { recursive: true });
 process.env.OMNI_DATA_DIR = dataDir;
 
@@ -195,6 +198,13 @@ if (started.ok) {
   check("OpenAPI 含记忆端点", spec.paths?.["/v1/memories"] && spec.paths?.["/mcp"]);
 
   await gateway.stopGateway();
+}
+
+// 只清理自己建的临时目录；调用方显式指定 OMNI_DATA_DIR 时保留现场。
+if (!providedDataDir) {
+  try {
+    rmSync(dataDir, { recursive: true, force: true });
+  } catch {}
 }
 
 console.log(failed === 0 ? "\nMemory smoke 全部通过" : `\n${failed} 项失败`);

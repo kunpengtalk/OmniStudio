@@ -12,6 +12,7 @@ import {
   CopyIcon,
   HardDriveIcon,
   TerminalSquareIcon,
+  TerminalIcon,
   LayoutDashboardIcon,
   StarIcon,
   BoxIcon,
@@ -39,6 +40,7 @@ import { WebSearchTab } from "./web-search-tab";
 import { McpTab } from "./mcp-tab";
 import { MemoryTab } from "./memory-tab";
 import { GeneralPrefsTab, AppearanceTab } from "./prefs-tabs";
+import { CliTab } from "./cli-tab";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import { DashboardScreen } from "../dashboard-screen";
@@ -132,6 +134,7 @@ type SettingsTab =
   | "websearch"
   | "memory"
   | "mcp"
+  | "cli"
   | "general"
   | "appearance"
   | "about";
@@ -151,6 +154,7 @@ const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
   websearch: { icon: <GlobeIcon className="size-4" />, labelKey: "settings.webSearch.title" },
   memory: { icon: <BrainIcon className="size-4" />, labelKey: "settings.memory.title" },
   mcp: { icon: <PlugIcon className="size-4" />, labelKey: "settings.mcp.title" },
+  cli: { icon: <TerminalIcon className="size-4" />, labelKey: "settings.cli.title" },
   general: { icon: <SlidersHorizontalIcon className="size-4" />, labelKey: "settings.prefs.general" },
   appearance: { icon: <PaletteIcon className="size-4" />, labelKey: "settings.appearance" },
   about: { icon: <GithubIcon className="size-4" />, labelKey: "settings.aboutTab.title" },
@@ -167,10 +171,26 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
     labelKey: "settings.group.services",
     tabs: ["gateway", "integrations", "benchmark", "performance"],
   },
-  { labelKey: "settings.group.tools", tabs: ["websearch", "memory", "mcp"] },
+  { labelKey: "settings.group.tools", tabs: ["websearch", "memory", "mcp", "cli"] },
   { labelKey: "settings.group.prefs", tabs: ["general", "appearance", "about"] },
   { labelKey: "settings.group.data", tabs: ["logs"] },
 ];
+
+/** 自带头部（PageHeader / 宽版面板）的页面不再重复显示通用标题。 */
+const SELF_HEADED_TABS: SettingsTab[] = [
+  "network",
+  "defaults",
+  "about",
+  "websearch",
+  "memory",
+  "mcp",
+  "cli",
+  "general",
+  "appearance",
+];
+
+/** 命令 / 代码片段较宽，命令行页与云服务、默认模型一样放宽内容宽度。 */
+const WIDE_TABS: SettingsTab[] = ["network", "defaults", "cli"];
 
 function FieldGrid({
   fields,
@@ -789,11 +809,11 @@ export function SettingsScreen() {
           <div
             className={cn(
               "mx-auto w-full px-6 py-6",
-              activeTab === "network" || activeTab === "defaults" ? "max-w-5xl" : "max-w-2xl",
+              WIDE_TABS.includes(activeTab) ? "max-w-5xl" : "max-w-2xl",
             )}
           >
             {/* 自带头部（PageHeader / 宽版面板）的页面不再重复显示通用标题 */}
-            {!["network", "defaults", "about", "websearch", "memory", "mcp", "general", "appearance"].includes(activeTab) && (
+            {!SELF_HEADED_TABS.includes(activeTab) && (
               <div className="mb-6">
                 <h2 className="text-lg font-semibold tracking-tight">{t("settings.title")}</h2>
                 <p className="text-xs text-muted-foreground">{t("settings.subtitle")}</p>
@@ -821,6 +841,8 @@ export function SettingsScreen() {
             {activeTab === "memory" && <MemoryTab />}
 
             {activeTab === "mcp" && <McpTab />}
+
+            {activeTab === "cli" && <CliTab />}
 
             {activeTab === "general" && (
               <GeneralPrefsTab form={form} updateField={updateField} />

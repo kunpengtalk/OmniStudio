@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import { optString, type ParsedArgs } from "../args";
 import { controlRequest } from "../client";
 import { resolveDataDir } from "../data-dir";
+import { helpFor } from "../help";
 import type { MemoryCategory, MemoryEntry } from "../../shared/memory";
 import { MEMORY_MCP_TOOLS, MEMORY_MCP_SERVER_INFO, handleMemoryMcpCall } from "../../bun/memory-api";
 
@@ -53,20 +54,18 @@ export async function cmdMemory(parsed: ParsedArgs): Promise<void> {
       return cmdList();
     case "mcp":
       return runMcpServer();
+    case "help":
+      // `omi memory help [子命令]`，与 `omi help memory [子命令]` 等价。
+      console.log(helpFor(["memory", parsed.positionals[1]]));
+      return;
     default:
-      console.error(
-        [
-          "用法：omi memory <子命令>",
-          "",
-          "  add <内容> [--category fact|preference|experience|skill|other] [--tags a,b]",
-          "              写入一条记忆（Agent 写回通道）",
-          "  search <关键词> [--limit 8]",
-          "              检索记忆",
-          "  list         列出全部记忆",
-          "  mcp          作为 stdio MCP 服务器运行（omni-memory，供外部 Agent 接入）",
-        ].join("\n"),
-      );
-      process.exit(sub ? 1 : 0);
+      if (!sub) {
+        console.log(helpFor(["memory"]));
+        return;
+      }
+      console.error(`未知子命令：${sub}\n`);
+      console.log(helpFor(["memory"]));
+      process.exitCode = 1;
   }
 }
 

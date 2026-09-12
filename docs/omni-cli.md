@@ -1,4 +1,8 @@
-# omni — OmniStudio 命令行工具
+# omni — OmniStudio 命令行工具（旧版）
+
+> **注意**：本页记录的是早期 `omni` 命令（`chat` / `doctor` / `config` / `gateway` 等，入口 `src/cli/omni.ts`）。
+> 现在主推的是 **`omi`** 命令（`src/cli/index.ts`：启动应用、推理服务器、模型加载、共享记忆、编码工具启动器），
+> 手册见 [omi-cli.md](./omi-cli.md)；终端里 `omi guide` 可随时打印同一份内容。
 
 `omni` 把 OmniStudio 桌面应用的后端能力封装成全局命令行工具，**直接复用 `src/bun/` 的真实代码**（模型库、推理服务器、网关、聊天、设置），不重写一套。模型、配置、数据库与桌面应用完全共享——`omni model set` 激活的模型就是应用里默认的对话模型。
 

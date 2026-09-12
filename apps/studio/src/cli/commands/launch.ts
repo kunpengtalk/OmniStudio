@@ -103,13 +103,15 @@ export async function cmdLaunch(parsed: ParsedArgs) {
       const protocol = kind === "anthropic" ? "Anthropic" : kind === "openai" ? "OpenAI" : "CLI";
       console.log(`  ${tool.padEnd(10)} ${protocol} 兼容`);
     }
+    console.log("\n接线细节：omi help launch <工具>；完整手册：omi guide");
     return;
   }
 
   const tool = parsed.positionals[0];
   if (!tool) {
     fail(
-      `缺少工具名。可用：${Object.keys(TOOL_SPECS).join(" / ")}\n运行 'omi launch --list' 查看详情。`,
+      `缺少工具名。可用：${Object.keys(TOOL_SPECS).join(" / ")}\n` +
+        `运行 'omi launch --list' 查看工具清单，'omi guide' 查看完整用法。`,
     );
   }
   const kind = TOOL_SPECS[tool];

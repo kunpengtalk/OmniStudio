@@ -121,30 +121,31 @@ cd apps/studio && bun run dev
 cd apps/studio && bun run build:dev
 ```
 
-## 💻 omni 命令行（CLI）
+## 💻 omi 命令行（CLI）
 
-`omni` 是封装后端能力的全局命令行工具——启动应用、管理推理服务器、配置云端、唤起模型列表、拉起编码工具、读写共享记忆，**与桌面应用共享同一个数据库**（模型、设置、记忆即时互通）。
+`omi` 是封装后端能力的全局命令行工具——启动应用、管理推理服务器、配置云端、唤起模型列表、拉起编码工具、读写共享记忆，**与桌面应用共享同一个数据库**（模型、设置、记忆即时互通）。
 
 ```bash
-cd apps/studio && bun link    # 安装全局 omni 命令（放进 ~/.bun/bin）
-omni --help                    # 查看全部命令
-omni help <命令>                # 查看单个命令用法
+cd apps/studio && bun link    # 安装全局 omi 命令（放进 ~/.bun/bin）
+omi help                       # 查看全部命令
+omi help <命令> [子命令]         # 单个命令用法（如 omi help memory add）
+omi guide                      # 完整手册：安装 / 启动 / 模型加载 / 记忆调用 / 编码工具
 
-omni start --server            # 启动应用并拉起推理服务器
-omni model                     # 打开应用里的模型列表选模型
-omni model list                # 列出已安装模型
-omni chat "你好" --reasoning    # 本地/远端对话（自动拉起推理服务器）
-omni serve                     # 推理服务器 + 统一网关一体启动（前台长驻，CTRL+C 退出）
-omni launch codex --model qwen3-4b-q4_k_m  # 拉起编码工具并接入当前模型（自动挂载共享记忆）
-omni memory add "偏好用 pnpm"    # 写入共享记忆（Agent 与 CLI 共用一份库）
-omni memory search 构建工具      # 检索记忆
-omni memory mcp                # 以 stdio MCP 服务器运行，供编码工具读写同一份记忆
-omni doctor                    # 环境体检
-omni config get INFERENCE_ENGINE
-omni status / omi models / omi stop / omi serve --port 8090
+omi start --server             # 启动应用并拉起推理服务器
+omi model --select             # 终端里选择活动模型（--list 只列出，不带选项打开应用模型列表）
+omi models                     # 本地 + 云端模型清单；omi model-info <名字> 看详情
+omi serve --port 8090          # 无界面常驻运行推理服务器（前台长驻，CTRL+C 退出）
+omi launch codex --model qwen3-4b-q4_k_m  # 拉起编码工具并接入当前模型（自动挂载共享记忆）
+omi memory add "偏好用 pnpm"    # 写入共享记忆（Agent 与 CLI 共用一份库）
+omi memory search 构建工具      # 检索记忆
+omi memory mcp                 # 以 stdio MCP 服务器运行，供编码工具读写同一份记忆
+omi server logs                # 服务器日志尾部；omi install 检查引擎依赖
+omi status
 ```
 
-原理：应用主进程在数据目录监听 Unix socket（`omni-control.sock`，0600 权限），`omi` 通过该通道唤醒窗口、跳转页面、启停服务器、读写设置；应用未运行时 `models` / `model-info` / `cloud` / `memory` 直接读同一个 SQLite 兜底。帮助：`omi help` 或 `omi <command> --help`，完整手册见 [docs/omni-cli.md](./docs/omni-cli.md)。
+原理：应用主进程在数据目录监听 Unix socket（`omni-control.sock`，0600 权限），`omi` 通过该通道唤醒窗口、跳转页面、启停服务器、读写设置；应用未运行时 `models` / `model-info` / `cloud` / `memory` 直接读同一个 SQLite 兜底。
+
+文档：完整手册 [docs/omi-cli.md](./docs/omi-cli.md)（由 `omi guide --md` 生成，与应用内「设置 → 工具 → 命令行」同源）；旧版 `omni` 命令（`chat` / `doctor` / `config` 等）见 [docs/omni-cli.md](./docs/omni-cli.md)。
 
 ## 🧩 技术栈
 
@@ -152,8 +153,8 @@ omni status / omi models / omi stop / omi serve --port 8090
 |---|---|
 | 桌面 | [Electrobun](https://blackboard.sh/electrobun) + Bun |
 | 前端 | React 19, Tailwind, shadcn/ui, Zustand, TanStack Query |
-| AI | Vercel AI SDK (`ai`), `@ai-sdk/openai-compatible` |
-| 推理引擎 | llama.cpp, vLLM, SGLang, OpenAI-compatible |
+| AI | Pi Agent（`@earendil-works/pi-agent-core` + `pi-ai`）驱动 Agent 循环；Vercel AI SDK（`ai` / `@ai-sdk/openai-compatible`）用于 OCR / 翻译等一次性调用 |
+| 推理引擎 | llama.cpp, vLLM, SGLang, MLX, OpenAI-compatible |
 | 语音与 OCR | audio.cpp, whisper.cpp, Tesseract, PaddleOCR, Edge-TTS, VLM |
 | 视频生成 | MiniMax (H3), Seedance (火山方舟), ComfyUI |
 | 知识库与记忆 | 纯 JS 向量化 + BM25×RRF 混合检索 + `/v1/rerank` 重排（无外部向量库 / FTS）、SQLite 共享记忆 |
@@ -184,6 +185,8 @@ apps/
 │       └── shared/         # shared constants, i18n, engine metadata 共享常量 / 国际化 / 引擎元数据
 ├── landing/                # marketing site (kunpengtalk.com) 官网
 ```
+
+架构详解（进程边界、主进程分层、对外接口面、不变量与已知架构债）见 [docs/architecture.md](./docs/architecture.md)。
 
 ## 🗺 Roadmap / 路线图
 
