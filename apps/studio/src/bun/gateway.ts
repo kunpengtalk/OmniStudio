@@ -7,6 +7,7 @@ import * as TTSLocal from "./tts-local";
 import * as Asr from "./asr";
 import { getTTSProviderConfig, listProviderModels, runTTSEdge } from "./voice";
 import { listInstalledModels, slugModelFileName } from "./model-store";
+import { getChatModelName, getLocalRequestModelId } from "./chat-model";
 import * as Memory from "./memory";
 import type { MemoryCategory } from "../shared/memory";
 import { handleMcpRequest } from "./kb-mcp";
@@ -367,11 +368,32 @@ class UpstreamError extends Error {
   }
 }
 
+/**
+ * 发往本地后端前，把请求里的模型 id 换成推理服务器实际认的那个。
+ *
+ * 客户端（编码工具 / 第三方）填的是我们写进配置的服务名 slug；llama.cpp / vLLM /
+ * SGLang 用 `--alias` / `--served-model-name` 起服务，slug 就是 id；MLX 没有别名机制，
+ * mlx_lm.server 对本地目录暴露的 id 是解析后的绝对路径 —— 填 slug 会被它当成 HF repo
+ * id 去下载，请求就一直没有响应。只改「客户端要的正是当前活动本地模型」的情况，
+ * 其它 id 原样透传（可能是云端模型或另一个本地模型）。
+ */
+function localizeModelId(backend: ChatBackend, params: Record<string, unknown>): Record<string, unknown> {
+  if (backend.kind !== "local") return params;
+  const requested = typeof params.model === "string" ? params.model.trim() : "";
+  // 本地后端认的 id（与 SERVER_MODE 无关：这里已经确定要发给本地服务器）。
+  const target = getLocalRequestModelId();
+  if (!target || target === requested) return params;
+  const activeIds = new Set(
+    [getChatModelName(), getSetting("LOCAL_MODEL_NAME"), getSetting("LOCAL_MODEL_PATH")].filter(Boolean),
+  );
+  return requested && activeIds.has(requested) ? { ...params, model: target } : params;
+}
+
 async function callUpstreamChat(backend: ChatBackend, params: Record<string, unknown>): Promise<Response> {
   return await fetch(`${backend.base}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...backend.headers },
-    body: JSON.stringify(params),
+    body: JSON.stringify(localizeModelId(backend, params)),
     signal: AbortSignal.timeout(600_000),
   });
 }

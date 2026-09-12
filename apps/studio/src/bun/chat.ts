@@ -4,7 +4,7 @@ import { desc, eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { conversations, messages } from "./db/schema";
 import { getSetting, getActiveServerPort } from "./db/settings";
-import { getChatModelName } from "./chat-model";
+import { getChatModelName, getChatRequestModelId } from "./chat-model";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { recordUsage } from "./stats";
 import { webSearch } from "./web-search";
@@ -402,7 +402,8 @@ async function streamAssistantReply(opts: {
 }): Promise<{ ok: boolean; error?: string; content: string }> {
   const { conversationId, assistantId, payloadMessages } = opts;
 
-  const model = getChatModelName();
+  // 请求里要填本地服务器实际认的 id（MLX 是解析后的路径，见 getChatRequestModelId）
+  const model = getChatRequestModelId();
   const base = getChatBaseUrl();
   if (!model || !base) {
     const errMsg = !model ? "No model configured" : "No inference server configured";
@@ -567,7 +568,7 @@ async function streamAssistantReply(opts: {
     }
     if (buffer.trim()) consumeLine(buffer);
 
-    recordUsage(model, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0);
+    recordUsage(getChatModelName() || model, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0);
     // 收尾前先冲掉最后一批增量，避免 emitDone 先到、尾巴几个字后到。
     flushChunks();
   } catch (e) {
@@ -647,7 +648,8 @@ export async function sendMessage(
   if (!conv) return { ok: false, error: "Conversation not found" };
   if (!content.trim() && images.length === 0) return { ok: false, error: "Empty message" };
 
-  const model = getChatModelName();
+  // 请求里要填本地服务器实际认的 id（MLX 是解析后的路径，见 getChatRequestModelId）
+  const model = getChatRequestModelId();
   if (!model) {
     emitDone({ conversationId, messageId: Date.now(), content: "", error: "No model configured" });
     return { ok: false, error: "No model configured" };
@@ -717,7 +719,8 @@ export async function streamChatTurn(opts: {
   disableThinking?: boolean;
 }): Promise<{ ok: boolean; error?: string }> {
   const { conversationId, content } = opts;
-  const model = getChatModelName();
+  // 请求里要填本地服务器实际认的 id（MLX 是解析后的路径，见 getChatRequestModelId）
+  const model = getChatRequestModelId();
   if (!model) {
     emitDone({ conversationId, messageId: Date.now(), content: "", error: "No model configured" });
     return { ok: false, error: "No model configured" };
@@ -784,7 +787,8 @@ function cleanSearchQuery(raw: string): string {
 async function rewriteSearchQuery(latestQuery: string): Promise<string> {
   const raw = latestQuery.trim();
   const fallback = cleanSearchQuery(raw);
-  const model = getChatModelName();
+  // 请求里要填本地服务器实际认的 id（MLX 是解析后的路径，见 getChatRequestModelId）
+  const model = getChatRequestModelId();
   const base = getChatBaseUrl();
   if (!raw || !model || !base) return fallback;
 

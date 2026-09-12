@@ -2,7 +2,7 @@ import { eq, desc } from "drizzle-orm";
 import { db } from "./db";
 import { translationRecords } from "./db/schema";
 import { getSetting } from "./db/settings";
-import { getChatModelName } from "./chat-model";
+import { getChatModelName, getChatRequestModelId } from "./chat-model";
 import { ensureServerReady, getChatBaseUrl } from "./chat";
 import { recordUsage } from "./stats";
 import { translationLangLabel } from "../shared/translate";
@@ -133,7 +133,9 @@ export async function runTranslation(params: {
     }
   }
 
-  const model = getChatModelName();
+  // 请求里填本地服务器认的 id（MLX 是绝对路径）；记录与展示仍用服务名。
+  const model = getChatRequestModelId();
+  const modelLabel = getChatModelName() || model;
   const base = getChatBaseUrl();
   if (!model || !base) {
     return { error: !model ? "未配置模型" : "未配置推理服务器" };
@@ -193,7 +195,7 @@ export async function runTranslation(params: {
       usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
     const content = json.choices?.[0]?.message?.content?.trim() ?? "";
-    recordUsage(model, json.usage?.prompt_tokens ?? 0, json.usage?.completion_tokens ?? 0);
+    recordUsage(modelLabel, json.usage?.prompt_tokens ?? 0, json.usage?.completion_tokens ?? 0);
     if (!content) return { error: "模型未返回译文" };
 
     if (params.save === false) return { text: content };
@@ -204,7 +206,7 @@ export async function runTranslation(params: {
         targetLang: params.targetLang,
         text,
         result: content,
-        model,
+        model: modelLabel,
       })
       .returning()
       .get();

@@ -260,6 +260,11 @@ export function setActiveModel(pathToModel: string): { ok: boolean; error?: stri
     LOCAL_MODEL_PATH: target,
     LOCAL_MODEL_NAME: name,
     CHAT_MODEL: name,
+    // 用户刚在模型库里挑了一个具体的 MLX 目录模型：它才是要加载的那个。
+    // MLX 引擎面板「部署」写的 MLX_MODEL 优先级更高，不清掉就会继续加载预设。
+    ...(isDir && kind === "safetensors" && getSetting("INFERENCE_ENGINE") === "mlx"
+      ? { MLX_MODEL: "" }
+      : {}),
   });
   return { ok: true };
 }

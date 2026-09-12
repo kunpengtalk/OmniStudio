@@ -11,6 +11,7 @@ import {
   type InferenceEngine,
 } from "../shared/modelscope";
 import * as ModelStore from "./model-store";
+import { isMlxActive, resolveMlxModel } from "./runtimes/mlx";
 import { getStatus, restartServer, startServer } from "./server-manager";
 
 /**
@@ -44,6 +45,27 @@ export function getChatModelName(): string {
   }
 
   return getSetting("VLLM_MODEL_NAME") || "";
+}
+
+/**
+ * 发往**本地推理服务器**的请求里该填的模型 id（调用方已经确定要走本地）。
+ *
+ * 大多数引擎都带 `--alias` / `--served-model-name`（llama.cpp / vLLM / SGLang），
+ * 服务名 slug 就是它们认的 id；MLX 没有这个机制 —— mlx_lm.server 对本地目录暴露的
+ * id 是解析后的绝对路径，填 slug 会被它当成 HF repo id 去下载，请求就永远没有响应
+ * （见 `resolveMlxModel`）。展示 / 记录仍用 `getChatModelName()`，别把路径写进历史。
+ */
+export function getLocalRequestModelId(): string {
+  const name = getChatModelName();
+  if (!isMlxActive()) return name;
+  // MLX 下即便服务名是空的（云端模式残留 / 只配了本地目录），也要给出它认的 id
+  return resolveMlxModel().requestModelId || name;
+}
+
+/** 按当前模式（本地推理服务器 / 云端 API）该填的请求模型 id。 */
+export function getChatRequestModelId(): string {
+  if (getSetting("SERVER_MODE") === "local") return getLocalRequestModelId();
+  return getChatModelName();
 }
 
 export function getChatModel(): LanguageModel {

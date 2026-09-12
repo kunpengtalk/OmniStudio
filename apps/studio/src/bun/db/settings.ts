@@ -222,8 +222,12 @@ const DEFAULTS: Record<SettingsKey, string> = {
   INFERENCE_ENGINE: "llama.cpp",
   MLX_PORT: "18010",
   MLX_EXTRA_ARGS: "",
-  // DeepSeek V4.1 Flash 官方社区 MLX（4/8bit 混合）——MLX 引擎的默认部署模型。
-  MLX_MODEL: "pipenetwork/DeepSeek-V4.1-Flash-MLX-mixed-4_8bit",
+  // MLX 引擎部署的模型（HF repo id 或本地目录）。**必须留空**：这个键是「用户显式部署」
+  // 的标记，运行时优先用它 —— 一旦给默认值（曾默认是 DeepSeek V4.1 Flash 预设），
+  // 用户在模型库里选的本地 MLX 目录就会被预设盖住：启动时拿着预设 repo 去 HuggingFace
+  // 下载，下载不到就报 LocalEntryNotFoundError（「启动 / 加载都有问题」就是这么来的）。
+  // 预设仍在 MLX 引擎面板与引导流程里一键部署，那两处会显式写入本键。
+  MLX_MODEL: "",
   MLX_CACHE_SIZE_GB: "8",
   // 国内环境优先走 hf-mirror，置空则使用 HuggingFace 官方。
   MLX_HF_ENDPOINT: "https://hf-mirror.com",

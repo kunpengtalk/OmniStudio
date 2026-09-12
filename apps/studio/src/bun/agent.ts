@@ -18,7 +18,7 @@ import { db } from "./db";
 import { agentEvents, conversations, messages } from "./db/schema";
 import { getSetting } from "./db/settings";
 import { getChatBaseUrl, getHistory, ensureServerReady } from "./chat";
-import { getChatModelName } from "./chat-model";
+import { getChatModelName, getChatRequestModelId } from "./chat-model";
 import { recordUsage } from "./stats";
 import { buildAgentTools, buildReadOnlyTools } from "./agent-tools";
 import { buildMediaGenTools, buildMediaReadTools } from "./media-tools";
@@ -209,15 +209,16 @@ export function getAgentMode(): AgentMode {
   return AGENT_MODES.includes(mode) ? mode : "agent";
 }
 
-/** 构造指向当前推理服务（本地 llama.cpp / vLLM / SGLang 或远端 OpenAI 兼容 API）的 pi-ai Model。 */
+/** 构造指向当前推理服务（本地 llama.cpp / vLLM / SGLang / MLX 或远端 OpenAI 兼容 API）的 pi-ai Model。 */
 function buildModel(): Model<"openai-completions"> {
   const base = getChatBaseUrl().replace(/\/+$/, "");
   const baseUrl = /\/v1$/i.test(base) ? base : `${base}/v1`;
-  const id = getChatModelName();
+  // id 是发请求用的（MLX 下是它认的绝对路径），name 只用于展示。
+  const id = getChatRequestModelId();
   const contextWindow = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
   return {
     id,
-    name: id,
+    name: getChatModelName() || id,
     api: "openai-completions",
     provider: "omni-studio",
     baseUrl,

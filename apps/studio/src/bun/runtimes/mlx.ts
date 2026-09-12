@@ -1,5 +1,6 @@
 import type { Subprocess } from "bun";
 import { existsSync } from "fs";
+import { resolve as resolvePath } from "path";
 import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/settings";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
@@ -15,10 +16,52 @@ import type {
 
 const DOWNLOAD_PATTERN = /downloading|fetching|(\d+(\.\d+)?)\s*%|progress/i;
 
-
-
 function slugModelName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
+}
+
+/** 当前活动引擎是不是 MLX（请求侧判断「要不要换成 mlx 认的模型 id」）。 */
+export function isMlxActive(): boolean {
+  return getSetting("INFERENCE_ENGINE") === "mlx";
+}
+
+/** 本地路径 → mlx_lm.server 对外的 id：路径取解析后的绝对值，repo id 原样。 */
+function asMlxModelId(target: string): string {
+  try {
+    return existsSync(target) ? resolvePath(target) : target;
+  } catch {
+    return target;
+  }
+}
+
+/**
+ * MLX 模型解析：运行时与请求侧共用，保证「服务器加载的模型」与「请求里的 model id」一致。
+ *
+ * mlx_lm.server **没有** `--served-model-name` / `--alias` 这类参数：
+ *   - `--model` 传本地目录时，它对外暴露的 id 就是**解析后的绝对路径**（`/v1/models` 里正是它）；
+ *   - 传 repo id 时，id 就是那个 repo id（并在缓存里列出）。
+ * 请求里填错名字的后果不是一句报错，而是它拿着这个名字去 HuggingFace 找仓库 ——
+ * 找不到就抛 Repository Not Found、或者卡在下载上，表现出来就是「发消息一直没有返回」。
+ */
+export function resolveMlxModel(): { model: string; requestModelId: string } {
+  const mlxModel = (getSetting("MLX_MODEL") || "").trim();
+  if (mlxModel) return { model: mlxModel, requestModelId: asMlxModelId(mlxModel) };
+
+  const localPath = getSetting("LOCAL_MODEL_PATH");
+  if (localPath && existsSync(localPath)) {
+    return { model: localPath, requestModelId: asMlxModelId(localPath) };
+  }
+
+  const chatModel = (getSetting("CHAT_MODEL") || "").trim();
+  if (chatModel) return { model: chatModel, requestModelId: chatModel };
+
+  const customHf = getSetting("CUSTOM_HF_MODEL");
+  if (customHf) {
+    const repo = customHf.split(":")[0] ?? customHf;
+    return { model: repo, requestModelId: repo };
+  }
+
+  return { model: "", requestModelId: "" };
 }
 
 /**
@@ -122,26 +165,12 @@ export class MlxRuntime implements Runtime {
    * `LOCAL_MODEL_PATH`（本地目录）→ `CHAT_MODEL` → `CUSTOM_HF_MODEL`。
    * 传 repo id 时启动阶段由 mlx-lm 自动下载，无需提前准备文件。
    */
-  private resolveModel(): { model: string; servedName?: string } {
-    const mlxModel = (getSetting("MLX_MODEL") || "").trim();
-    if (mlxModel) {
-      return { model: mlxModel, servedName: slugModelName(mlxModel.split("/").pop() ?? mlxModel) };
-    }
-
-    const localPath = getSetting("LOCAL_MODEL_PATH");
-    if (localPath && existsSync(localPath)) {
-      const localName = getSetting("LOCAL_MODEL_NAME");
-      const base = localPath.split(/[\\/]/).pop() ?? "model";
-      return { model: localPath, servedName: slugModelName(localName || base) };
-    }
-
-    const chatModel = getSetting("CHAT_MODEL");
-    if (chatModel) return { model: chatModel, servedName: slugModelName(chatModel) };
-
-    const customHf = getSetting("CUSTOM_HF_MODEL");
-    if (customHf) return { model: customHf.split(":")[0] ?? customHf };
-
-    return { model: "" };
+  private resolveModel(): { model: string; servedName: string } {
+    const { model, requestModelId } = resolveMlxModel();
+    // servedName 只用于日志 / 命令预览的展示；请求侧要的是 requestModelId
+    // （MLX 没有 --served-model-name，本地目录的 id 是绝对路径）。
+    const base = requestModelId.split(/[\\/]/).filter(Boolean).pop() ?? requestModelId;
+    return { model, servedName: slugModelName(base) };
   }
 
   private buildArgs(model: string): string[] {

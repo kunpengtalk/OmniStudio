@@ -2,6 +2,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
 
 import { getSetting, getActiveServerPort } from "../db/settings";
+import { isMlxActive, resolveMlxModel } from "../runtimes/mlx";
 import { getModelProfile } from "../../shared/model-profiles";
 
 export type ModelEndpoint = {
@@ -10,7 +11,16 @@ export type ModelEndpoint = {
   model?: string;
 };
 
+/**
+ * 本地推理服务器认的模型 id（OCR / 知识库这些一次性调用用）。
+ * MLX 与其它引擎不同：它没有 `--served-model-name`，本地目录对外暴露的 id 是解析后的
+ * 绝对路径（见 `resolveMlxModel`），填服务名会被它当成 HF repo id 去下载、请求没有响应。
+ */
 export function getLocalModelName(): string {
+  if (isMlxActive()) {
+    const mlxId = resolveMlxModel().requestModelId;
+    if (mlxId) return mlxId;
+  }
   const localName = getSetting("LOCAL_MODEL_NAME");
   if (localName) return localName;
   const profileId = getSetting("VLLM_MODEL_PROFILE");
