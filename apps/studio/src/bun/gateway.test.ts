@@ -7,7 +7,11 @@ const CLOUD_PORT = 18100;
 // 桩掉网关依赖的后端与设置，让测试不依赖真实 db / 推理服务 / electrobun。
 let SERVER_STATUS: "stopped" | "running" = "running";
 
+// 展开真实模块再覆盖：只写死用到的几个函数，避免"模块新增导出 →
+// 单跑本文件时解析不到导出"（例如 restartServer 曾让本文件无法独立运行）。
+const realServerManager = await import("./server-manager");
 mock.module("./server-manager", () => ({
+  ...realServerManager,
   getStatus: () => SERVER_STATUS,
   onStatusChange: () => () => {},
 }));

@@ -3269,6 +3269,21 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
   },
 });
 
+/**
+ * webview 重新加载（刷新 / HMR）后补推一次当前状态。
+ *
+ * 状态推送只在"发生变化"时发消息，而 webview 侧 store 会随刷新重置为默认值，
+ * 于是重启后的界面会显示"未启动"，点了启动才报"已在运行"。
+ */
+export function broadcastCurrentStatus(win: BrowserWindowWithRPC) {
+  try {
+    win.webview.rpc?.send.serverStatusChanged({ status: ServerManager.getStatus() });
+  } catch {}
+  try {
+    win.webview.rpc?.send.gatewayStatusChanged({ status: Gateway.getGatewayStatus().status });
+  } catch {}
+}
+
 export function initServerBroadcast(win: BrowserWindowWithRPC) {
   ServerManager.onLog((text) => {
     try {

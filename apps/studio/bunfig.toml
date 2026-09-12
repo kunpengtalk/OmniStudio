@@ -1,0 +1,4 @@
+# bun test 配置：预加载测试隔离脚本（临时数据目录 / 测试模式）。
+# 背景见 test-preload.ts —— 不隔离的话，单独跑测试会迁移真实用户数据库。
+[test]
+preload = ["./test-preload.ts"]

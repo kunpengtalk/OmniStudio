@@ -6,7 +6,7 @@ import { BrowserWindow, Updater } from "electrobun/bun";
 import "./db";
 import { startImageServer } from "./image-server";
 import { setWindowRef } from "./window";
-import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast } from "./rpc";
+import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast, broadcastCurrentStatus } from "./rpc";
 import { seedIfNeeded } from "./prompt-library";
 import { initSkills, shutdownSkills } from "./skills";
 import { APP_NAME } from "./config";
@@ -95,6 +95,8 @@ initSkillsBroadcast(mainWindow);
 
 mainWindow.webview.on("dom-ready", () => {
   broadcastUpdateStatus();
+  // 刷新 / HMR 后 store 会重置，这里补推一次服务器与网关的当前状态。
+  broadcastCurrentStatus(mainWindow);
 });
 
 // CLI 控制通道（Unix socket），供 `omi` 命令唤醒/导航/管理。

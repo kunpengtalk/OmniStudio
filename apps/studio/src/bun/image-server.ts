@@ -31,6 +31,11 @@ export function getImagesBaseDir(): string {
  * 提示词库媒体素材根目录：seed 数据里的 `/prompt-library/...` 路径指向
  * vibedesign 仓库 `frontend/public/prompt-library`（图片/视频封面，未打进本应用包）。
  * 目录不存在时返回 null，由本地缓存 / 云端直链兜底。
+ *
+ * 注意返回的是**素材根目录本身**（含 prompt-library 这一段）：`/prompt-library/`
+ * 路由会把前缀之后的部分接在它下面，与下载缓存目录（<dataDir>/prompt-media/
+ * prompt-library）保持同一语义。此前少了一层，导致开发机上的本地素材一律 404
+ * （被云端直链兜底掩盖，路由测试也一直是失败的、被人为跳过）。
  */
 export function getPromptLibraryMediaBase(): string | null {
   const base = path.join(
@@ -39,8 +44,9 @@ export function getPromptLibraryMediaBase(): string | null {
     "vibedesign",
     "frontend",
     "public",
+    "prompt-library",
   );
-  return existsSync(path.join(base, "prompt-library")) ? base : null;
+  return existsSync(base) ? base : null;
 }
 
 /**

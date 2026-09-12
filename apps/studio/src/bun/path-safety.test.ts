@@ -38,6 +38,17 @@ describe("safeJoin 阻断越界路径", () => {
     expect(safeJoin(root, "escape")).toBeNull();
   });
 
+  test("基目录下尚不存在的文件不算越界（调用方按 404 处理，而不是 403）", () => {
+    expect(safeJoin(root, "not-created-yet.png")).toBe(join(root, "not-created-yet.png"));
+  });
+
+  test("基目录本身不存在时也返回路径（缓存目录首次使用前）", () => {
+    const missing = join(root, "no-such-base");
+    expect(safeJoin(missing, "a/b.png")).toBe(join(missing, "a", "b.png"));
+    // 但依旧不允许逃逸
+    expect(safeJoin(missing, "../outside.png")).toBeNull();
+  });
+
   test("isInsideDir 不把基准目录自身算作内部，也不把同前缀兄弟目录算作内部", () => {
     expect(isInsideDir(root, root)).toBe(false);
     expect(isInsideDir(join(root, "images"), join(root, "imagesX", "secret.txt"))).toBe(false);

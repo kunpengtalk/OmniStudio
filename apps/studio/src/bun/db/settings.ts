@@ -310,9 +310,30 @@ const DEFAULTS: Record<SettingsKey, string> = {
   CUSTOM_PROVIDERS: "[]",
 };
 
+/**
+ * 设置读取缓存：`getSetting` 是热路径（一次服务器启动会读十几次，每次对话也要读），
+ * 263 处调用点每处一次 SELECT 会被放大。
+ *
+ * - 本进程写入（updateSettings）立即失效对应键，读到的一定是最新值；
+ * - 跨进程写入（omi CLI、记忆桥接会直连同一个 SQLite）不经过本进程，
+ *   用 2 秒 TTL 兜底 —— 代价是最多 2 秒的陈旧窗口，换来热路径零查询。
+ */
+const SETTINGS_CACHE_TTL_MS = 2000;
+const settingsCache = new Map<string, { value: string; at: number }>();
+
+/** 清空设置缓存（跨进程写入后需要立即生效时手动调用）。 */
+export function invalidateSettingsCache() {
+  settingsCache.clear();
+}
+
 export function getSetting(key: SettingsKey): string {
+  const now = Date.now();
+  const cached = settingsCache.get(key);
+  if (cached && now - cached.at < SETTINGS_CACHE_TTL_MS) return cached.value;
   const row = db.select().from(settingsTable).where(eq(settingsTable.key, key)).get();
-  return row?.value ?? DEFAULTS[key];
+  const value = row?.value ?? DEFAULTS[key];
+  settingsCache.set(key, { value, at: now });
+  return value;
 }
 
 export function getNumericSetting(key: SettingsKey): number {
@@ -324,6 +345,7 @@ export function getAllSettings(): Record<string, string> {
   const result: Record<string, string> = { ...DEFAULTS };
   for (const row of rows) {
     result[row.key] = row.value;
+    settingsCache.set(row.key, { value: row.value, at: Date.now() });
   }
   return result;
 }
@@ -334,6 +356,7 @@ export function updateSettings(values: Record<string, string>) {
       .values({ key, value })
       .onConflictDoUpdate({ target: settingsTable.key, set: { value } })
       .run();
+    settingsCache.set(key, { value, at: Date.now() });
   }
 }
 

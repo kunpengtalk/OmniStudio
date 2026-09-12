@@ -12,21 +12,30 @@ export function isInsideDir(base: string, target: string): boolean {
   return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
+/** target 是否位于 base 内部或就是 base 本身（用于"待创建文件的父目录"判断）。 */
+function isInsideOrEqual(base: string, target: string): boolean {
+  const rel = path.relative(path.resolve(base), path.resolve(target));
+  return !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
 /**
  * 判断一个已存在的路径在真实文件系统上是否仍在 base 内（解引用软链接）。
- * 路径不存在 / realpath 失败时返回 true —— 交给调用方按"待创建路径"处理。
+ * base 不存在时无法解引用（也谈不上越界）→ 返回 true，由 resolve 层的包含判断兜底；
+ * 其他 realpath 失败场景同样放行，交给调用方按"待创建路径"处理。
  */
 function realPathInside(root: string, target: string): boolean {
   try {
-    if (!existsSync(root)) return false;
+    if (!existsSync(root)) return true;
     const realRoot = realpathSync(root);
     if (existsSync(target)) {
-      return isInsideDir(realRoot, realpathSync(target));
+      return isInsideOrEqual(realRoot, realpathSync(target));
     }
-    // 目标待创建：校验其父目录（含软链接）不越界。
+    // 目标待创建（或不存在）：校验其父目录（含软链接）不越界。
+    // 注意这里允许"父目录 == 基准目录"—— 直接位于基目录下的文件是合法的，
+    // 用 isInsideDir（把相等视为越界）会把它们误判成 403 而不是 404。
     const parent = path.dirname(target);
     if (!existsSync(parent)) return true;
-    return isInsideDir(realRoot, realpathSync(parent));
+    return isInsideOrEqual(realRoot, realpathSync(parent));
   } catch {
     return true;
   }

@@ -38,20 +38,20 @@ mock.module("./db/settings", () => {
   };
 });
 mock.module("./chat-model", () => ({ getChatModelName: () => "test-model" }));
+// 展开真实模块再覆盖：只改本文件需要的几个函数，其余导出保持真实实现。
+// 同一批测试共享 mock 注册表，image-server.route.test 也会 import ./image-server ——
+// 手写全量桩会随真实实现演进变味（例如 getPromptLibraryMediaBase 曾经少一层路径，
+// 桩里也照抄了旧逻辑，于是一个文件里的 bug 被另一个文件的桩隐藏）。
+const realImageServer = await import("./image-server");
 mock.module("./image-server", () => ({
+  ...realImageServer,
   chatImageDir: () => "/tmp",
   getImagesBaseDir: () => "/tmp",
   getPromptLibraryCacheBase: () => join("/tmp", `pl-cache-${process.pid}`),
   promptLibraryLocalUrl: (rel: string) => `http://localhost:1/prompt-library/${rel}`,
-  // 同一批测试在同一进程共享 mock 注册表，image-server.route.test 也会 import
-  // ./image-server；补上它需要的导出，避免该文件的冒烟测试被这个桩污染。
-  getPromptLibraryMediaBase: () => {
-    const base = join(process.env.HOME || "", "ai", "vibedesign", "frontend", "public");
-    return fs.existsSync(join(base, "prompt-library")) ? base : null;
-  },
   startImageServer: () => {
-    // 让路由冒烟测试按"端口被占用"的预设路径跳过服务器冒烟，只跑纯函数断言。
-    throw new Error("image-server mocked: treat as port occupied");
+    // 本文件不需要起图片服务（chat 只用到目录工具函数）。
+    throw new Error("image-server mocked: no server in chat tests");
   },
 }));
 mock.module("./stats", () => ({ recordUsage: () => {} }));

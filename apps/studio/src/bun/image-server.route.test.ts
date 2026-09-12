@@ -45,8 +45,8 @@ afterAll(() => {
   rmSync(getPromptLibraryCacheBase(), { recursive: true, force: true });
 });
 
-test("mediaBase 指向 vibedesign public 目录", () => {
-  expect(getPromptLibraryMediaBase()).toBe(join(mediaPublic, ".."));
+test("mediaBase 指向 vibedesign 素材根目录（含 prompt-library 层）", () => {
+  expect(getPromptLibraryMediaBase()).toBe(mediaPublic);
 });
 
 if (serverReady) {
