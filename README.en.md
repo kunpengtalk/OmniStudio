@@ -205,6 +205,35 @@ See [docs/architecture.md](./docs/architecture.md) for the full architecture (pr
 - [ ] Memory lifecycle (idle unload, prefault protection), KV cache tiering with SSD offload
 - [ ] Menu bar / Dock indicators, API key encryption
 
+## 🩺 Troubleshooting
+
+### Windows: the window opens but the content area is blank
+
+**Symptom**: title bar and menu are there, the content area is one flat colour; the process is alive and the backend is healthy (`http://127.0.0.1:10000/health` responds).
+
+**Cause**: WebView2's **GPU process keeps crashing**. Once Chromium gives up on the GPU it stops producing compositor frames — the page DOM is fully rendered, it just never gets painted ("a page, but no picture"). It is not a frontend or packaging problem, so an even cleaner payload will not help.
+
+**Confirm** (optional): search `%LOCALAPPDATA%\omni-studio.kunpengtalk.com\<channel>\WebView2\Partitions\default\EBWebView\chrome_debug.log` for:
+
+```
+GPU process exited unexpectedly
+GPU process isn't usable. Goodbye.
+```
+
+**Workaround**: force an in-process GPU by setting the env var before launching.
+
+```powershell
+# current session only, then launch OmniStudio from that terminal
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--in-process-gpu"
+```
+
+```bat
+:: or persist it (then launch from the Start menu as usual)
+setx WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS "--in-process-gpu"
+```
+
+This flag only helps the GPU-crash flavour of a blank window. If the blank page comes from something else (e.g. a frontend module error) it will not help — for that, check the renderer console instead. Once the GPU driver or WebView2 is updated you can drop the variable and return to the default rendering path.
+
 ## 📄 License
 
 MIT — maintained by 鲲鹏Talk. See [LICENSE](LICENSE).
