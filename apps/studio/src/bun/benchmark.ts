@@ -6,13 +6,32 @@ import {
   getActiveServerPort,
   getActiveInferenceEngine,
 } from "./db/settings";
+import { getCloudProviderInfo } from "./cloud-providers";
+import {
+  ensureEvalData,
+  evalDataReady,
+  loadEvalSuite,
+  runEvalQuestions,
+  stripThinkTags,
+  type EvalCategoryRow,
+  type EvalSuiteId,
+} from "./eval";
 
 export type BenchmarkParams = {
   model: string;
+  /** 指定 cloud_providers 行 id 时直连该云服务商测速（无需全局激活）。 */
+  providerId?: string;
   batchSize?: number;
   genLength?: number;
   contexts?: number[];
   temperature?: number;
+  /** 缺省 speed = 速度扫描；eval = 能力评测（suite 必填）。 */
+  mode?: "speed" | "eval";
+  suite?: EvalSuiteId;
+  /** 评测抽样题数；0 = 全量。 */
+  sampleSize?: number;
+  /** 评测并发跑题数。 */
+  concurrency?: number;
 };
 
 /** 单档上下文的完整指标行。tokens 均为 usage 精确值（无 usage 时回退 chunk 计数）。 */
@@ -46,6 +65,29 @@ export type BenchmarkSummary = {
   peakAggTps: number;
   peakPrefillTps: number;
   totalTokens: number;
+  /** kind='eval' 时有值（速度字段全 0）。 */
+  eval?: {
+    suite: EvalSuiteId;
+    accuracy: number;
+    correctCount: number;
+    totalQuestions: number;
+    datasetTotal: number;
+    failures: number;
+  };
+};
+
+/** 能力评测的运行时进度（BenchmarkRunState.eval）。 */
+export type BenchmarkEvalInfo = {
+  suite: EvalSuiteId;
+  sampleSize: number;
+  total: number;
+  done: number;
+  correct: number;
+  accuracy: number;
+  datasetTotal: number;
+  failures: number;
+  /** 题库下载阶段进度（phase=download 时有值）。 */
+  download?: { received: number; total: number };
 };
 
 export type BenchmarkRunState = {
@@ -53,6 +95,7 @@ export type BenchmarkRunState = {
   status: "running" | "done" | "cancelled" | "error";
   error?: string;
   startedAt: number;
+  kind: "speed" | "eval";
   progress: {
     total: number;
     done: number;
@@ -60,20 +103,20 @@ export type BenchmarkRunState = {
     currentContext?: number;
   };
   rows: SpeedBenchRow[];
+  /** eval 任务的类别得分行。 */
+  evalRows?: EvalCategoryRow[];
   summary?: BenchmarkSummary;
   /** 结束后落库的记录 id。 */
   recordId?: number;
   /** 运行总耗时（ms，结束时写入）。 */
   durationMs?: number;
+  /** eval 任务的实时进度。 */
+  eval?: BenchmarkEvalInfo;
   model: string;
+  /** local（本地引擎）/ remote（激活的云服务商槽位）/ cloud（按 id 直连的云服务商）。 */
   serverMode: string;
   engine?: string;
-  params: {
-    genLength: number;
-    batchSize: number;
-    contexts: number[];
-    temperature: number;
-  };
+  params: Record<string, unknown>;
 };
 
 export type BenchmarkRecordRow = {
@@ -82,8 +125,8 @@ export type BenchmarkRecordRow = {
   model: string;
   serverMode: string | null;
   engine: string | null;
-  params: BenchmarkRunState["params"] | null;
-  rows: SpeedBenchRow[] | null;
+  params: Record<string, unknown> | null;
+  rows: SpeedBenchRow[] | EvalCategoryRow[];
   summary: BenchmarkSummary | null;
   status: "done" | "cancelled" | "error";
   durationMs: number | null;
@@ -95,6 +138,11 @@ const DEFAULT_CONTEXTS = [1024, 4096, 8192, 16384, 32768];
 const CHARS_PER_TOKEN = 4;
 
 export const BENCHMARK_PRESET_CONTEXTS = DEFAULT_CONTEXTS;
+
+/** 去掉尾斜杠与 /v1 后缀，统一成拼接 /v1/chat/completions 的形态。 */
+function normalizeBase(url: string): string {
+  return url.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
+}
 
 function buildPrompt(ctxTokens: number): string {
   const unit =
@@ -127,6 +175,78 @@ type StreamStats = {
   totalMs: number;
 };
 
+// ---------------------------------------------------------------------------
+// 云 API 参数兼容：不同厂商对 OpenAI 参数的支持参差（如 gpt-5 系列只认
+// max_completion_tokens，部分厂商不认 stream_options）。首次 400 时按错误
+// 文案自动降级重试一次，结果按 base 缓存，同服务商后续请求直接用兼容形态。
+// ---------------------------------------------------------------------------
+
+type CloudCompat = { maxCompletionTokens: boolean; noStreamOptions: boolean };
+const compatByBase = new Map<string, CloudCompat>();
+
+function compatFor(base: string): CloudCompat {
+  let c = compatByBase.get(base);
+  if (!c) {
+    c = { maxCompletionTokens: false, noStreamOptions: false };
+    compatByBase.set(base, c);
+  }
+  return c;
+}
+
+/** 从 400 错误文案推断需要的参数降级；无需调整时返回 null。 */
+function adaptCompat(c: CloudCompat, errText: string): Partial<CloudCompat> | null {
+  const t = errText.toLowerCase();
+  if (!c.maxCompletionTokens && t.includes("max_completion_tokens")) return { maxCompletionTokens: true };
+  if (!c.noStreamOptions && t.includes("stream_options")) return { noStreamOptions: true };
+  return null;
+}
+
+async function chatFetch(
+  base: string,
+  apiKey: string,
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<Response> {
+  const make = (c: CloudCompat) => {
+    const b = { ...body };
+    if (c.maxCompletionTokens) {
+      b.max_completion_tokens = b.max_tokens;
+      delete b.max_tokens;
+    }
+    if (c.noStreamOptions) delete b.stream_options;
+    return b;
+  };
+  const send = (bodyStr: string) =>
+    fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: bodyStr,
+      signal,
+    });
+
+  const compat = compatFor(base);
+  let bodyStr = JSON.stringify(make(compat));
+  let res = await send(bodyStr);
+  // 最多两轮降级：max_tokens→max_completion_tokens、去掉 stream_options。
+  for (let attempt = 0; attempt < 2 && res.status === 400; attempt++) {
+    const text = await res.text().catch(() => "");
+    const patch = adaptCompat(compat, text);
+    if (patch) Object.assign(compat, patch);
+    // 并发下 flags 可能已被其他请求降级：按最新形态重建，请求体确实变化才重试。
+    const nextStr = JSON.stringify(make(compat));
+    if (nextStr === bodyStr) {
+      throw new Error(`Benchmark request failed (400): ${text.slice(0, 300)}`);
+    }
+    bodyStr = nextStr;
+    res = await send(bodyStr);
+  }
+  if (res.status === 400) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Benchmark request failed (400): ${text.slice(0, 300)}`);
+  }
+  return res;
+}
+
 /** 流式 chat/completions：精确到 usage（stream_options.include_usage），无 usage 时回退 chunk 计数。 */
 async function timedStream(
   base: string,
@@ -141,25 +261,25 @@ async function timedStream(
   const { signal, cleanup } = combineSignals(cancel, 600_000);
   let res: Response;
   try {
-    res = await fetch(`${base}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
+    res = await chatFetch(
+      base,
+      apiKey,
+      {
         model,
         messages: [{ role: "user", content: prompt }],
         max_tokens: genLength,
         temperature,
         stream: true,
         stream_options: { include_usage: true },
-      }),
+      },
       signal,
-    });
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`Benchmark request failed (${res.status}): ${body.slice(0, 300)}`);
+    }
   } finally {
     cleanup();
-  }
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`Benchmark request failed (${res.status}): ${body.slice(0, 300)}`);
   }
   if (!res.body) throw new Error("No response body");
 
@@ -230,16 +350,16 @@ async function warmupRequest(
 ): Promise<number> {
   const { signal, cleanup } = combineSignals(cancel, 120_000);
   try {
-    const res = await fetch(`${base}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({
+    const res = await chatFetch(
+      base,
+      apiKey,
+      {
         model,
         messages: [{ role: "user", content: prompt }],
         max_tokens: 1,
-      }),
+      },
       signal,
-    });
+    );
     if (!res.ok) return 0;
     const json = (await res.json().catch(() => null)) as { usage?: { prompt_tokens?: number } } | null;
     return typeof json?.usage?.prompt_tokens === "number" ? json.usage.prompt_tokens : 0;
@@ -360,16 +480,33 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
     if (run.state.status === "running") return { error: "benchmark_already_running" };
   }
 
-  const serverMode = getSetting("SERVER_MODE") === "remote" ? "remote" : "local";
-  const engine = serverMode === "local" ? getActiveInferenceEngine() : undefined;
-  const base =
-    serverMode === "remote"
-      ? (getSetting("VLLM_API_BASE") || "").replace(/\/$/, "").replace(/\/v1$/, "")
-      : `http://localhost:${getActiveServerPort()}`;
-  const apiKey = serverMode === "remote" ? getSetting("VLLM_API_KEY") || "EMPTY" : "EMPTY";
+  // 目标解析：providerId 直连 cloud_providers 行（不改变全局激活状态）；
+  // 未指定时沿用全局 SERVER_MODE / VLLM_* 槽位。
+  let serverMode: string;
+  let engine: string | undefined;
+  let base: string;
+  let apiKey: string;
+  if (params.providerId) {
+    const provider = getCloudProviderInfo(params.providerId);
+    if (!provider) return { error: "Cloud provider not found" };
+    serverMode = "cloud";
+    engine = provider.name;
+    base = normalizeBase(provider.baseUrl);
+    apiKey = provider.apiKey || "EMPTY";
+  } else {
+    serverMode = getSetting("SERVER_MODE") === "remote" ? "remote" : "local";
+    engine = serverMode === "local" ? getActiveInferenceEngine() : undefined;
+    base =
+      serverMode === "remote"
+        ? normalizeBase(getSetting("VLLM_API_BASE") || "")
+        : `http://localhost:${getActiveServerPort()}`;
+    apiKey = serverMode === "remote" ? getSetting("VLLM_API_KEY") || "EMPTY" : "EMPTY";
+  }
 
   if (!base) return { error: "No inference server configured" };
-  const model = params.model || getSetting("CHAT_MODEL") || getSetting("VLLM_MODEL_NAME");
+  const model = params.providerId
+    ? params.model.trim()
+    : params.model || getSetting("CHAT_MODEL") || getSetting("VLLM_MODEL_NAME");
   if (!model) return { error: "No model configured" };
 
   const batchSize = Math.max(params.batchSize ?? 1, 1);
@@ -379,27 +516,211 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
     .map((c) => Math.max(c, 128))
     .sort((a, b) => a - b);
 
+  const kind: "speed" | "eval" = params.mode === "eval" ? "eval" : "speed";
+  if (kind === "eval" && !params.suite) return { error: "eval suite required" };
+  const suite = params.suite ?? "mmlu";
+  const sampleSize = Math.max(params.sampleSize ?? 0, 0);
+  const concurrency = Math.max(params.concurrency ?? 4, 1);
+
   const runId = `bench-${Date.now()}-${++runCounter}`;
   const cancel = new AbortController();
   const state: BenchmarkRunState = {
     runId,
     status: "running",
     startedAt: Date.now(),
+    kind,
     progress: { total: contexts.length, done: 0, phase: "warmup" },
     rows: [],
     model,
     serverMode,
     engine,
-    params: { genLength, batchSize, contexts, temperature },
+    params:
+      kind === "speed"
+        ? { genLength, batchSize, contexts, temperature }
+        : { suite, sampleSize, concurrency },
   };
+  if (kind === "eval") {
+    state.eval = {
+      suite,
+      sampleSize,
+      total: 0,
+      done: 0,
+      correct: 0,
+      accuracy: 0,
+      datasetTotal: 0,
+      failures: 0,
+    };
+  }
   runs.set(runId, { state, cancel });
   // 只保留最近几个已结束任务，避免内存增长。
   for (const [id, run] of runs) {
     if (run.state.status !== "running" && runs.size > 3 && id !== runId) runs.delete(id);
   }
 
-  void executeRun(runId, { base, apiKey, model, genLength, batchSize, contexts, temperature, cancel, state });
+  if (kind === "eval") {
+    void executeEvalRun(runId, { base, apiKey, model, suite, sampleSize, concurrency, cancel, state });
+  } else {
+    void executeRun(runId, { base, apiKey, model, genLength, batchSize, contexts, temperature, cancel, state });
+  }
   return { runId };
+}
+
+/** 结果落库（speed 与 eval 共用；rows 传类别行时 kind 须为 eval）。 */
+function persistRun(
+  state: BenchmarkRunState,
+  values: {
+    kind: "speed" | "eval";
+    rows: SpeedBenchRow[] | EvalCategoryRow[];
+    summary: BenchmarkSummary;
+  },
+): void {
+  try {
+    const inserted = db
+      .insert(benchmarkRecords)
+      .values({
+        kind: values.kind,
+        model: state.model,
+        serverMode: state.serverMode,
+        engine: state.engine ?? null,
+        params: JSON.stringify(state.params),
+        rows: JSON.stringify(values.rows),
+          summary: JSON.stringify(values.summary),
+          // persistRun 只在任务结束后调用，running 兜底为 done 满足列类型窄化。
+          status: state.status === "running" ? "done" : state.status,
+        durationMs: state.durationMs ?? 0,
+        error: state.error ?? null,
+      })
+      .returning({ id: benchmarkRecords.id })
+      .get();
+    state.recordId = inserted?.id;
+  } catch (e) {
+    // 落库失败不影响已测得的指标展示。
+    state.error = state.error ?? `save failed: ${e instanceof Error ? e.message : String(e)}`;
+  }
+}
+
+async function executeEvalRun(
+  runId: string,
+  env: {
+    base: string;
+    apiKey: string;
+    model: string;
+    suite: EvalSuiteId;
+    sampleSize: number;
+    concurrency: number;
+    cancel: AbortController;
+    state: BenchmarkRunState;
+  },
+) {
+  const { state, cancel } = env;
+  const { base, apiKey, model, suite, sampleSize, concurrency } = env;
+  const info = state.eval!;
+  try {
+    // 题库缺失时先下载（phase=download 进度透出）。
+    if (!evalDataReady(suite)) {
+      await ensureEvalData(
+        suite,
+        (received, total) => {
+          info.download = { received, total };
+        },
+        cancel.signal,
+      );
+    }
+    info.download = undefined;
+
+    const { items, fewShot, datasetTotal } = loadEvalSuite(suite, sampleSize);
+    info.total = items.length;
+    info.datasetTotal = datasetTotal;
+
+    const outcome = await runEvalQuestions({
+      ask: async (prompt, maxTokens) => {
+        const { signal, cleanup } = combineSignals(cancel.signal, 600_000);
+        try {
+          const res = await chatFetch(
+            base,
+            apiKey,
+            {
+              model,
+              messages: [{ role: "user", content: prompt }],
+              max_tokens: maxTokens,
+              temperature: 0,
+            },
+            signal,
+          );
+          if (!res.ok) return null;
+          const json = (await res.json().catch(() => null)) as {
+            choices?: { message?: { content?: string } }[];
+          } | null;
+          const content = json?.choices?.[0]?.message?.content;
+          return typeof content === "string" && content ? stripThinkTags(content) : null;
+        } catch {
+          return null;
+        } finally {
+          cleanup();
+        }
+      },
+      suite,
+      items,
+      fewShot,
+      datasetTotal,
+      concurrency,
+      cancel: cancel.signal,
+      onProgress: (done, total, correct) => {
+        info.done = done;
+        info.total = total;
+        info.correct = correct;
+        info.accuracy = done > 0 ? Number(((correct / done) * 100).toFixed(1)) : 0;
+      },
+    });
+
+    info.failures = outcome.failures;
+    info.correct = outcome.correctCount;
+    info.accuracy = outcome.accuracy;
+    state.evalRows = outcome.categories;
+    state.summary = {
+      avgTps: 0,
+      peakTps: 0,
+      avgTtftMs: 0,
+      bestTtftMs: 0,
+      peakAggTps: 0,
+      peakPrefillTps: 0,
+      totalTokens: 0,
+      eval: {
+        suite,
+        accuracy: outcome.accuracy,
+        correctCount: outcome.correctCount,
+        totalQuestions: outcome.totalQuestions,
+        datasetTotal: outcome.datasetTotal,
+        failures: outcome.failures,
+      },
+    };
+    state.status = cancel.signal.aborted ? "cancelled" : "done";
+  } catch (e) {
+    state.status = cancel.signal.aborted ? "cancelled" : "error";
+    state.error = e instanceof Error ? e.message : String(e);
+  }
+
+  state.durationMs = Date.now() - state.startedAt;
+  if (!state.summary) {
+    state.summary = {
+      avgTps: 0,
+      peakTps: 0,
+      avgTtftMs: 0,
+      bestTtftMs: 0,
+      peakAggTps: 0,
+      peakPrefillTps: 0,
+      totalTokens: 0,
+    };
+  }
+  // 已答出的题仍有价值（含取消 / 出错路径）。
+  if (info.done > 0 && state.summary.eval) {
+    state.summary.eval.totalQuestions = info.done;
+    state.summary.eval.correctCount = info.correct;
+    state.summary.eval.accuracy = info.done > 0 ? Number(((info.correct / info.done) * 100).toFixed(1)) : 0;
+  }
+  if (info.done > 0 || state.status === "error") {
+    persistRun(state, { kind: "eval", rows: state.evalRows ?? [], summary: state.summary });
+  }
 }
 
 async function executeRun(
@@ -436,32 +757,10 @@ async function executeRun(
   }
 
   state.durationMs = Date.now() - state.startedAt;
-  const durationMs = state.durationMs;
   state.summary = summarize(state.rows);
   // 取消时已完成的档位仍有价值，一并落库。
   if (state.rows.length > 0 || state.status === "error") {
-    try {
-      const inserted = db
-        .insert(benchmarkRecords)
-        .values({
-          kind: "speed",
-          model: state.model,
-          serverMode: state.serverMode,
-          engine: state.engine ?? null,
-          params: JSON.stringify(state.params),
-          rows: JSON.stringify(state.rows),
-          summary: JSON.stringify(state.summary),
-          status: state.status,
-          durationMs,
-          error: state.error ?? null,
-        })
-        .returning({ id: benchmarkRecords.id })
-        .get();
-      state.recordId = inserted?.id;
-    } catch (e) {
-      // 落库失败不影响已测得的指标展示。
-      state.error = state.error ?? `save failed: ${e instanceof Error ? e.message : String(e)}`;
-    }
+    persistRun(state, { kind: "speed", rows: state.rows, summary: state.summary });
   }
 }
 

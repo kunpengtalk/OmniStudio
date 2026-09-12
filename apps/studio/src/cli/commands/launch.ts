@@ -840,7 +840,7 @@ async function resolveModel(
     fail(`未找到模型「${flag}」。运行 \`omi models\` 查看已装模型。`);
   }
 
-  // 只有一个模型时自动选中（omlx 行为）
+  // 只有一个模型时自动选中
   if (installed.length === 1) {
     const only = installed[0]!;
     return { name: only.servedName || only.fileName, path: only.path, changed: false };

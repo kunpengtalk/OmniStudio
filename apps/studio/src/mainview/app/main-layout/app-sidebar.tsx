@@ -425,17 +425,29 @@ function BenchmarkRecordList() {
                   }}
                   tooltip={r.model}
                 >
-                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="min-w-0 truncate text-xs font-medium leading-none">{r.model}</span>
-                    <span className="flex items-center gap-1 text-[10px] leading-none text-muted-foreground">
-                      {r.summary ? (
-                        <span className="font-medium tabular-nums text-primary">{r.summary.avgTps} tok/s</span>
-                      ) : (
-                        <span>{t(`benchmark.status.${r.status}`)}</span>
-                      )}
-                      <span className="tabular-nums">{fmtRecordTime(r.createdAt)}</span>
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="flex min-w-0 items-center gap-1">
+                        {r.kind === "eval" && <GaugeIcon className="size-3 shrink-0 text-muted-foreground" />}
+                        <span className="min-w-0 truncate text-xs font-medium leading-none">{r.model}</span>
+                      </span>
+                      <span className="flex items-center gap-1 text-[10px] leading-none text-muted-foreground">
+                        {r.kind === "eval" ? (
+                          <>
+                            <span className="max-w-24 truncate">{t(`benchmark.suite.${r.summary?.eval?.suite ?? "mmlu"}`)}</span>
+                            {r.summary?.eval ? (
+                              <span className="font-medium tabular-nums text-primary">{r.summary.eval.accuracy}%</span>
+                            ) : (
+                              <span>{t(`benchmark.status.${r.status}`)}</span>
+                            )}
+                          </>
+                        ) : r.summary ? (
+                          <span className="font-medium tabular-nums text-primary">{r.summary.avgTps} tok/s</span>
+                        ) : (
+                          <span>{t(`benchmark.status.${r.status}`)}</span>
+                        )}
+                        <span className="tabular-nums">{fmtRecordTime(r.createdAt)}</span>
+                      </span>
                     </span>
-                  </span>
                   <Button
                     variant="ghost"
                     size="icon-sm"

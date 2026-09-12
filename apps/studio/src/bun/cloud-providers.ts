@@ -154,6 +154,13 @@ export function listCloudProviders(): { providers: CloudProviderInfo[]; activeId
   return { providers: sorted, activeId };
 }
 
+/** 按 id 取单个服务商（基准测试等按需直连，无需全局激活）。 */
+export function getCloudProviderInfo(id: string): CloudProviderInfo | null {
+  ensureMigrated();
+  const row = getRow(id);
+  return row ? rowToInfo(row) : null;
+}
+
 export function createCloudProvider(input: {
   presetId?: string;
   name?: string;

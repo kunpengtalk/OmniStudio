@@ -689,7 +689,7 @@ export const benchmarkRecords = sqliteTable("benchmark_records", {
     .notNull()
     .$defaultFn(() => "speed"),
   model: text("model").notNull(),
-  /** 目标服务快照：local（引擎+端口）/ remote（API Base）。 */
+  /** 目标服务快照：local（引擎+端口）/ remote（激活的云服务商槽位）/ cloud（按 id 直连的云服务商，engine 存服务商名）。 */
   serverMode: text("server_mode"),
   engine: text("engine"),
   /** JSON：{ genLength, batchSize, contexts, temperature }。 */

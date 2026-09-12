@@ -28,6 +28,7 @@ export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台
   backup <子命令>      全局备份 / 恢复：list / create / inspect / restore
   status               查看服务器 / 网关状态
   server <action>      管理服务器：list | start | stop | restart | info | logs
+  benchmark [model]    跑基准测速（本地引擎 / 云端 API），结果入库
   install              检查推理引擎依赖（llama.cpp / vLLM / SGLang / MLX）
   guide                打印完整使用手册（--md / --json / --lang en）
   version              显示版本
@@ -129,6 +130,7 @@ export const CMD_HELP: Record<string, string> = {
   --opus <name>        Claude Code 的 Opus 档位单独指定模型
   --haiku <name>       Claude Code 的 Haiku 档位单独指定模型
   --list               列出可用工具
+  benchmark [model]    跑基准测速（本地引擎 / 云端 API），结果入库
   --app-path           指定 OmniStudio.app 完整路径
 
 说明：

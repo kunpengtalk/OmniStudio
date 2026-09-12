@@ -19,8 +19,25 @@ import { useSkillsStore } from "../stores/skills";
 import { useBackupStore } from "../stores/backup";
 import { useRouter } from "../stores/router";
 import { t } from "../stores/ui-lang";
+import { useAppStore, type AppId } from "../stores/app";
 
 const knownCompletedIds = new Set<string>();
+
+/** navigate 可直达的工具页（index 路由内的 activeApp）。 */
+const NAV_APP_PATHS = new Set<string>([
+  "agent",
+  "voicecall",
+  "voice",
+  "image",
+  "video",
+  "ocr",
+  "translate",
+  "prompt",
+  "skills",
+  "kb",
+  "memory",
+  "benchmark",
+]);
 
 const rpc = Electroview.defineRPC<AppRPC>({
   // 大模型下载（MLX 本地生图可达 30+ GB）耗时可能远超普通请求，放宽上限到 60 分钟。
@@ -210,6 +227,9 @@ const rpc = Electroview.defineRPC<AppRPC>({
           path === "index"
         ) {
           useRouter.getState().setRoute({ path });
+        } else if (NAV_APP_PATHS.has(path)) {
+          useAppStore.getState().setActiveApp(path as AppId);
+          useRouter.getState().setRoute({ path: "index" });
         }
       },
       backupProgress: (progress) => {

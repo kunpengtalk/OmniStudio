@@ -60,6 +60,7 @@ import {
   type BenchmarkRunState,
   type BenchmarkRecordRow,
 } from "../benchmark";
+import { listEvalSuites, type EvalSuiteInfo } from "../eval";
 import { downloadManager, type DownloadTask } from "../download-manager";
 import * as Voice from "../voice";
 import type { VoiceRecordRow, VoiceRecordKind, VoiceClone } from "../voice";
@@ -805,7 +806,7 @@ export type AppRPC = {
           dataDir: string;
         };
       };
-      // Benchmark（速度扫描：异步任务 + 历史记录）
+      // Benchmark（速度扫描 + 能力评测：异步任务 + 历史记录）
       startBenchmark: {
         params: BenchmarkParams;
         response: { runId: string } | { error: string };
@@ -829,6 +830,11 @@ export type AppRPC = {
       clearBenchmarkRecords: {
         params: undefined;
         response: { ok: boolean };
+      };
+      /** 能力评测套件清单（含题库下载状态）。 */
+      getEvalSuites: {
+        params: undefined;
+        response: { suites: EvalSuiteInfo[] };
       };
       // Voice (TTS / ASR / voice cloning)
       listVoiceRecords: {
@@ -2711,6 +2717,9 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
       clearBenchmarkRecords: async () => {
         return clearBenchmarkRecords();
+      },
+      getEvalSuites: async () => {
+        return { suites: listEvalSuites() };
       },
 
       // Voice

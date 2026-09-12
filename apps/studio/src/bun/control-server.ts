@@ -8,14 +8,21 @@ import { listInstalledModels, setActiveModel, getActiveModelPath, slugModelFileN
 import { downloadManager } from "./download-manager";
 import { updateState } from "./updates";
 import * as Memory from "./memory";
+import * as CloudProviders from "./cloud-providers";
+import {
+  startBenchmark,
+  getBenchmarkRun,
+  cancelBenchmark,
+  listBenchmarkRecords,
+} from "./benchmark";
 
 /**
  * `omi` CLI 与应用的本地控制通道（Unix domain socket）。
  *
- * 参照 omlx 的 `control.sock` 设计：socket 文件即"应用是否在运行"的标志，
- * CLI 先尝试连接，失败才用 `open` 拉起应用。协议为 HTTP over unix socket，
- * POST JSON `{ cmd, payload }`，响应 `{ ok, data | error }`。
- * 只监听本机用户目录下的 socket，权限 0600，无网络暴露。
+ * socket 文件即"应用是否在运行"的标志：CLI 先尝试连接，失败才用 `open`
+ * 拉起应用。协议为 HTTP over unix socket，POST JSON `{ cmd, payload }`，
+ * 响应 `{ ok, data | error }`。只监听本机用户目录下的 socket，权限 0600，
+ * 无网络暴露。
  */
 
 type ControlRequest = { cmd: string; payload?: Record<string, unknown> };
@@ -215,6 +222,36 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
     case "memoryImport": {
       const result = await Memory.importMemories(payload.payload);
       return { ok: true, data: { ...result, errors: result.errors.slice(0, 5) } };
+    }
+
+    // 基准测速：omi benchmark 走这里（应用内 UI 与 CLI 共用同一任务单例与历史表）。
+    case "benchmark": {
+      const contexts = Array.isArray(payload.contexts)
+        ? payload.contexts.map(Number).filter((n) => Number.isFinite(n))
+        : undefined;
+      const result = startBenchmark({
+        model: typeof payload.model === "string" ? payload.model : "",
+        providerId: typeof payload.providerId === "string" ? payload.providerId : undefined,
+        genLength: Number(payload.genLength) || undefined,
+        batchSize: Number(payload.batchSize) || undefined,
+        temperature: Number.isFinite(Number(payload.temperature)) ? Number(payload.temperature) : undefined,
+        contexts,
+      });
+      if ("error" in result) return { ok: false, error: result.error };
+      return { ok: true, data: { runId: result.runId } };
+    }
+    case "benchmarkRun": {
+      return { ok: true, data: { run: getBenchmarkRun(String(payload.runId ?? "")) } };
+    }
+    case "benchmarkCancel": {
+      return { ok: true, data: cancelBenchmark(String(payload.runId ?? "")) };
+    }
+    case "benchmarkRecords": {
+      return { ok: true, data: { records: listBenchmarkRecords() } };
+    }
+    // --cloud 服务商解析用：完整 cloud_providers 表（"models" 只回激活槽位）。
+    case "cloudProviders": {
+      return { ok: true, data: CloudProviders.listCloudProviders() };
     }
 
     case "models": {

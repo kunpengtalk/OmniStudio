@@ -2,7 +2,7 @@ import { createInterface } from "node:readline/promises";
 
 export type PickOption = { label: string; value: string; dim?: string };
 
-/** 极简终端编号选择器（omlx 的 curses 选择器降级形态）。 */
+/** 极简终端编号选择器（无 curses 依赖的降级交互形态）。 */
 export async function pickNumbered(
   title: string,
   options: PickOption[],

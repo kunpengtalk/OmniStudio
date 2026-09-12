@@ -45,7 +45,7 @@ export async function isAppRunning(): Promise<boolean> {
   return r.connected && r.ok;
 }
 
-/** 唤起已安装的 OmniStudio.app（omlx 同款：`open` + 轮询 socket）。 */
+/** 唤起已安装的 OmniStudio.app（`open` 拉起 + 轮询控制 socket 就绪）。 */
 export async function launchApp(appPath?: string): Promise<boolean> {
   const target = appPath && existsSync(appPath) ? appPath : appBundlePath();
   const args = target ? ["open", target] : ["open", "-a", "OmniStudio"];
