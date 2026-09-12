@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { mergeSystemMessages } from "../src/bun/chat-messages";
+import { mergeSystemMessages, parseChatDelta } from "../src/bun/chat-messages";
 
 /**
  * Qwen 系 chat template 只允许开头一条 system：
@@ -58,5 +58,43 @@ describe("mergeSystemMessages", () => {
       { role: "user", content: "hi" },
     ]);
     expect(merged).toEqual([{ role: "user", content: "hi" }]);
+  });
+});
+
+/**
+ * 流式增量的思考字段：llama.cpp / vLLM 用 `reasoning_content`，mlx-lm 用 `reasoning`。
+ * 只认前者时 MLX 的整段思考都会被丢掉（界面空白 + 0 tokens）。
+ */
+describe("parseChatDelta", () => {
+  test("llama.cpp / vLLM 的 reasoning_content", () => {
+    expect(parseChatDelta({ reasoning_content: "想想" })).toEqual({
+      content: "",
+      reasoning: "想想",
+    });
+  });
+
+  test("mlx-lm 的 reasoning", () => {
+    expect(parseChatDelta({ reasoning: "Thinking Process: ..." })).toEqual({
+      content: "",
+      reasoning: "Thinking Process: ...",
+    });
+  });
+
+  test("正文与思考同时到达时都能取到", () => {
+    expect(parseChatDelta({ content: "答案", reasoning: "草稿" })).toEqual({
+      content: "答案",
+      reasoning: "草稿",
+    });
+  });
+
+  test("两者都在时优先 reasoning_content（同一条里不会同时出现）", () => {
+    expect(parseChatDelta({ reasoning_content: "A", reasoning: "B" }).reasoning).toBe("A");
+  });
+
+  test("空串 / 缺失 / 其它字段名都不算内容", () => {
+    expect(parseChatDelta({})).toEqual({ content: "", reasoning: "" });
+    expect(parseChatDelta({ reasoning: "" })).toEqual({ content: "", reasoning: "" });
+    expect(parseChatDelta({ thinking: "x", reasoning: "" }).reasoning).toBe("");
+    expect(parseChatDelta({ role: "assistant" })).toEqual({ content: "", reasoning: "" });
   });
 });

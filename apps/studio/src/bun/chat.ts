@@ -5,7 +5,7 @@ import { db } from "./db";
 import { conversations, messages } from "./db/schema";
 import { getSetting, getActiveServerPort } from "./db/settings";
 import { getChatModelName, getChatRequestModelId } from "./chat-model";
-import { mergeSystemMessages } from "./chat-messages";
+import { mergeSystemMessages, parseChatDelta } from "./chat-messages";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { recordUsage } from "./stats";
 import { webSearch } from "./web-search";
@@ -353,6 +353,19 @@ export async function ensureServerReady(
 }
 
 /**
+ * 单次回复的生成上限（max_tokens）。
+ *
+ * 必须显式给：不传时各引擎用自己的默认值，而 mlx-lm 的 `--max-tokens` 默认只有 512 ——
+ * 推理模型光"思考"就能用光它，正文一个字都出不来，界面上就是「空白回复 + 0 tokens」。
+ * 这里跟随「上下文长度」（SERVER_CTX_SIZE，默认 8192）并夹在 1k~32k：
+ * 上限只是封顶，模型正常会自己 EOS 收尾。
+ */
+export function maxOutputTokens(): number {
+  const ctx = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
+  return Math.min(Math.max(1024, ctx), 32768);
+}
+
+/**
  * 构建携带当前时间的系统消息：模型自身不知道"今天是哪天"，不注入的话
  * 涉及"今天/最新/最近"的问题会按训练数据里的旧日期回答（如报出两年前的股价）。
  * 每次推理请求都注入在最前面，所有模型生效；仅注入 payload，不落库。
@@ -451,6 +464,9 @@ async function streamAssistantReply(opts: {
       currentTimeSystemMessage(),
       ...payloadMessages,
     ]),
+    // 生成上限跟随上下文设置：本地引擎各有默认值，mlx-lm 只有 512 —— 推理模型光思考
+    // 就能用光它，正文一个字都出不来（界面上就是「空白回复 + 0 tokens」）。
+    max_tokens: maxOutputTokens(),
     stream: true,
     // llama.cpp / Qwen3 等支持：通话等场景要求直接回答，不打思考草稿。
     ...(opts.disableThinking ? { chat_template_kwargs: { enable_thinking: false } } : {}),
@@ -543,12 +559,11 @@ async function streamAssistantReply(opts: {
       try {
         const json = JSON.parse(payloadLine);
         const delta = json.choices?.[0]?.delta ?? {};
-        if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) {
-          appendReasoning(delta.reasoning_content);
-        }
-        if (typeof delta.content === "string" && delta.content.length > 0) {
+        const { content: contentDelta, reasoning: reasonDelta } = parseChatDelta(delta);
+        if (reasonDelta) appendReasoning(reasonDelta);
+        if (contentDelta.length > 0) {
           // 部分推理模型的 content 开头带残留的思考标签，剥掉避免混进正文。
-          let content = delta.content;
+          let content = contentDelta;
           if (full.length === 0) content = content.replace(/^\s*<\/?think[\s>]*>/, "").trimStart();
           appendContent(content);
         }
