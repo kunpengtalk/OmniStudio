@@ -4,7 +4,7 @@ All notable changes are documented here. 所有重要变更记录于此。
 
 Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and the project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/).
 
-## [0.0.6-canary.0] - 2026-09-12
+## [0.0.7-canary.0] - 2026-09-12
 
 ### Added / 新增
 
@@ -22,36 +22,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 - **Agent 生图「需要用户介入」弹窗**：Agent 调 `generate_image` 前检查生图后端是否就绪（缺 Base URL / ComfyUI 地址 / 未选模型 / MLX 引擎未装或权重未下载），不满足时弹出全局配置窗（任何页面都能弹）：可切换 OpenAI 兼容 / MLX / ComfyUI 三个后端（各带就绪状态点）、填地址与 API Key、「扫描模型」拉候选（ComfyUI checkpoint 或 `/v1/models`）、MLX 可直接装引擎并在窗内下载权重（带进度）。「确认并继续生图」后同一次工具调用继续跑且选择落盘到「图像」页配置；取消 / 关闭 / 超时 10 分钟 / 停止 / 会话重置都会立即收尾并明确告诉模型不要自行重试；同一时刻只保留一个弹窗，无界面监听（CLI / 无人值守）时按取消返回不挂起。
 - **网关素材接口（只读）+ MCP `media_search`**：网关新增 `GET /v1/media`（`q` / `kind=image|video|audio` / `source=manual|agent` / `days` / `limit`，返回含绝对路径与可播放 URL 的结构化列表），MCP 端 `tools/list` 在知识库与记忆之外新增 `media_search`，Claude Code / Codex / Cursor 等外部智能体经网关即可查到并复用本机素材；与内置 Agent 共用同一份检索实现，鉴权与 `/v1/*` 一致，OpenAPI 已补端点说明。接口只读 —— 生成与导出仍只由界面或内置 Agent 触发。
 - **素材来源标注（手工 vs Agent）**：`image_records` / `video_records` / `voice_records` 新增 `source` 列（迁移 `0024_media_source`，默认 `manual`），界面手工生成记为 `manual`、内置 Agent 与经网关生成记为 `agent`；图片与视频历史新增「全部 / 我生成 / Agent 生成」筛选，Agent 生成的卡片与侧栏记录显示「Agent 生成」徽标（手工生成不加标签，避免视觉噪音）。
-- **AI 视频生成（新应用）**：左侧图标栏新增「视频」应用，三种后端统一为「提交任务 + 轮询」异步模式——MiniMax（H3，云端，支持首帧图生视频）、Seedance（火山方舟内容生成任务 API）、ComfyUI（本地工作流）；5 秒轮询任务状态，成片落盘后进历史库（新表 `video_records`，迁移 `0019_add_video_records`），结果区可直接播放 / 下载 / 删除，参数面板支持提示词、负向提示词、分辨率、时长、种子与首帧图上传。
-- **Skills 管理（新应用）**：图标栏新增「Skills」应用，中央技能库（默认 `~/.agents/skills`）统一管理并同步到各编码工具；六区界面：技能市场（skillssh 榜单 + 一键安装 / 批量导入）、我的技能（启用 / 分组 / 标签 / 批量操作）、预设（技能集合一键套用到多个 Agent）、项目（按项目目录管理技能）、工具（53 个内置工具适配器 + 自定义工具 + 路径覆盖）、备份（Git 远端 + PAT、自动快照、快照列表）；支持 symlink / copy 两种同步模式、技能文档查看、审计日志与元数据同步。
-- **知识库 / 本地 RAG（新应用）**：图标栏新增「知识库」应用——数据源摄取（本地文件（文本直读，PDF / 图片走 VLM OCR）、手写笔记、网页抓取）、Markdown 感知切片（标题分节 + 段落贪心打包 + 超长硬切带重叠）、可选向量化（OpenAI 兼容 `/v1/embeddings`，Float32 base64 存在分块行）、混合检索（BM25 关键词与余弦向量各自排序后 RRF 融合，不依赖外部向量库或 FTS 扩展）；四个标签页（召回测试、文档、访问、设置）；对话界面挂载知识库后回答带 **[n] 引用溯源**（迁移 `0017_knowledge_base`，引用随消息落库）。
-- **知识库 · 重排序（Rerank）**：每个知识库可配置 Jina / SiliconFlow / Cohere 兼容的 `/v1/rerank` 二次排序模型（模型 / Base URL / API Key 三项，可从服务端拉取模型列表）；混合检索的候选按重排得分再次排序，召回落点标注「已重排」与相关性得分；未配置时保持原序，功能自动退化。
-- **记忆层（新应用 + 全 Agent 共享）**：图标栏新增「记忆」应用；Agent 经 `memory_search` / `memory_save` / `memory_list` 工具沉淀事实 / 偏好 / 经验 / 技能，与手工录入同库（迁移 `0018_strong_corsair`）；置顶与高热记忆作为「常驻核心记忆」注入 Agent 系统提示（`MEMORY_ENABLED` 总开关）；记忆对外三条通道——网关 REST `/v1/memories`（GET 检索 / POST 写入 / DELETE 删除）、网关 MCP `memory_*` 工具、`omi memory add|search|list` CLI；`omi launch` 启动编码工具时自动刷新工具上下文文件（CLAUDE.md / AGENTS.md）的托管区块，并给 Claude Code / Codex / OpenCode 挂载 `omni-memory` MCP 服务器（在应用外用 `memory_save` 实时写回同一个库）。
-- **MCP 客户端与调试工作台**：设置页新增「MCP」工具组，支持 stdio（换行分隔 JSON-RPC）/ Streamable HTTP / 旧版 SSE 三种传输的手写客户端（不引入 SDK，避免 Electrobun 自定义 Bun 运行时的 node 兼容层风险），服务增删改查、连通检测与工具枚举；已启用服务器的工具以 `mcp_*` 注入 Agent（连接失败的服务器自动跳过，Plan 模式不注入有副作用的工具）；网关同时提供 **MCP 服务端**——`POST /mcp`（Streamable HTTP，无状态），对外暴露知识库 `kb_search` / `kb_list` 与记忆 `memory_search` / `memory_save` / `memory_list`，浏览器 `GET /mcp` 打开单文件调试工作台（连接 → 枚举工具 → 按 inputSchema 生成表单 → 调用 → 看原始 JSON-RPC）。
-- **模型云服务重构**：云端厂商配置从设置键迁移到 `cloud_providers` 表（迁移 `0015_slippery_vulture`）——多服务商配置并存、单一「激活」，激活行的 Base URL / API Key / 模型列表同步写回 `VLLM_API_BASE` / `VLLM_API_KEY` / `CLOUD_MODELS` 等旧槽位，网关、`chat-model`、`omi` CLI 与集成模型选择器零改动；设置页改为参照 Cherry Studio 的**三栏面板**（厂商列表 / 配置详情 / 模型），内置 20 家厂商预设（16 家彩色品牌 Logo，OpenAI / Anthropic / Gemini 用官方单色 path，未收录的回退字母徽章），并新增「默认模型」页集中指定各用途的默认模型；旧数据（`CUSTOM_PROVIDERS` / `CLOUD_MODELS`）首次读取时自动迁移入表。
-- **实时仪表盘（重做）**：`server-stats` 替换为新的仪表盘页——吞吐 / 速度（tok/s）、请求数、活跃模型、内存 / CPU 负载、运行时长与**模型磁盘占用**（`statfs` 读数据目录所在卷的可用 / 总容量），每 2 秒轮询。
-- **主题与更新检查**：新增 `UI_THEME` 设置（system / light / dark，跟随系统并监听变化，作用于 `<html>` 的 `.dark` 类）与 `AUTO_UPDATE` 开关；「关于」页新增版本与 GitHub Release 检查（匿名 API 结果缓存 10 分钟避免限流，按通道比较版本并提示更新，可一键跳转下载）。
-- **OCR · PP-OCRv6 本地引擎（PaddleOCR）**：新增第三套本地 OCR 引擎，走 ONNX / PaddlePaddle CPU 装入独立 venv（`userData/engines/paddleocr`），主进程启动常驻 Python worker（`ppocr-worker.py`，JSON-lines stdio 协议），模型加载一次常驻内存、识别不阻塞界面；内置 PP-OCRv6 **medium** 档（约 140 MB，34.5M 参数）一键安装与首载自动下载，安装日志与加载 / 识别阶段实时推送到界面，全程离线无需 API Key。
-- **OCR · 三引擎补全与模型详情**：Tesseract（一键安装 + 多语言 LSTM 语言包）/ PaddleOCR / VLM 三个引擎页签补齐引擎状态、安装与下载进度、识别记录；模型详情改为原地打开（不再跳页）。
-- **翻译 · 同传翻译**：翻译页新增「同传翻译」——打开麦克风实时转写（复用 whisper.cpp / audio.cpp / OpenAI 兼容三套 ASR 引擎），并同步输出多种目标语言译文同屏滚动。
 - **设置 · 命令行手册页**：设置 → 工具 → 命令行，把 `omi` 的完整用法搬进应用——安装启用、启动应用与推理服务器、模型加载与切换、共享记忆（CLI / stdio MCP / HTTP MCP / REST）、编码工具（code）加载、引擎依赖与版本检查，每条命令与记忆接入片段都可一键复制（MCP / REST 片段里的网关地址取自当前设置）；内容与 `omi guide`、`docs/omi-cli.md` 同源（`src/shared/cli-docs.ts`），中英双语跟随界面语言。
 - **架构文档**：新增 `docs/architecture.md` —— 面向维护者的结构说明：进程模型与五类进程边界、主进程各层（RPC / 推理运行时 / 模型库 / 智能层 / 媒体管线）、对外接口面（网关 / 图片服务 / 控制 socket 及端口与鉴权）、前端与 CLI 架构、数据层与目录布局、四条端到端数据流、不变量清单与已知架构债。
 
 ### Changed / 变更
 
-- **工具页布局统一**：OCR / 图片 / 翻译 / 语音等工具页统一为「侧栏工具入口 + 左参数面板（引擎切换 / 配置 / 输入 / 主操作）+ 右结果区」，替换原先各自为政的页内切换方式。
-- **设置页按组重构**：单文件设置页拆分为偏好组（通用 / 外观）、工具组（MCP / 记忆 / 联网搜索 / 云服务 / 默认模型）与「关于」页，配套抽出共用表单组件（`setting-ui.tsx`）与厂商图标表（`provider-logos.ts`）。
-- **导航**：应用图标栏新增视频 / Skills / 知识库 / 记忆四个入口，Agent 图标改为 `CircuitBoardIcon`；各应用按统一工作台布局（左侧参数面板 + 右侧结果区）排布。
-- **对话**：发送消息可挂载知识库（`kbIds`）并在重新生成时复用检索；assistant 消息新增 `citations` 字段承载引用溯源。
 - **网关文档**：OpenAPI 补充 `/v1/memories`、`/v1/media` 端点与 `/mcp` 工具说明（总述改为「对话协议 + TTS / ASR + 共享记忆 + 本地素材库」）；`/v1/models` 聚合不变。
 - **模型下载**：下载面板每个任务都显示来源平台徽标（此前无法分辨字节从哪个站拉取）；下载完成后把分类与来源平台写入仓库目录的 `.vllm-meta.json`，本地模型列表据此显示「从哪儿下的」（没有记录的老数据不显示来源）。
 - **首次本地模型安装向导**：列文件与下载统一走 ModelScope（此前列文件走 ModelScope、下载却写死 hf-mirror 镜像，两边文件名不一致时会出现「列表里有、下载 404」），向导中明确标注「文件与下载均来自 ModelScope（modelscope.cn）」。
 - **模型分类识别**：同时识别 ModelScope 的 `task:*` 标签与 Hugging Face 直接放进 tags 的 pipeline tag（含 VLM `image-text-to-text` 归为对话），命名启发式补齐 deepseek / glm / mistral，减少落入「其它」；市场与详情页的格式徽标改为按平台元数据展示。
-- **`omi` CLI**：新增 `omi memory`（`add` / `search` / `list` / `mcp`）——应用运行时走控制 socket（`memoryAdd` / `memorySearch` / `memoryList`），未运行时直连 SQLite；`omi help memory` 有完整用法。
 - **`omi` 帮助体系与手册**：新增 `omi guide`（纯文本 / `--md` / `--json` / `--lang en`）打印完整手册（安装、启动、模型加载、记忆调用、编码工具加载），`docs/omi-cli.md` 由同一份数据源生成（`omi guide --md`，`scripts/omi-docs-smoke.ts` 校验命令表、帮助文本与文档三者同步）；`omi help` 支持子命令与工具级帮助（`omi help memory add` / `omi help launch claude` / `omi server help logs`），`omi memory <子命令> -h` 等价；总览补齐此前遗漏的 `memory`、`guide` 与常用示例，`omi launch --list` 与错误提示指向对应帮助。
-- **SQLite 并发**：数据库启用 WAL、`busy_timeout=5000` 与 `synchronous=NORMAL`，支撑 `omi memory` / MCP 桥接在应用之外直连同一个库读写。
-- **媒体分发**：图片服务器为视频容器补全 MIME（`.mp4` / `.webm` / `.mov` / `.mkv` 返回 `video/*`，成片可用 `<video>` 播放）。
-- **国际化**：中英双语词条补齐新应用与设置页（`shared/i18n.ts` 新增 1255 行），本次再补模型市场 / 素材来源标注 / Agent 生图配置弹窗 / 本地模型目录管理约 450 行。
+- **国际化**：中英双语词条补齐模型市场 / 素材来源标注 / Agent 生图配置弹窗 / 本地模型目录管理约 450 行。
 - **文档口径对齐**：`ROADMAP.md` 完成度重估（生图闭环 / 视频生成 / 知识库 / 记忆 / MCP / Skills / 下载持久化 / `omi launch` 等已落地项从"未启动"移入已完成，vLLM / SGLang 一键安装与实测、内存生命周期、平台支持改为按实际状态标注，并注明 `scripts/backlog.tsv` 是一次性导入载荷、看板状态以 GitHub Projects 为准）；`AGENTS.md` 补齐遗漏的 `memory` / `guide` 命令、Agent SDK 与 MLX 引擎，并新增「Hard Rules」一节固化跨进程边界约定；README 中英双份的技术栈表补上 Agent SDK 与 MLX、修正残留的 `omni` 提法，并挂上架构文档入口。
 
 ### Fixed / 修复
@@ -68,8 +49,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 - **「创建后自动上传」是死开关**：`autoUpload` 会被保存、会渲染成开关，但没有任何代码读它，用户打开它之后备份并不会自动上传（文档还写着它会生效）。现在创建备份时真的会读它；恢复前自动生成的 `pre-restore-*` 回退点除外（就地兜底用，推远端既不符合预期，也会让恢复多受一次网络波动影响）。
 - **备份清单缺字段会让恢复页白屏**：预览只校验格式与版本，缺 `db` / `tables` / `scopes` 的清单能通过预览，随后在恢复面板渲染时抛 `TypeError`（整页空白），恢复本身也以 `Cannot read properties of undefined` 收场。现在这些字段在预览阶段就校验并提示「文件可能已损坏」。
 - **创建备份时传入的文件名可以越出目标目录**：`fileName` 来自 webview / CLI 且未净化，`../../x` 会把归档写到所选目录之外；现在只取 basename（缺扩展名时仍自动补 `.omnibackup`）。
-- **迁移 0013 在老库升级时被跳过**：drizzle 以「库内已记录的最大 `created_at`」判断是否跳过迁移，而 `0013_uneven_lester` 的 `when` 小于前一条 `0012`，导致从旧版本升级的用户（库内最大 `when` 已被后续迁移抬高）**不会建出 `user_prompts` 表**，「我的提示词」功能直接报错；现将其 `when` 调整为严格递增区间内，并把该迁移改写为幂等 DDL（`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`），使「已建表 / 曾被跳过 / 已升到最新」三种库都安全。
-- **知识库向量补齐**：`embedDocChunks` 内改为循环外复制一份配置对象（原写法在循环中展开累加，且可能污染调用方传入的对象）。
 - **手册漂移无人拦截**：`scripts/omi-docs-smoke.ts` 校验命令表 ↔ 帮助文本 ↔ 数据源 ↔ `docs/omi-cli.md` 四者同步，但它此前既不在 `test:smoke` 列表里、CI 也不会执行，文档漂移事实上不会被发现；现已纳入 `test:smoke`，随 CI 一起跑。
 - **在线模型市场 · ModelScope 分页总数读错字段**：检索接口返回的是 `total_count`，此前读 `total` 导致「共 N 条」永远等于当前页条数、加载更多判断错误；现显示真实命中总数并正确分页（Hugging Face 本就没有总数接口，改为如实显示「已加载 N 条」而不是编造总数）。
 - **模型详情「已下载」误判**：已安装列表登记的是文件名，而 HF 仓库常见 `BF16/xxx.gguf` 这类子目录路径，此前用完整路径比对导致已下载的文件仍显示成可下载；现统一按 basename 比对。
@@ -80,11 +59,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 ### Internal / 内部
 
-- 新增迁移：`0014_talented_network`（Skills 预设工具开关 `preset_skill_tools`）、`0015_slippery_vulture`（`cloud_providers`）、`0016_lean_turbo`（`mcp_servers`）、`0017_knowledge_base`（`knowledge_bases` / `knowledge_docs` / `knowledge_chunks`）、`0018_strong_corsair`（`memories`）、`0019_add_video_records`（`video_records`）、`0020_kb_rerank`（`knowledge_bases` 增加重排模型 / Base / Key 三列）、`0021_tense_dragon_man`（补 `messages` / `agent_events` / `knowledge_*` 的会话与外键索引）、`0022_memory_lifecycle`（`memory_events` / `memory_metrics` 与记忆状态 / 指纹 / 作用域索引）、`0023_kb_governance`（`kb_events` / `kb_ingest_jobs` 与文档来源路径索引）、`0024_media_source`（`image_records` / `video_records` / `voice_records` 增加 `source` 列区分手工与 Agent 生成）。
-- 新增主进程模块：`video-gen.ts`、`cloud-providers.ts`、`mcp.ts`、`mcp-playground.ts`、`kb-mcp.ts`、`knowledge.ts`、`memory.ts`、`memory-api.ts`、`memory-sync.ts`、`release-check.ts`、`skills/`（13 个文件：中央库 / 安装器 / 同步引擎 / 扫描 / 元数据 / 预设 / 项目 / 审计 / 备份等）、`backup/`（5 个文件：归档内核 / tar / 加密 / 远端存储 / 作用域归置，刻意不依赖数据层与 electrobun）、`media-tools.ts`（Agent 侧素材检索与生成工具，兼素材库内核）、`media-api.ts`（网关对外只读素材接口）、`media-setup.ts`（Agent 生成前的「需要用户介入」通道）、`model-scan.ts`（本地模型目录扫描）、`huggingface.ts`（市场检索的 HF / hf-mirror 数据源）。
-- 新增前端：`video-screen.tsx`、`dashboard-screen.tsx`、`memory-screen.tsx`、`kb/`（6 个文件）、`skills/`（9 个文件）、`main-layout/backup-tab.tsx`、`components/media-setup-dialog.tsx`、`components/{media-,}source-badge.tsx`、设置页各组面板与 `stores/{video,kb,memory-ui,skills,backup,market,media-setup}.ts`。
-- 新增脚本：`apps/studio/scripts/migrations-smoke.ts`（journal 单调性 + 全新库建表 + 重复打开幂等；本次正是它先暴露出 0013 的 `when` 倒挂）、`apps/studio/scripts/backup-smoke.ts`（加密备份往返 / 远端上传下载 / 坏库下的离线可用性）。
+- 新增迁移：`0021_tense_dragon_man`（补 `messages` / `agent_events` / `knowledge_*` 的会话与外键索引）、`0022_memory_lifecycle`（`memory_events` / `memory_metrics` 与记忆状态 / 指纹 / 作用域索引）、`0023_kb_governance`（`kb_events` / `kb_ingest_jobs` 与文档来源路径索引）、`0024_media_source`（`image_records` / `video_records` / `voice_records` 增加 `source` 列区分手工与 Agent 生成）。
+- 新增主进程模块：`backup/`（5 个文件：归档内核 / tar / 加密 / 远端存储 / 作用域归置，刻意不依赖数据层与 electrobun）、`media-tools.ts`（Agent 侧素材检索与生成工具，兼素材库内核）、`media-api.ts`（网关对外只读素材接口）、`media-setup.ts`（Agent 生成前的「需要用户介入」通道）、`model-scan.ts`（本地模型目录扫描）、`huggingface.ts`（市场检索的 HF / hf-mirror 数据源）。
+- 新增前端：`main-layout/backup-tab.tsx`、`components/media-setup-dialog.tsx`、`components/{media-,}source-badge.tsx` 与 `stores/{backup,market,media-setup}.ts`。
+- 新增脚本：`apps/studio/scripts/backup-smoke.ts`（加密备份往返 / 远端上传下载 / 坏库下的离线可用性）。
 - 备份内核新增「归档不可信输入」测试组（`backup/index.test.ts`）：伪造归档改写技能库落地目录、非法 KDF 参数、声明 1 GiB 的条目长度、缺字段清单、重复条目、非备份文件删除、`../` 文件名、空库恢复，各一条回归用例。
+
+## [0.0.6-canary.0] - 2026-09-12
+
+### Added / 新增
+
+- **AI 视频生成（新应用）**：左侧图标栏新增「视频」应用，三种后端统一为「提交任务 + 轮询」异步模式——MiniMax（H3，云端，支持首帧图生视频）、Seedance（火山方舟内容生成任务 API）、ComfyUI（本地工作流）；5 秒轮询任务状态，成片落盘后进历史库（新表 `video_records`，迁移 `0019_add_video_records`），结果区可直接播放 / 下载 / 删除，参数面板支持提示词、负向提示词、分辨率、时长、种子与首帧图上传。
+- **Skills 管理（新应用）**：图标栏新增「Skills」应用，中央技能库（默认 `~/.agents/skills`）统一管理并同步到各编码工具；六区界面：技能市场（skillssh 榜单 + 一键安装 / 批量导入）、我的技能（启用 / 分组 / 标签 / 批量操作）、预设（技能集合一键套用到多个 Agent）、项目（按项目目录管理技能）、工具（53 个内置工具适配器 + 自定义工具 + 路径覆盖）、备份（Git 远端 + PAT、自动快照、快照列表）；支持 symlink / copy 两种同步模式、技能文档查看、审计日志与元数据同步。
+- **知识库 / 本地 RAG（新应用）**：图标栏新增「知识库」应用——数据源摄取（本地文件（文本直读，PDF / 图片走 VLM OCR）、手写笔记、网页抓取）、Markdown 感知切片（标题分节 + 段落贪心打包 + 超长硬切带重叠）、可选向量化（OpenAI 兼容 `/v1/embeddings`，Float32 base64 存在分块行）、混合检索（BM25 关键词与余弦向量各自排序后 RRF 融合，不依赖外部向量库或 FTS 扩展）；四个标签页（召回测试、文档、访问、设置）；对话界面挂载知识库后回答带 **[n] 引用溯源**（迁移 `0017_knowledge_base`，引用随消息落库）。
+- **知识库 · 重排序（Rerank）**：每个知识库可配置 Jina / SiliconFlow / Cohere 兼容的 `/v1/rerank` 二次排序模型（模型 / Base URL / API Key 三项，可从服务端拉取模型列表）；混合检索的候选按重排得分再次排序，召回落点标注「已重排」与相关性得分；未配置时保持原序，功能自动退化。
+- **记忆层（新应用 + 全 Agent 共享）**：图标栏新增「记忆」应用；Agent 经 `memory_search` / `memory_save` / `memory_list` 工具沉淀事实 / 偏好 / 经验 / 技能，与手工录入同库（迁移 `0018_strong_corsair`）；置顶与高热记忆作为「常驻核心记忆」注入 Agent 系统提示（`MEMORY_ENABLED` 总开关）；记忆对外三条通道——网关 REST `/v1/memories`（GET 检索 / POST 写入 / DELETE 删除）、网关 MCP `memory_*` 工具、`omi memory add|search|list` CLI；`omi launch` 启动编码工具时自动刷新工具上下文文件（CLAUDE.md / AGENTS.md）的托管区块，并给 Claude Code / Codex / OpenCode 挂载 `omni-memory` MCP 服务器（在应用外用 `memory_save` 实时写回同一个库）。
+- **MCP 客户端与调试工作台**：设置页新增「MCP」工具组，支持 stdio（换行分隔 JSON-RPC）/ Streamable HTTP / 旧版 SSE 三种传输的手写客户端（不引入 SDK，避免 Electrobun 自定义 Bun 运行时的 node 兼容层风险），服务增删改查、连通检测与工具枚举；已启用服务器的工具以 `mcp_*` 注入 Agent（连接失败的服务器自动跳过，Plan 模式不注入有副作用的工具）；网关同时提供 **MCP 服务端**——`POST /mcp`（Streamable HTTP，无状态），对外暴露知识库 `kb_search` / `kb_list` 与记忆 `memory_search` / `memory_save` / `memory_list`，浏览器 `GET /mcp` 打开单文件调试工作台（连接 → 枚举工具 → 按 inputSchema 生成表单 → 调用 → 看原始 JSON-RPC）。
+- **模型云服务重构**：云端厂商配置从设置键迁移到 `cloud_providers` 表（迁移 `0015_slippery_vulture`）——多服务商配置并存、单一「激活」，激活行的 Base URL / API Key / 模型列表同步写回 `VLLM_API_BASE` / `VLLM_API_KEY` / `CLOUD_MODELS` 等旧槽位，网关、`chat-model`、`omi` CLI 与集成模型选择器零改动；设置页改为参照 Cherry Studio 的**三栏面板**（厂商列表 / 配置详情 / 模型），内置 20 家厂商预设（16 家彩色品牌 Logo，OpenAI / Anthropic / Gemini 用官方单色 path，未收录的回退字母徽章），并新增「默认模型」页集中指定各用途的默认模型；旧数据（`CUSTOM_PROVIDERS` / `CLOUD_MODELS`）首次读取时自动迁移入表。
+- **实时仪表盘（重做）**：`server-stats` 替换为新的仪表盘页——吞吐 / 速度（tok/s）、请求数、活跃模型、内存 / CPU 负载、运行时长与**模型磁盘占用**（`statfs` 读数据目录所在卷的可用 / 总容量），每 2 秒轮询。
+- **主题与更新检查**：新增 `UI_THEME` 设置（system / light / dark，跟随系统并监听变化，作用于 `<html>` 的 `.dark` 类）与 `AUTO_UPDATE` 开关；「关于」页新增版本与 GitHub Release 检查（匿名 API 结果缓存 10 分钟避免限流，按通道比较版本并提示更新，可一键跳转下载）。
+- **OCR · PP-OCRv6 本地引擎（PaddleOCR）**：新增第三套本地 OCR 引擎，走 ONNX / PaddlePaddle CPU 装入独立 venv（`userData/engines/paddleocr`），主进程启动常驻 Python worker（`ppocr-worker.py`，JSON-lines stdio 协议），模型加载一次常驻内存、识别不阻塞界面；内置 PP-OCRv6 **medium** 档（约 140 MB，34.5M 参数）一键安装与首载自动下载，安装日志与加载 / 识别阶段实时推送到界面，全程离线无需 API Key。
+- **OCR · 三引擎补全与模型详情**：Tesseract（一键安装 + 多语言 LSTM 语言包）/ PaddleOCR / VLM 三个引擎页签补齐引擎状态、安装与下载进度、识别记录；模型详情改为原地打开（不再跳页）。
+- **翻译 · 同传翻译**：翻译页新增「同传翻译」——打开麦克风实时转写（复用 whisper.cpp / audio.cpp / OpenAI 兼容三套 ASR 引擎），并同步输出多种目标语言译文同屏滚动。
+
+### Changed / 变更
+
+- **工具页布局统一**：OCR / 图片 / 翻译 / 语音等工具页统一为「侧栏工具入口 + 左参数面板（引擎切换 / 配置 / 输入 / 主操作）+ 右结果区」，替换原先各自为政的页内切换方式。
+- **设置页按组重构**：单文件设置页拆分为偏好组（通用 / 外观）、工具组（MCP / 记忆 / 联网搜索 / 云服务 / 默认模型）与「关于」页，配套抽出共用表单组件（`setting-ui.tsx`）与厂商图标表（`provider-logos.ts`）。
+- **导航**：应用图标栏新增视频 / Skills / 知识库 / 记忆四个入口，Agent 图标改为 `CircuitBoardIcon`；各应用按统一工作台布局（左侧参数面板 + 右侧结果区）排布。
+- **对话**：发送消息可挂载知识库（`kbIds`）并在重新生成时复用检索；assistant 消息新增 `citations` 字段承载引用溯源。
+- **网关文档**：OpenAPI 补充 `/v1/memories`、`/mcp` 端点说明；`/v1/models` 聚合不变。
+- **`omi` CLI**：新增 `omi memory`（`add` / `search` / `list` / `mcp`）——应用运行时走控制 socket（`memoryAdd` / `memorySearch` / `memoryList`），未运行时直连 SQLite；`omi help memory` 有完整用法。
+- **SQLite 并发**：数据库启用 WAL、`busy_timeout=5000` 与 `synchronous=NORMAL`，支撑 `omi memory` / MCP 桥接在应用之外直连同一个库读写。
+- **媒体分发**：图片服务器为视频容器补全 MIME（`.mp4` / `.webm` / `.mov` / `.mkv` 返回 `video/*`，成片可用 `<video>` 播放）。
+- **国际化**：中英双语词条补齐新应用与设置页（`shared/i18n.ts` 新增 1255 行）。
+
+### Fixed / 修复
+
+- **迁移 0013 在老库升级时被跳过**：drizzle 以「库内已记录的最大 `created_at`」判断是否跳过迁移，而 `0013_uneven_lester` 的 `when` 小于前一条 `0012`，导致从旧版本升级的用户（库内最大 `when` 已被后续迁移抬高）**不会建出 `user_prompts` 表**，「我的提示词」功能直接报错；现将其 `when` 调整为严格递增区间内，并把该迁移改写为幂等 DDL（`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`），使「已建表 / 曾被跳过 / 已升到最新」三种库都安全。
+- **知识库向量补齐**：`embedDocChunks` 内改为循环外复制一份配置对象（原写法在循环中展开累加，且可能污染调用方传入的对象）。
+
+### Internal / 内部
+
+- 新增迁移：`0014_talented_network`（Skills 预设工具开关 `preset_skill_tools`）、`0015_slippery_vulture`（`cloud_providers`）、`0016_lean_turbo`（`mcp_servers`）、`0017_knowledge_base`（`knowledge_bases` / `knowledge_docs` / `knowledge_chunks`）、`0018_strong_corsair`（`memories`）、`0019_add_video_records`（`video_records`）、`0020_kb_rerank`（`knowledge_bases` 增加重排模型 / Base / Key 三列）。
+- 新增主进程模块：`video-gen.ts`、`cloud-providers.ts`、`mcp.ts`、`mcp-playground.ts`、`kb-mcp.ts`、`knowledge.ts`、`memory.ts`、`memory-api.ts`、`memory-sync.ts`、`release-check.ts`、`skills/`（13 个文件：中央库 / 安装器 / 同步引擎 / 扫描 / 元数据 / 预设 / 项目 / 审计 / 备份等）。
+- 新增前端：`video-screen.tsx`、`dashboard-screen.tsx`、`memory-screen.tsx`、`kb/`（6 个文件）、`skills/`（9 个文件）、设置页各组面板与 `stores/{video,kb,memory-ui,skills}.ts`。
+- 新增脚本：`apps/studio/scripts/migrations-smoke.ts`（journal 单调性 + 全新库建表 + 重复打开幂等；本次正是它先暴露出 0013 的 `when` 倒挂）。
 - README 界面预览截图更新（模型云服务 / 编码工具集成 / 语音实时对话 / TTS / 模型选择向导），中英两份 README 同步重写。
 - 依赖：无新增运行时依赖（MCP 客户端手写、向量检索纯 JS、调试工作台单文件无 CDN）。
 
