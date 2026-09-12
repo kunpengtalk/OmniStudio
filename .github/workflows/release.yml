@@ -279,6 +279,31 @@ jobs:
             echo "prerelease=false" >> $GITHUB_OUTPUT
           fi
 
+      # 发布说明取 CHANGELOG 里对应版本的小节。仓库把 CHANGELOG 当成唯一真源在维护
+      # （中英双语、逐条写清"改了什么、为什么"），而此前 release 只挂一条自动生成的
+      # compare 链接，用户点进 Release 页看不到任何内容。
+      - name: Build release notes from CHANGELOG
+        id: notes
+        run: |
+          set -euo pipefail
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          VERSION="${RELEASE_TAG#v}"
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { inside = 1; next }
+            inside && /^## \[/ { exit }
+            inside { print }
+          ' CHANGELOG.md > "$NOTES" || true
+          if [ ! -s "$NOTES" ]; then
+            echo "CHANGELOG.md 里没有 ${VERSION} 小节，本版发布说明为自动生成。" > "$NOTES"
+          fi
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "完整变更日志见仓库 [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md)。"
+          } >> "$NOTES"
+          echo "用 ${VERSION} 的小节作为发布说明（$(wc -l < "$NOTES") 行）"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -289,6 +314,6 @@ jobs:
             omnistudio-linux-x64/*
           draft: false
           prerelease: ${{ steps.release-env.outputs.prerelease }}
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
