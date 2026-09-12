@@ -2,7 +2,7 @@ import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { Database } from "bun:sqlite";
 import { join } from "path";
-import { mkdirSync, existsSync, renameSync } from "fs";
+import { appendFileSync, copyFileSync, mkdirSync, existsSync, readdirSync, renameSync, rmSync, statSync } from "fs";
 import * as schema from "./schema";
 import { getDataDir } from "../paths";
 
@@ -48,4 +48,64 @@ export const db = drizzle({ client: sqlite, schema: schema });
 const migrationsFolder = existsSync(join(import.meta.dir, "db", "migrations"))
   ? join(import.meta.dir, "db", "migrations")
   : join(import.meta.dir, "migrations");
-migrate(db, { migrationsFolder });
+
+/**
+ * 迁移前备份数据库文件。
+ *
+ * 迁移失败时应用会起不来，而用户此时的唯一"修复手段"往往是删库（等于丢掉全部
+ * 设置 / API Key / 会话）。这里保证任何一次迁移前都有一份可回滚的副本，
+ * 并只保留最近 3 份，避免无限占盘。
+ */
+function backupBeforeMigrate(): void {
+  try {
+    if (!existsSync(dbPath) || statSync(dbPath).size === 0) return;
+    // 全新库（还没有任何表）没有可回滚的数据，不必产生备份噪音。
+    const tables = sqlite
+      .query("select count(*) as c from sqlite_master where type='table'")
+      .get() as { c: number } | null;
+    if (!tables || tables.c === 0) return;
+    const dir = join(dbPath, "..", "db-backups");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const dest = join(dir, `${stamp}.db`);
+    copyFileSync(dbPath, dest);
+    // 只保留最近 3 份
+    const keep = 3;
+    const files = readdirSync(dir)
+      .filter((n) => n.endsWith(".db"))
+      .sort();
+    for (const stale of files.slice(0, Math.max(0, files.length - keep))) {
+      rmSync(join(dir, stale), { force: true });
+    }
+  } catch {
+    // 备份失败不阻断启动（只读盘 / 空间不足等）；迁移失败时会另外记录日志。
+  }
+}
+
+/** 迁移失败日志：应用可能因此起不来，留下可诊断的现场。 */
+function logMigrateFailure(error: unknown): void {
+  try {
+    const dir = join(getDataDir(), "logs");
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    appendFileSync(
+      join(dir, "db-migrate-error.log"),
+      `[${new Date().toISOString()}] 迁移失败（数据库：${dbPath}）\n${String(error)}\n\n`,
+    );
+  } catch {
+    // ignore
+  }
+}
+
+backupBeforeMigrate();
+try {
+  migrate(db, { migrationsFolder });
+} catch (e) {
+  logMigrateFailure(e);
+  throw new Error(
+    `数据库迁移失败：${e instanceof Error ? e.message : String(e)}\n` +
+      `数据库：${dbPath}\n` +
+      `迁移前备份位于同目录的 db-backups/（可复制回 ${join(dbPath)} 后重试），` +
+      `详细日志见数据目录 logs/db-migrate-error.log。`,
+    { cause: e },
+  );
+}
