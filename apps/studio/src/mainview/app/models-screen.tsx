@@ -180,6 +180,10 @@ function MyModelRow({
             params: 0,
             createdAt: "",
             lastModified: "",
+            // 本机已装模型默认按魔搭口径列文件。
+            source: "modelscope",
+            formats: [],
+            fileCount: 0,
           },
         };
     useModelDetailStore.getState().setSource(source);
