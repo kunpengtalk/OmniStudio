@@ -206,6 +206,35 @@ apps/
 - [ ] Memory lifecycle (idle unload, prefault protection), KV cache tiering with SSD offload 内存生命周期与 KV 缓存分层
 - [ ] Menu bar / Dock indicators, API key encryption 菜单栏指标 / Key 加密
 
+## 🩺 常见问题 / 排障
+
+### Windows：窗口能打开，内容区整片空白
+
+**症状**：标题栏、菜单都在，内容区是单一色块；进程活着，后端也正常（`http://127.0.0.1:10000/health` 能返回）。
+
+**原因**：WebView2 的 **GPU 进程反复崩溃**，Chromium 判定 GPU 不可用后就不再产出合成帧 —— 页面 DOM 其实已经渲染好了，只是没画到屏幕上（「有页面、没画面」）。所以这不是前端或安装包的问题，换更干净的载荷也不会变好。
+
+**确认**（可选）：在 `%LOCALAPPDATA%\omni-studio.kunpengtalk.com\<channel>\WebView2\Partitions\default\EBWebView\chrome_debug.log` 里搜：
+
+```
+GPU process exited unexpectedly
+GPU process isn't usable. Goodbye.
+```
+
+**解决**：让 GPU 走进程内实现，启动前设置环境变量。
+
+```powershell
+# 只对当前终端会话生效，随后从该终端启动 OmniStudio
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--in-process-gpu"
+```
+
+```bat
+:: 或持久设置（之后照常从开始菜单启动）
+setx WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS "--in-process-gpu"
+```
+
+这个参数**只**对「GPU 进程崩溃型白屏」有效。若是别的原因导致的白屏（例如前端模块报错），它不会让情况变好 —— 那种白屏要看渲染层控制台日志。等显卡驱动或 WebView2 更新后，可以去掉这个变量、恢复默认渲染路径。
+
 ## 📄 许可证
 
 MIT — by 鲲鹏Talk。见 [LICENSE](LICENSE)。
