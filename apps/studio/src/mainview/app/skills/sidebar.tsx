@@ -5,7 +5,7 @@ import {
   GitBranchIcon,
   LayersIcon,
   BlocksIcon,
-  ShoppingBagIcon,
+  PackageSearchIcon,
   WrenchIcon,
   FolderTreeIcon,
 } from "lucide-react";
