@@ -1,4 +1,4 @@
-CREATE TABLE `user_prompts` (
+CREATE TABLE IF NOT EXISTS `user_prompts` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`kind` text NOT NULL,
 	`category` text DEFAULT '' NOT NULL,
@@ -12,4 +12,4 @@ CREATE TABLE `user_prompts` (
 	`updated_at` integer
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `user_prompts_source_key_unique` ON `user_prompts` (`source_key`);
+CREATE UNIQUE INDEX IF NOT EXISTS `user_prompts_source_key_unique` ON `user_prompts` (`source_key`);

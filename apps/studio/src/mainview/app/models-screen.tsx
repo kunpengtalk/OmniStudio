@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 
 import { ScrollArea } from "@ui/scroll-area";
-import { useModelDetailStore } from "@stores/model-detail";
+import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detail";
 import { useRouter } from "@stores/router";
 import { useEngine } from "@lib/use-engine";
 import { useT } from "@stores/ui-lang";
@@ -45,15 +45,24 @@ const CARD_ICONS: Record<ModelCategory, LucideIcon> = {
 /**
  * 推荐模型展示卡片（模型库只做展示）：
  * 点击进入详情页，下载在详情页/在线模型市场完成。
+ * 嵌在设置页时通过 onOpenDetail 原地打开详情，不切换全局路由。
  */
-function PresetCard({ preset }: { preset: ChatPreset }) {
+function PresetCard({
+  preset,
+  onOpenDetail,
+}: {
+  preset: ChatPreset;
+  onOpenDetail?: (source: ModelDetailSource) => void;
+}) {
   const t = useT();
   const setSource = useModelDetailStore((s) => s.setSource);
   const setRoute = useRouter((s) => s.setRoute);
 
   const openDetail = () => {
-    setSource({ kind: "preset", preset });
-    setRoute({ path: "model-detail" });
+    const source = { kind: "preset", preset } as const;
+    setSource(source);
+    if (onOpenDetail) onOpenDetail(source);
+    else setRoute({ path: "model-detail" });
   };
 
   const CardIcon = CARD_ICONS[preset.app];
@@ -105,7 +114,11 @@ function PresetCard({ preset }: { preset: ChatPreset }) {
 }
 
 /** 模型库：只做展示，浏览推荐模型。搜索/下载在「在线模型市场」，推理/启动在「本地模型」。 */
-export function ModelsScreen() {
+export function ModelsScreen({
+  onOpenDetail,
+}: {
+  onOpenDetail?: (source: ModelDetailSource) => void;
+} = {}) {
   const t = useT();
   const [activeCategory, setActiveCategory] = useState<ModelCategory | "all">("all");
   const { engine } = useEngine();
@@ -179,7 +192,7 @@ export function ModelsScreen() {
           </h3>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {filteredPresets.map((preset) => (
-              <PresetCard key={preset.repo} preset={preset} />
+              <PresetCard key={preset.repo} preset={preset} onOpenDetail={onOpenDetail} />
             ))}
           </div>
         </div>

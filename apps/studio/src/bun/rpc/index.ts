@@ -1,5 +1,5 @@
 import { BrowserView, BrowserWindow, RPCSchema, Updater, Utils } from "electrobun/bun";
-import { asc, eq, desc, like, sql } from "drizzle-orm";
+import { asc, eq, desc, like, sql, inArray } from "drizzle-orm";
 import path from "path";
 import { existsSync, rmSync, copyFileSync, mkdirSync, appendFileSync } from "fs";
 
@@ -9,7 +9,10 @@ import { getAllSettings, getSetting, isConfigured, updateSettings } from "../db/
 import { getImagesBaseDir, getUploadsBaseDir } from "../image-server";
 import { chatImageDir, chatImageUrl } from "../image-server";
 import { processDocumentPages } from "../queue";
-import { updateState, type UpdateInfo } from "../updates";
+import { updateState, checkForUpdate, type UpdateInfo } from "../updates";
+import * as ReleaseCheck from "../release-check";
+import type { ReleaseCheckResult } from "../../shared/release";
+import { getUserDataDir } from "../paths";
 import * as ServerManager from "../server-manager";
 import type { ServerStatus } from "../server-manager";
 import * as Gateway from "../gateway";
@@ -19,12 +22,20 @@ import * as Chat from "../chat";
 import type { Conversation, ChatMessage, ChatStats } from "../chat";
 import * as Agent from "../agent";
 import type { AgentEventRow, AgentMode } from "../agent";
+import * as Mcp from "../mcp";
+import type { McpServerConfig } from "../mcp";
+import * as Memory from "../memory";
+import * as MemorySync from "../memory-sync";
+import type { MemoryCategory, MemoryEntry } from "../../shared/memory";
+import type { MemorySyncResult, MemorySyncStatus } from "../memory-sync";
 import * as VoiceCall from "../voice-call";
 import type { VoiceCallOutgoing, VoiceCallPhase, VoiceCallPreflight } from "../voice-call";
 import * as RealtimeVoice from "../realtime-voice";
 import type { RealtimeProviderConfig } from "../realtime-voice";
 import * as Translate from "../translate";
 import { listChatModels, selectChatModel, type ChatModelOption } from "../chat-model";
+import * as CloudProviders from "../cloud-providers";
+import type { CloudModelEntry, CloudProviderInfo } from "../../shared/cloud-providers";
 import * as ModelScope from "../modelscope";
 import type { ModelScopeModel, ModelScopeFile } from "../modelscope";
 import * as ModelStore from "../model-store";
@@ -39,15 +50,22 @@ import type { AsrModelItem, AsrSegment, AsrStatus } from "../asr";
 import * as AsrAudioCpp from "../asr-audiocpp";
 import type { AsrAudioCppModelInfo, AsrAudioCppStatus } from "../asr-audiocpp";
 import * as WhisperEngine from "../whisper-engine";
-import type { WhisperEngineInfo } from "../whisper-engine";
 import * as TTSModels from "../tts-models";
 import type { TTSModelInfo } from "../tts-models";
 import * as TTSLocal from "../tts-local";
 import type { TtsLocalModelInfo, TtsLocalStatus } from "../tts-local";
 import * as Ocr from "../ocr";
 import type { OcrLangModelInfo, OcrStatus, OcrResult, OcrVlmResult, OcrProviderConfig } from "../ocr";
+import * as PpOcr from "../ppocr";
+import type { PpOcrModelSize } from "../../shared/ocr";
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
+import * as VideoGen from "../video-gen";
+import type {
+  VideoGenConfig,
+  VideoRecordRow,
+  VideoGenBackend,
+} from "../video-gen";
 import * as PromptLib from "../prompt-library";
 import * as Up from "../user-prompt";
 import * as MlxGen from "../mlx-gen";
@@ -60,6 +78,24 @@ import type {
 } from "../mlx-gen";
 import type { EdgeVoice } from "../edge-tts";
 import type { ModelCategory } from "../../shared/modelscope";
+import * as Skills from "../skills";
+import type {
+  ToolInfo,
+  ManagedSkill,
+  SkillsShSkill,
+  PresetView,
+  ProjectView,
+  ProjectSkillView,
+  DiscoveredSkillGroup,
+  SkillsInstallProgress,
+} from "../../shared/skills";
+import type { BackupStatus as SkillsBackupStatus } from "../skills/git-backup";
+import type { SkillUpdateStatus as SkillUpdateStatusView } from "../skills/installer";
+import type { CentralInfo as SkillsCentralInfo } from "../skills/central-repo";
+import * as Knowledge from "../knowledge";
+import type { KbCitation, KbHit } from "../../shared/knowledge";
+
+export type GitPreviewItem = { relPath: string; name: string; description: string | null };
 
 /** 聊天附件允许的文本文件类型与大小上限（超限直接跳过）。 */
 const CHAT_TEXT_FILE_RE =
@@ -88,6 +124,12 @@ export type DocumentMeta = {
   processedPages: number | null;
   createdAt: number | null;
   processingStartedAt: number | null;
+  /** 文件类别（决定侧边栏左侧图标：图片缩略图 / PDF 图标 / 通用图标）。仅列表接口返回。 */
+  kind?: "image" | "pdf" | "other";
+  /** 图片缩略图 URL（仅图片类且位于图片服务目录内，否则 null）。仅列表接口返回。 */
+  thumbUrl?: string | null;
+  /** 首页识别内容首行预览（列表标题用；无内容为 null）。仅列表接口返回。 */
+  preview?: string | null;
 };
 
 export type DocumentFull = DocumentMeta & {
@@ -116,6 +158,37 @@ export type AppRPC = {
       listRemoteModels: {
         params: { baseUrl?: string; apiKey?: string } | undefined;
         response: { ok: boolean; models: string[]; error?: string };
+      };
+      /** 模型云服务商管理（cloud_providers 表；激活行同步写回 VLLM_* 槽位）。 */
+      cloudProviderList: {
+        params: undefined;
+        response: { providers: CloudProviderInfo[]; activeId: string | null };
+      };
+      cloudProviderCreate: {
+        params: { presetId?: string; name?: string; baseUrl?: string };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      cloudProviderUpdate: {
+        params: {
+          id: string;
+          name?: string;
+          baseUrl?: string;
+          apiKey?: string;
+          models?: CloudModelEntry[];
+        };
+        response: { ok: boolean; error?: string };
+      };
+      cloudProviderDelete: {
+        params: { id: string };
+        response: { ok: boolean; error?: string };
+      };
+      cloudProviderActivate: {
+        params: { id: string };
+        response: { ok: boolean; error?: string };
+      };
+      cloudProviderDeactivate: {
+        params: undefined;
+        response: { ok: boolean };
       };
       checkLlamaServer: {
         params: undefined;
@@ -196,7 +269,15 @@ export type AppRPC = {
         response: { document: DocumentFull | null };
       };
       openFileDialog: {
-        params: { allowedFileTypes?: string } | undefined;
+        params:
+          | {
+              allowedFileTypes?: string;
+              /** 选择目录（知识库批量导入等场景）。 */
+              canChooseDirectory?: boolean;
+              canChooseFiles?: boolean;
+              allowsMultipleSelection?: boolean;
+            }
+          | undefined;
         response: { paths: string[] };
       };
       addDocument: {
@@ -235,6 +316,26 @@ export type AppRPC = {
         params: undefined;
         response: undefined;
       };
+      /** 检查 GitHub 仓库最新 release（10 分钟缓存，force 跳过）。 */
+      checkReleaseUpdate: {
+        params: { force?: boolean };
+        response: ReleaseCheckResult;
+      };
+      /** 返回上次 release 检查结果（首屏展示用，从未检查为 null）。 */
+      getReleaseCheck: {
+        params: undefined;
+        response: ReleaseCheckResult | null;
+      };
+      /** 触发内置更新器检查 + 自动下载（状态经 updateStatus 广播）。 */
+      startAutoUpdate: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      /** 用系统默认程序打开文件/目录（Finder / 资源管理器）。 */
+      openPath: {
+        params: { path: string };
+        response: { ok: boolean };
+      };
       // Chat
       listConversations: {
         params: { app?: string } | undefined;
@@ -267,6 +368,8 @@ export type AppRPC = {
           images?: string[];
           webSearch?: boolean;
           files?: { name: string; content: string }[];
+          /** 挂载的知识库（检索注入 + 引用溯源）。 */
+          kbIds?: number[];
         };
         response: { ok: boolean; error?: string };
       };
@@ -288,6 +391,7 @@ export type AppRPC = {
           sourceLang?: string;
           targetLang: string;
           engine?: "model" | "google";
+          save?: boolean;
         };
         response: { text?: string; id?: number; error?: string };
       };
@@ -384,6 +488,84 @@ export type AppRPC = {
       listAgentTools: {
         params: { mode?: string } | undefined;
         response: { tools: { name: string; label: string; description: string }[] };
+      };
+
+      // -----------------------------------------------------------------
+      // MCP 服务器管理
+      // -----------------------------------------------------------------
+      /** 服务器列表 + 当前连接状态（缓存里活着的才算已连接）。 */
+      mcpListServers: {
+        params: undefined;
+        response: {
+          servers: (McpServerConfig & { status?: { connected: boolean; toolCount: number } })[];
+        };
+      };
+      /** 新建 / 编辑（带 id 为编辑）。 */
+      mcpSaveServer: {
+        params: { server: McpServerConfig };
+        response: { ok: boolean; server: McpServerConfig };
+      };
+      mcpDeleteServer: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      mcpSetServerEnabled: {
+        params: { id: number; enabled: boolean };
+        response: { ok: boolean };
+      };
+      /** 连接并枚举工具。带 id 用库内配置，否则用传入的临时配置（保存前预检）。 */
+      mcpTestServer: {
+        params: { server: McpServerConfig };
+        response: {
+          ok: boolean;
+          tools: { name: string; description: string }[];
+          error?: string;
+        };
+      };
+      /** 解析 Claude Desktop / Cursor 风格 mcp.json 文本，预览待导入服务器。 */
+      mcpParseJson: {
+        params: { text: string };
+        response: { ok: boolean; servers: McpServerConfig[]; error?: string };
+      };
+
+      // -----------------------------------------------------------------
+      // 记忆（所有 Agent 共享的长期记忆库）
+      // -----------------------------------------------------------------
+      /** 记忆列表（可按关键词 / 分类过滤，置顶优先）。 */
+      memoryList: {
+        params: { query?: string; category?: MemoryCategory } | undefined;
+        response: { memories: MemoryEntry[] };
+      };
+      /** 新建 / 编辑（带 id 为编辑）。 */
+      memorySave: {
+        params: {
+          memory: {
+            id?: number;
+            content: string;
+            category?: MemoryCategory;
+            tags?: string[];
+            pinned?: boolean;
+          };
+        };
+        response: { ok: boolean; memory: MemoryEntry };
+      };
+      memoryDelete: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      memorySetPinned: {
+        params: { id: number; pinned: boolean };
+        response: { ok: boolean };
+      };
+      /** 外部 Agent 同步状态（各工具上下文文件是否已含托管区块）。 */
+      memorySyncStatus: {
+        params: undefined;
+        response: { targets: MemorySyncStatus[] };
+      };
+      /** 一键同步 / 移除：把记忆写入（或从）目标工具的上下文文件托管区块。 */
+      memorySyncApply: {
+        params: { tools: string[]; remove?: boolean };
+        response: { results: MemorySyncResult[] };
       };
       getAgentWorkspace: {
         params: undefined;
@@ -516,7 +698,13 @@ export type AppRPC = {
       };
       getAboutInfo: {
         params: undefined;
-        response: { version: string; channel: string; sessionStartedAt: number; basePath: string };
+        response: {
+          version: string;
+          channel: string;
+          sessionStartedAt: number;
+          basePath: string;
+          dataDir: string;
+        };
       };
       runBenchmark: {
         params: BenchmarkParams;
@@ -716,6 +904,11 @@ export type AppRPC = {
         params: undefined;
         response: { ok: boolean };
       };
+      /** 一键安装 tesseract 引擎（brew install，日志经 tesseractInstallLog 推送）。 */
+      installTesseractEngine: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
       deleteOcrModel: {
         params: { modelId: string };
         response: { ok: boolean };
@@ -743,6 +936,52 @@ export type AppRPC = {
       listOcrProviderModels: {
         params: { base?: string; apiKey?: string } | undefined;
         response: { models: string[]; error?: string };
+      };
+      // PaddleOCR（本地 PP-OCRv6 引擎）
+      getPpOcrStatus: {
+        params: undefined;
+        response: PpOcr.PpOcrStatus;
+      };
+      downloadPpOcrEngine: {
+        params: undefined;
+        response: { ok: boolean; error?: string; version?: string };
+      };
+      startPpOcr: {
+        params: { modelSize?: PpOcrModelSize };
+        response: { ok: boolean; error?: string; already?: boolean };
+      };
+      stopPpOcr: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      /** 下载指定档位的 PP-OCRv6 模型（det+rec，缺哪个下哪个；分片断点续传）。 */
+      downloadPpOcrModels: {
+        params: { modelSize: PpOcrModelSize };
+        response: { ok: boolean; canceled?: boolean; error?: string };
+      };
+      /** 取消进行中的模型下载（保留分片，可后续续传）。 */
+      cancelPpOcrModelDownload: {
+        params: { modelSize: PpOcrModelSize };
+        response: { ok: boolean };
+      };
+      /** 清空指定档位的未完成分片（重新下载前把半成品清掉）。 */
+      deletePpOcrPartialModels: {
+        params: { modelSize: PpOcrModelSize };
+        response: { ok: boolean };
+      };
+      /** 清理引擎残留（删除虚拟环境，保留已下载模型），装坏后可重置重装。 */
+      cleanupPpOcrEngine: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      /** 删除指定档位的全部模型文件（含半成品分片），可重新下载。 */
+      deletePpOcrModels: {
+        params: { modelSize: PpOcrModelSize };
+        response: { ok: boolean };
+      };
+      runPpOcr: {
+        params: { imageRef: string; modelSize?: PpOcrModelSize };
+        response: { result?: OcrResult; error?: string };
       };
       // AI 生图
       stageEditImage: {
@@ -786,6 +1025,55 @@ export type AppRPC = {
         params: { backend?: ImageGenBackend; base?: string; apiKey?: string } | undefined;
         response: { models: string[]; error?: string };
       };
+      // AI 视频生成（comfyui 本地 / minimax / seedance 云端，提交任务 + 轮询）
+      submitVideoGeneration: {
+        params: {
+          prompt: string;
+          negativePrompt?: string;
+          duration?: number;
+          ratio?: string;
+          resolution?: string;
+          seed?: number;
+          steps?: number;
+          cfg?: number;
+          model?: string;
+          /** 图生视频首帧（images 目录内 ref，仅云端后端支持）。 */
+          firstFrameRef?: string;
+          watermark?: boolean;
+          config?: Partial<VideoGenConfig>;
+        };
+        response: { record?: VideoRecordRow; error?: string };
+      };
+      pollVideoRecords: {
+        params: { ids: number[] };
+        response: { records: VideoRecordRow[] };
+      };
+      listVideoRecords: {
+        params: { limit?: number } | undefined;
+        response: { records: VideoRecordRow[] };
+      };
+      deleteVideoRecord: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      getVideoGenConfig: {
+        params: undefined;
+        response: { config: VideoGenConfig };
+      };
+      saveVideoGenConfig: {
+        params: Partial<VideoGenConfig>;
+        response: { ok: boolean };
+      };
+      listVideoGenModels: {
+        params: { backend?: VideoGenBackend; base?: string } | undefined;
+        response: {
+          models: string[];
+          checkpoints: string[];
+          clips: string[];
+          vaes: string[];
+          error?: string;
+        };
+      };
       // MLX 本地生图引擎（mflux）
       getMlxGenStatus: {
         params: undefined;
@@ -828,6 +1116,368 @@ export type AppRPC = {
         params: undefined;
         response: { active: { modelId: string; quantize: number } | null };
       };
+
+      // -----------------------------------------------------------------
+      // Skills 管理（参照 skills-manager 移植）
+      // -----------------------------------------------------------------
+      /** 工具列表（53 内置 + 自定义，含安装检测/启停/中央库同根标记）。 */
+      skillsGetTools: {
+        params: undefined;
+        response: { tools: ToolInfo[] };
+      };
+      skillsSetToolEnabled: {
+        params: { tool: string; enabled: boolean };
+        response: { ok: boolean };
+      };
+      skillsSetAllToolsEnabled: {
+        params: { enabled: boolean };
+        response: { ok: boolean };
+      };
+      skillsSetCustomToolPath: {
+        params: { tool: string; path: string | null };
+        response: { ok: boolean };
+      };
+      skillsAddCustomTool: {
+        params: { key: string; name: string; skillsDir: string; projectSkillsDir?: string; category: "coding" | "lobster" };
+        response: { ok: boolean; error?: string };
+      };
+      skillsRemoveCustomTool: {
+        params: { key: string };
+        response: { ok: boolean };
+      };
+      /** 中央库信息（路径 / 技能数 / 体积 / 警告）。 */
+      skillsGetCentralInfo: {
+        params: undefined;
+        response: SkillsCentralInfo;
+      };
+      skillsSetCentralPath: {
+        params: { path: string };
+        response: { ok: boolean; info: SkillsCentralInfo };
+      };
+      /** 重建索引（磁盘 → DB 收编，git pull 恢复后调用）。 */
+      skillsReindex: {
+        params: undefined;
+        response: { added: string[]; removed: string[] };
+      };
+      /** 我的技能列表（含 target 实时同步状态）。 */
+      skillsList: {
+        params: undefined;
+        response: { skills: ManagedSkill[] };
+      };
+      skillsGetDoc: {
+        params: { skillId: string };
+        response: { markdown: string | null };
+      };
+      skillsDelete: {
+        params: { ids: string[] };
+        response: { ok: boolean; errors: string[] };
+      };
+      skillsSetTags: {
+        params: { skillId: string; tags: string[] };
+        response: { ok: boolean };
+      };
+      skillsGetAllTags: {
+        params: undefined;
+        response: { tags: string[] };
+      };
+      skillsRenameTag: {
+        params: { from: string; to: string };
+        response: { ok: boolean };
+      };
+      skillsDeleteTag: {
+        params: { tag: string };
+        response: { ok: boolean };
+      };
+      /** skills.sh 市场：榜单（alltime/trending/hot）。 */
+      skillsMarketLeaderboard: {
+        params: { board: "alltime" | "trending" | "hot" };
+        response: { skills: SkillsShSkill[] };
+      };
+      skillsMarketSearch: {
+        params: { query: string; limit?: number };
+        response: { skills: SkillsShSkill[] };
+      };
+      skillsInstallFromMarket: {
+        params: { source: string; skillId: string };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      skillsCancelInstall: {
+        params: { ref: string };
+        response: { ok: boolean };
+      };
+      /** Git URL 导入：预览仓库内的全部 skill 目录。 */
+      skillsGitPreview: {
+        params: { url: string };
+        response: { ok: boolean; tempDir?: string; skills?: GitPreviewItem[]; error?: string };
+      };
+      skillsGitConfirm: {
+        params: { url: string; tempDir: string; items: { relPath: string; name: string }[] };
+        response: { ok: boolean; installed: string[]; errors: string[] };
+      };
+      skillsGitCancelPreview: {
+        params: { tempDir: string };
+        response: { ok: boolean };
+      };
+      /** 本地导入：目录 / .zip / .skill。 */
+      skillsInstallLocal: {
+        params: { path: string; name?: string };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      skillsBatchImportFolder: {
+        params: { path: string };
+        response: { installed: string[]; errors: string[] };
+      };
+      skillsCheckUpdates: {
+        params: { ids?: string[] };
+        response: { statuses: SkillUpdateStatusView[] };
+      };
+      skillsUpdateSkill: {
+        params: { skillId: string };
+        response: { ok: boolean; error?: string; unchanged?: boolean };
+      };
+      /** 扫描已启用工具目录里已有的技能（收编用）。 */
+      skillsScanDiscovered: {
+        params: undefined;
+        response: { groups: DiscoveredSkillGroup[] };
+      };
+      skillsImportDiscovered: {
+        params: { name: string; paths: string[]; removeOriginal: boolean };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      skillsImportAllDiscovered: {
+        params: { groups: DiscoveredSkillGroup[]; removeOriginal: boolean };
+        response: { installed: string[]; errors: string[] };
+      };
+      /** 同步：技能 → 工具（needConfirm = 目标被外部目录占用）。 */
+      skillsSyncToTool: {
+        params: { skillId: string; tool: string; overwrite?: boolean };
+        response: { ok: boolean; error?: string; needConfirm?: boolean };
+      };
+      skillsUnsyncFromTool: {
+        params: { skillId: string; tool: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsGetSyncMode: {
+        params: undefined;
+        response: { mode: "symlink" | "copy" };
+      };
+      skillsSetSyncMode: {
+        params: { mode: "symlink" | "copy" };
+        response: { ok: boolean };
+      };
+      /** 场景（预设）。 */
+      skillsListPresets: {
+        params: undefined;
+        response: { presets: PresetView[] };
+      };
+      skillsCreatePreset: {
+        params: { name: string; description?: string | null; icon?: string | null };
+        response: { id: string };
+      };
+      skillsUpdatePreset: {
+        params: { id: string; name: string; description?: string | null; icon?: string | null };
+        response: { ok: boolean };
+      };
+      skillsDeletePreset: {
+        params: { id: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsAddSkillsToPreset: {
+        params: { presetId: string; skillIds: string[] };
+        response: { ok: boolean };
+      };
+      skillsRemoveSkillFromPreset: {
+        params: { presetId: string; skillId: string };
+        response: { ok: boolean };
+      };
+      skillsApplyPreset: {
+        params: { presetId: string };
+        response: { ok: boolean; deployed: number; undeployed: number; errors: string[] };
+      };
+      skillsApplyPresetToAgents: {
+        params: { presetId: string; mode: "add" | "remove" };
+        response: { ok: boolean; count: number; errors: string[] };
+      };
+      skillsTogglePresetSkillTool: {
+        params: { presetId: string; skillId: string; tool: string; enabled: boolean };
+        response: { ok: boolean; error?: string };
+      };
+      skillsSetActivePreset: {
+        params: { presetId: string };
+        response: { ok: boolean };
+      };
+      /** Git 备份。 */
+      skillsBackupStatus: {
+        params: undefined;
+        response: { status: SkillsBackupStatus };
+      };
+      skillsBackupInit: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      skillsBackupSetRemote: {
+        params: { url: string; pat?: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsBackupCommit: {
+        params: { message?: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsBackupPush: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      skillsBackupPull: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      skillsBackupSetAuto: {
+        params: { enabled: boolean };
+        response: { ok: boolean };
+      };
+      skillsSnapshots: {
+        params: undefined;
+        response: { snapshots: { tag: string; date: string; subject: string }[] };
+      };
+      skillsCreateSnapshot: {
+        params: { name?: string };
+        response: { ok: boolean; tag?: string; error?: string };
+      };
+      skillsRestoreSnapshot: {
+        params: { tag: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsResolveConflict: {
+        params: { keep: "local" | "remote" };
+        response: { ok: boolean; error?: string };
+      };
+      skillsSizeReport: {
+        params: undefined;
+        response: { totalBytes: number; oversized: { id: string; bytes: number }[] };
+      };
+      /** 项目级管理。 */
+      skillsListProjects: {
+        params: undefined;
+        response: { projects: ProjectView[] };
+      };
+      skillsAddProject: {
+        params: { path: string };
+        response: { ok: boolean; id?: string; error?: string; created?: string[] };
+      };
+      skillsRemoveProject: {
+        params: { id: string };
+        response: { ok: boolean };
+      };
+      skillsScanProjects: {
+        params: { root: string };
+        response: { projects: { path: string; agentDirs: string[] }[] };
+      };
+      skillsGetProjectSkills: {
+        params: { projectId: string };
+        response: { skills: ProjectSkillView[]; agentDirs: string[] };
+      };
+      skillsProjectImportToCenter: {
+        params: { projectId: string; relDir: string };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      skillsProjectExportFromCenter: {
+        params: { projectId: string; skillId: string; agentRel?: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsProjectUpdateToCenter: {
+        params: { projectId: string; relDir: string };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      skillsProjectToggleSkill: {
+        params: { projectId: string; relDir: string; enabled: boolean };
+        response: { ok: boolean; error?: string };
+      };
+      skillsProjectDeleteSkill: {
+        params: { projectId: string; relDir: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsGetProjectSkillDoc: {
+        params: { projectId: string; relDir: string };
+        response: { markdown: string | null };
+      };
+      /** 在系统文件管理器中打开目录（path="central" 时打开中央库内 skillId 子目录）。 */
+      skillsOpenFolder: {
+        params: { path: string; skillId?: string };
+        response: { ok: boolean };
+      };
+      // ---- 知识库（本地 RAG） ----
+      kbList: {
+        params: undefined;
+        response: { kbs: Knowledge.KbView[] };
+      };
+      kbCreate: {
+        params: { name: string; description?: string; embeddingModel?: string; rerankModel?: string };
+        response: { kb: Knowledge.KbView };
+      };
+      kbUpdate: {
+        params: { id: number; patch: Knowledge.KbUpdatePatch };
+        response: { kb: Knowledge.KbView; embeddingsReset: boolean };
+      };
+      kbDelete: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      kbDocList: {
+        params: { kbId: number };
+        response: { docs: Knowledge.KbDocView[] };
+      };
+      kbAddFiles: {
+        params: { kbId: number; paths: string[] };
+        response: { docs: Knowledge.KbDocView[] };
+      };
+      kbAddFolder: {
+        params: { kbId: number; path: string };
+        response: { docs: Knowledge.KbDocView[]; skipped: number };
+      };
+      kbAddNote: {
+        params: { kbId: number; title: string; content: string };
+        response: { doc: Knowledge.KbDocView };
+      };
+      kbAddWeb: {
+        params: { kbId: number; url: string };
+        response: { doc: Knowledge.KbDocView };
+      };
+      kbDocDelete: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      kbDocReingest: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      kbChunks: {
+        params: { docId: number };
+        response: { chunks: Knowledge.KbChunkView[] };
+      };
+      kbEmbedMissing: {
+        params: { kbId: number };
+        response: { ok: boolean; embedded?: number; error?: string };
+      };
+      kbRecall: {
+        params: { kbIds: number[]; query: string; topK?: number };
+        response: { hits: KbHit[]; notes: string[] };
+      };
+      kbTestEmbedding: {
+        params: { base?: string; apiKey?: string; model: string };
+        response: { ok: boolean; dim?: number; error?: string };
+      };
+      kbEmbeddingModels: {
+        params: { base?: string; apiKey?: string } | undefined;
+        response: { models: string[] };
+      };
+      kbTestRerank: {
+        params: { base?: string; apiKey?: string; model: string };
+        response: { ok: boolean; error?: string };
+      };
+      kbRerankModels: {
+        params: { base?: string; apiKey?: string } | undefined;
+        response: { models: string[] };
+      };
     };
     messages: {};
   }>;
@@ -850,7 +1500,11 @@ export type AppRPC = {
         content: string;
         reasoning?: string;
         error?: string;
+        /** 知识库引用溯源（挂了知识库的回答才有）。 */
+        citations?: KbCitation[];
       };
+      /** 知识库数据变化（摄取进度/删除/向量补齐），前端据此刷新列表。 */
+      knowledgeChanged: { kbId?: number; docId?: number };
       chatStats: ChatStats;
       agentEvent: AgentEventRow;
       voicecallPartial: { conversationId: number; text: string };
@@ -880,6 +1534,17 @@ export type AppRPC = {
       mlxModelDownloadProgress: MlxModelDownloadProgress;
       /** 生图阶段事件：启动/加载/生成 n/N/完成。 */
       mlxGenPhase: MlxGenPhase;
+      /** PaddleOCR 引擎安装日志 / 阶段（下载模型 / 加载 / 就绪 / 错误），实时推送。 */
+      ppOcrInstallLog: { text: string };
+      ppOcrPhase: { phase: PpOcr.PpOcrPhase; message: string };
+      /** PaddleOCR 模型文件下载进度（字节 + 估算速度），模型卡实时进度条。 */
+      ppOcrModelProgress: PpOcr.PpOcrModelProgress;
+      /** Tesseract 引擎一键安装（brew install）日志，实时推送。 */
+      tesseractInstallLog: { text: string };
+      /** Skills 安装进度（市场/Git/更新），实时推送。 */
+      skillsInstallProgress: SkillsInstallProgress;
+      /** Skills 中央库发生变化（外部编辑/git pull/安装同步完成），前端刷新列表。 */
+      skillsChanged: { reason?: string };
       /** CLI（`omi`）请求跳转到某个页面：models / settings / server / stats / chat / index。 */
       navigate: { path: string };
     };
@@ -940,6 +1605,19 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
           return { ok: false, models: [], error: String(e) };
         }
       },
+
+      cloudProviderList: async () => CloudProviders.listCloudProviders(),
+
+      cloudProviderCreate: async (params) => CloudProviders.createCloudProvider(params ?? {}),
+
+      cloudProviderUpdate: async (params) =>
+        CloudProviders.updateCloudProvider(params.id, params ?? {}),
+
+      cloudProviderDelete: async ({ id }) => CloudProviders.deleteCloudProvider(id),
+
+      cloudProviderActivate: async ({ id }) => CloudProviders.activateCloudProvider(id),
+
+      cloudProviderDeactivate: async () => CloudProviders.deactivateCloudProvider(),
 
       checkLlamaServer: async () => {
         return ServerManager.checkBinaryExists();
@@ -1062,12 +1740,61 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         const total = countResult?.count ?? 0;
 
         const docs = baseQuery.orderBy(desc(documents.createdAt)).limit(limit).offset(offset).all();
+        if (docs.length === 0) return { documents: [], total };
+
+        // 首页内容预览：识别记录的文件名常是 UUID，用识别文本做标题更有辨识度。
+        const firstPages = db
+          .select({ documentId: pages.documentId, markdown: pages.markdown })
+          .from(pages)
+          .where(
+            inArray(
+              pages.documentId,
+              docs.map((d) => d.id),
+            ),
+          )
+          .orderBy(asc(pages.pageNumber))
+          .all();
+        const previewByDoc = new Map<number, string>();
+        for (const p of firstPages) {
+          if (previewByDoc.has(p.documentId) || !p.markdown) continue;
+          const firstLine =
+            p.markdown
+              .split("\n")
+              .map((l) => l.trim())
+              .find((l) => l.length > 0) ?? "";
+          previewByDoc.set(
+            p.documentId,
+            firstLine.replace(/^[#>\s]+/, "").replace(/[*`]/g, "").trim().slice(0, 60),
+          );
+        }
+
+        // 缩略图：图片类文档且位于图片服务目录内 → 直接给可加载的 URL；PDF 用图标。
+        const imagesBase = getImagesBaseDir();
+        const kindOf = (d: (typeof docs)[number]): "image" | "pdf" | "other" => {
+          if (d.type === "application/pdf" || /\.pdf$/i.test(d.path)) return "pdf";
+          if (
+            d.type.startsWith("image/") ||
+            /\.(png|jpe?g|webp|bmp|tiff?|gif|heic|heif)$/i.test(d.path)
+          )
+            return "image";
+          return "other";
+        };
 
         return {
-          documents: docs.map((d) => ({
-            ...d,
-            name: path.basename(d.path),
-          })),
+          documents: docs.map((d) => {
+            const kind = kindOf(d);
+            const thumbUrl =
+              kind === "image" && d.path.startsWith(imagesBase + path.sep)
+                ? chatImageUrl(path.relative(imagesBase, d.path))
+                : null;
+            return {
+              ...d,
+              name: path.basename(d.path),
+              kind,
+              thumbUrl,
+              preview: previewByDoc.get(d.id) ?? null,
+            };
+          }),
           total,
         };
       },
@@ -1096,12 +1823,12 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       openFileDialog: async (params) => {
-        const allowedFileTypes = params?.allowedFileTypes;
+        const canChooseDirectory = params?.canChooseDirectory === true;
         const paths = await Utils.openFileDialog({
-          allowedFileTypes: allowedFileTypes ?? "pdf,png,jpg,jpeg,webp,tiff,bmp,heic,heif",
-          canChooseFiles: true,
-          canChooseDirectory: false,
-          allowsMultipleSelection: true,
+          allowedFileTypes: canChooseDirectory ? undefined : (params?.allowedFileTypes ?? "pdf,png,jpg,jpeg,webp,tiff,bmp,heic,heif"),
+          canChooseFiles: params?.canChooseFiles ?? true,
+          canChooseDirectory,
+          allowsMultipleSelection: params?.allowsMultipleSelection ?? true,
         });
         return { paths: (paths ?? []).filter((p) => p && p.length > 0) };
       },
@@ -1237,6 +1964,34 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         Updater.applyUpdate();
       },
 
+      checkReleaseUpdate: async ({ force }) => {
+        return ReleaseCheck.checkGitHubRelease(force === true);
+      },
+
+      getReleaseCheck: async () => {
+        return ReleaseCheck.getReleaseCheckResult();
+      },
+
+      startAutoUpdate: async () => {
+        void checkForUpdate();
+        return { ok: true };
+      },
+
+      openPath: async ({ path: target }) => {
+        try {
+          const cmd =
+            process.platform === "darwin"
+              ? ["open", target]
+              : process.platform === "win32"
+                ? ["cmd", "/c", "start", "", target]
+                : ["xdg-open", target];
+          Bun.spawn(cmd, { stdout: "ignore", stderr: "ignore" });
+          return { ok: true };
+        } catch {
+          return { ok: false };
+        }
+      },
+
       // Chat
       listConversations: async (params) => {
         return { conversations: Chat.listConversations(params?.app) };
@@ -1264,8 +2019,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return Chat.setConversationPinned(id, pinned);
       },
 
-      sendChatMessage: async ({ conversationId, content, images, webSearch, files }) => {
-        return Chat.sendMessage(conversationId, content, images ?? [], { webSearch, files });
+      sendChatMessage: async ({ conversationId, content, images, webSearch, files, kbIds }) => {
+        return Chat.sendMessage(conversationId, content, images ?? [], { webSearch, files, kbIds });
       },
 
       deleteMessage: async ({ conversationId, messageId }) => {
@@ -1378,7 +2133,69 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       listAgentTools: async (params) => {
         const mode = params?.mode as AgentMode | undefined;
-        return { tools: Agent.listAgentTools(mode) };
+        return { tools: await Agent.listAgentTools(mode) };
+      },
+
+      // MCP 服务器管理
+      mcpListServers: async () => {
+        const statuses = Mcp.mcpConnectionStatus();
+        const servers = Mcp.listMcpServers().map((s) =>
+          s.id && statuses[s.id] ? { ...s, status: statuses[s.id] } : s,
+        );
+        return { servers };
+      },
+      mcpSaveServer: async ({ server }) => {
+        const saved = Mcp.upsertMcpServer(server);
+        return { ok: true, server: saved };
+      },
+      mcpDeleteServer: async ({ id }) => {
+        Mcp.deleteMcpServer(id);
+        return { ok: true };
+      },
+      mcpSetServerEnabled: async ({ id, enabled }) => {
+        Mcp.setMcpServerEnabled(id, enabled);
+        return { ok: true };
+      },
+      mcpTestServer: async ({ server }) => {
+        const result = await Mcp.testMcpServer(server);
+        return {
+          ok: result.ok,
+          tools: result.tools.map((t) => ({ name: t.name, description: t.description })),
+          error: result.error,
+        };
+      },
+      mcpParseJson: async ({ text }) => {
+        try {
+          return { ok: true, servers: Mcp.parseMcpJson(text) };
+        } catch (e) {
+          return { ok: false, servers: [], error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      // 记忆（所有 Agent 共享的长期记忆库）
+      memoryList: async (params) => {
+        return { memories: Memory.listMemories(params ?? undefined) };
+      },
+      memorySave: async ({ memory }) => {
+        const saved = Memory.saveMemory(memory);
+        return { ok: true, memory: saved };
+      },
+      memoryDelete: async ({ id }) => {
+        Memory.deleteMemory(id);
+        return { ok: true };
+      },
+      memorySetPinned: async ({ id, pinned }) => {
+        Memory.setMemoryPinned(id, pinned);
+        return { ok: true };
+      },
+      memorySyncStatus: async () => {
+        return { targets: MemorySync.memorySyncStatus() };
+      },
+      memorySyncApply: async ({ tools, remove }) => {
+        const results = remove
+          ? MemorySync.removeMemoryFromTools(tools)
+          : MemorySync.syncMemoryToTools(tools);
+        return { results };
       },
 
       // 实时语音通话
@@ -1544,6 +2361,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
           channel,
           sessionStartedAt,
           basePath: ModelStore.getModelsBaseDirForRuntime(),
+          dataDir: getUserDataDir(),
         };
       },
 
@@ -1704,7 +2522,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       getAsrAudioCppStatus: async () => {
         try {
           return await AsrAudioCpp.getAsrAudioCppStatus();
-        } catch (e) {
+        } catch {
           return {
             engineInstalled: false,
             binaryPath: null,
@@ -1817,7 +2635,17 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       stopOcr: async () => {
         try {
           await Ocr.stopOcr();
+          // 切回其他引擎时顺手停掉常驻的 PaddleOCR worker，释放内存。
+          await PpOcr.stopPpOcr();
           return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      installTesseractEngine: async () => {
+        try {
+          return await Ocr.installTesseractEngine();
         } catch (e) {
           return { ok: false, error: e instanceof Error ? e.message : String(e) };
         }
@@ -1869,6 +2697,105 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         }
       },
 
+      getPpOcrStatus: async () => {
+        try {
+          return await PpOcr.getPpOcrStatus();
+        } catch {
+          return {
+            pythonFound: false,
+            pythonPath: null,
+            engineInstalled: false,
+            version: "",
+            engineDir: null,
+            workerRunning: false,
+            phase: "idle",
+            phaseMessage: "",
+            modelSize: "medium",
+            installInterrupted: false,
+            models: (["medium"] as const).map((size) => ({
+              size,
+              models: {
+                det: { ready: false, partialBytes: 0, totalBytes: 0 },
+                rec: { ready: false, partialBytes: 0, totalBytes: 0 },
+              },
+            })),
+          };
+        }
+      },
+
+      downloadPpOcrEngine: async () => {
+        try {
+          return await PpOcr.downloadPpOcrEngine();
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      startPpOcr: async ({ modelSize }) => {
+        try {
+          return await PpOcr.startPpOcr(modelSize);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      stopPpOcr: async () => {
+        try {
+          await PpOcr.stopPpOcr();
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      downloadPpOcrModels: async ({ modelSize }) => {
+        try {
+          return await PpOcr.downloadPpOcrModels(modelSize);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      cancelPpOcrModelDownload: async ({ modelSize }) => {
+        try {
+          return PpOcr.cancelPpOcrModelDownload(modelSize);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      deletePpOcrPartialModels: async ({ modelSize }) => {
+        try {
+          return PpOcr.deletePpOcrPartialModels(modelSize);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      cleanupPpOcrEngine: async () => {
+        try {
+          return await PpOcr.cleanupPpOcrEngine();
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      deletePpOcrModels: async ({ modelSize }) => {
+        try {
+          return await PpOcr.deletePpOcrModels(modelSize);
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      runPpOcr: async (params) => {
+        try {
+          return { result: await PpOcr.runPpOcr(params) };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
       // AI 生图
       stageEditImage: async ({ paths }) => {
         const files = await ImageGen.stageEditImage(paths);
@@ -1882,7 +2809,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       listImageRecords: async (params) => {
         try {
           return { records: ImageGen.listImageRecords(params?.limit) };
-        } catch (e) {
+        } catch {
           return { records: [] };
         }
       },
@@ -1916,6 +2843,69 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
           return { models };
         } catch (e) {
           return { models: [], error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      // AI 视频生成
+      submitVideoGeneration: async (params) => {
+        return VideoGen.submitVideoGeneration(params);
+      },
+
+      pollVideoRecords: async ({ ids }) => {
+        try {
+          return { records: await VideoGen.pollVideoRecords(ids) };
+        } catch {
+          return { records: [] };
+        }
+      },
+
+      listVideoRecords: async (params) => {
+        try {
+          return { records: VideoGen.listVideoRecords(params?.limit) };
+        } catch {
+          return { records: [] };
+        }
+      },
+
+      deleteVideoRecord: async ({ id }) => {
+        return VideoGen.deleteVideoRecord(id);
+      },
+
+      getVideoGenConfig: async () => {
+        return { config: VideoGen.getVideoGenConfig() };
+      },
+
+      saveVideoGenConfig: async (config) => {
+        VideoGen.saveVideoGenConfig(config);
+        return { ok: true };
+      },
+
+      listVideoGenModels: async (params) => {
+        try {
+          const cfg = VideoGen.getVideoGenConfig();
+          const backend = params?.backend ?? cfg.backend;
+          if (backend === "comfyui") {
+            const lists = await VideoGen.listComfyVideoModels(params?.base ?? cfg.comfyBase);
+            return {
+              models: lists.models,
+              checkpoints: lists.checkpoints,
+              clips: lists.clips,
+              vaes: lists.vaes,
+            };
+          }
+          const models =
+            backend === "seedance"
+              ? VideoGen.SEEDANCE_VIDEO_MODELS
+              : VideoGen.MINIMAX_VIDEO_MODELS;
+          return { models, checkpoints: [], clips: [], vaes: [] };
+        } catch (e) {
+          return {
+            models: [],
+            checkpoints: [],
+            clips: [],
+            vaes: [],
+            error: e instanceof Error ? e.message : String(e),
+          };
         }
       },
 
@@ -1967,6 +2957,308 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       getMlxActiveModel: async () => {
         return { active: MlxGen.getMlxActiveModel() };
       },
+
+      // -----------------------------------------------------------------
+      // Skills 管理
+      // -----------------------------------------------------------------
+      skillsGetTools: async () => {
+        return { tools: Skills.listToolInfos() };
+      },
+      skillsSetToolEnabled: async ({ tool, enabled }) => {
+        Skills.setToolEnabled(tool, enabled);
+        return { ok: true };
+      },
+      skillsSetAllToolsEnabled: async ({ enabled }) => {
+        Skills.setAllToolsEnabled(enabled);
+        return { ok: true };
+      },
+      skillsSetCustomToolPath: async ({ tool, path }) => {
+        Skills.setCustomToolPath(tool, path);
+        return { ok: true };
+      },
+      skillsAddCustomTool: async (def) => {
+        return Skills.addCustomTool(def);
+      },
+      skillsRemoveCustomTool: async ({ key }) => {
+        Skills.removeCustomTool(key);
+        return { ok: true };
+      },
+      skillsGetCentralInfo: async () => {
+        return Skills.getCentralInfoForRpc();
+      },
+      skillsSetCentralPath: async ({ path }) => {
+        Skills.setCentralRepoPath(path);
+        return { ok: true, info: Skills.getCentralInfoForRpc() };
+      },
+      skillsReindex: async () => {
+        return Skills.reindexCentralRepo();
+      },
+      skillsList: async () => {
+        return { skills: Skills.listSkills() };
+      },
+      skillsGetDoc: async ({ skillId }) => {
+        return { markdown: Skills.getSkillDoc(skillId)?.markdown ?? null };
+      },
+      skillsDelete: async ({ ids }) => {
+        return Skills.deleteSkills(ids);
+      },
+      skillsSetTags: async ({ skillId, tags }) => {
+        Skills.setSkillTags(skillId, tags);
+        Skills.writeSkillMeta(skillId);
+        return { ok: true };
+      },
+      skillsGetAllTags: async () => {
+        return { tags: Skills.getAllTags() };
+      },
+      skillsRenameTag: async ({ from, to }) => {
+        Skills.renameTagEverywhere(from, to);
+        return { ok: true };
+      },
+      skillsDeleteTag: async ({ tag }) => {
+        Skills.deleteTagEverywhere(tag);
+        return { ok: true };
+      },
+      skillsMarketLeaderboard: async ({ board }) => {
+        return { skills: await Skills.fetchLeaderboard(board) };
+      },
+      skillsMarketSearch: async ({ query, limit }) => {
+        return { skills: await Skills.searchSkillssh(query, limit ?? 60) };
+      },
+      skillsInstallFromMarket: async ({ source, skillId }) => {
+        return Skills.installFromSkillssh(source, skillId);
+      },
+      skillsCancelInstall: async ({ ref }) => {
+        return { ok: Skills.cancelInstall(ref) };
+      },
+      skillsGitPreview: async ({ url }) => {
+        return Skills.gitPreview(url);
+      },
+      skillsGitConfirm: async ({ url, tempDir, items }) => {
+        return Skills.gitConfirm(url, tempDir, items);
+      },
+      skillsGitCancelPreview: async ({ tempDir }) => {
+        Skills.gitCancelPreview(tempDir);
+        return { ok: true };
+      },
+      skillsInstallLocal: async ({ path, name }) => {
+        return Skills.installLocal(path, name);
+      },
+      skillsBatchImportFolder: async ({ path }) => {
+        return Skills.batchImportFolder(path);
+      },
+      skillsCheckUpdates: async ({ ids }) => {
+        const statuses = ids && ids.length > 0 ? await Promise.all(ids.map((id) => Skills.checkSkillUpdate(id))) : await Skills.checkAllSkillUpdates();
+        return { statuses };
+      },
+      skillsUpdateSkill: async ({ skillId }) => {
+        return Skills.updateSkill(skillId);
+      },
+      skillsScanDiscovered: async () => {
+        return { groups: Skills.scanDiscoveredSkills() };
+      },
+      skillsImportDiscovered: async ({ name, paths, removeOriginal }) => {
+        return Skills.importDiscoveredGroup(name, paths, removeOriginal);
+      },
+      skillsImportAllDiscovered: async ({ groups, removeOriginal }) => {
+        return Skills.importAllDiscovered(groups, removeOriginal);
+      },
+      skillsSyncToTool: async ({ skillId, tool, overwrite }) => {
+        return Skills.syncSkillToTool(skillId, tool, { overwrite });
+      },
+      skillsUnsyncFromTool: async ({ skillId, tool }) => {
+        return Skills.unsyncSkillFromTool(skillId, tool);
+      },
+      skillsGetSyncMode: async () => {
+        return { mode: Skills.getSyncMode() };
+      },
+      skillsSetSyncMode: async ({ mode }) => {
+        Skills.setSyncMode(mode);
+        return { ok: true };
+      },
+      skillsListPresets: async () => {
+        return { presets: Skills.getPresetRowsWithCounts() };
+      },
+      skillsCreatePreset: async ({ name, description, icon }) => {
+        return { id: Skills.createPreset(name, description, icon) };
+      },
+      skillsUpdatePreset: async ({ id, name, description, icon }) => {
+        Skills.updatePresetRow(id, name, description, icon);
+        return { ok: true };
+      },
+      skillsDeletePreset: async ({ id }) => {
+        return Skills.deletePresetRow(id);
+      },
+      skillsAddSkillsToPreset: async ({ presetId, skillIds }) => {
+        for (const sid of skillIds) Skills.addSkillToPreset(presetId, sid);
+        return { ok: true };
+      },
+      skillsRemoveSkillFromPreset: async ({ presetId, skillId }) => {
+        Skills.removeSkillFromPreset(presetId, skillId);
+        return { ok: true };
+      },
+      skillsApplyPreset: async ({ presetId }) => {
+        return Skills.applyPresetToDefault(presetId);
+      },
+      skillsApplyPresetToAgents: async ({ presetId, mode }) => {
+        return Skills.applyPresetToCodingAgents(presetId, mode);
+      },
+      skillsTogglePresetSkillTool: async ({ presetId, skillId, tool, enabled }) => {
+        return Skills.togglePresetSkillTool(presetId, skillId, tool, enabled);
+      },
+      skillsSetActivePreset: async ({ presetId }) => {
+        Skills.setActivePreset(presetId);
+        return { ok: true };
+      },
+      skillsBackupStatus: async () => {
+        return { status: Skills.backupStatus() };
+      },
+      skillsBackupInit: async () => {
+        return Skills.backupInit();
+      },
+      skillsBackupSetRemote: async ({ url, pat }) => {
+        return Skills.setBackupRemote(url, pat);
+      },
+      skillsBackupCommit: async ({ message }) => {
+        return Skills.backupCommit(message);
+      },
+      skillsBackupPush: async () => {
+        return Skills.backupPush();
+      },
+      skillsBackupPull: async () => {
+        return Skills.backupPull();
+      },
+      skillsBackupSetAuto: async ({ enabled }) => {
+        Skills.setAutoBackup(enabled);
+        return { ok: true };
+      },
+      skillsSnapshots: async () => {
+        return { snapshots: Skills.listSnapshots() };
+      },
+      skillsCreateSnapshot: async ({ name }) => {
+        return Skills.createSnapshot(name);
+      },
+      skillsRestoreSnapshot: async ({ tag }) => {
+        return Skills.restoreSnapshot(tag);
+      },
+      skillsResolveConflict: async ({ keep }) => {
+        return Skills.resolveConflict(keep);
+      },
+      skillsSizeReport: async () => {
+        return Skills.sizeReport();
+      },
+      skillsListProjects: async () => {
+        return { projects: Skills.listProjectViews() };
+      },
+      skillsAddProject: async ({ path }) => {
+        return Skills.addProject(path);
+      },
+      skillsRemoveProject: async ({ id }) => {
+        Skills.removeProject(id);
+        return { ok: true };
+      },
+      skillsScanProjects: async ({ root }) => {
+        return { projects: Skills.scanProjectWorkspaces(root) };
+      },
+      skillsGetProjectSkills: async ({ projectId }) => {
+        return Skills.getProjectSkillsForRpc(projectId);
+      },
+      skillsProjectImportToCenter: async ({ projectId, relDir }) => {
+        return Skills.projectImportToCenterForRpc(projectId, relDir);
+      },
+      skillsProjectExportFromCenter: async ({ projectId, skillId, agentRel }) => {
+        return Skills.projectExportForRpc(projectId, skillId, agentRel);
+      },
+      skillsProjectUpdateToCenter: async ({ projectId, relDir }) => {
+        return Skills.projectUpdateToCenterForRpc(projectId, relDir);
+      },
+      skillsProjectToggleSkill: async ({ projectId, relDir, enabled }) => {
+        return Skills.projectToggleForRpc(projectId, relDir, enabled);
+      },
+      skillsProjectDeleteSkill: async ({ projectId, relDir }) => {
+        return Skills.projectDeleteForRpc(projectId, relDir);
+      },
+      skillsGetProjectSkillDoc: async ({ projectId, relDir }) => {
+        return Skills.projectSkillDocForRpc(projectId, relDir);
+      },
+      skillsOpenFolder: async (params) => {
+        let target = params.path;
+        if (params.path === "central") {
+          target = path.join(Skills.getCentralRepoDir(), params.skillId ?? "");
+        }
+        try {
+          const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
+          Bun.spawn([opener, target]);
+          return { ok: true };
+        } catch {
+          return { ok: false };
+        }
+      },
+
+      // ---- 知识库（本地 RAG） ----
+      kbList: async () => {
+        return { kbs: Knowledge.listKnowledgeBases() };
+      },
+      kbCreate: async (params) => {
+        return {
+          kb: Knowledge.createKb({
+            name: params.name,
+            description: params.description,
+            embeddingModel: params.embeddingModel,
+            rerankModel: params.rerankModel,
+          }),
+        };
+      },
+      kbUpdate: async ({ id, patch }) => {
+        return Knowledge.updateKb(id, patch);
+      },
+      kbDelete: async ({ id }) => {
+        Knowledge.deleteKb(id);
+        return { ok: true };
+      },
+      kbDocList: async ({ kbId }) => {
+        return { docs: Knowledge.listDocs(kbId) };
+      },
+      kbAddFiles: async ({ kbId, paths }) => {
+        return { docs: Knowledge.addFileDocs(kbId, paths ?? []) };
+      },
+      kbAddFolder: async ({ kbId, path: dirPath }) => {
+        return Knowledge.addFolderDocs(kbId, dirPath);
+      },
+      kbAddNote: async ({ kbId, title, content }) => {
+        return { doc: Knowledge.addNoteDoc(kbId, title, content) };
+      },
+      kbAddWeb: async ({ kbId, url }) => {
+        return { doc: Knowledge.addWebDoc(kbId, url) };
+      },
+      kbDocDelete: async ({ id }) => {
+        Knowledge.deleteDoc(id);
+        return { ok: true };
+      },
+      kbDocReingest: async ({ id }) => {
+        Knowledge.reingestDoc(id);
+        return { ok: true };
+      },
+      kbChunks: async ({ docId }) => {
+        return { chunks: Knowledge.listChunks(docId) };
+      },
+      kbEmbedMissing: async ({ kbId }) => {
+        return Knowledge.embedMissing(kbId);
+      },
+      kbRecall: async ({ kbIds, query, topK }) => {
+        return Knowledge.recall(kbIds ?? [], query ?? "", topK);
+      },
+      kbTestEmbedding: async ({ base, apiKey, model }) => {
+        return Knowledge.testEmbedding({ base, apiKey, model });
+      },
+      kbEmbeddingModels: async (params) => {
+        return { models: await Knowledge.suggestEmbeddingModels(params ?? undefined) };
+      },
+      kbTestRerank: async ({ base, apiKey, model }) => {
+        return Knowledge.testRerank({ base, apiKey, model });
+      },
+      kbRerankModels: async (params) => {
+        return { models: await Knowledge.suggestRerankModels(params ?? undefined) };
+      },
     },
     messages: {},
   },
@@ -2017,6 +3309,12 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
   Agent.onAgentStats((payload) => {
     try {
       win.webview.rpc?.send.chatStats(payload);
+    } catch {}
+  });
+  // 知识库：摄取进度 / 删除 / 向量补齐 → 前端刷新列表。
+  Knowledge.onKnowledgeChanged((payload) => {
+    try {
+      win.webview.rpc?.send.knowledgeChanged(payload);
     } catch {}
   });
   // 实时语音通话：把后端会话事件按类型路由到对应的一元消息通道。
@@ -2114,6 +3412,48 @@ export function initMlxModelDownloadBroadcast(win: BrowserWindowWithRPC) {
   MlxGen.onMlxGenPhase((p) => {
     try {
       win.webview.rpc?.send.mlxGenPhase(p);
+    } catch {}
+  });
+}
+
+/** PaddleOCR 引擎安装日志 / 阶段 / 模型下载进度，实时推送到前端。 */
+export function initPpOcrBroadcast(win: BrowserWindowWithRPC) {
+  PpOcr.onPpOcrInstallLog((text) => {
+    try {
+      win.webview.rpc?.send.ppOcrInstallLog({ text });
+    } catch {}
+  });
+  PpOcr.onPpOcrPhase((phase, message) => {
+    try {
+      win.webview.rpc?.send.ppOcrPhase({ phase, message });
+    } catch {}
+  });
+  PpOcr.onPpOcrModelProgress((p) => {
+    try {
+      win.webview.rpc?.send.ppOcrModelProgress(p);
+    } catch {}
+  });
+}
+
+/** Tesseract 引擎一键安装日志，实时推送到前端。 */
+export function initTessInstallBroadcast(win: BrowserWindowWithRPC) {
+  Ocr.onTesseractInstallLog((text) => {
+    try {
+      win.webview.rpc?.send.tesseractInstallLog({ text });
+    } catch {}
+  });
+}
+
+/** Skills 安装进度 + 中央库变更，实时推送到前端。 */
+export function initSkillsBroadcast(win: BrowserWindowWithRPC) {
+  Skills.onInstallProgressForRpc((p) => {
+    try {
+      win.webview.rpc?.send.skillsInstallProgress(p);
+    } catch {}
+  });
+  Skills.onCentralChanged(() => {
+    try {
+      win.webview.rpc?.send.skillsChanged({});
     } catch {}
   });
 }

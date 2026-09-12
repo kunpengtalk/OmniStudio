@@ -192,11 +192,15 @@ function FileRow({
   );
 }
 
-export function ModelDetailScreen() {
+/**
+ * 模型详情页：独立路由（返回模型库）或嵌在设置页内（onBack 返回设置标签页）。
+ */
+export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
   const t = useT();
   const queryClient = useQueryClient();
   const { source, setSource } = useModelDetailStore();
   const setRoute = useRouter((s) => s.setRoute);
+  const goBack = () => (onBack ? onBack() : setRoute({ path: "models" }));
   const { engine } = useEngine();
   // null = auto: follow the active engine's native format
   const [formatFilter, setFormatFilter] = useState<"all" | ModelFileKind | null>(null);
@@ -266,7 +270,7 @@ export function ModelDetailScreen() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2">
         <p className="text-sm text-muted-foreground">{t("models.detailNoModel")}</p>
-        <Button variant="outline" size="sm" onClick={() => setRoute({ path: "models" })}>
+        <Button variant="outline" size="sm" onClick={goBack}>
           <ArrowLeftIcon data-icon="inline-start" /> {t("common.back")}
         </Button>
       </div>
@@ -281,7 +285,7 @@ export function ModelDetailScreen() {
     <ScrollArea className="h-full">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 px-6 py-6">
         {/* Back */}
-        <Button variant="ghost" size="sm" className="-ml-2 w-fit" onClick={() => setRoute({ path: "models" })}>
+        <Button variant="ghost" size="sm" className="-ml-2 w-fit" onClick={goBack}>
           <ArrowLeftIcon data-icon="inline-start" className="size-4" />
           {t("common.back")}
         </Button>

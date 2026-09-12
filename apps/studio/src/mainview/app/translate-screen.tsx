@@ -9,7 +9,6 @@ import {
   CheckIcon,
   RefreshCwIcon,
   FilePlusIcon,
-  SparklesIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -29,16 +28,14 @@ import { useT } from "@stores/ui-lang";
 import { useTranslateStore } from "@stores/translate";
 import { cn } from "@/mainview/lib/utils";
 import type { TranslationRecordRow } from "../../bun/translate";
+import { LiveTranslateTab } from "./live-translate";
 import {
   TRANSLATION_LANGUAGES,
   TRANSLATION_SOURCE_AUTO,
 } from "../../shared/translate";
 
-/** 模型选择器中「Google 翻译」引擎的特殊取值（不是真实模型名）。 */
-const GOOGLE_ENGINE_VALUE = "google-engine";
-
 /** 翻译引擎：model = 当前对话模型；google = 谷歌浏览器同款免费接口。 */
-function useTranslationEngine(): "model" | "google" {
+export function useTranslationEngine(): "model" | "google" {
   const { data: settingsData } = useQuery({
     queryKey: ["settings"],
     queryFn: () => rpcClient.getSettings(undefined),
@@ -46,11 +43,11 @@ function useTranslationEngine(): "model" | "google" {
   return settingsData?.settings?.TRANSLATION_ENGINE === "google" ? "google" : "model";
 }
 
-/** 模型/引擎选择器（内联紧凑版）：Google 免费引擎 + 本地模型 + OpenAI 兼容 API 模型。 */
-function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
+/** 翻译引擎选择（与生图页后端切换同款样式）：模型翻译 / Google 免费引擎 + 模型下拉。 */
+export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
   const t = useT();
   const queryClient = useQueryClient();
-  const [pendingType, setPendingType] = useState<"local" | "api" | "google" | null>(null);
+  const [pendingType, setPendingType] = useState<"local" | "api" | null>(null);
 
   const { data: settingsData } = useQuery({
     queryKey: ["settings"],
@@ -62,26 +59,28 @@ function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
   });
 
   const settings = settingsData?.settings;
+  const isGoogle = settings?.TRANSLATION_ENGINE === "google";
   const mode = settings?.SERVER_MODE ?? "local";
   const chatModel = settings?.CHAT_MODEL ?? "";
   const apiModel = settings?.VLLM_MODEL_NAME ?? "";
   const activePath = settings?.LOCAL_MODEL_PATH ?? "";
-  const isGoogle = settings?.TRANSLATION_ENGINE === "google";
+  const engineKey = isGoogle ? "google" : "model";
 
   const options = modelsQuery.data?.models ?? [];
-  const current = isGoogle
-    ? GOOGLE_ENGINE_VALUE
-    : mode === "remote"
-      ? apiModel || chatModel || ""
-      : activePath || chatModel || "";
+  const current = mode === "remote" ? apiModel || chatModel || "" : activePath || chatModel || "";
+
+  const switchEngine = useMutation({
+    mutationFn: (engine: "model" | "google") =>
+      rpcClient.updateSettings({ settings: { TRANSLATION_ENGINE: engine } }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
 
   const selectMutation = useMutation({
-    mutationFn: async (opt: { type: "local" | "api" | "google"; value: string }) => {
-      if (opt.type === "google") {
-        await rpcClient.updateSettings({ settings: { TRANSLATION_ENGINE: "google" } });
-        return { ok: true };
-      }
+    mutationFn: async (opt: { type: "local" | "api"; value: string }) => {
       const r = await rpcClient.selectChatModel({ type: opt.type, value: opt.value });
+      // 选了模型即回到模型翻译引擎。
       await rpcClient.updateSettings({ settings: { TRANSLATION_ENGINE: "model" } });
       return r;
     },
@@ -94,20 +93,14 @@ function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
     onSettled: () => setPendingType(null),
   });
 
-  const handleChange = (value: string) => {
-    if (value === GOOGLE_ENGINE_VALUE) {
-      if (current === GOOGLE_ENGINE_VALUE) return;
-      setPendingType("google");
-      selectMutation.mutate({ type: "google", value: GOOGLE_ENGINE_VALUE });
-      return;
-    }
+  const pickModel = (value: string) => {
     const option = options.find((o) => o.value === value);
     if (!option || option.value === current) return;
     setPendingType(option.type);
     selectMutation.mutate({ type: option.type, value: option.value });
   };
 
-  const busy = selectMutation.isPending || modelsQuery.isLoading || disabled;
+  const busy = selectMutation.isPending || switchEngine.isPending || modelsQuery.isLoading || disabled;
   const selectError = selectMutation.isError
     ? String(selectMutation.error)
     : !selectMutation.isPending && selectMutation.data && !selectMutation.data.ok
@@ -115,96 +108,117 @@ function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
       : null;
 
   return (
-    <div className="flex min-w-0 items-center gap-1.5">
-      <Label className="shrink-0 text-[11px] text-muted-foreground">
-        {t("translate.model")}
-      </Label>
-      <Select value={current} onValueChange={handleChange} disabled={busy}>
-        <SelectTrigger size="sm" className="h-8 w-52 max-w-64 text-xs">
-          <SelectValue placeholder={t("chat.modelEmpty")} />
-        </SelectTrigger>
-        <SelectContent className="max-w-80">
-          <SelectItem value={GOOGLE_ENGINE_VALUE}>
-            <span className="truncate">{t("translate.engine.google")}</span>
-            <span className="shrink-0 rounded-sm bg-emerald-500/15 px-1 text-[9px] leading-4 text-emerald-600">
-              {t("translate.engine.free")}
-            </span>
-          </SelectItem>
-          {options.filter((o) => o.type === "local").length > 0 && (
-            <SelectGroup>
-              <SelectLabel>{t("chat.modelLocal")}</SelectLabel>
-              {options
-                .filter((o) => o.type === "local")
-                .map((o) => (
-                  <SelectItem key={`local-${o.value}`} value={o.value}>
-                    <span className="truncate">{o.label}</span>
-                    <span className="flex min-w-0 items-center gap-1">
-                      {o.engine && (
-                        <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
-                          {t(`settings.engine.${o.engine}`)}
+    <div>
+      <Label className="mb-1.5 block text-xs">{t("translate.engine.title")}</Label>
+      <div className="flex overflow-hidden rounded-lg border">
+        {(["model", "google"] as const).map((key) => (
+          <button
+            key={key}
+            type="button"
+            disabled={busy}
+            onClick={() => switchEngine.mutate(key)}
+            className={cn(
+              "flex-1 px-3 py-1.5 text-xs transition-colors",
+              engineKey === key
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
+            )}
+          >
+            {key === "model" ? t("translate.engine.model") : t("translate.engine.google")}
+          </button>
+        ))}
+      </div>
+      <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+        {switchEngine.isPending
+          ? t("translate.engine.switching")
+          : isGoogle
+            ? t("translate.engine.googleDesc")
+            : t("translate.engine.modelDesc")}
+      </p>
+
+      {!isGoogle && (
+        <div className="mt-2.5">
+          <div className="mb-1 flex items-center justify-between">
+            <Label className="text-xs">{t("translate.model")}</Label>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              tooltip={t("chat.modelRefresh")}
+              onClick={() => queryClient.invalidateQueries({ queryKey: ["chat-models"] })}
+              disabled={modelsQuery.isFetching || disabled}
+            >
+              <RefreshCwIcon
+                className={cn("size-3.5", modelsQuery.isFetching && "animate-spin")}
+              />
+            </Button>
+          </div>
+          <Select value={current} onValueChange={pickModel} disabled={busy}>
+            <SelectTrigger className="h-8 w-full text-xs">
+              <SelectValue placeholder={t("chat.modelEmpty")} />
+            </SelectTrigger>
+            <SelectContent className="max-w-80">
+              {options.filter((o) => o.type === "local").length > 0 && (
+                <SelectGroup>
+                  <SelectLabel>{t("chat.modelLocal")}</SelectLabel>
+                  {options
+                    .filter((o) => o.type === "local")
+                    .map((o) => (
+                      <SelectItem key={`local-${o.value}`} value={o.value}>
+                        <span className="truncate">{o.label}</span>
+                        <span className="flex min-w-0 items-center gap-1">
+                          {o.engine && (
+                            <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
+                              {t(`settings.engine.${o.engine}`)}
+                            </span>
+                          )}
+                          {o.detail && (
+                            <span className="truncate text-[10px] text-muted-foreground/70">
+                              {o.detail}
+                            </span>
+                          )}
                         </span>
-                      )}
-                      {o.detail && (
-                        <span className="truncate text-[10px] text-muted-foreground/70">
-                          {o.detail}
-                        </span>
-                      )}
-                    </span>
-                  </SelectItem>
-                ))}
-            </SelectGroup>
+                      </SelectItem>
+                    ))}
+                </SelectGroup>
+              )}
+              {options.filter((o) => o.type === "api").length > 0 && (
+                <SelectGroup>
+                  <SelectLabel>{t("chat.modelApi")}</SelectLabel>
+                  {options
+                    .filter((o) => o.type === "api")
+                    .map((o) => (
+                      <SelectItem key={`api-${o.value}`} value={o.value}>
+                        <span className="truncate">{o.label}</span>
+                        {o.detail && (
+                          <span className="truncate text-[10px] text-muted-foreground/70">
+                            {o.detail}
+                          </span>
+                        )}
+                      </SelectItem>
+                    ))}
+                </SelectGroup>
+              )}
+              {options.length === 0 && (
+                <div className="px-2 py-3 text-center text-xs text-muted-foreground">
+                  {t("chat.modelEmpty")}
+                </div>
+              )}
+            </SelectContent>
+          </Select>
+          {selectError && (
+            <p className="mt-1 flex items-center gap-1 text-[11px] text-destructive">
+              <span className="truncate">{selectError}</span>
+            </p>
           )}
-          {options.filter((o) => o.type === "api").length > 0 && (
-            <SelectGroup>
-              <SelectLabel>{t("chat.modelApi")}</SelectLabel>
-              {options
-                .filter((o) => o.type === "api")
-                .map((o) => (
-                  <SelectItem key={`api-${o.value}`} value={o.value}>
-                    <span className="truncate">{o.label}</span>
-                    {o.detail && (
-                      <span className="truncate text-[10px] text-muted-foreground/70">
-                        {o.detail}
-                      </span>
-                    )}
-                  </SelectItem>
-                ))}
-            </SelectGroup>
+          {selectMutation.isPending && (
+            <p className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground">
+              <Loader2Icon className="size-3 shrink-0 animate-spin" />
+              <span className="truncate">
+                {pendingType === "local" ? t("chat.modelRestarting") : t("chat.modelSwitching")}
+              </span>
+            </p>
           )}
-          {options.length === 0 && (
-            <div className="px-2 py-3 text-center text-xs text-muted-foreground">
-              {t("chat.modelEmpty")}
-            </div>
-          )}
-        </SelectContent>
-      </Select>
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        tooltip={t("chat.modelRefresh")}
-        onClick={() => queryClient.invalidateQueries({ queryKey: ["chat-models"] })}
-        disabled={modelsQuery.isFetching || disabled}
-      >
-        <RefreshCwIcon
-          className={cn("size-3.5", modelsQuery.isFetching && "animate-spin")}
-        />
-      </Button>
-      {selectError && (
-        <span className="flex min-w-0 items-center gap-1 text-[11px] text-destructive">
-          <span className="truncate">{selectError}</span>
-        </span>
-      )}
-      {selectMutation.isPending && (
-        <span className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
-          <Loader2Icon className="size-3 shrink-0 animate-spin" />
-          <span className="truncate">
-            {pendingType === "google"
-              ? t("translate.engine.switching")
-              : pendingType === "local"
-                ? t("chat.modelRestarting")
-                : t("chat.modelSwitching")}
-          </span>
-        </span>
+        </div>
       )}
     </div>
   );
@@ -234,7 +248,7 @@ function CopyTextButton({ text }: { text: string }) {
   );
 }
 
-export function TranslateScreen() {
+function TextTranslateTab() {
   const t = useT();
   const queryClient = useQueryClient();
   const [sourceLang, setSourceLang] = useState(TRANSLATION_SOURCE_AUTO);
@@ -333,132 +347,133 @@ export function TranslateScreen() {
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* 工具栏：标题 + 模型/引擎 + 语言对 */}
-      <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b px-4 py-2">
-        <div className="flex items-center gap-1.5">
-          <LanguagesIcon className="size-4 text-muted-foreground" />
-          <span className="text-sm font-semibold">{t("translate.title")}</span>
-        </div>
-        <TranslationEnginePicker disabled={busy} />
-        <div className="ml-auto flex items-center gap-1.5">
-          <Select value={sourceLang} onValueChange={setSourceLang} disabled={busy}>
-            <SelectTrigger className="h-8 w-40 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>{langOptions(true)}</SelectContent>
-          </Select>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            tooltip={t("translate.swap")}
-            disabled={busy}
-            onClick={swap}
-          >
-            <ArrowLeftRightIcon className="size-4" />
-          </Button>
-          <Select value={targetLang} onValueChange={setTargetLang} disabled={busy}>
-            <SelectTrigger className="h-8 w-40 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>{langOptions(false)}</SelectContent>
-          </Select>
-        </div>
-      </div>
+    <div className="flex h-full min-h-0">
+      {/* 左侧：参数面板（与生图页同款布局） */}
+      <aside className="w-[340px] shrink-0 overflow-y-auto border-r p-4">
+        <div className="flex flex-col gap-5">
+          {/* 翻译引擎 / 模型 */}
+          <TranslationEnginePicker disabled={busy} />
 
-      {error && (
-        <div className="shrink-0 px-4 pt-3">
-          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-xs text-destructive">
-            {error}
+          {/* 语言对：源语言 ⇄ 目标语言 */}
+          <div className="flex items-center gap-1.5 rounded-lg border bg-card p-2.5">
+            <Select value={sourceLang} onValueChange={setSourceLang} disabled={busy}>
+              <SelectTrigger className="h-8 min-w-0 flex-1 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>{langOptions(true)}</SelectContent>
+            </Select>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              tooltip={t("translate.swap")}
+              disabled={busy}
+              onClick={swap}
+              className="shrink-0"
+            >
+              <ArrowLeftRightIcon className="size-4" />
+            </Button>
+            <Select value={targetLang} onValueChange={setTargetLang} disabled={busy}>
+              <SelectTrigger className="h-8 min-w-0 flex-1 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>{langOptions(false)}</SelectContent>
+            </Select>
           </div>
-        </div>
-      )}
 
-      {/* 双栏卡片：左原文右译文，撑满剩余高度 */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 p-4 md:grid-cols-2">
-        <section className="flex min-h-64 flex-col overflow-hidden rounded-xl border bg-card shadow-sm md:min-h-0">
-          <header className="flex h-9 shrink-0 items-center justify-between gap-2 border-b bg-muted/40 px-3">
-            <span className="text-xs font-medium text-muted-foreground">
-              {t("translate.sourceLabel")}
-            </span>
-            <span className="text-[10px] tabular-nums text-muted-foreground/70">
-              {text.length} {t("translate.charCount")}
-            </span>
-          </header>
-          <Textarea
-            value={text}
-            onChange={(e) => {
-              setText(e.target.value);
-              if (result || error) {
-                setResult("");
-                setError(undefined);
-              }
-              clearActive();
-            }}
-            placeholder={t("translate.placeholder")}
-            className="min-h-0 flex-1 resize-none rounded-none border-0 p-4 font-normal text-sm leading-relaxed shadow-none focus-visible:ring-0"
-            disabled={busy}
-          />
-        </section>
-
-        <section className="flex min-h-64 flex-col overflow-hidden rounded-xl border bg-card shadow-sm md:min-h-0">
-          <header className="flex h-9 shrink-0 items-center justify-between gap-2 border-b bg-muted/40 px-3">
-            <span className="text-xs font-medium text-muted-foreground">
-              {t("translate.targetLabel")}
-            </span>
-            <CopyTextButton text={result} />
-          </header>
-          <div className="relative min-h-0 flex-1">
+          {/* 原文 */}
+          <div>
+            <div className="mb-1.5 flex items-center justify-between">
+              <Label htmlFor="translate-text" className="text-xs">
+                {t("translate.sourceLabel")}
+              </Label>
+              <span className="text-[10px] tabular-nums text-muted-foreground/70">
+                {text.length} {t("translate.charCount")}
+              </span>
+            </div>
             <Textarea
-              readOnly
-              value={result}
-              placeholder={
-                busy ? t("translate.translating") : t("translate.outputPlaceholder")
-              }
-              className="h-full min-h-0 w-full resize-none rounded-none border-0 p-4 font-normal text-sm leading-relaxed shadow-none focus-visible:ring-0"
+              id="translate-text"
+              rows={9}
+              placeholder={t("translate.placeholder")}
+              value={text}
+              onChange={(e) => {
+                setText(e.target.value);
+                if (result || error) {
+                  setResult("");
+                  setError(undefined);
+                }
+                clearActive();
+              }}
+              disabled={busy}
+              className="resize-none text-xs"
             />
-            {busy && (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 bg-background/60 text-xs text-muted-foreground backdrop-blur-[1px]">
-                <Loader2Icon className="size-4 animate-spin text-primary" />
-                {t("translate.translating")}
-              </div>
+            {!text.trim() && (
+              <p className="mt-1 text-[10px] text-muted-foreground">{t("translate.needText")}</p>
             )}
           </div>
-        </section>
-      </div>
 
-      {/* 底部操作栏 */}
-      <div className="flex shrink-0 items-center gap-3 border-t px-4 py-3">
-        <Button onClick={() => translate.mutate()} disabled={!canSend}>
-          {busy ? (
-            <Loader2Icon data-icon="inline-start" className="animate-spin" />
-          ) : (
-            <SendIcon data-icon="inline-start" />
-          )}
-          {busy ? t("translate.translating") : t("translate.send")}
-        </Button>
-        {!text.trim() && (
-          <p className="text-xs text-muted-foreground">{t("translate.needText")}</p>
-        )}
-        {result && !busy && (
-          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <SparklesIcon className="size-3.5 text-primary" />
-            {t("translate.doneHint")}
-          </span>
-        )}
-        {(activeRecord !== null || text || result) && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="ml-auto"
-            onClick={resetEditor}
-            disabled={busy}
-          >
-            <FilePlusIcon data-icon="inline-start" />
-            {t("translate.new")}
+          {/* 翻译 */}
+          <Button size="lg" className="w-full" onClick={() => translate.mutate()} disabled={!canSend}>
+            {busy ? (
+              <Loader2Icon data-icon="inline-start" className="animate-spin" />
+            ) : (
+              <SendIcon data-icon="inline-start" />
+            )}
+            {busy ? t("translate.translating") : t("translate.send")}
           </Button>
-        )}
-      </div>
+
+          {(activeRecord !== null || text || result) && (
+            <Button variant="ghost" size="sm" className="w-full" onClick={resetEditor} disabled={busy}>
+              <FilePlusIcon data-icon="inline-start" />
+              {t("translate.new")}
+            </Button>
+          )}
+        </div>
+      </aside>
+
+      {/* 右侧：结果区 */}
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 p-8">
+          {busy ? (
+            <div className="flex flex-col items-center gap-3 text-center">
+              <div className="flex size-20 items-center justify-center rounded-2xl bg-primary/15">
+                <Loader2Icon className="size-9 animate-spin text-primary" />
+              </div>
+              <p className="text-sm text-muted-foreground">{t("translate.translating")}</p>
+            </div>
+          ) : error ? (
+            <div className="w-full max-w-md rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-xs text-destructive">
+              {error}
+            </div>
+          ) : result ? (
+            <div className="w-full max-w-2xl rounded-xl border bg-card p-4 shadow-sm">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-muted-foreground">
+                  {t("translate.targetLabel")}
+                </span>
+                <CopyTextButton text={result} />
+              </div>
+              <p className="whitespace-pre-wrap text-sm leading-relaxed">{result}</p>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center justify-center gap-3 text-center">
+              <div className="flex size-20 items-center justify-center rounded-2xl bg-primary/15">
+                <LanguagesIcon className="size-9 text-primary" />
+              </div>
+              <p className="text-lg font-medium">{t("translate.title")}</p>
+              <p className="max-w-xs text-sm text-muted-foreground">{t("translate.sidebarHint")}</p>
+            </div>
+          )}
+        </div>
+      </main>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// 应用入口：左侧栏工具入口切换（文本翻译 / 同传翻译）
+// ---------------------------------------------------------------------------
+
+export function TranslateScreen() {
+  const tool = useTranslateStore((s) => s.tool);
+  return tool === "live" ? <LiveTranslateTab /> : <TextTranslateTab />;
 }

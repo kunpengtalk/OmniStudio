@@ -76,8 +76,11 @@ const MIME: Record<string, string> = {
   ".m4a": "audio/mp4",
   ".aac": "audio/aac",
   ".flac": "audio/flac",
-  ".webm": "audio/webm",
-  ".mp4": "audio/mp4",
+  // 视频容器（AI 视频生成的成片由 <video> 元素播放，MIME 必须是 video/*）
+  ".webm": "video/webm",
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".mkv": "video/x-matroska",
 };
 
 const CORS_HEADERS = {

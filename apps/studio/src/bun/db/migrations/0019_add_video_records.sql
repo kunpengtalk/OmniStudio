@@ -1,0 +1,20 @@
+CREATE TABLE `video_records` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`status` text NOT NULL,
+	`backend` text,
+	`model` text,
+	`prompt` text,
+	`negative_prompt` text,
+	`task_id` text,
+	`ratio` text,
+	`resolution` text,
+	`duration` integer,
+	`width` integer,
+	`height` integer,
+	`seed` integer,
+	`steps` integer,
+	`first_frame_path` text,
+	`video_path` text,
+	`error` text,
+	`created_at` integer
+);

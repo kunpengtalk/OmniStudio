@@ -53,9 +53,11 @@ type VlmSource = "local" | "remote";
 export function VlmTab({
   image,
   onImageChange,
+  engineSwitcher,
 }: {
   image: StagedImage | null;
   onImageChange: (img: StagedImage | null) => void;
+  engineSwitcher?: React.ReactNode;
 }) {
   const t = useT();
   const queryClient = useQueryClient();
@@ -208,6 +210,8 @@ export function VlmTab({
       }
       setError(undefined);
       setResult({ markdown: r.result.markdown, modelLabel: r.result.modelLabel });
+      // 识别记录已入库（saveOcrRecord），刷新侧边栏「OCR 记录」列表。
+      void queryClient.invalidateQueries({ queryKey: ["documents"] });
     },
     onError: (e) => setError(String(e)),
   });
@@ -226,6 +230,7 @@ export function VlmTab({
 
   const panel = (
     <>
+      {engineSwitcher}
       <PanelSection title={t("ocr.vlm.source")} hint={t("ocr.vlm.desc")}>
         <SegmentedControl<VlmSource>
           value={source}

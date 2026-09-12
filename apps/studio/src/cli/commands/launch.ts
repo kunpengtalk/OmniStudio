@@ -14,6 +14,7 @@ import { formatBytes, slugModelFileName } from "../format";
 import { pickNumbered } from "../tui";
 import { getInstalledModels } from "./models";
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
+import { resolveDataDir } from "../data-dir";
 
 type ToolKind = "anthropic" | "openai" | "generic";
 
@@ -56,6 +57,45 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
+// ---------------------------------------------------------------------------
+// 记忆注入：启动时刷新目标工具上下文文件里的托管区块（Agent 自动读到），
+// 并给支持 MCP 的工具挂上 omni-memory 服务器（Agent 可用 memory_save 实时写回）。
+// ---------------------------------------------------------------------------
+
+/** MCP 桥接进程的启动描述：用绝对路径（bun + omi 入口脚本），不依赖 PATH。 */
+function omniMemoryMcpSpec(): { command: string; args: string[] } {
+  return { command: process.execPath, args: [Bun.main, "memory", "mcp"] };
+}
+
+/** 刷新工具上下文文件（CLAUDE.md / AGENTS.md）的记忆区块。独立进程直读主库。 */
+async function injectMemoryContext(tool: string): Promise<void> {
+  try {
+    process.env.OMNI_DATA_DIR ??= resolveDataDir();
+    const { syncMemoryToTools, MEMORY_SYNC_TARGETS } = await import("../../bun/memory-sync");
+    if (!MEMORY_SYNC_TARGETS.some((t) => t.tool === tool)) return;
+    const results = syncMemoryToTools([tool]);
+    if (results[0]?.ok) console.log("已同步共享记忆到工具上下文文件（写回：omi memory add / omni-memory MCP）。");
+  } catch {
+    // 记忆注入失败不阻塞启动
+  }
+}
+
+/** claude：--mcp-config 指向常驻配置文件（每次启动覆盖写，保持最新）。 */
+function writeClaudeMcpConfig(): string {
+  const spec = omniMemoryMcpSpec();
+  mkdirSync(LAUNCHER_CONFIG_DIR, { recursive: true });
+  const file = join(LAUNCHER_CONFIG_DIR, "claude-mcp.json");
+  writeFileSync(
+    file,
+    JSON.stringify(
+      { mcpServers: { "omni-memory": { command: spec.command, args: spec.args } } },
+      null,
+      2,
+    ),
+  );
+  return file;
+}
+
 export async function cmdLaunch(parsed: ParsedArgs) {
   if (optBool(parsed.options, "list")) {
     console.log("可用编码工具：");
@@ -86,7 +126,7 @@ export async function cmdLaunch(parsed: ParsedArgs) {
     : await getAllSettingsFallback();
 
   // 3. 选模型（可能改活动模型 → 变更会触发本地服务器重启）。
-  const model = await resolveModel(parsed, connected, settings.VLLM_API_KEY || "EMPTY");
+  const model = await resolveModel(parsed, connected);
 
   // 端点由「选中的模型」决定而不是 SERVER_MODE：本地模型 → 本地推理服务器，
   // 云端模型 ID → 云端 API。集成页选的就是模型名，本地模型绝不该发到云端。
@@ -158,6 +198,10 @@ export async function cmdLaunch(parsed: ParsedArgs) {
   }
   writeToolConfig(tool, model.name, baseUrl);
 
+  // 记忆总开关开启时：刷新上下文区块 + 给支持 MCP 的工具挂 omni-memory（写回通道）。
+  const memoryOn = (settings.MEMORY_ENABLED ?? "1") !== "0";
+  if (memoryOn) await injectMemoryContext(tool);
+
   console.log(
     `启动 ${tool}（模型：${model.name}，接口：${gatewayBase}${agentKey ? "，已鉴权" : ""}）` +
       (gatewayNotice ? `\n提示：${gatewayNotice}` : ""),
@@ -212,16 +256,20 @@ export async function cmdLaunch(parsed: ParsedArgs) {
       env.DISABLE_FEEDBACK_COMMAND = "1";
       env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY = "1";
       extraArgs.unshift("--model", model.name);
+      if (memoryOn) {
+        // 挂载 omni-memory MCP：Claude Code 会话里可直接 memory_search / memory_save。
+        extraArgs.unshift("--mcp-config", writeClaudeMcpConfig());
+      }
       break;
     }
     case "codex": {
-      configureCodex(`${gatewayBase}/v1/`, model.name);
+      configureCodex(`${gatewayBase}/v1/`, model.name, memoryOn);
       env.OPENAI_API_KEY = agentKey;
       extraArgs.unshift("--profile", CODEX_PROFILE_NAME, "-m", model.name);
       break;
     }
     case "opencode": {
-      env.OPENCODE_CONFIG_CONTENT = buildOpenCodeConfig(`${gatewayBase}/v1`, agentKey, model.name);
+      env.OPENCODE_CONFIG_CONTENT = buildOpenCodeConfig(`${gatewayBase}/v1`, agentKey, model.name, memoryOn);
       writeOpenCodeState(model.name);
       break;
     }
@@ -380,7 +428,7 @@ async function configureHermesProvider(
 const CODEX_DIR = join(homedir(), ".codex");
 const CODEX_PROFILE_NAME = "omni-launch";
 
-function configureCodex(baseURL: string, model: string): void {
+function configureCodex(baseURL: string, model: string, memoryOn: boolean): void {
   mkdirSync(CODEX_DIR, { recursive: true });
 
   const catalogPath = join(CODEX_DIR, "model.json");
@@ -408,7 +456,7 @@ function configureCodex(baseURL: string, model: string): void {
   writeFileSync(catalogPath, JSON.stringify(catalog, null, 2));
 
   const profilePath = join(CODEX_DIR, `${CODEX_PROFILE_NAME}.config.toml`);
-  const text = [
+  const textLines = [
     `model = ${JSON.stringify(model)}`,
     `model_provider = ${JSON.stringify(CODEX_PROFILE_NAME)}`,
     `model_catalog_json = ${JSON.stringify(catalogPath)}`,
@@ -418,15 +466,25 @@ function configureCodex(baseURL: string, model: string): void {
     `base_url = ${JSON.stringify(baseURL)}`,
     `wire_api = "responses"`,
     "",
-  ].join("\n");
-  writeFileSync(profilePath, text);
+  ];
+  if (memoryOn) {
+    const spec = omniMemoryMcpSpec();
+    textLines.push(
+      `[mcp_servers.omni-memory]`,
+      `command = ${JSON.stringify(spec.command)}`,
+      `args = ${JSON.stringify(spec.args)}`,
+      "",
+    );
+  }
+  writeFileSync(profilePath, textLines.join("\n"));
 }
 
 /** opencode：内联 provider 配置走 OPENCODE_CONFIG_CONTENT，模型注册进状态文件（照搬 Ollama）。 */
-function buildOpenCodeConfig(baseURL: string, apiKey: string, model: string): string {
+function buildOpenCodeConfig(baseURL: string, apiKey: string, model: string, memoryOn: boolean): string {
   const options: Record<string, string> = { baseURL };
   if (apiKey && apiKey !== "EMPTY") options.apiKey = apiKey;
-  const config = {
+  const spec = omniMemoryMcpSpec();
+  const config: Record<string, unknown> = {
     $schema: "https://opencode.ai/config.json",
     provider: {
       omni: {
@@ -438,6 +496,11 @@ function buildOpenCodeConfig(baseURL: string, apiKey: string, model: string): st
     },
     model: `omni/${model}`,
   };
+  if (memoryOn) {
+    config.mcp = {
+      "omni-memory": { type: "local", command: [spec.command, ...spec.args], enabled: true },
+    };
+  }
   return JSON.stringify(config);
 }
 
@@ -744,7 +807,6 @@ function configureChatgpt(baseURL: string, apiKey: string, model: string): void 
 async function resolveModel(
   parsed: ParsedArgs,
   connected: boolean,
-  apiKey: string,
 ): Promise<{ name: string; path?: string; changed: boolean }> {
   const flag = optString(parsed.options, "model");
   const installed = await getInstalledModels();

@@ -14,7 +14,21 @@
 export const OCR_TESSDATA_REPO = "tesseract-ocr/tessdata_fast";
 export const OCR_TESSDATA_RAW_BASE = `https://github.com/${OCR_TESSDATA_REPO}/raw/main/`;
 
-export type OcrEngineType = "tesseract" | "vlm";
+export type OcrEngineType = "tesseract" | "vlm" | "paddleocr";
+
+/** PP-OCRv6 模型档位（决定加载哪套官方模型）。只保留 medium 一档：精度最高，
+ * tiny / small 精度损失明显、桌面端意义不大，已下线。 */
+export type PpOcrModelSize = "medium";
+
+/**
+ * PP-OCRv6 档位目录：仅 medium（官方默认档，约 140MB，34.5M 参数，精度最高）。
+ */
+export const PPOCR_MODEL_OPTIONS: readonly {
+  value: PpOcrModelSize;
+  labelKey: string;
+  /** 展示用模型体积（近似，识别 + 检测模型合计）。 */
+  sizeLabel: string;
+}[] = [{ value: "medium", labelKey: "ocr.paddleocr.size.medium", sizeLabel: "≈ 140 MB" }];
 
 /** 页面分割模式（--psm）。 */
 export const OCR_PSM_MODES: { value: string; labelKey: string }[] = [

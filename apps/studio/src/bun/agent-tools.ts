@@ -5,6 +5,7 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earen
 
 import { getSetting } from "./db/settings";
 import { webSearch } from "./web-search";
+import { listKnowledgeBases, recall } from "./knowledge";
 
 /**
  * Agent 可使用的工具集。
@@ -453,6 +454,62 @@ function createWebSearch(): BuiltTool {
   };
 }
 
+/**
+ * 本地知识库检索：Agent / Plan / Goal 三模式都可用（只读）。
+ * 不指定 kb 时检索全部知识库；命中返回来源文档名 + 分块内容。
+ */
+function createKnowledgeSearch(): BuiltTool {
+  return {
+    name: "knowledge_search",
+    label: "Knowledge search",
+    description:
+      "Search the user's local knowledge bases (documents / notes / web pages imported in OmniStudio). " +
+      "Use it when the task may relate to materials the user stored locally, before searching the web.",
+    parameters: Type.Object({
+      query: Type.String({ description: "Search query — natural language is fine." }),
+      kb: Type.Optional(
+        Type.String({ description: "Knowledge base name to restrict the search to. Omit for all." }),
+      ),
+      top_k: Type.Optional(Type.Number({ description: "Max chunks to return (default 6)." })),
+    }),
+    execute: async (_toolCallId, params: { query: string; kb?: string; top_k?: number }) => {
+      try {
+        const kbs = listKnowledgeBases();
+        if (kbs.length === 0) {
+          return textResult("用户还没有创建任何知识库。");
+        }
+        let targets = kbs;
+        if (params.kb?.trim()) {
+          const lowered = params.kb.trim().toLowerCase();
+          targets = kbs.filter((k) => k.name.toLowerCase() === lowered);
+          if (targets.length === 0) {
+            return textResult(
+              `没有名为「${params.kb}」的知识库。可用：${kbs.map((k) => k.name).join("、")}`,
+            );
+          }
+        }
+        const { hits } = await recall(
+          targets.map((k) => k.id),
+          params.query,
+          params.top_k,
+        );
+        if (hits.length === 0) {
+          return textResult("没有检索到相关内容。");
+        }
+        const formatted = hits
+          .map(
+            (h, i) =>
+              `[${i + 1}] 《${h.docName}》分块 ${h.seq}（${h.kbName}，相关度 ${h.score.toFixed(2)}）\n${h.content}`,
+          )
+          .join("\n\n");
+        return textResult(`找到 ${hits.length} 条相关片段：\n\n${formatted}`);
+      } catch (e) {
+        return errorResult(`knowledge_search failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  };
+}
+
 /** 只读工具集：Plan 模式下只用这些，保证"先出方案再动手"。 */
 export function buildReadOnlyTools(ctx: ToolContext): BuiltTool[] {
   return [
@@ -461,6 +518,7 @@ export function buildReadOnlyTools(ctx: ToolContext): BuiltTool[] {
     createGlob(ctx),
     createGrep(ctx),
     createWebSearch(),
+    createKnowledgeSearch(),
   ];
 }
 

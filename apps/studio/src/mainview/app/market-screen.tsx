@@ -15,7 +15,7 @@ import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { ScrollArea } from "@ui/scroll-area";
 import { Spinner } from "@ui/spinner";
-import { useModelDetailStore } from "@stores/model-detail";
+import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detail";
 import { useRouter } from "@stores/router";
 import { useT } from "@stores/ui-lang";
 import {
@@ -50,7 +50,13 @@ const CAT_BADGE_CLASSES: Record<string, string> = {
   other: "bg-muted text-muted-foreground",
 };
 
-function SearchResultRow({ model }: { model: ModelScopeModel }) {
+function SearchResultRow({
+  model,
+  onOpenDetail,
+}: {
+  model: ModelScopeModel;
+  onOpenDetail?: (source: ModelDetailSource) => void;
+}) {
   const t = useT();
   const setSource = useModelDetailStore((s) => s.setSource);
   const setRoute = useRouter((s) => s.setRoute);
@@ -59,8 +65,10 @@ function SearchResultRow({ model }: { model: ModelScopeModel }) {
   const formatHint = repoFormatHint(model.id);
 
   const openDetail = () => {
-    setSource({ kind: "search", model });
-    setRoute({ path: "model-detail" });
+    const source = { kind: "search", model } as const;
+    setSource(source);
+    if (onOpenDetail) onOpenDetail(source);
+    else setRoute({ path: "model-detail" });
   };
 
   return (
@@ -105,7 +113,11 @@ function SearchResultRow({ model }: { model: ModelScopeModel }) {
 }
 
 /** 在线模型市场：在 ModelScope / HuggingFace 搜索模型并下载（详情页提供文件下载）。 */
-export function MarketScreen() {
+export function MarketScreen({
+  onOpenDetail,
+}: {
+  onOpenDetail?: (source: ModelDetailSource) => void;
+} = {}) {
   const t = useT();
   const [query, setQuery] = useState("");
   const [submitted, setSubmitted] = useState("");
@@ -205,7 +217,9 @@ export function MarketScreen() {
                 {t("models.noResults")}
               </p>
             ) : (
-              filteredResults.map((m) => <SearchResultRow key={m.id} model={m} />)
+              filteredResults.map((m) => (
+                <SearchResultRow key={m.id} model={m} onOpenDetail={onOpenDetail} />
+              ))
             )}
           </div>
         )}

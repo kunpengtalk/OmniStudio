@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from "fs";
 import path from "path";
 
+import { db } from "./db";
+import { documents, pages } from "./db/schema";
 import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import { getDataDir } from "./paths";
 import { getImagesBaseDir } from "./image-server";
@@ -70,10 +72,11 @@ export type OcrLine = OcrBox & {
 
 export type OcrResult = {
   text: string;
-  engine: "tesseract";
+  engine: "tesseract" | "paddleocr";
   modelLabel: string;
   modelCode: string;
-  psm: number;
+  /** psm 仅 Tesseract 路径使用（PaddleOCR 无此概念）。 */
+  psm?: number;
   lines: OcrLine[];
 };
 
@@ -172,6 +175,78 @@ export async function getTesseractVersion(bin: string): Promise<string> {
   } catch {
     return "";
   }
+}
+
+// ---------------------------------------------------------------------------
+// 引擎一键安装（brew install tesseract，日志实时广播到前端）
+// ---------------------------------------------------------------------------
+
+type TessLogCallback = (text: string) => void;
+const tessLogListeners = new Set<TessLogCallback>();
+
+/** 订阅 tesseract 安装日志（rpc 层转发到 webview）。 */
+export function onTesseractInstallLog(cb: TessLogCallback): () => void {
+  tessLogListeners.add(cb);
+  return () => {
+    tessLogListeners.delete(cb);
+  };
+}
+
+function emitTessLog(text: string): void {
+  for (const cb of tessLogListeners) {
+    try {
+      cb(text);
+    } catch {}
+  }
+}
+
+/**
+ * 一键安装 tesseract 引擎（brew install，用户无需手动开终端），
+ * 体验对齐 PaddleOCR 的「下载引擎」。未安装 Homebrew 时返回错误，
+ * 保留「复制安装命令」作为手动兜底。
+ */
+export async function installTesseractEngine(): Promise<{ ok: boolean; error?: string }> {
+  if (await findTesseract()) return { ok: true };
+  const brew = Bun.which("brew", { PATH: getSearchPath() });
+  if (!brew) {
+    const err =
+      "未找到 Homebrew，无法自动安装。请先安装 Homebrew（https://brew.sh），或点「复制安装命令」在终端手动执行。";
+    emitTessLog(err);
+    return { ok: false, error: err };
+  }
+  emitTessLog("$ brew install tesseract");
+  const proc = Bun.spawn([brew, "install", "tesseract"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  // 保留末尾若干行：失败时附在错误里，用户不必翻日志就能看到原因。
+  const tail: string[] = [];
+  const pump = async (stream: ReadableStream<Uint8Array>) => {
+    const dec = new TextDecoder();
+    const reader = stream.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const line of dec.decode(value, { stream: true }).split("\n")) {
+        if (!line.trim()) continue;
+        emitTessLog(line.trimEnd());
+        tail.push(line.trimEnd());
+        if (tail.length > 30) tail.shift();
+      }
+    }
+  };
+  await Promise.all([pump(proc.stdout), pump(proc.stderr)]);
+  const code = await proc.exited;
+  if (code !== 0) {
+    emitTessLog(`安装失败（退出码 ${code}）`);
+    return { ok: false, error: `brew install tesseract 失败（退出码 ${code}）：\n${tail.join("\n")}` };
+  }
+  const bin = await findTesseract();
+  if (bin) {
+    emitTessLog("tesseract 安装成功。");
+    return { ok: true };
+  }
+  return { ok: false, error: "安装命令已成功执行，但未检测到 tesseract，请重启应用后再试。" };
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +375,45 @@ export function deleteOcrModel(modelId: string): { ok: boolean } {
 // 图片暂存（选择/拖入识别）
 // ---------------------------------------------------------------------------
 
+/**
+ * 「识别提取」页一次成功识别 → 存为侧边栏「OCR 记录」的一条文档记录
+ * （documents + pages 各一行，与「文档处理」管线同表，点击即可回看识别文本）。
+ * best-effort：记录写失败不影响识别结果返回。
+ */
+export function saveOcrRecord(input: { imagePath: string; markdown: string; raw?: string }): void {
+  try {
+    const file = Bun.file(input.imagePath);
+    const now = Date.now();
+    const doc = db
+      .insert(documents)
+      .values({
+        path: input.imagePath,
+        type: file.type || "image/png",
+        size: file.size,
+        status: "completed",
+        totalPages: 1,
+        processedPages: 1,
+        completedAt: now,
+      })
+      .returning({ id: documents.id })
+      .get();
+    db.insert(pages)
+      .values({
+        documentId: doc.id,
+        // 页码 0 基，与文档管线一致（详情页显示为 Page 1）。
+        pageNumber: 0,
+        markdown: input.markdown,
+        // raw 供详情页 Raw/HTML 页签展示；为空则该页签自动禁用。
+        raw: input.raw ?? input.markdown,
+        status: "completed",
+        completedAt: now,
+      })
+      .run();
+  } catch {
+    // ignore：识别结果已在界面上展示，记录保存失败不阻断流程
+  }
+}
+
 const OCR_IMAGE_EXT_RE = /^\.(png|jpe?g|webp|bmp|tiff?|gif|heic|heif|pdf)$/;
 
 export async function stageOcrImage(paths: string[]): Promise<{ ref: string; url: string }[]> {
@@ -319,7 +433,8 @@ export async function stageOcrImage(paths: string[]): Promise<{ ref: string; url
   return out;
 }
 
-function resolveOcrImage(ref: string): string | null {
+/** 把 OCR 暂存图片 ref（ocr/in/...）解析为绝对路径（限 images 目录内）。 */
+export function resolveOcrImage(ref: string): string | null {
   const base = getImagesBaseDir();
   const resolved = path.resolve(base, ref);
   if (!resolved.startsWith(base + path.sep)) return null;
@@ -476,6 +591,7 @@ export async function runOcr(input: {
       throw new Error(stderr.trim().slice(-400) || "识别结果为空");
     }
 
+    saveOcrRecord({ imagePath: abs, markdown: text, raw: text });
     return {
       text,
       engine: "tesseract",
@@ -582,6 +698,7 @@ export async function runOcrVlm(input: {
     throw new Error("识别结果为空");
   }
 
+  saveOcrRecord({ imagePath: abs, markdown, raw: rawAll });
   return {
     markdown,
     raw: rawAll,

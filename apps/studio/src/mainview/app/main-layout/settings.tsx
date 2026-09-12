@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ServerIcon,
@@ -6,58 +6,49 @@ import {
   GaugeIcon,
   BlocksIcon,
   ActivityIcon,
-  InfoIcon,
   GlobeIcon,
   CheckIcon,
   XCircleIcon,
-  ZapIcon,
   CopyIcon,
-  Trash2Icon,
   HardDriveIcon,
   TerminalSquareIcon,
-  PlusIcon,
-  CloudIcon,
-  XIcon,
-  RefreshCwIcon,
-  SearchIcon,
+  LayoutDashboardIcon,
+  StarIcon,
   BoxIcon,
   Link2Icon,
   WaypointsIcon,
-  EyeIcon,
-  EyeOffIcon,
-  ChevronDownIcon,
-  MinusIcon,
+  GithubIcon,
+  PlugIcon,
+  SlidersHorizontalIcon,
+  PaletteIcon,
+  BrainIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
-import { Badge } from "@ui/badge";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { IntegrationModelSelect } from "@/mainview/components/integration-model-select";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@ui/dialog";
 import { ScrollArea } from "@ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { Spinner } from "@ui/spinner";
-import { CLOUD_PROVIDERS } from "../setup-screen/constants";
-import { useUILang } from "@stores/ui-lang";
+import { CloudProviderPanel } from "./cloud-provider-panel";
+import { DefaultModelsPanel } from "./default-models-panel";
+import { AboutTab } from "./about-tab";
+import { WebSearchTab } from "./web-search-tab";
+import { McpTab } from "./mcp-tab";
+import { MemoryTab } from "./memory-tab";
+import { GeneralPrefsTab, AppearanceTab } from "./prefs-tabs";
 import { useT } from "@stores/ui-lang";
-import { LANGS, type UILang } from "@/shared/i18n";
 import { cn } from "@/mainview/lib/utils";
-import { DEFAULT_INFERENCE_PORT } from "@/shared/server-info";
-import { ServerStatsScreen } from "../server-stats";
+import { DashboardScreen } from "../dashboard-screen";
 import { ServerLogsScreen } from "./server-logs";
+import { ModelDetailScreen } from "../model-detail";
 import { ModelsScreen } from "../models-screen";
 import { LocalModelsScreen } from "../local-models-screen";
 import { MarketScreen } from "../market-screen";
 import { GatewayScreen } from "../gateway-screen";
+import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detail";
 
 type SettingsFormState = Record<string, string>;
 
@@ -128,6 +119,7 @@ const CLAUDE_TIERS = [
 
 type SettingsTab =
   | "network"
+  | "defaults"
   | "model"
   | "store"
   | "market"
@@ -137,22 +129,47 @@ type SettingsTab =
   | "benchmark"
   | "logs"
   | "stats"
+  | "websearch"
+  | "memory"
+  | "mcp"
   | "general"
-  | "interface";
+  | "appearance"
+  | "about";
 
-const TAB_DEFS: { key: SettingsTab; icon: ReactNode; labelKey: string }[] = [
-  { key: "network", icon: <ServerIcon className="size-4" />, labelKey: "settings.server" },
-  { key: "model", icon: <CpuIcon className="size-4" />, labelKey: "settings.model" },
-  { key: "store", icon: <BoxIcon className="size-4" />, labelKey: "settings.store" },
-  { key: "market", icon: <Link2Icon className="size-4" />, labelKey: "settings.market" },
-  { key: "gateway", icon: <WaypointsIcon className="size-4" />, labelKey: "settings.gateway" },
-  { key: "performance", icon: <GaugeIcon className="size-4" />, labelKey: "settings.performance" },
-  { key: "integrations", icon: <BlocksIcon className="size-4" />, labelKey: "settings.integrations" },
-  { key: "benchmark", icon: <ActivityIcon className="size-4" />, labelKey: "settings.benchmark" },
-  { key: "logs", icon: <TerminalSquareIcon className="size-4" />, labelKey: "settings.logs" },
-  { key: "stats", icon: <HardDriveIcon className="size-4" />, labelKey: "settings.stats" },
-  { key: "general", icon: <InfoIcon className="size-4" />, labelKey: "settings.general" },
-  { key: "interface", icon: <GlobeIcon className="size-4" />, labelKey: "settings.interface" },
+const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
+  network: { icon: <ServerIcon className="size-4" />, labelKey: "settings.server" },
+  defaults: { icon: <StarIcon className="size-4" />, labelKey: "settings.defaults" },
+  model: { icon: <CpuIcon className="size-4" />, labelKey: "settings.model" },
+  store: { icon: <BoxIcon className="size-4" />, labelKey: "settings.store" },
+  market: { icon: <Link2Icon className="size-4" />, labelKey: "settings.market" },
+  gateway: { icon: <WaypointsIcon className="size-4" />, labelKey: "settings.gateway" },
+  performance: { icon: <GaugeIcon className="size-4" />, labelKey: "settings.performance" },
+  integrations: { icon: <BlocksIcon className="size-4" />, labelKey: "settings.integrations" },
+  benchmark: { icon: <ActivityIcon className="size-4" />, labelKey: "settings.benchmark" },
+  logs: { icon: <TerminalSquareIcon className="size-4" />, labelKey: "settings.logs" },
+  stats: { icon: <LayoutDashboardIcon className="size-4" />, labelKey: "settings.dashboard" },
+  websearch: { icon: <GlobeIcon className="size-4" />, labelKey: "settings.webSearch.title" },
+  memory: { icon: <BrainIcon className="size-4" />, labelKey: "settings.memory.title" },
+  mcp: { icon: <PlugIcon className="size-4" />, labelKey: "settings.mcp.title" },
+  general: { icon: <SlidersHorizontalIcon className="size-4" />, labelKey: "settings.prefs.general" },
+  appearance: { icon: <PaletteIcon className="size-4" />, labelKey: "settings.appearance" },
+  about: { icon: <GithubIcon className="size-4" />, labelKey: "settings.aboutTab.title" },
+};
+
+/** 设置导航分组（参照主流客户端的设置页：分组标题 + 条目）。概览置顶且无分组标题。 */
+const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
+  { tabs: ["stats"] },
+  {
+    labelKey: "settings.group.models",
+    tabs: ["network", "defaults", "model", "store", "market"],
+  },
+  {
+    labelKey: "settings.group.services",
+    tabs: ["gateway", "integrations", "benchmark", "performance"],
+  },
+  { labelKey: "settings.group.tools", tabs: ["websearch", "memory", "mcp"] },
+  { labelKey: "settings.group.prefs", tabs: ["general", "appearance", "about"] },
+  { labelKey: "settings.group.data", tabs: ["logs"] },
 ];
 
 function FieldGrid({
@@ -212,767 +229,6 @@ interface SaveMutationLike {
   isPending: boolean;
   isSuccess: boolean;
   reset: () => void;
-}
-
-function inferBaseUrl(form: SettingsFormState): string {
-  const isLocal = (form.SERVER_MODE ?? "local") === "local";
-  if (isLocal) {
-    return `http://${form.SERVER_HOST || "127.0.0.1"}:${form.SERVER_PORT || DEFAULT_INFERENCE_PORT}`;
-  }
-  return (form.VLLM_API_BASE ?? "").replace(/\/+$/, "").replace(/\/v1$/, "");
-}
-
-/** 云服务商的模型条目：id 必填，name/group/remark 可选（兼容旧版纯 id 列表）。 */
-type CloudModelEntry = { id: string; name?: string; group?: string; remark?: string };
-
-/** 用户通过「添加服务商」加入的自定义服务商（持久化在 CUSTOM_PROVIDERS）。 */
-type CustomProvider = {
-  id: string;
-  label: string;
-  vendor: string;
-  baseUrl: string;
-  models: string[];
-  /** 简短备注（免费额度 / 需要额外操作等），兼容 REMOTE_PROVIDERS。 */
-  note?: string;
-};
-
-function parseCloudModels(raw: string | undefined): CloudModelEntry[] {
-  try {
-    const arr: unknown = JSON.parse(raw ?? "[]");
-    if (!Array.isArray(arr)) return [];
-    return arr
-      .map((x): CloudModelEntry | null => {
-        if (typeof x === "string") return { id: x };
-        if (x && typeof x === "object" && typeof (x as Record<string, unknown>).id === "string") {
-          const o = x as Record<string, unknown>;
-          return {
-            id: o.id as string,
-            name: typeof o.name === "string" ? o.name : undefined,
-            group: typeof o.group === "string" ? o.group : undefined,
-          };
-        }
-        return null;
-      })
-      .filter((x): x is CloudModelEntry => x !== null);
-  } catch {
-    return [];
-  }
-}
-
-/** 「模型云服务」页的云服务商区块：左侧原厂厂商列表，右侧选中厂商的配置表单。 */
-function CloudProviderPanel({
-  form,
-  updateField,
-  testMutation,
-  saveMutation,
-}: {
-  form: SettingsFormState;
-  updateField: (key: string, value: string) => void;
-  testMutation: {
-    mutate: () => void;
-    isPending: boolean;
-    isSuccess: boolean;
-    isError: boolean;
-    data?: { connected: boolean };
-  };
-  saveMutation: SaveMutationLike;
-}) {
-  const isLocal = (form.SERVER_MODE ?? "local") === "local";
-  const t = useT();
-  const baseUrl = (form.VLLM_API_BASE ?? "").trim();
-  const apiKey = form.VLLM_API_KEY ?? "";
-  const modelName = (form.VLLM_MODEL_NAME ?? "").trim();
-
-  // 自定义服务商（「添加服务商」加入，持久化在 CUSTOM_PROVIDERS）
-  const customProviders = useMemo<CustomProvider[]>(() => {
-    try {
-      const arr: unknown = JSON.parse(form.CUSTOM_PROVIDERS ?? "[]");
-      return Array.isArray(arr)
-        ? arr.filter(
-            (x): x is CustomProvider =>
-              !!x &&
-              typeof x === "object" &&
-              typeof (x as Record<string, unknown>).id === "string" &&
-              typeof (x as Record<string, unknown>).label === "string",
-          )
-        : [];
-    } catch {
-      return [];
-    }
-  }, [form.CUSTOM_PROVIDERS]);
-  const setCustomProviders = (list: CustomProvider[]) =>
-    updateField("CUSTOM_PROVIDERS", JSON.stringify(list));
-
-  // 完整服务商列表 = 原厂厂商 + 自定义（旧版内置「自定义」占位项不展示）
-  const allProviders = useMemo<CustomProvider[]>(
-    () => [
-      ...CLOUD_PROVIDERS.filter((p) => p.id !== "custom").map((p) => ({
-        ...p,
-        vendor: p.vendor,
-      })),
-      ...customProviders,
-    ],
-    [customProviders],
-  );
-
-  // 优先用保存的 CLOUD_PROVIDER；没有则按 Base URL 反查，避免换窗口后选中态丢失。
-  const savedId = form.CLOUD_PROVIDER;
-  const byUrl = allProviders.find((p) => p.baseUrl && p.baseUrl === baseUrl);
-  const selected = allProviders.find((p) => p.id === savedId) ?? byUrl ?? null;
-  const isCustom = !selected;
-
-  const pickProvider = (id: string) => {
-    const p = allProviders.find((x) => x.id === id);
-    if (!p) return;
-    updateField("CLOUD_PROVIDER", p.id);
-    if (p.baseUrl) updateField("VLLM_API_BASE", p.baseUrl);
-    if (p.models[0] && !modelName) updateField("VLLM_MODEL_NAME", p.models[0]);
-    // 选中正式厂商即视为启用云服务
-    if (p.baseUrl) updateField("SERVER_MODE", "remote");
-  };
-
-  // 添加服务商
-  const [showAddProvider, setShowAddProvider] = useState(false);
-  const [npLabel, setNpLabel] = useState("");
-  const [npBase, setNpBase] = useState("");
-  const addProvider = () => {
-    const label = npLabel.trim();
-    if (!label) return;
-    const entry: CustomProvider = {
-      id: `custom-${Date.now()}`,
-      label,
-      vendor: "自定义",
-      baseUrl: npBase.trim(),
-      models: [],
-    };
-    setCustomProviders([...customProviders, entry]);
-    updateField("CLOUD_PROVIDER", entry.id);
-    if (entry.baseUrl) {
-      updateField("VLLM_API_BASE", entry.baseUrl);
-      updateField("SERVER_MODE", "remote");
-    }
-    setNpLabel("");
-    setNpBase("");
-    setShowAddProvider(false);
-  };
-
-  // 附加端点（「添加端点」加入，持久化在 CLOUD_ENDPOINTS）
-  const extraEndpoints = useMemo<string[]>(() => {
-    try {
-      const arr: unknown = JSON.parse(form.CLOUD_ENDPOINTS ?? "[]");
-      return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : [];
-    } catch {
-      return [];
-    }
-  }, [form.CLOUD_ENDPOINTS]);
-  const setExtraEndpoints = (list: string[]) =>
-    updateField("CLOUD_ENDPOINTS", JSON.stringify(list));
-
-  // 「获取密钥」入口：跳转服务商站点（取 API 地址的域名）
-  const consoleUrl = (() => {
-    try {
-      return baseUrl ? new URL(baseUrl).origin : "";
-    } catch {
-      return "";
-    }
-  })();
-
-  // 云服务商的模型列表（支持 id/name/group）
-  const cloudModels = useMemo(() => parseCloudModels(form.CLOUD_MODELS), [form.CLOUD_MODELS]);
-  const setCloudModels = (list: CloudModelEntry[]) =>
-    updateField("CLOUD_MODELS", JSON.stringify(list));
-
-  const syncMutation = useMutation({
-    mutationFn: () => rpcClient.listRemoteModels({ baseUrl, apiKey: apiKey || undefined }),
-    onSuccess: (data) => {
-      if (!data.ok) return;
-      const merged = new Map(cloudModels.map((m) => [m.id, m]));
-      for (const id of data.models) if (!merged.has(id)) merged.set(id, { id });
-      setCloudModels(Array.from(merged.values()));
-    },
-  });
-
-  const queryClient = useQueryClient();
-  const cloudEnabled = (form.SERVER_MODE ?? "local") === "remote";
-  const toggleEnabledMutation = useMutation({
-    mutationFn: async (on: boolean) => {
-      updateField("SERVER_MODE", on ? "remote" : "local");
-      await rpcClient.updateSettings({ settings: { SERVER_MODE: on ? "remote" : "local" } });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-      queryClient.invalidateQueries({ queryKey: ["connection-status"] });
-    },
-  });
-
-  const [showKey, setShowKey] = useState(false);
-  const [showAddModel, setShowAddModel] = useState(false);
-  const [dlgId, setDlgId] = useState("");
-  const [dlgName, setDlgName] = useState("");
-  const [dlgGroup, setDlgGroup] = useState("");
-  const [dlgRemark, setDlgRemark] = useState("");
-  const [dlgMore, setDlgMore] = useState(false);
-  const addModel = () => {
-    const id = dlgId.trim();
-    if (!id || cloudModels.some((m) => m.id === id)) return;
-    setCloudModels([
-      ...cloudModels,
-      {
-        id,
-        name: dlgName.trim() || undefined,
-        group: dlgGroup.trim() || undefined,
-        remark: dlgRemark.trim() || undefined,
-      },
-    ]);
-    setDlgId("");
-    setDlgName("");
-    setDlgGroup("");
-    setDlgRemark("");
-    setDlgMore(false);
-  };
-  const removeModel = (id: string) => setCloudModels(cloudModels.filter((m) => m.id !== id));
-
-  // 左栏厂商搜索
-  const [vendorSearch, setVendorSearch] = useState("");
-  const vendorNeedle = vendorSearch.trim().toLowerCase();
-  const filteredProviders = vendorNeedle
-    ? allProviders.filter((p) =>
-        `${p.label} ${p.vendor}`.toLowerCase().includes(vendorNeedle),
-      )
-    : allProviders;
-
-  // 模型列表 = 已保存的云端模型 ∪ 厂商预设模型（点击行即设为当前模型，勾选标记当前项）
-  const displayModels = useMemo(() => {
-    const merged = new Map<string, CloudModelEntry>(cloudModels.map((m) => [m.id, m]));
-    for (const id of selected?.models ?? []) if (!merged.has(id)) merged.set(id, { id });
-    return Array.from(merged.values());
-  }, [cloudModels, selected]);
-  const removableIds = new Set(cloudModels.map((m) => m.id));
-
-  return (
-    <div className="flex flex-col gap-5">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
-            <CloudIcon className="size-5" />
-            模型云服务
-          </h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            选择原厂厂商、填入 API Key 并保存后即可使用云端模型。仅提供官方接口，不含聚合/中介服务。
-          </p>
-        </div>
-        {!isLocal && (
-          <span className="flex shrink-0 items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-            <CheckIcon className="size-3.5" /> 云服务已启用
-          </span>
-        )}
-      </div>
-
-      {/* 两栏：厂商源列表 / 配置详情 */}
-      <div className="flex items-stretch gap-6">
-        {/* 左栏：厂商列表（macOS 源列表风格，带搜索） */}
-        <div className="flex w-64 shrink-0 flex-col gap-2.5">
-          <div className="relative">
-            <Label htmlFor="cloud-provider-search" className="sr-only">
-              搜索厂商
-            </Label>
-            <Input
-              id="cloud-provider-search"
-              placeholder="搜索厂商"
-              value={vendorSearch}
-              onChange={(e) => setVendorSearch(e.target.value)}
-              className="h-8 rounded-lg pl-8 text-xs"
-            />
-            <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 opacity-50" />
-          </div>
-          <div className="flex max-h-[560px] flex-col gap-0.5 overflow-y-auto rounded-xl bg-muted/40 p-1.5">
-            {filteredProviders.map((p) => {
-              const isCustomOpt = p.id === "custom";
-              const active = isCustom ? isCustomOpt : selected?.id === p.id;
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => pickProvider(p.id)}
-                  className={cn(
-                    "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
-                    active
-                      ? "bg-primary/10 text-primary"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "flex size-8 shrink-0 items-center justify-center rounded-lg text-xs font-semibold",
-                      active ? "bg-primary/15" : "bg-muted",
-                    )}
-                  >
-                    {isCustomOpt ? <PlusIcon className="size-4" /> : p.label.charAt(0)}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] font-medium">{p.label}</span>
-                    {p.vendor && (
-                      <span className="block truncate text-[11px] opacity-60">{p.vendor}</span>
-                    )}
-                  </span>
-                  {p.id === savedId && (
-                    <span className="size-1.5 shrink-0 rounded-full bg-emerald-500" />
-                  )}
-                </button>
-              );
-            })}
-            {filteredProviders.length === 0 && (
-              <p className="py-6 text-center text-xs text-muted-foreground">无匹配厂商</p>
-            )}
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            className="w-full border-dashed"
-            onClick={() => setShowAddProvider(true)}
-          >
-            <PlusIcon data-icon="inline-start" className="size-3.5" />
-            添加服务商
-          </Button>
-        </div>
-
-        {/* 右栏：选中服务商的详情（头部 + 连接配置分组卡片 / 模型列表卡片） */}
-        <div className="flex min-w-0 flex-1 flex-col gap-5">
-          {/* 头部：大图标 + 名称 + 厂商信息 + 启用开关 */}
-          <div className="flex items-center gap-3.5">
-            <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-muted text-base font-semibold">
-              {isCustom ? <PlusIcon className="size-5" /> : selected?.label.charAt(0)}
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-base font-semibold">
-                {isCustom ? "自定义服务商" : selected?.label}
-              </p>
-              {(selected?.vendor || selected?.note) && (
-                <p
-                  className="truncate text-xs text-muted-foreground"
-                  title={[selected?.vendor, selected?.note].filter(Boolean).join(" · ")}
-                >
-                  {[selected?.vendor, selected?.note].filter(Boolean).join(" · ")}
-                </p>
-              )}
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={cloudEnabled}
-              disabled={toggleEnabledMutation.isPending}
-              onClick={() => toggleEnabledMutation.mutate(!cloudEnabled)}
-              className={cn(
-                "ml-auto relative h-5 w-9 shrink-0 rounded-full transition-colors",
-                cloudEnabled ? "bg-emerald-500" : "bg-muted-foreground/30",
-              )}
-            >
-              <span
-                className={cn(
-                  "absolute top-0.5 size-4 rounded-full bg-white shadow transition-all",
-                  cloudEnabled ? "left-[18px]" : "left-0.5",
-                )}
-              />
-            </button>
-          </div>
-
-          {/* 连接配置：分组卡片（API 密钥 / API 地址 / 当前模型） */}
-          <div className="divide-y rounded-xl border bg-card shadow-sm">
-            {/* API 密钥 + 检测 */}
-            <div className="px-4 py-3.5">
-          <div className="flex items-end gap-3">
-            <div className="min-w-0 flex-1">
-              <Label className="mb-1 block text-xs">
-                API 密钥
-                {consoleUrl && (
-                  <button
-                    type="button"
-                    className="ml-1.5 font-normal text-primary hover:underline"
-                    onClick={() => void rpcClient.openGatewayDocs({ url: consoleUrl })}
-                  >
-                    获取密钥
-                  </button>
-                )}
-              </Label>
-              <div className="relative">
-                <Input
-                  type={showKey ? "text" : "password"}
-                  placeholder="在服务商控制台获取"
-                  value={apiKey}
-                  onChange={(e) => updateField("VLLM_API_KEY", e.target.value)}
-                  className="h-8 pr-14 font-mono text-xs"
-                />
-                <div className="absolute top-1/2 right-2 flex -translate-y-1/2 items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setShowKey((v) => !v)}
-                    className="text-muted-foreground transition-colors hover:text-foreground"
-                  >
-                    {showKey ? <EyeOffIcon className="size-3.5" /> : <EyeIcon className="size-3.5" />}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => navigator.clipboard?.writeText(apiKey).catch(() => {})}
-                    className="text-muted-foreground transition-colors hover:text-foreground"
-                  >
-                    <CopyIcon className="size-3.5" />
-                  </button>
-                </div>
-              </div>
-            </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 shrink-0"
-              onClick={() => testMutation.mutate()}
-              disabled={testMutation.isPending || !baseUrl}
-            >
-              {testMutation.isPending ? <Spinner data-icon="inline-start" /> : null}
-              检测
-            </Button>
-          </div>
-          {(testMutation.isSuccess || testMutation.isError) && (
-            <p
-              className={cn(
-                "mt-2 flex items-center gap-1.5 text-xs",
-                testMutation.data?.connected
-                  ? "text-emerald-600 dark:text-emerald-400"
-                  : "text-destructive",
-              )}
-            >
-              {testMutation.data?.connected ? (
-                <>
-                  <CheckIcon className="size-3.5" /> 连接成功
-                </>
-              ) : (
-                <>
-                  <XCircleIcon className="size-3.5" /> 连接失败，请检查 API 地址 / 密钥
-                </>
-              )}
-            </p>
-          )}
-
-            </div>
-
-            {/* API 地址 + 添加端点 */}
-            <div className="px-4 py-3.5">
-            <div className="mb-1 flex items-center gap-1.5">
-              <Label className="text-xs">
-                API 地址
-                {!isCustom && (
-                  <span className="ml-1 font-normal text-muted-foreground">（自动带出）</span>
-                )}
-              </Label>
-              <button
-                type="button"
-                className="text-xs text-primary hover:underline"
-                onClick={() => setExtraEndpoints([...extraEndpoints, ""])}
-              >
-                添加端点
-              </button>
-            </div>
-            {isCustom ? (
-              <Input
-                placeholder="https://api.example.com/v1"
-                value={baseUrl}
-                onChange={(e) => updateField("VLLM_API_BASE", e.target.value)}
-                className="h-8 font-mono text-xs"
-              />
-            ) : (
-              <div
-                className="flex h-8 items-center rounded-md border bg-muted/40 px-3 font-mono text-xs text-muted-foreground"
-                title={baseUrl || selected?.baseUrl}
-              >
-                <span className="truncate">{baseUrl || selected?.baseUrl}</span>
-              </div>
-            )}
-            {extraEndpoints.map((ep, i) => (
-              <div key={i} className="mt-1.5 flex items-center gap-2">
-                <Input
-                  value={ep}
-                  placeholder="https://api.example.com/v1"
-                  onChange={(e) => {
-                    const next = [...extraEndpoints];
-                    next[i] = e.target.value;
-                    setExtraEndpoints(next);
-                  }}
-                  className="h-8 min-w-0 flex-1 font-mono text-xs"
-                />
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="shrink-0 text-muted-foreground"
-                  onClick={() => setExtraEndpoints(extraEndpoints.filter((_, j) => j !== i))}
-                >
-                  <MinusIcon className="size-3" />
-                </Button>
-              </div>
-            ))}
-          </div>
-          </div>
-
-          {!isCustom && selected?.note && (
-            <p className="rounded-lg bg-muted/60 px-3 py-2 text-[11px] text-muted-foreground">
-              {selected.note}
-            </p>
-          )}
-
-          {/* 模型列表：获取模型列表 + 新增 */}
-          <div className="rounded-xl border bg-card shadow-sm">
-            <div className="flex items-center gap-2 border-b px-4 py-2.5">
-              <p className="text-[13px] font-medium">模型</p>
-              <div className="ml-auto flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => syncMutation.mutate()}
-                  disabled={syncMutation.isPending || !baseUrl}
-                >
-                  {syncMutation.isPending ? (
-                    <Spinner data-icon="inline-start" />
-                  ) : (
-                    <ZapIcon data-icon="inline-start" />
-                  )}
-                  获取模型列表
-                </Button>
-                <Button
-                  variant="outline"
-                  size="icon-sm"
-                  onClick={() => setShowAddModel(true)}
-                  tooltip="添加模型"
-                >
-                  <PlusIcon className="size-3.5" />
-                </Button>
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-2 p-3">
-            {syncMutation.isSuccess && !syncMutation.data?.ok && (
-              <p className="flex items-start gap-1 text-[11px] text-destructive">
-                <XCircleIcon className="mt-0.5 size-3 shrink-0" />
-                <span className="min-w-0 break-words">
-                  获取失败：{syncMutation.data?.error}
-                </span>
-              </p>
-            )}
-            {syncMutation.isSuccess && syncMutation.data?.ok && (
-              <p className="flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400">
-                <CheckIcon className="size-3" />
-                已获取 {syncMutation.data.models.length} 个模型
-              </p>
-            )}
-
-            {displayModels.length === 0 ? (
-              <p className="rounded-md border border-dashed px-3 py-4 text-center text-[11px] text-muted-foreground">
-                暂无模型，点「获取模型列表」拉取，或点「+」手动添加
-              </p>
-            ) : (
-              <div className="flex flex-col gap-1">
-                {displayModels.map((entry) => {
-                  return (
-                    <div
-                      key={entry.id}
-                      title={entry.remark || entry.id}
-                      className="flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 transition-colors hover:bg-muted/60"
-                      onClick={() => updateField("VLLM_MODEL_NAME", entry.id)}
-                    >
-                      <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[9px] font-semibold text-muted-foreground">
-                        {entry.id.charAt(0).toUpperCase()}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate text-xs">
-                        {entry.name || entry.id}
-                      </span>
-                      {entry.name && entry.name !== entry.id && (
-                        <span className="shrink-0 font-mono text-[10px] text-muted-foreground/60">
-                          {entry.id}
-                        </span>
-                      )}
-                      {entry.group && (
-                        <span
-                          title={entry.group}
-                          className="flex size-4 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[8px] font-semibold text-primary"
-                        >
-                          {entry.group.charAt(0)}
-                        </span>
-                      )}
-                      {modelName === entry.id && (
-                        <CheckIcon className="size-3.5 shrink-0 text-primary" />
-                      )}
-                      {removableIds.has(entry.id) && (
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          className="h-5 w-5 shrink-0 text-muted-foreground"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            removeModel(entry.id);
-                          }}
-                        >
-                          <MinusIcon className="size-3" />
-                        </Button>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 操作行：保存靠右 */}
-      <div className="flex items-center gap-3 border-t pt-3">
-        {isLocal && (
-          <p className="mr-auto text-[11px] text-muted-foreground">保存后将自动切换为云服务模式</p>
-        )}
-        <Button
-          size="sm"
-          className={cn(!isLocal && "ml-auto")}
-          onClick={() => saveMutation.mutate()}
-          disabled={saveMutation.isPending}
-        >
-          {saveMutation.isPending ? (
-            <Spinner data-icon="inline-start" />
-          ) : saveMutation.isSuccess ? (
-            <CheckIcon data-icon="inline-start" />
-          ) : null}
-          {saveMutation.isSuccess ? "已保存" : "保存"}
-        </Button>
-      </div>
-
-      {/* 添加模型弹框 */}
-      <Dialog open={showAddModel} onOpenChange={setShowAddModel}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>添加模型</DialogTitle>
-          </DialogHeader>
-
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center gap-3">
-              <Label htmlFor="dlg-model-id" className="w-20 shrink-0 text-xs">
-                模型 ID <span className="text-destructive">*</span>
-              </Label>
-              <Input
-                id="dlg-model-id"
-                placeholder="例如 gpt-5.5"
-                value={dlgId}
-                onChange={(e) => setDlgId(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && dlgId.trim()) addModel();
-                }}
-                className="h-8 min-w-0 flex-1 text-xs"
-              />
-            </div>
-            <div className="flex items-center gap-3">
-              <Label htmlFor="dlg-model-name" className="w-20 shrink-0 text-xs">
-                模型名称
-              </Label>
-              <Input
-                id="dlg-model-name"
-                placeholder="例如 GPT-5.5"
-                value={dlgName}
-                onChange={(e) => setDlgName(e.target.value)}
-                className="h-8 min-w-0 flex-1 text-xs"
-              />
-            </div>
-            <div className="flex items-center gap-3">
-              <Label htmlFor="dlg-model-group" className="w-20 shrink-0 text-xs">
-                分组名称
-              </Label>
-              <Input
-                id="dlg-model-group"
-                placeholder="例如 ChatGPT"
-                value={dlgGroup}
-                onChange={(e) => setDlgGroup(e.target.value)}
-                className="h-8 min-w-0 flex-1 text-xs"
-              />
-            </div>
-            {dlgMore && (
-              <div className="flex items-center gap-3">
-                <Label htmlFor="dlg-model-remark" className="w-20 shrink-0 text-xs">
-                  备注
-                </Label>
-                <Input
-                  id="dlg-model-remark"
-                  placeholder="备注说明"
-                  value={dlgRemark}
-                  onChange={(e) => setDlgRemark(e.target.value)}
-                  className="h-8 min-w-0 flex-1 text-xs"
-                />
-              </div>
-            )}
-            <button
-              type="button"
-              onClick={() => setDlgMore((v) => !v)}
-              className="flex w-fit items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-            >
-              更多设置
-              <ChevronDownIcon className={cn("size-3.5 transition-transform", dlgMore && "rotate-180")} />
-            </button>
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setShowAddModel(false)}>
-              取消
-            </Button>
-            <Button size="sm" onClick={addModel} disabled={!dlgId.trim()}>
-              添加模型
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 添加服务商弹框 */}
-      <Dialog open={showAddProvider} onOpenChange={setShowAddProvider}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>添加服务商</DialogTitle>
-            <DialogDescription>
-              填写服务商名称与 OpenAI 兼容 API 地址，保存后出现在左侧列表。
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center gap-3">
-              <Label htmlFor="np-label" className="w-20 shrink-0 text-xs">
-                名称 <span className="text-destructive">*</span>
-              </Label>
-              <Input
-                id="np-label"
-                placeholder="例如 我的代理商"
-                value={npLabel}
-                onChange={(e) => setNpLabel(e.target.value)}
-                className="h-8 min-w-0 flex-1 text-xs"
-              />
-            </div>
-            <div className="flex items-center gap-3">
-              <Label htmlFor="np-base" className="w-20 shrink-0 text-xs">
-                API 地址
-              </Label>
-              <Input
-                id="np-base"
-                placeholder="https://api.example.com/v1"
-                value={npBase}
-                onChange={(e) => setNpBase(e.target.value)}
-                className="h-8 min-w-0 flex-1 font-mono text-xs"
-              />
-            </div>
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setShowAddProvider(false)}>
-              取消
-            </Button>
-            <Button size="sm" onClick={addProvider} disabled={!npLabel.trim()}>
-              添加服务商
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
 }
 
 function PerformanceSettings({
@@ -1395,194 +651,21 @@ function BenchmarkSettings({ form }: { form: SettingsFormState }) {
   );
 }
 
-function GeneralSettings({ form, updateField, saveMutation }: { form: SettingsFormState; updateField: (key: string, value: string) => void; saveMutation: SaveMutationLike }) {
-  const t = useT();
-  const queryClient = useQueryClient();
-
-  const { data: about } = useQuery({
-    queryKey: ["about-info"],
-    queryFn: () => rpcClient.getAboutInfo(),
-  });
-
-  const clearLogsMutation = useMutation({
-    mutationFn: () => rpcClient.clearServerLogs(),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["server-status"] }),
-  });
-
-  const uptimeSeconds = about?.sessionStartedAt ? Math.floor(Date.now() / 1000 - about.sessionStartedAt / 1000) : 0;
-  const uptime = (() => {
-    const h = Math.floor(uptimeSeconds / 3600);
-    const m = Math.floor((uptimeSeconds % 3600) / 60);
-    return h > 0 ? `${h}h ${m}m` : `${m}m`;
-  })();
-
-  return (
-    <div className="flex flex-col gap-5">
-      <div>
-        <h3 className="mb-2 text-sm font-medium">{t("settings.updateChannel.title")}</h3>
-        <p className="mb-2 text-[11px] text-muted-foreground">{t("settings.updateChannel.desc")}</p>
-        <Select
-          value={form.UPDATE_CHANNEL ?? "stable"}
-          onValueChange={(v) => updateField("UPDATE_CHANNEL", v)}
-        >
-          <SelectTrigger className="h-8 w-full text-xs sm:w-56">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="stable">{t("settings.updateChannel.stable")}</SelectItem>
-            <SelectItem value="beta">{t("settings.updateChannel.beta")}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-
-      <div>
-        <h3 className="mb-1 text-sm font-medium">{t("settings.webSearch.title")}</h3>
-        <p className="mb-2 text-[11px] text-muted-foreground">{t("settings.webSearch.desc")}</p>
-
-        <label className="mb-3 flex cursor-pointer items-center gap-2 text-xs">
-          <input
-            type="checkbox"
-            checked={form.WEB_SEARCH_ENABLED === "1"}
-            onChange={(e) => updateField("WEB_SEARCH_ENABLED", e.target.checked ? "1" : "0")}
-            className="size-3.5 accent-[var(--primary)]"
-          />
-          {t("settings.webSearch.defaultEnabled")}
-        </label>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div>
-            <Label className="mb-1 text-xs">{t("settings.webSearch.provider")}</Label>
-            <Select
-              value={form.WEB_SEARCH_PROVIDER ?? "bing"}
-              onValueChange={(v) => updateField("WEB_SEARCH_PROVIDER", v)}
-            >
-              <SelectTrigger className="h-8 w-full text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="bing">{t("settings.webSearch.bing")}</SelectItem>
-                <SelectItem value="duckduckgo">{t("settings.webSearch.duckduckgo")}</SelectItem>
-                <SelectItem value="tavily">{t("settings.webSearch.tavily")}</SelectItem>
-                <SelectItem value="brave">{t("settings.webSearch.brave")}</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <Label htmlFor="WEB_SEARCH_MAX_RESULTS" className="mb-1 text-xs">
-              {t("settings.webSearch.maxResults")}
-            </Label>
-            <Input
-              id="WEB_SEARCH_MAX_RESULTS"
-              type="text"
-              inputMode="numeric"
-              placeholder="5"
-              value={form.WEB_SEARCH_MAX_RESULTS ?? ""}
-              onChange={(e) => updateField("WEB_SEARCH_MAX_RESULTS", e.target.value)}
-              className="h-8 text-xs"
-            />
-          </div>
-          <div className="sm:col-span-2">
-            <Label htmlFor="WEB_SEARCH_API_KEY" className="mb-1 text-xs">
-              {t("settings.webSearch.apiKey")}
-            </Label>
-            <Input
-              id="WEB_SEARCH_API_KEY"
-              type="password"
-              placeholder="tvly-…"
-              value={form.WEB_SEARCH_API_KEY ?? ""}
-              onChange={(e) => updateField("WEB_SEARCH_API_KEY", e.target.value)}
-              className="h-8 text-xs"
-            />
-            <p className="mt-1 text-[11px] text-muted-foreground">
-              {t("settings.webSearch.apiKeyHint")}
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div>
-        <h3 className="mb-2 text-sm font-medium">{t("settings.about.title")}</h3>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="rounded-lg border px-3 py-2">
-            <p className="text-[11px] text-muted-foreground">{t("settings.about.version")}</p>
-            <p className="font-mono text-xs">{about?.version ?? "—"}</p>
-          </div>
-          <div className="rounded-lg border px-3 py-2">
-            <p className="text-[11px] text-muted-foreground">{t("settings.updateChannel.title")}</p>
-            <p className="text-xs">{about?.channel === "beta" ? t("settings.updateChannel.beta") : t("settings.updateChannel.stable")}</p>
-          </div>
-          <div className="rounded-lg border px-3 py-2">
-            <p className="text-[11px] text-muted-foreground">{t("settings.about.uptime")}</p>
-            <p className="font-mono text-xs tabular-nums">{uptime}</p>
-          </div>
-          <div className="rounded-lg border px-3 py-2">
-            <p className="text-[11px] text-muted-foreground">{t("settings.about.basePath")}</p>
-            <p className="truncate font-mono text-xs">{about?.basePath ?? "—"}</p>
-          </div>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="mt-3"
-          onClick={() => clearLogsMutation.mutate()}
-          disabled={clearLogsMutation.isPending}
-        >
-          <Trash2Icon data-icon="inline-start" />
-          {t("settings.about.clearLogs")}
-        </Button>
-      </div>
-
-      <SaveRow mutation={saveMutation} />
-    </div>
-  );
-}
-
-function InterfaceSettings() {
-  const t = useT();
-  const lang = useUILang((s) => s.lang);
-  const setLang = useUILang((s) => s.setLang);
-  const queryClient = useQueryClient();
-
-  const saveMutation = useMutation({
-    mutationFn: (newLang: UILang) => rpcClient.updateSettings({ settings: { UI_LANG: newLang } }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
-  });
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h3 className="mb-1 text-sm font-medium">{t("settings.interface")}</h3>
-        <p className="text-xs text-muted-foreground">{t("settings.interface.languageDesc")}</p>
-      </div>
-      <div>
-        <Label className="mb-1 text-xs">{t("settings.interface.language")}</Label>
-        <div className="flex gap-2">
-          {LANGS.map((l: { value: UILang; label: string }) => (
-            <Button
-              key={l.value}
-              variant={lang === l.value ? "default" : "outline"}
-              size="sm"
-              className="h-8 min-w-[72px]"
-              onClick={() => {
-                setLang(l.value);
-                saveMutation.mutate(l.value);
-              }}
-              disabled={saveMutation.isPending && lang !== l.value}
-            >
-              {l.label}
-            </Button>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function SettingsScreen() {
   const t = useT();
-  const [activeTab, setActiveTab] = useState<SettingsTab>("network");
+  const [activeTab, setActiveTab] = useState<SettingsTab>("stats");
   const [form, setForm] = useState<SettingsFormState>({});
   const queryClient = useQueryClient();
+  // 设置页内原地打开的模型详情：不切换全局路由，左侧分类菜单保持可见。
+  const [detail, setDetail] = useState<ModelDetailSource | null>(null);
+  const openDetail = (source: ModelDetailSource) => {
+    useModelDetailStore.getState().setSource(source);
+    setDetail(source);
+  };
+  const pickTab = (tab: SettingsTab) => {
+    setActiveTab(tab);
+    setDetail(null);
+  };
 
   const { data } = useQuery({
     queryKey: ["settings"],
@@ -1597,16 +680,6 @@ export function SettingsScreen() {
     }
   }, [data]);
 
-  const NETWORK_KEYS = [
-    "SERVER_MODE",
-    "CLOUD_PROVIDER",
-    "VLLM_API_BASE",
-    "VLLM_API_KEY",
-    "VLLM_MODEL_NAME",
-    "CLOUD_MODELS",
-    "CUSTOM_PROVIDERS",
-    "CLOUD_ENDPOINTS",
-  ];
   const PERFORMANCE_KEYS = [
     ...PERFORMANCE_FIELDS.map((f) => f.key),
     "SERVER_CACHE_TYPE_K",
@@ -1617,13 +690,6 @@ export function SettingsScreen() {
     "LAUNCHER_CLAUDE_MODE",
     ...CLAUDE_TIERS.map((c) => c.key),
     ...LAUNCHER_TOOLS.map((x) => x.key),
-  ];
-  const GENERAL_KEYS = [
-    "UPDATE_CHANNEL",
-    "WEB_SEARCH_ENABLED",
-    "WEB_SEARCH_PROVIDER",
-    "WEB_SEARCH_API_KEY",
-    "WEB_SEARCH_MAX_RESULTS",
   ];
 
   const pickKeys = (keys: string[]) => {
@@ -1636,7 +702,6 @@ export function SettingsScreen() {
     useMutation({
       mutationFn: () => {
         const settings = pickKeys(keys);
-        if (!settings.VLLM_API_KEY) settings.VLLM_API_KEY = "EMPTY";
         return rpcClient.updateSettings({ settings });
       },
       onSuccess: () => {
@@ -1648,30 +713,8 @@ export function SettingsScreen() {
       },
     });
 
-  // 模型云服务页：保存即切换为云服务（remote）模式
-  const saveCloud = useMutation({
-    mutationFn: () => {
-      const settings = pickKeys(NETWORK_KEYS);
-      if (!settings.VLLM_API_KEY) settings.VLLM_API_KEY = "EMPTY";
-      settings.SERVER_MODE = "remote";
-      return rpcClient.updateSettings({ settings });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-      queryClient.invalidateQueries({ queryKey: ["connection-status"] });
-    },
-  });
   const savePerformance = useTabSave(PERFORMANCE_KEYS, { invalidateConnection: true });
   const saveIntegrations = useTabSave(INTEGRATION_KEYS);
-  const saveGeneral = useTabSave(GENERAL_KEYS);
-
-  const testMutation = useMutation({
-    mutationFn: () =>
-      rpcClient.checkConnection({
-        baseUrl: form.VLLM_API_BASE ?? "",
-        apiKey: form.VLLM_API_KEY || "EMPTY",
-      }),
-  });
 
   const updateField = (key: string, value: string) => {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -1679,41 +722,54 @@ export function SettingsScreen() {
 
   return (
     <div className="flex min-h-0 flex-1">
-      {/* Left category nav */}
+      {/* Left category nav：分组标题 + 条目 */}
       <div className="flex w-44 shrink-0 flex-col gap-1 overflow-y-auto border-r p-3">
-        <span className="mb-1 px-2 text-[11px] font-medium tracking-wide text-muted-foreground uppercase">
-          {t("settings.category.title")}
-        </span>
-        {TAB_DEFS.map((tab) => (
-          <button
-            key={tab.key}
-            type="button"
-            onClick={() => setActiveTab(tab.key)}
-            className={cn(
-              "flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs transition-colors",
-              activeTab === tab.key
-                ? "bg-primary/10 text-primary"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground",
+        {TAB_GROUPS.map((group) => (
+          <div key={group.labelKey ?? group.tabs[0]} className="mb-1 flex flex-col gap-0.5">
+            {group.labelKey && (
+              <span className="mt-1 mb-0.5 px-2 text-[10px] font-medium tracking-wide text-muted-foreground/70 uppercase">
+                {t(group.labelKey)}
+              </span>
             )}
-          >
-            {tab.icon}
-            <span className="truncate">{t(tab.labelKey)}</span>
-          </button>
+            {group.tabs.map((key) => {
+              const tab = TAB_DEFS[key];
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => pickTab(key)}
+                  className={cn(
+                    "flex items-center gap-2 rounded-lg px-2.5 py-2 text-xs transition-colors",
+                    activeTab === key
+                      ? "bg-primary/10 text-primary"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
+                >
+                  {tab.icon}
+                  <span className="truncate">{t(tab.labelKey)}</span>
+                </button>
+              );
+            })}
+          </div>
         ))}
       </div>
 
-      {/* Right content */}
-      {activeTab === "model" ? (
+      {/* Right content: detail (opened in place) takes precedence over tab content */}
+      {detail ? (
         <div className="min-w-0 flex-1">
-          <LocalModelsScreen />
+          <ModelDetailScreen onBack={() => setDetail(null)} />
+        </div>
+      ) : activeTab === "model" ? (
+        <div className="min-w-0 flex-1">
+          <LocalModelsScreen onOpenDetail={openDetail} />
         </div>
       ) : activeTab === "store" ? (
         <div className="min-w-0 flex-1">
-          <ModelsScreen />
+          <ModelsScreen onOpenDetail={openDetail} />
         </div>
       ) : activeTab === "market" ? (
         <div className="min-w-0 flex-1">
-          <MarketScreen />
+          <MarketScreen onOpenDetail={openDetail} />
         </div>
       ) : activeTab === "gateway" ? (
         <div className="min-w-0 flex-1">
@@ -1721,7 +777,7 @@ export function SettingsScreen() {
         </div>
       ) : activeTab === "stats" ? (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <ServerStatsScreen />
+          <DashboardScreen />
         </div>
       ) : activeTab === "logs" ? (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1729,28 +785,24 @@ export function SettingsScreen() {
         </div>
       ) : (
         <ScrollArea className="min-h-0 flex-1">
-          {/* 模型云服务是三栏布局，放宽内容宽度 */}
+          {/* 模型云服务 / 默认模型是宽版式（三栏 / 双列卡片），放宽内容宽度 */}
           <div
             className={cn(
               "mx-auto w-full px-6 py-6",
-              activeTab === "network" ? "max-w-5xl" : "max-w-2xl",
+              activeTab === "network" || activeTab === "defaults" ? "max-w-5xl" : "max-w-2xl",
             )}
           >
-            {activeTab !== "network" && (
+            {/* 自带头部（PageHeader / 宽版面板）的页面不再重复显示通用标题 */}
+            {!["network", "defaults", "about", "websearch", "memory", "mcp", "general", "appearance"].includes(activeTab) && (
               <div className="mb-6">
                 <h2 className="text-lg font-semibold tracking-tight">{t("settings.title")}</h2>
                 <p className="text-xs text-muted-foreground">{t("settings.subtitle")}</p>
               </div>
             )}
 
-            {activeTab === "network" && (
-              <CloudProviderPanel
-                form={form}
-                updateField={updateField}
-                testMutation={testMutation}
-                saveMutation={saveCloud}
-              />
-            )}
+            {activeTab === "network" && <CloudProviderPanel />}
+
+            {activeTab === "defaults" && <DefaultModelsPanel />}
 
             {activeTab === "performance" && (
               <PerformanceSettings form={form} updateField={updateField} saveMutation={savePerformance} />
@@ -1762,11 +814,23 @@ export function SettingsScreen() {
 
             {activeTab === "benchmark" && <BenchmarkSettings form={form} />}
 
-            {activeTab === "general" && (
-              <GeneralSettings form={form} updateField={updateField} saveMutation={saveGeneral} />
+            {activeTab === "websearch" && (
+              <WebSearchTab form={form} updateField={updateField} />
             )}
 
-            {activeTab === "interface" && <InterfaceSettings />}
+            {activeTab === "memory" && <MemoryTab />}
+
+            {activeTab === "mcp" && <McpTab />}
+
+            {activeTab === "general" && (
+              <GeneralPrefsTab form={form} updateField={updateField} />
+            )}
+
+            {activeTab === "appearance" && (
+              <AppearanceTab form={form} updateField={updateField} />
+            )}
+
+            {activeTab === "about" && <AboutTab />}
           </div>
         </ScrollArea>
       )}

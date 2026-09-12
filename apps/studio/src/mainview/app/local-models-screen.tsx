@@ -30,7 +30,7 @@ import { ScrollArea } from "@ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@ui/tabs";
 import { Spinner } from "@ui/spinner";
 import { useRouter } from "@stores/router";
-import { useModelDetailStore } from "@stores/model-detail";
+import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detail";
 import { useServerStore } from "@stores/server";
 import { useT } from "@stores/ui-lang";
 import {
@@ -850,7 +850,11 @@ function DefaultModelConfig() {
 // ---------------------------------------------------------------------------
 
 /** 本地模型：推理引擎 / 启动参数 / 启动按钮 / 已安装模型管理。 */
-export function LocalModelsScreen() {
+export function LocalModelsScreen({
+  onOpenDetail,
+}: {
+  onOpenDetail?: (source: ModelDetailSource) => void;
+} = {}) {
   const t = useT();
   const setRoute = useRouter((s) => s.setRoute);
   const { engine } = useEngine();
@@ -882,8 +886,10 @@ export function LocalModelsScreen() {
               size="sm"
               className="w-fit"
               onClick={() => {
-                useModelDetailStore.getState().setSource({ kind: "preset", preset: suggested });
-                setRoute({ path: "model-detail" });
+                const source = { kind: "preset", preset: suggested } as const;
+                useModelDetailStore.getState().setSource(source);
+                if (onOpenDetail) onOpenDetail(source);
+                else setRoute({ path: "model-detail" });
               }}
             >
               <StoreIcon data-icon="inline-start" className="size-3.5" />

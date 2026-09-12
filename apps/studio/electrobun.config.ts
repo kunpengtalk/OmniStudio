@@ -52,6 +52,9 @@ export default {
       "src/bun/mlx-model.py": "bun/mlx-model.py",
       // 常驻生图 worker（模型加载一次、反复生成），同样以同目录相对路径调用。
       "src/bun/mlx-worker.py": "bun/mlx-worker.py",
+      // 常驻 PaddleOCR worker（PP-OCRv6，本地模型目录加载）；主进程以
+      // import.meta.dir 同目录相对路径 spawn，必须打进 bundle。
+      "src/bun/ppocr-worker.py": "bun/ppocr-worker.py",
       // 提示词库内置素材（scripts/bundle-prompt-library-assets.ts 生成）：
       // 有则打进 webview，作为远程封面加载失败时的离线兜底。
       ...(existsSync("dist/prompt-library")

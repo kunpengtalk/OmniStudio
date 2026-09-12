@@ -6,7 +6,8 @@
 
 <p align="center">
   <b>A desktop workstation for local LLMs</b><br/>
-  Manage models, run inference servers, and build with Chat / Voice / Image / OCR / Translate apps — all local-first.
+  Manage models, run inference servers, and build with Chat / Voice / Image / Video / OCR / Translate apps,<br/>
+  plus a local knowledge base, shared memory, and a Skills manager — all local-first.
 </p>
 
 <p align="center">
@@ -30,20 +31,26 @@
 
 <table>
   <tr>
-    <th align="center">Home</th>
-    <th align="center">Model Download</th>
+    <th align="center">Cloud Models</th>
+    <th align="center">CLI Integrations</th>
   </tr>
   <tr>
-    <td><img src="docs/images/screenshot-home.png" alt="Home" width="100%"/></td>
-    <td><img src="docs/images/screenshot-model-download.png" alt="Model Download" width="100%"/></td>
+    <td><img src="docs/images/screenshot-cloud-service.png" alt="Cloud model providers" width="100%"/></td>
+    <td><img src="docs/images/screenshot-integrations.png" alt="Coding tool integrations" width="100%"/></td>
   </tr>
   <tr>
-    <th align="center">Chat</th>
-    <th align="center">Chat · Web Search</th>
+    <th align="center">Voice · Live Talk</th>
+    <th align="center">Text-to-Speech</th>
   </tr>
   <tr>
-    <td><img src="docs/images/screenshot-chat.png" alt="Chat" width="100%"/></td>
-    <td><img src="docs/images/screenshot-chat-websearch.png" alt="Chat with Web Search" width="100%"/></td>
+    <td><img src="docs/images/screenshot-voice.png" alt="Live voice conversation" width="100%"/></td>
+    <td><img src="docs/images/screenshot-tts.png" alt="Text-to-speech" width="100%"/></td>
+  </tr>
+  <tr>
+    <th align="center" colspan="2">Model Picker · Setup Wizard</th>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="docs/images/screenshot-model-chooser.png" alt="Model picker setup wizard" width="100%" style="max-width:640px; margin:0 auto; display:block;"/></td>
   </tr>
 </table>
 
@@ -55,31 +62,44 @@
 
 - **Search & browse** — ModelScope model search with repository file listings and detail pages (parameters, size, downloads, license, tags).
 - **Full-format downloads** — GGUF (llama.cpp), safetensors (vLLM / SGLang), bin / pt / ckpt / onnx; single file or whole-repo "download all"; HuggingFace as the source for audio.cpp GGUF models.
-- **Download manager** — Queue-based concurrent downloads with pause / resume / cancel, byte-accurate resumable transfer (HTTP 206), favorites, and multi-directory model storage.
-- **Capability categories** — Auto-classified as Chat / TTS / ASR / Image / Other from model metadata and persisted, surfaced as badges and filters.
+- **Download manager** — Queue-based concurrent downloads with pause / resume / cancel, resumable transfer (HTTP 206), favorites, and multi-directory storage.
+- **Capability categories** — Auto-classified as Chat / TTS / ASR / Image / Other and persisted, surfaced as badges and filters.
 
-### Inference Engines
+### Model Services
 
-- **Unified runtime** — llama.cpp (default: GGUF from local files or HuggingFace, GPU offload, KV cache quantization, multimodal mmproj), vLLM, and SGLang behind one runtime abstraction with hot engine switching.
-- **Remote mode** — Directly connect any OpenAI-compatible endpoint (base URL / API key / model) with built-in connection testing.
-- **Unified gateway** — A single local endpoint that routes each model to the local inference server or a cloud API, speaking three protocols: OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages (including bidirectional tool calling). Optional API-key auth and interactive OpenAPI docs.
-- **Endpoints** — Chat Completions `/v1`, Responses, Anthropic Messages, `/health`, `/metrics`, one-click copy from settings.
+- **First-run wizard** — One-click Qwen3.5 4B / 9B / 35B-A3B and Qwen3.6 27B models that download and deploy automatically once selected; also supports a custom HuggingFace GGUF model.
+- **Cloud model service** — Presets for 20 mainstream OpenAI-compatible providers (OmniLabs, DeepSeek, Qwen, Zhipu GLM, Kimi, Doubao, Wenxin, Hunyuan, MiniMax, iFlytek Spark, 01.AI, StepFun, SiliconFlow, OpenRouter, OpenAI, Anthropic, Gemini, and more), presented as a three-column **providers / configuration / models** panel: keep several provider profiles side by side and activate one with a click — the active profile is written back into the slots the gateway and `omi` CLI already read. Connectivity testing, live model-list fetching, and a **Default Models** page for per-purpose defaults.
+- **Unified three-engine runtime** — llama.cpp (default: GGUF from local files or HuggingFace, GPU offload, KV cache quantization, multimodal mmproj), vLLM, and SGLang behind one abstraction with hot switching; or connect any OpenAI-compatible endpoint directly (remote mode).
+- **Unified gateway** — A single local endpoint that routes each model to the local inference server or a cloud API, speaking Chat Completions / Responses / Anthropic Messages (including bidirectional tool calling); optional API-key auth, interactive OpenAPI docs, and `/v1`, `/health`, `/metrics` endpoints with one-click copy from settings; `/mcp` and `/v1/memories` expose the knowledge base and shared memory to external clients.
 
-### Five Built-in Apps
+### Built-in Apps
 
-- **Chat** — streaming responses with reasoning display, image attachments (multimodal), web search (Bing / DuckDuckGo / Tavily with results injected as cited context), and text-file attachments (whitelisted formats wrapped into context); auto-titled conversations, per-app session isolation, usage tracking.
-- **Voice** — TTS from multiple sources (audio.cpp local engine, Edge-TTS, OpenAI-compatible TTS) plus a voice clone library, and multi-engine ASR (whisper.cpp / audio.cpp / OpenAI-compatible transcription), all logged as records with an embedded player.
-- **OCR** — Two engines: local Tesseract (multilingual LSTM language packs, word/line bounding boxes) and VLM (Chandra / GLM-OCR / LightOnOCR-class models on the inference server). Upload PDF / images and get structured Markdown — GFM tables, KaTeX math, code blocks, captions, and bounding-box-cropped image regions — with a document queue, search, and a two-pane workspace.
+Every app shares one workstation layout: a global icon rail on the far left, a configuration panel on the left (engine switch / settings / input / primary action), and a result area on the right.
+
+- **Chat** — streaming responses with reasoning display, image attachments (multimodal), web search (Bing / DuckDuckGo / Tavily with results injected as cited context), and text-file attachments; attach local knowledge bases to a message and answers come back with `[n]` citation traceability; auto-titled conversations, per-app session isolation, usage tracking.
+- **Voice** — TTS from multiple sources (audio.cpp local engine, Edge-TTS, OpenAI-compatible TTS) plus a voice clone library, and multi-engine ASR (whisper.cpp / audio.cpp / OpenAI-compatible transcription); live listening conversations (cloud / local) with an embedded record player.
 - **Image** — Generation via cloud OpenAI-compatible APIs, ComfyUI, or the local MLX (mflux) engine on Apple Silicon. MLX weights are pre-downloaded with live progress before generation.
-- **Translate** — Translate text through the current chat model across 22 languages, with source auto-detection, language swap, and one-click copy.
+- **Video** — Three backends behind one submit-then-poll flow: MiniMax (H3, cloud, image-to-video from a first frame), Seedance (Volcano Ark content-generation tasks), and ComfyUI (local workflows); prompt / negative prompt / resolution / duration / seed / aspect ratio / watermark toggle plus first-frame upload, with finished clips kept in a history library you can play, download, or delete.
+- **OCR** — Three engines: local Tesseract (one-click install, multilingual LSTM language packs, word/line bounding boxes), PaddleOCR (PP-OCRv6 resident worker, ~140 MB for the medium model), and VLM (Chandra / GLM-OCR / LightOnOCR). Upload PDF / images and get structured Markdown — GFM tables, KaTeX math, code blocks, captions, and bounding-box-cropped image regions — with a document queue and search.
+- **Translate** — Switch between the current chat model (local / OpenAI-compatible) and the free Google endpoint across 22 languages, with source auto-detection, language swap, and one-click copy; **Live Translate** opens the microphone for real-time transcription (reusing all three ASR engines) and renders several target languages side by side.
+- **Knowledge Base (local RAG)** — Ingest local files (text read directly; PDF / images go through VLM OCR), handwritten notes, and web pages; Markdown-aware chunking (heading sections + greedy paragraph packing + overlapping hard splits) with optional embeddings (OpenAI-compatible `/v1/embeddings`), hybrid recall that fuses BM25 and cosine-vector rankings with RRF, and optional reranking (Jina / SiliconFlow / Cohere-compatible `/v1/rerank`); four tabs for recall testing, documents, access, and settings; no external vector store or FTS extension required.
+- **Memory** — Long-term memory shared by every agent: built-in `memory_search` / `memory_save` / `memory_list` tools let agents store facts, preferences, and experience, and pinned or frequently used entries are injected into the system prompt; the same SQLite store is readable and writable through the gateway REST `/v1/memories`, MCP tools, and the `omi memory` CLI.
+- **Skills Manager** — One central skills repository (default `~/.agents/skills`) managed and synced into every coding tool, with 53 built-in tool adapters and symlink / copy sync modes; six sections: market (skillssh leaderboard), my skills, presets, projects, tools, and backup (Git remote, snapshots, auto-backup).
+
+### Agents & Protocols
+
+- **Pi Agent modes** — Agent / Plan (read-only tools, plan before acting) / Goal; the toolset is built-in file, shell, and search tools plus memory tools and tools from enabled MCP servers, and Plan mode automatically excludes tools with side effects.
+- **MCP client** — Manage MCP servers from the settings **Tools** group over stdio, Streamable HTTP, or legacy SSE, with connectivity testing, tool enumeration, and JSON import; their tools are injected into the agent as `mcp_*`, and servers that fail to connect are skipped.
+- **MCP server** — The local gateway exposes `POST /mcp` (stateless Streamable HTTP) so any MCP client — Claude Code, Cursor, and friends — can use the knowledge base (`kb_search` / `kb_list`) and memory (`memory_search` / `memory_save` / `memory_list`) as tools; opening `GET /mcp` in a browser gives you a built-in playground (connect → list tools → forms generated from each schema → call → raw JSON-RPC).
+- **Three memory channels** — Built-in agent tools, the gateway REST / MCP endpoints, and the `omi memory` CLI all read and write the same SQLite store; `omi launch` refreshes the managed memory block in CLAUDE.md / AGENTS.md and mounts an `omni-memory` MCP server for Claude Code / Codex / OpenCode.
 
 ### Ops & Telemetry
 
-- **Live dashboard** — Prefill / generation tokens and speed (tok/s), request counts, active models, memory and CPU load, server uptime, model disk usage — polled every 2s.
-- **Benchmarks** — Context-length sweeps (1K–200K) with TTFT / TPOT / TPS, results in tables and charts, for local or remote servers.
+- **Live dashboard** — Prefill / generation tokens and speed (tok/s), request counts, active models, memory and CPU load, uptime, and model disk usage (free / total of the volume holding the data directory) — polled every 2s.
+- **Benchmarks** — Context-length sweeps (1K–200K) with TTFT / TPOT / TPS, in tables and charts, for local or remote servers.
 - **Server logs** — Live tail with ANSI colors, auto-scroll, truncation guard, copy / clear.
-- **CLI integrations** — Generated launch commands for Claude Code (local / cloud, Opus–Sonnet–Haiku model mapping), Codex, OpenCode, OpenClaw, Hermes, Pi, and Copilot CLI, each bound to a default model.
-- **Updates & i18n** — Stable / beta channels with in-app updates, a setup wizard, zh / en UI language, SQLite-backed session stores.
+- **CLI integrations** — One-click launch commands for Claude Code (local / cloud, Opus–Sonnet–Haiku mapping), Codex, OpenCode, OpenClaw, Hermes, Pi, and Copilot CLI, each bound to a default model and wired into shared memory.
+- **Updates & i18n** — Stable / beta channels with in-app updates, automatic or manual update checks (the About page reports the latest release and links to the download), light / dark / follow-system themes, a setup wizard, zh / en UI language, SQLite-backed session stores.
 
 ## 🚀 Getting Started
 
@@ -103,21 +123,28 @@ cd apps/studio && bun run build:dev
 
 ## 💻 omni CLI
 
-`omni` is a global command-line tool wrapping the backend: model management, chat, inference servers, unified gateway, and config — **sharing the same database as the desktop app** (models and settings stay in sync).
+`omni` is a global command-line tool wrapping the backend: start the app, manage inference servers, configure cloud providers, pick models, launch coding tools, and read/write shared memory — **sharing the same database as the desktop app** (models, settings, and memory stay in sync).
 
 ```bash
 cd apps/studio && bun link    # install the global omni command (~/.bun/bin)
 omni --help                    # list all commands
 omni help <command>            # help for one command
 
+omni start --server            # start the app and bring up the inference server
+omni model                     # open the model list in the app to pick a model
 omni model list                # list installed models
 omni chat "Hello" --reasoning  # chat via local/remote inference (auto-starts the server)
 omni serve                     # inference server + unified gateway (foreground, CTRL+C to exit)
+omni launch codex --model qwen3-4b-q4_k_m  # launch a coding tool on the current model (memory attached)
+omni memory add "prefers pnpm"  # write to shared memory (same store the agents use)
+omni memory search build-tools  # search memory
+omni memory mcp                # run as a stdio MCP server so coding tools share the same memory
 omni doctor                    # environment health check
 omni config get INFERENCE_ENGINE
+omni status / omi models / omi stop / omi serve --port 8090
 ```
 
-Full manual: [docs/omni-cli.md](./docs/omni-cli.md).
+How it works: the main process listens on a Unix socket in the data directory (`omni-control.sock`, mode 0600); `omi` uses that channel to focus the window, navigate, start/stop servers, and read/write settings. When the app is not running, `models` / `model-info` / `cloud` / `memory` fall back to reading the same SQLite database directly. Run `omi help` or `omi <command> --help`; the full manual is in [docs/omni-cli.md](./docs/omni-cli.md).
 
 ## 🧩 Tech Stack
 
@@ -127,7 +154,10 @@ Full manual: [docs/omni-cli.md](./docs/omni-cli.md).
 | Frontend | React 19, Tailwind, shadcn/ui, Zustand, TanStack Query |
 | AI | Vercel AI SDK (`ai`), `@ai-sdk/openai-compatible` |
 | Inference engines | llama.cpp, vLLM, SGLang, OpenAI-compatible |
-| Voice & OCR | audio.cpp, whisper.cpp, Tesseract, Edge-TTS, VLM |
+| Voice & OCR | audio.cpp, whisper.cpp, Tesseract, PaddleOCR, Edge-TTS, VLM |
+| Video generation | MiniMax (H3), Seedance (Volcano Ark), ComfyUI |
+| Knowledge base & memory | Pure-JS embeddings + BM25×RRF hybrid recall + `/v1/rerank` reranking (no external vector store / FTS), SQLite-backed shared memory |
+| Protocols | MCP (hand-written client + Streamable HTTP server), Chat Completions / Responses / Anthropic Messages |
 | Database | Drizzle ORM + Bun SQLite |
 | Document processing | Sharp, pdfjs-dist, @napi-rs/canvas, Cheerio, Turndown |
 | Model hub | ModelScope OpenAPI, HuggingFace |
@@ -140,17 +170,37 @@ Full manual: [docs/omni-cli.md](./docs/omni-cli.md).
 apps/
 ├── studio/               # Electrobun desktop app
 │   └── src/
-│       ├── bun/          # Main process (RPC, DB, inference runtimes, OCR pipeline, queue)
-│       └── mainview/     # React UI
-└── landing/              # Marketing site (kunpengtalk.com)
+│       ├── bun/            # Main process
+│       │   ├── runtimes/   #   llama.cpp / vLLM / SGLang runtime abstraction
+│       │   ├── vllm/       #   model profiles & endpoints
+│       │   ├── db/         #   Drizzle schema, migrations, settings
+│       │   ├── skills/     #   skills manager: central repo, sync, presets, backup
+│       │   ├── control-server.ts  #   `omi` CLI ↔ app control channel (Unix socket)
+│       │   └── ...         #   chat / voice / image / video / OCR / translation / knowledge (RAG) /
+│       │                   #   memory / MCP (client + server) / model hub / downloads / stats / updates
+│       ├── cli/            # `omi` command line (bin/omi.ts, reusing the bun data layer)
+│       ├── mainview/       # React UI (components, stores, lib)
+│       └── shared/         # shared constants, i18n, engine metadata
+└── landing/                # Marketing site (kunpengtalk.com)
 ```
 
 ## 🗺 Roadmap
 
-- [ ] **Cloud sync** — sync conversations and settings across devices
-- [ ] **Plugin system** — extensible tool / plugin SDK for third-party integrations
-- [ ] **Linux / Windows ports** — extend desktop support to other platforms
-- [ ] **Server mode** — headless server deployment (SSH / Docker)
+- [x] Model hub: ModelScope / HuggingFace downloads, queue, categories, favorites
+- [x] Unified llama.cpp / vLLM / SGLang runtime + remote OpenAI-compatible API
+- [x] Chat / Voice / OCR apps with per-app sessions; voice multi-engine TTS/ASR + cloning + records
+- [x] Dashboard, benchmarks, log viewer, CLI integrations, update channels, i18n
+- [x] Image generation loop for the Image app
+- [x] `omi` CLI: launch app / server / cloud, model picking, launcher tools, status & logs
+- [x] AI video generation (MiniMax / Seedance / ComfyUI) with task polling and history
+- [x] Local RAG knowledge base (hybrid BM25 + vector recall) with chat citations
+- [x] Shared memory across agents (built-in tools, gateway REST / MCP, `omi memory`)
+- [x] Skills manager: central repo, 53 tool adapters, presets, Git backup
+- [x] MCP both ways: client for external MCP servers + gateway `/mcp` server with playground
+- [ ] Linux and Windows support
+- [ ] More document formats (PowerPoint, Word, Excel, etc.)
+- [ ] Memory lifecycle (idle unload, prefault protection), KV cache tiering with SSD offload
+- [ ] Menu bar / Dock indicators, API key encryption
 
 ## 📄 License
 

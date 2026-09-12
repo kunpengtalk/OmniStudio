@@ -1,4 +1,6 @@
+import { statfsSync } from "node:fs";
 import { freemem, loadavg, totalmem } from "node:os";
+import { getUserDataDir } from "./paths";
 import { getActiveServerPort } from "./db/settings";
 import { listInstalledModels } from "./model-store";
 
@@ -21,6 +23,7 @@ export type ServerStats = {
     loadAvg: number[];
     totalMem: number;
     freeMem: number;
+    disk: { total: number; free: number };
   };
   modelsSize: number;
 };
@@ -83,6 +86,15 @@ export async function getServerStats(): Promise<ServerStats> {
   const elapsed = Math.max((Date.now() - sessionStartedAt) / 1000, 1);
   const modelsSize = listInstalledModels().reduce((sum, m) => sum + (m.size || 0), 0);
 
+  // Free/total bytes of the filesystem hosting the app data dir (where models live).
+  let disk = { total: 0, free: 0 };
+  try {
+    const fs = statfsSync(getUserDataDir());
+    disk = { total: fs.blocks * fs.bsize, free: fs.bavail * fs.bsize };
+  } catch {
+    // statfs unsupported — leave zeros, UI shows "—"
+  }
+
   return {
     sessionStartedAt,
     serverStartedAt,
@@ -96,6 +108,7 @@ export async function getServerStats(): Promise<ServerStats> {
       loadAvg: loadavg(),
       totalMem: totalmem(),
       freeMem: freemem(),
+      disk,
     },
     modelsSize,
   };
