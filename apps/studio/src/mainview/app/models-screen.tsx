@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   StoreIcon,
   ChevronRightIcon,
+  FolderIcon,
   SparklesIcon,
   StarIcon,
   PlayIcon,
@@ -126,7 +127,8 @@ function MyModelRow({
   const t = useT();
   const queryClient = useQueryClient();
   const serverStatus = useServerStore((s) => s.status);
-  const kind = fileKind(model.fileName);
+  // 目录条目（vLLM / SGLang / MLX 的整个仓库）文件名没有扩展名，格式按目录内容判定。
+  const kind = model.kind ?? fileKind(model.fileName);
   const compatible = engineSupports(engine, kind);
   const [startError, setStartError] = useState<string | null>(null);
 
@@ -202,6 +204,9 @@ function MyModelRow({
             <div className="flex items-center gap-2">
               {model.favorite && (
                 <StarIcon className="size-3.5 shrink-0 fill-amber-500 text-amber-500" />
+              )}
+              {model.isDir && (
+                <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
               )}
               <span className="truncate text-sm font-medium">{model.fileName}</span>
               <span
