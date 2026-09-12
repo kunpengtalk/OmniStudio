@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, renameSync, statSync } from "fs";
 import path from "path";
+import { createHash } from "crypto";
 import { IMAGE_SERVER_HOST, IMAGE_SERVER_PORT, isLocalOrigin, isLoopbackHost } from "../shared/server-info";
 import { getDataDir } from "./paths";
 import { safeJoin } from "./path-safety";
@@ -96,6 +97,51 @@ const CORS_HEADERS = {
 };
 
 /**
+ * 产出物 / 工作区文件预览用的文本类型（HTML 要在右侧面板里当网页打开，
+ * 所以 MIME 必须是 text/html，而不是当二进制下载）。
+ */
+const WEB_MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".htm": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".txt": "text/plain; charset=utf-8",
+  ".md": "text/markdown; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".wasm": "application/wasm",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+  ".ttf": "font/ttf",
+  ".ico": "image/x-icon",
+};
+
+/**
+ * 产出物路径解析钩子：由主进程启动时注入（rpc 侧查 DB）。
+ * 放在钩子里是为了让 image-server 不依赖数据库——它要能在备份/迁移等场景独立起服务。
+ */
+let artifactResolver: ((id: number) => string | null) | null = null;
+
+export function setArtifactResolver(resolve: (id: number) => string | null): void {
+  artifactResolver = resolve;
+}
+
+/**
+ * 工作区根目录白名单：只服务主进程登记过的目录。
+ * 请求里只能带目录 id，带不了路径——预览地址因此无法被用来读工作区之外的文件。
+ */
+const workspaceRoots = new Map<string, string>();
+
+export function registerWorkspaceRoot(root: string): string {
+  const resolved = path.resolve(root);
+  const id = createHash("sha1").update(resolved).digest("hex").slice(0, 12);
+  workspaceRoots.set(id, resolved);
+  return id;
+}
+
+/**
  * 解析单个 Range 头部为 [start, end]（闭区间），不合法返回 null。
  * 支持 bytes=start-end / bytes=start- / bytes=-suffix。
  */
@@ -123,7 +169,7 @@ function parseRange(range: string | null, size: number): [number, number] | null
 /** 用 Range 支持返回文件内容（媒体播放器需要 206 才能稳定播放/拖动）。 */
 function fileResponse(filePath: string, size: number, rangeHeader: string | null): Response {
   const ext = path.extname(filePath).toLowerCase();
-  const contentType = MIME[ext] ?? "application/octet-stream";
+  const contentType = WEB_MIME[ext] ?? MIME[ext] ?? "application/octet-stream";
   const baseHeaders: Record<string, string> = {
     "Content-Type": contentType,
     "Accept-Ranges": "bytes",
@@ -188,6 +234,37 @@ export function startImageServer() {
           return fileResponse(mediaPath, mediaSize, req.headers.get("range"));
         }
         return new Response("Not found", { status: 404 });
+      }
+
+      // 产出物预览：/artifact/<id>[/相对子路径]。
+      // 只按登记过的 id 查路径（请求里给不了绝对路径），子路径相对产出物所在目录解析
+      // —— 生成的 HTML 引用同目录的 css/js/图片时才能一起加载。
+      if (url.pathname.startsWith("/artifact/")) {
+        const rest = decodeURIComponent(url.pathname.slice("/artifact/".length));
+        const [idPart, ...sub] = rest.split("/");
+        const id = Number(idPart);
+        const absPath = Number.isInteger(id) && id > 0 ? artifactResolver?.(id) ?? null : null;
+        if (!absPath) return new Response("Not found", { status: 404 });
+        const target = sub.length > 0 ? safeJoin(path.dirname(absPath), sub.join("/")) : absPath;
+        if (!target) return new Response("Forbidden", { status: 403 });
+        if (!existsSync(target) || !statSync(target).isFile()) {
+          return new Response("Not found", { status: 404 });
+        }
+        return fileResponse(target, statSync(target).size, req.headers.get("range"));
+      }
+
+      // 工作区文件预览：/workspace/<rootId>/<相对路径>（rootId 由主进程登记）。
+      if (url.pathname.startsWith("/workspace/")) {
+        const rest = decodeURIComponent(url.pathname.slice("/workspace/".length));
+        const [rootId, ...sub] = rest.split("/");
+        const root = rootId ? workspaceRoots.get(rootId) : undefined;
+        if (!root || sub.length === 0) return new Response("Not found", { status: 404 });
+        const target = safeJoin(root, sub.join("/"));
+        if (!target) return new Response("Forbidden", { status: 403 });
+        if (!existsSync(target) || !statSync(target).isFile()) {
+          return new Response("Not found", { status: 404 });
+        }
+        return fileResponse(target, statSync(target).size, req.headers.get("range"));
       }
 
       const filePath = safeJoin(baseDir, decodeURIComponent(url.pathname));

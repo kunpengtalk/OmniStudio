@@ -6,6 +6,7 @@ import { useServerStore } from "../stores/server";
 import { useServedStore } from "../stores/served";
 import { useChatStore } from "../stores/chat";
 import { useAgentStore } from "../stores/agent";
+import { useTerminalStore } from "../stores/terminal";
 import { useVoiceCallStore } from "../stores/voice-call";
 import { useModelDownloadStore } from "../stores/model-download";
 import { useGatewayStore } from "../stores/gateway";
@@ -71,6 +72,10 @@ const rpc = Electroview.defineRPC<AppRPC>({
         useChatStore.getState().appendChunk(conversationId, messageId, delta, kind ?? "content");
       },
       chatDone: ({ conversationId, messageId, content, reasoning, error, citations }) => {
+        // 不是当前打开的会话：标个未读点，用户切回去时清掉。
+        if (useChatStore.getState().activeConversationId !== conversationId) {
+          useAgentStore.getState().markUnread(conversationId);
+        }
         useChatStore.getState().finalizeMessage(
           conversationId,
           messageId,
@@ -82,6 +87,10 @@ const rpc = Electroview.defineRPC<AppRPC>({
         useAgentStore.getState().setRunning(false);
         queryClient.invalidateQueries({ queryKey: ["conversations"] });
         queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
+        queryClient.invalidateQueries({ queryKey: ["agent-sessions"] });
+        // 一轮跑完 = 工作区多半又变了：审查 / 文件页签重新取一次。
+        queryClient.invalidateQueries({ queryKey: ["agent-workspace-changes"] });
+        queryClient.invalidateQueries({ queryKey: ["agent-workspace-files"] });
       },
       chatStats: (stats) => {
         useChatStore.getState().setMessageStats(
@@ -92,7 +101,46 @@ const rpc = Electroview.defineRPC<AppRPC>({
       },
       // Agent 运行轨迹：工具调用 / 状态 / 错误
       agentEvent: (event) => {
+        // 产出物有专门的 agentArtifact 推送（主进程登记时就发），这里不再顺带失效查询：
+        // 每个工具结果都触发一次重取，跑几轮就会白白重读整个产出物列表。
         useAgentStore.getState().appendEvent(event);
+      },
+      // 工具授权：弹窗阻塞工具执行，用户选「允许一次 / 本会话总是 / 始终允许 / 拒绝」
+      agentPermissionRequest: (request) => {
+        useAgentStore.getState().upsertPermission(request);
+      },
+      agentPermissionSettled: ({ id }) => {
+        useAgentStore.getState().settlePermission(id);
+      },
+      // ask_user 提问与作答
+      agentQuestion: (question) => {
+        useAgentStore.getState().upsertQuestion(question);
+      },
+      agentQuestionSettled: ({ id }) => {
+        useAgentStore.getState().settleQuestion(id);
+      },
+      // 待办清单：agent 每次 todo_write 全量覆盖
+      agentTodos: ({ conversationId, todos }) => {
+        if (useAgentStore.getState().conversationId !== conversationId) return;
+        useAgentStore.getState().setTodos(todos);
+      },
+      // 新产出物：直接插到面板顶部并展开
+      agentArtifact: ({ artifact }) => {
+        useAgentStore.getState().appendArtifact(artifact);
+        // agent 刚写出文件：审查页签（改动清单）与文件树要跟着更新。
+        queryClient.invalidateQueries({ queryKey: ["agent-workspace-changes"] });
+        queryClient.invalidateQueries({ queryKey: ["agent-workspace-files"] });
+      },
+      // 侧边面板的终端：输出增量 / shell 退出
+      terminalData: ({ id, data }) => {
+        useTerminalStore.getState().appendOutput(id, data);
+      },
+      terminalExit: ({ id, exitCode }) => {
+        useTerminalStore.getState().markExited(id, exitCode);
+      },
+      automationsChanged: () => {
+        queryClient.invalidateQueries({ queryKey: ["automations"] });
+        queryClient.invalidateQueries({ queryKey: ["automation-runs"] });
       },
       // Agent 生图前需要用户介入：弹出配置 / 选模型弹窗，确认后回传主进程
       mediaSetup: (payload) => {
@@ -236,6 +284,11 @@ const rpc = Electroview.defineRPC<AppRPC>({
           path === "index"
         ) {
           useRouter.getState().setRoute({ path });
+        } else if (path === "automations") {
+          // 自动化不再是左侧一级菜单：跳进 Agent 并打开它的自动化子视图。
+          useAppStore.getState().setActiveApp("agent");
+          useAgentStore.getState().setSubView("automations");
+          useRouter.getState().setRoute({ path: "index" });
         } else if (NAV_APP_PATHS.has(path)) {
           useAppStore.getState().setActiveApp(path as AppId);
           useRouter.getState().setRoute({ path: "index" });

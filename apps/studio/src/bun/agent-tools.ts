@@ -23,6 +23,28 @@ export type ToolContext = {
   workspace: string;
   /** 是否允许执行 shell 命令。 */
   allowShell: boolean;
+  /**
+   * 工作区之外已授权的目录（权限弹窗里「始终允许」写入的 + 设置页手工添加的）。
+   * 命中这些目录的读写不再被路径层拦住（授权弹窗已经收过用户确认）。
+   */
+  authorizedFolders?: string[];
+  /** 当前会话 / 消息：待办、提问、产出物登记都要带上归属。 */
+  conversationId?: number;
+  messageId?: number | null;
+  /** 写待办清单（agent.ts 注入，落库 + 推送 UI）。 */
+  onTodoWrite?: (todos: { content: string; status?: string; priority?: string }[]) => void;
+  /** 向用户提问并等待答复（agent.ts 注入）。 */
+  askUser?: (
+    questions: { question: string; header?: string; options?: { label: string; description?: string }[]; multiple?: boolean }[],
+  ) => Promise<string[][]>;
+  /** 派子智能体执行子任务，返回它的最终答复（agent.ts 注入）。 */
+  spawnSubagent?: (opts: {
+    description: string;
+    prompt: string;
+    subagentType: string;
+  }) => Promise<string>;
+  /** 登记产出物（agent.ts 注入）。 */
+  recordArtifact?: (filePath: string, tool: string) => void;
 };
 
 /**
@@ -121,12 +143,56 @@ function assertNotSecret(workspace: string, target: string): void {
   }
 }
 
-/** 写操作必须落在工作区内。 */
+/** 写操作必须落在工作区内（或已授权的目录里）。 */
 export function assertInsideWorkspace(workspace: string, target: string) {
   const root = path.resolve(workspace);
   if (target !== root && !target.startsWith(root + path.sep)) {
     throw new Error(`Path outside workspace is not writable: ${target}`);
   }
+}
+
+/** 已授权目录（设置里的 + 会话授权传入的），统一成绝对路径。 */
+export function authorizedFoldersOf(ctx: ToolContext): string[] {
+  const fromSettings = (() => {
+    try {
+      const parsed = JSON.parse(getSetting("AGENT_AUTHORIZED_FOLDERS"));
+      return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+    } catch {
+      return [];
+    }
+  })();
+  return [...(ctx.authorizedFolders ?? []), ...fromSettings]
+    .filter((value) => typeof value === "string" && value.trim().length > 0)
+    .map((value) => path.resolve(value.replace(/^~/, process.env.HOME ?? "/")));
+}
+
+function underAny(target: string, folders: string[]): boolean {
+  const abs = path.resolve(target);
+  return folders.some((folder) => abs === folder || abs.startsWith(folder + path.sep));
+}
+
+/**
+ * 读权限：工作区内随便读；工作区外必须落在已授权目录里。
+ * 凭据路径（SECRET_PATH_PATTERNS）始终拒绝，授权也不放行。
+ */
+export function assertReadable(ctx: ToolContext, target: string): void {
+  const root = path.resolve(ctx.workspace);
+  const abs = path.resolve(target);
+  if (abs === root || abs.startsWith(root + path.sep)) return;
+  if (underAny(abs, authorizedFoldersOf(ctx))) return;
+  throw new Error(
+    `需要授权才能访问工作区之外的路径：${abs}。` +
+      "请在授权弹窗里允许，或把需要的文件复制进工作区。",
+  );
+}
+
+/** 写权限：工作区内或已授权目录。 */
+export function assertWritable(ctx: ToolContext, target: string): void {
+  const root = path.resolve(ctx.workspace);
+  const abs = path.resolve(target);
+  if (abs === root || abs.startsWith(root + path.sep)) return;
+  if (underAny(abs, authorizedFoldersOf(ctx))) return;
+  throw new Error(`Path outside workspace is not writable without permission: ${abs}`);
 }
 
 export function textResult(text: string) {
@@ -206,6 +272,7 @@ function createReadFile(ctx: ToolContext): BuiltTool {
     execute: async (_toolCallId, params: { path: string; offset?: number; limit?: number }) => {
       try {
         const target = resolvePath(ctx.workspace, params.path);
+        assertReadable(ctx, target);
         if (!existsSync(target)) return errorResult(`File not found: ${target}`);
         const raw = readFileSync(target, "utf8");
         const lines = raw.split("\n");
@@ -235,6 +302,7 @@ function createListDir(ctx: ToolContext): BuiltTool {
     execute: async (_toolCallId, params: { path?: string }) => {
       try {
         const target = resolvePath(ctx.workspace, params.path?.trim() ? params.path : ".");
+        assertReadable(ctx, target);
         if (!existsSync(target)) return errorResult(`Not found: ${target}`);
         const entries = readdirSync(target, { withFileTypes: true })
           .filter((e) => !e.name.startsWith(".") || e.name === ".env.example")
@@ -262,6 +330,7 @@ function createGlob(ctx: ToolContext): BuiltTool {
     execute: async (_toolCallId, params: { pattern: string; path?: string }) => {
       try {
         const root = resolvePath(ctx.workspace, params.path?.trim() ? params.path : ".");
+        assertReadable(ctx, root);
         if (!existsSync(root)) return errorResult(`Not found: ${root}`);
         const re = globToRegExp(params.pattern.replace(/^\.\//, ""));
         const matches = walkDir(root)
@@ -297,6 +366,7 @@ function createGrep(ctx: ToolContext): BuiltTool {
     ) => {
       try {
         const target = resolvePath(ctx.workspace, params.path?.trim() ? params.path : ".");
+        assertReadable(ctx, target);
         if (!existsSync(target)) return errorResult(`Not found: ${target}`);
         let re: RegExp;
         try {
@@ -348,9 +418,10 @@ function createWriteFile(ctx: ToolContext): BuiltTool {
     execute: async (_toolCallId, params: { path: string; content: string }) => {
       try {
         const target = resolvePath(ctx.workspace, params.path);
-        assertInsideWorkspace(ctx.workspace, target);
+        assertWritable(ctx, target);
         mkdirSync(path.dirname(target), { recursive: true });
         writeFileSync(target, params.content, "utf8");
+        ctx.recordArtifact?.(target, "write_file");
         return textResult(`Wrote ${params.content.length} chars to ${target}`);
       } catch (e) {
         return errorResult(`write_file failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -378,7 +449,7 @@ function createEditFile(ctx: ToolContext): BuiltTool {
     ) => {
       try {
         const target = resolvePath(ctx.workspace, params.path);
-        assertInsideWorkspace(ctx.workspace, target);
+        assertWritable(ctx, target);
         if (!existsSync(target)) return errorResult(`File not found: ${target}`);
         const original = readFileSync(target, "utf8");
         const occurrences = original.split(params.old_str).length - 1;
@@ -392,6 +463,7 @@ function createEditFile(ctx: ToolContext): BuiltTool {
           ? original.split(params.old_str).join(params.new_str)
           : original.replace(params.old_str, params.new_str);
         writeFileSync(target, next, "utf8");
+        ctx.recordArtifact?.(target, "edit_file");
         return textResult(
           `Edited ${target} (${occurrences} replacement${occurrences > 1 ? "s" : ""})`,
         );
@@ -555,6 +627,185 @@ function createKnowledgeSearch(): BuiltTool {
   };
 }
 
+/**
+ * 待办清单：Agent 把多步任务拆成清单并持续更新状态，UI 在输入框上方显示进度。
+ * 这是让"长任务看起来在推进"的关键（对齐 OpenWork 的 todowrite）。
+ */
+function createTodoWrite(ctx: ToolContext): BuiltTool {
+  return {
+    name: "todo_write",
+    label: "Update todo list",
+    description:
+      "Create or update the task list for the current work. Pass the FULL list every time " +
+      "(it replaces the previous one). Keep at most one item in_progress. " +
+      "Use it for multi-step work so the user can see progress.",
+    parameters: Type.Object({
+      todos: Type.Array(
+        Type.Object({
+          content: Type.String({ description: "What this step does (short, imperative)." }),
+          status: Type.Optional(
+            Type.String({ description: "pending | in_progress | completed | cancelled" }),
+          ),
+          priority: Type.Optional(Type.String({ description: "high | medium | low" })),
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params: { todos: { content: string; status?: string; priority?: string }[] }) => {
+      if (!ctx.onTodoWrite) return errorResult("Todo list is not available in this mode.");
+      ctx.onTodoWrite(params.todos ?? []);
+      const done = (params.todos ?? []).filter((t) => t.status === "completed").length;
+      return textResult(`Todo list updated (${done}/${params.todos?.length ?? 0} done).`);
+    },
+  };
+}
+
+/** 反问用户：需要澄清意图 / 让用户做选择时用，答案会作为工具结果回到上下文。 */
+function createAskUser(ctx: ToolContext): BuiltTool {
+  return {
+    name: "ask_user",
+    label: "Ask the user",
+    description:
+      "Ask the user one or more questions and wait for the answer. Use it when the task is " +
+      "ambiguous or a decision must be made by the user (choices, preferences, credentials). " +
+      "Prefer concrete options; the user can always type a custom answer.",
+    parameters: Type.Object({
+      questions: Type.Array(
+        Type.Object({
+          header: Type.Optional(Type.String({ description: "Short label for the question." })),
+          question: Type.String({ description: "The question to ask." }),
+          options: Type.Optional(
+            Type.Array(
+              Type.Object({
+                label: Type.String(),
+                description: Type.Optional(Type.String()),
+              }),
+            ),
+          ),
+          multiple: Type.Optional(Type.Boolean({ description: "Allow selecting several options." })),
+        }),
+      ),
+    }),
+    execute: async (
+      _toolCallId,
+      params: {
+        questions: {
+          header?: string;
+          question: string;
+          options?: { label: string; description?: string }[];
+          multiple?: boolean;
+        }[];
+      },
+    ) => {
+      if (!ctx.askUser) return errorResult("Asking the user is not available in this mode.");
+      const questions = (params.questions ?? []).filter((q) => q?.question?.trim());
+      if (questions.length === 0) return errorResult("No question provided.");
+      const answers = await ctx.askUser(questions);
+      if (answers.length === 0) {
+        return textResult("The user did not answer (dismissed or timed out). Continue sensibly and say what you assumed.");
+      }
+      const formatted = questions
+        .map((q, i) => `Q: ${q.question}\nA: ${(answers[i] ?? []).join("、") || "(no answer)"}`)
+        .join("\n\n");
+      return textResult(formatted);
+    },
+  };
+}
+
+/** 子智能体：把一块独立调研 / 执行交给子任务，主上下文只收它的结论。 */
+function createTaskTool(ctx: ToolContext): BuiltTool {
+  return {
+    name: "task",
+    label: "Delegate to subagent",
+    description:
+      "Delegate a self-contained sub-task to a subagent that has its own context window, then " +
+      "returns only its final answer. Use it for broad exploration (\"find every place X is used\") " +
+      "or work that would flood your own context with tool output. The subagent cannot ask the user.",
+    parameters: Type.Object({
+      description: Type.String({ description: "Short (3-5 words) description of the sub-task." }),
+      prompt: Type.String({ description: "Full, self-contained instructions for the subagent." }),
+      subagent_type: Type.Optional(
+        Type.String({ description: "explore (read-only search) | general (full tools, default)" }),
+      ),
+    }),
+    execute: async (
+      _toolCallId,
+      params: { description: string; prompt: string; subagent_type?: string },
+      signal?: AbortSignal,
+    ) => {
+      if (!ctx.spawnSubagent) return errorResult("Subagents are not available in this mode.");
+      void signal;
+      const subagentType = params.subagent_type?.trim() === "explore" ? "explore" : "general";
+      try {
+        const summary = await ctx.spawnSubagent({
+          description: params.description,
+          prompt: params.prompt,
+          subagentType,
+        });
+        return textResult(summary || "(subagent returned no output)");
+      } catch (e) {
+        return errorResult(`task failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  };
+}
+
+/** 抓网页正文：只做 GET + 去标签，够模型读文档 / 排错，不做浏览器自动化。 */
+function createWebFetch(): BuiltTool {
+  return {
+    name: "web_fetch",
+    label: "Fetch web page",
+    description:
+      "Fetch a URL and return its readable text (HTML tags stripped). Use it to read a page " +
+      "found by web_search, or any docs URL. Only http/https.",
+    parameters: Type.Object({
+      url: Type.String({ description: "Absolute URL (http/https)." }),
+    }),
+    execute: async (_toolCallId, params: { url: string }) => {
+      try {
+        const url = new URL(params.url.trim());
+        if (url.protocol !== "http:" && url.protocol !== "https:") {
+          return errorResult("Only http/https URLs are supported.");
+        }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 30_000);
+        const res = await fetch(url, {
+          signal: controller.signal,
+          redirect: "follow",
+          headers: { "User-Agent": "OmniStudio-Agent/1.0", Accept: "text/html,text/plain;q=0.9,*/*;q=0.5" },
+        }).finally(() => clearTimeout(timer));
+        if (!res.ok) return errorResult(`Fetch failed: HTTP ${res.status}`);
+        const contentType = res.headers.get("content-type") ?? "";
+        const raw = await res.text();
+        const text = contentType.includes("html") ? htmlToText(raw) : raw;
+        return textResult(`URL: ${res.url}\n\n${text}`);
+      } catch (e) {
+        return errorResult(`web_fetch failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  };
+}
+
+/** 极简 HTML → 文本：去掉脚本样式与标签，压缩空白。够读文档，不需要完整解析器。 */
+export function htmlToText(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<\/(p|div|section|article|li|tr|h[1-6])>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t\u00a0]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /** 只读工具集：Plan 模式下只用这些，保证"先出方案再动手"。 */
 export function buildReadOnlyTools(ctx: ToolContext): BuiltTool[] {
   return [
@@ -563,7 +814,10 @@ export function buildReadOnlyTools(ctx: ToolContext): BuiltTool[] {
     createGlob(ctx),
     createGrep(ctx),
     createWebSearch(),
+    createWebFetch(),
     createKnowledgeSearch(),
+    createTodoWrite(ctx),
+    createAskUser(ctx),
   ];
 }
 
@@ -574,5 +828,6 @@ export function buildAgentTools(ctx: ToolContext): BuiltTool[] {
     createWriteFile(ctx),
     createEditFile(ctx),
     createBash(ctx),
+    createTaskTool(ctx),
   ];
 }

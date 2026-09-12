@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, rmSync } from "fs";
 import path from "path";
-import { desc, eq, sql } from "drizzle-orm";
+import { asc, desc, eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { conversations, messages } from "./db/schema";
 import { getSetting, getActiveServerPort } from "./db/settings";
@@ -45,6 +45,10 @@ export type Conversation = {
   app: string;
   modelId: string | null;
   pinned: number;
+  /** 会话级工作区（绝对路径）；null = 跟随全局 AGENT_WORKSPACE 设置。 */
+  workspace?: string | null;
+  /** 归档时间戳；非空表示已归档（列表默认过滤，可恢复）。 */
+  archivedAt?: number | null;
   /** 会话内消息条数（用于判断是否为空会话）。仅 listConversations 填充。 */
   messageCount?: number;
   createdAt: number;
@@ -299,8 +303,83 @@ export function setConversationPinned(id: number, pinned: boolean): {
   return { ok: true, conversation: updated as Conversation };
 }
 
-export function getHistory(conversationId: number): ChatMessage[] {
-  return db
+/**
+ * 从某条消息分叉出一个新会话（OpenWork 的 session branch）：
+ * 把到该消息（含）为止的正文复制过去，标题加「· 分支」，工作区沿用原会话。
+ * 原会话完全不动 —— 分叉是"基于这里换个方向试试"，不是回退。
+ */
+export function forkConversation(
+  conversationId: number,
+  messageId: number,
+): { ok: boolean; conversationId?: number; error?: string } {
+  const source = db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
+  if (!source) return { ok: false, error: "Conversation not found" };
+  const target = db.select().from(messages).where(eq(messages.id, messageId)).get();
+  if (!target || target.conversationId !== conversationId) {
+    return { ok: false, error: "Message not found" };
+  }
+
+  const created = db
+    .insert(conversations)
+    .values({
+      title: `${source.title} · 分支`,
+      app: source.app,
+      modelId: source.modelId,
+      workspace: source.workspace,
+      updatedAt: Date.now(),
+    })
+    .returning()
+    .get();
+
+  const history = db
+    .select()
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId))
+    .orderBy(asc(messages.id))
+    .all()
+    .filter((message) => message.id <= messageId);
+  for (const message of history) {
+    db.insert(messages)
+      .values({
+        conversationId: created.id,
+        role: message.role,
+        content: message.content,
+        reasoning: message.reasoning,
+        images: message.images,
+        kbIds: message.kbIds,
+        citations: message.citations,
+        createdAt: message.createdAt,
+      })
+      .run();
+  }
+  return { ok: true, conversationId: created.id };
+}
+
+/** 重命名会话（拖拽排序 / 归档都在会话管理里，这里只改标题）。 */
+export function renameConversation(id: number, title: string): { ok: boolean; error?: string } {
+  const clean = title.trim();
+  if (!clean) return { ok: false, error: "Title is empty" };
+  const updated = db
+    .update(conversations)
+    .set({ title: clean.slice(0, 120), updatedAt: Date.now() })
+    .where(eq(conversations.id, id))
+    .returning()
+    .get();
+  return updated ? { ok: true } : { ok: false, error: "Conversation not found" };
+}
+
+/** 归档 / 取消归档：归档的会话仍可读，只是默认不出现在侧栏。 */
+export function setConversationArchived(id: number, archived: boolean): { ok: boolean; error?: string } {
+  const updated = db
+    .update(conversations)
+    .set({ archivedAt: archived ? Date.now() : null, updatedAt: Date.now() })
+    .where(eq(conversations.id, id))
+    .returning()
+    .get();
+  return updated ? { ok: true } : { ok: false, error: "Conversation not found" };
+}
+
+export function getHistory(conversationId: number): ChatMessage[] {  return db
     .select()
     .from(messages)
     .where(eq(messages.conversationId, conversationId))

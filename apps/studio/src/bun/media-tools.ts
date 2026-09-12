@@ -593,7 +593,11 @@ function createMediaExport(ctx: ToolContext): BuiltTool {
             name: refs.length === 1 ? params.name : undefined,
             used,
           });
-          if (rel) copied.push(`${KIND_LABEL[asset.kind]} ${asset.ref} → ${rel}`);
+          if (rel) {
+            copied.push(`${KIND_LABEL[asset.kind]} ${asset.ref} → ${rel}`);
+            // 复制进工作区也算一次「产出」：产出物面板里能看到它。
+            ctx.recordArtifact?.(rel, "media_export");
+          }
         }
 
         const lines: string[] = [];
@@ -757,7 +761,10 @@ function createGenerateImage(ctx: ToolContext): BuiltTool {
               kind: "image",
               used,
             });
-            if (rel) copied.push(rel);
+            if (rel) {
+              copied.push(rel);
+              ctx.recordArtifact?.(rel, "generate_image");
+            }
           }
           if (copied.length > 0) {
             lines.push("", `已复制到工作区：${copied.join("、")}`);
@@ -895,7 +902,10 @@ function createGenerateSpeech(ctx: ToolContext): BuiltTool {
               kind: "audio",
               used: new Set<string>(),
             });
-            if (rel) lines.push("", `已复制到工作区：${rel}`);
+            if (rel) {
+              lines.push("", `已复制到工作区：${rel}`);
+              ctx.recordArtifact?.(rel, "generate_speech");
+            }
           }
         }
         return textResult(lines.join("\n"));
@@ -1026,7 +1036,10 @@ function createGenerateVideo(ctx: ToolContext): BuiltTool {
               kind: "video",
               used: new Set<string>(),
             });
-            if (rel) lines.push("", `已复制到工作区：${rel}`);
+            if (rel) {
+              lines.push("", `已复制到工作区：${rel}`);
+              ctx.recordArtifact?.(rel, "generate_video");
+            }
           }
         }
         return textResult(lines.join("\n"));

@@ -137,7 +137,15 @@ export type SettingsKey =
   | "AGENT_WORKSPACES"
   | "AGENT_MODE"
   | "AGENT_MAX_STEPS"
+  /** 子智能体（task 工具）的步数上限：多步调研要给它足够回合，但要防止失控。 */
+  | "AGENT_SUBAGENT_MAX_STEPS"
   | "AGENT_ALLOW_SHELL"
+  /** 工具授权模式：smart（只拦危险动作）/ manual（全部询问）/ auto（全部放行）/ strict（全部拒绝）。 */
+  | "AGENT_APPROVAL_MODE"
+  /** 用户自定义权限规则（JSON 数组：[{permission, pattern, action}]）。 */
+  | "AGENT_PERMISSION_RULES"
+  /** 已授权的工作区之外目录（JSON 字符串数组）。 */
+  | "AGENT_AUTHORIZED_FOLDERS"
   | "VOICE_CALL_PROVIDER"
   | "VOICE_CALL_REALTIME_API_KEY"
   | "VOICE_CALL_REALTIME_BASE_URL"
@@ -317,7 +325,12 @@ const DEFAULTS: Record<SettingsKey, string> = {
   AGENT_WORKSPACES: "[]",
   AGENT_MODE: "agent",
   AGENT_MAX_STEPS: "40",
+  AGENT_SUBAGENT_MAX_STEPS: "12",
   AGENT_ALLOW_SHELL: "1",
+  // 默认 smart：写工作区 / 跑普通命令不打扰，危险命令与工作区外访问才弹授权。
+  AGENT_APPROVAL_MODE: "smart",
+  AGENT_PERMISSION_RULES: "[]",
+  AGENT_AUTHORIZED_FOLDERS: "[]",
   // 语音通话：local = 本地 ASR+LLM+TTS 三段管线；cloud = Qwen Realtime（DashScope）。
   // 默认空 = 首次进入时由前端引导二选一（getVoiceCallProvider 会把空值当 local）。
   VOICE_CALL_PROVIDER: "",

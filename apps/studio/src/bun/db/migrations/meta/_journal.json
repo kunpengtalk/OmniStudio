@@ -183,6 +183,13 @@
       "when": 1790094000000,
       "tag": "0025_add_benchmark_records",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1790095000000,
+      "tag": "0026_glossy_sentry",
+      "breakpoints": true
     }
   ]
 }

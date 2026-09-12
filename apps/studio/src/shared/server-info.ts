@@ -43,3 +43,27 @@ export function isLocalOrigin(origin: string | null | undefined): boolean {
 export function chatImageUrl(ref: string): string {
   return `http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}/${ref}`;
 }
+
+/**
+ * 产出物在右侧面板里的预览地址（本地回环文件服务，见 bun/image-server.ts）：
+ * HTML 直接当网页加载，同目录的相对 css/js/图片也会一起请求到。
+ */
+export function artifactPreviewUrl(artifactId: number, version?: number): string {
+  const suffix = version == null ? "" : `?v=${version}`;
+  return `http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}/artifact/${artifactId}${suffix}`;
+}
+
+/** 工作区文件预览地址；rootId 由主进程登记（见 registerWorkspaceRoot）。 */
+export function workspaceFilePreviewUrl(
+  rootId: string,
+  relativePath: string,
+  version?: number,
+): string {
+  const encoded = relativePath
+    .split("/")
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join("/");
+  const suffix = version == null ? "" : `?v=${version}`;
+  return `http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}/workspace/${rootId}/${encoded}${suffix}`;
+}

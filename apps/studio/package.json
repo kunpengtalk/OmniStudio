@@ -18,7 +18,7 @@
     "db:generate": "drizzle-kit generate",
     "hmr": "vite --port 5173",
     "test": "bun test",
-    "test:smoke": "bun scripts/migrations-smoke.ts && bun scripts/memory-smoke.ts && bun scripts/kb-smoke.ts && bun scripts/kb-chat-smoke.ts && bun scripts/kb-rerank-smoke.ts && bun scripts/kb-access-smoke.ts && bun scripts/kb-governance-smoke.ts && bun scripts/video-gen-smoke.ts && bun scripts/backup-smoke.ts && bun scripts/omi-docs-smoke.ts",
+    "test:smoke": "bun scripts/migrations-smoke.ts && bun scripts/memory-smoke.ts && bun scripts/kb-smoke.ts && bun scripts/kb-chat-smoke.ts && bun scripts/kb-rerank-smoke.ts && bun scripts/kb-access-smoke.ts && bun scripts/kb-governance-smoke.ts && bun scripts/video-gen-smoke.ts && bun scripts/backup-smoke.ts && bun scripts/agent-capabilities-smoke.ts && bun scripts/agent-live-check.ts && bun scripts/omi-docs-smoke.ts",
     "build:dev": "vite build && electrobun build",
     "build:canary": "vite build && electrobun build --env=canary",
     "build:stable": "vite build && electrobun build --env=stable"
@@ -37,6 +37,8 @@
     "@tailwindcss/vite": "catalog:",
     "@tanstack/react-query": "^5.90.21",
     "@truto/turndown-plugin-gfm": "^1.0.2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "ai": "^6.0.116",
     "ansi-to-react": "^6.2.6",
     "cheerio": "^1.2.0",

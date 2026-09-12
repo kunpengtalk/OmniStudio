@@ -160,7 +160,13 @@ apps/
 - Agent 的正文流复用 chat 的 chunk/done/stats 通道，工具事件走独立的 `agentEvent`。
 - **需要用户拍板的动作会停下来问**：`generate_image` 在开跑前检查生图后端是否就绪，缺配置 / 缺模型 / 本地引擎没装 / 有多个候选模型可选时，主进程推 `mediaSetup` 消息给界面弹出配置窗（`media-setup.ts` + `components/media-setup-dialog.tsx`），用户确认后经 RPC `resolveMediaSetup` 回传，**同一次工具调用接着往下跑**。用户没指定模型时会扫一遍候选，多于一个就再弹一次确认用哪个。用户点取消（或超时 10 分钟、或按停止 / 会话重置）则工具立即收尾并告诉模型"别再自行重试"。没有界面在监听时（CLI、测试）直接按取消返回，不会挂起。
 
-**工具的安全模型**（`agent-tools.ts`）：工作区外**可读**（方便读用户提到的文件），但有一份凭据路径黑名单硬拦 —— `~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.kube`、`.netrc`、`.npmrc`、`.git-credentials`、`~/.omni`、应用自身数据目录等。理由写在注释里：工具结果会回喂模型，而网页与 MCP 返回的内容可能构成提示词注入。**写操作**则一律 `assertInsideWorkspace`。`bash` 每条命令先写审计日志，且受 `AGENT_ALLOW_SHELL` 开关控制。
+**工具授权模型**（`permissions.ts` + `agent-interactions.ts`）：每个工具调用先被翻译成一条 `(permission, pattern)` 请求（`bash` → 命令原文、`write_file` → 相对路径、工作区外读写 → `external_directory`、MCP → 工具名），再按「内置默认 → 设置规则 → 工作区规则 → 会话规则」求值（后匹配覆盖先匹配，无匹配则 ask）。动作分 `allow / ask / deny`：`ask` 由 `Agent.beforeToolCall` 挂起，把请求推给界面弹窗，用户选**允许一次 / 本会话总是 / 始终允许（写进工作区规则）/ 拒绝**后工具才继续（`respondAgentPermission`）。审批模式 `AGENT_APPROVAL_MODE` 四档：`smart`（默认，只拦危险命令与工作区外访问）、`manual`（有副作用的工具全问）、`auto`、`strict`。同一工具调用连续重复 3 次会按 `doom_loop` 询问一次，避免模型原地打转。
+
+凭据路径黑名单是硬拦（授权也不放行）：`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.kube`、`.netrc`、`.npmrc`、`.git-credentials`、`~/.omni`、应用自身数据目录等 —— 工具结果会回喂模型，而网页与 MCP 返回的内容可能构成提示词注入。写操作默认只能落在工作区内（或 `AGENT_AUTHORIZED_FOLDERS` 里显式授权的目录）。`bash` 每条命令先写审计日志，且受 `AGENT_ALLOW_SHELL` 开关控制。
+
+**上下文压缩**（`agent-compaction.ts`）挂在 `Agent.transformContext` 上：每次请求前按 `SERVER_CTX_SIZE` 的 60% 预算裁剪历史，保留第一条任务陈述与最近的进展，中间换成一条说明消息（并往轨迹里写一条 `compact` 状态），长任务因此不会在 8k 窗口的本地模型上直接炸掉；尾部刻意不以工具结果开头，否则真实 OpenAI 兼容服务会因「tool 消息没有对应的 tool_calls」直接 400。
+
+**会话能力面对齐 OpenWork / Claude Cowork**（详见 [docs/openwork-parity.md](./openwork-parity.md)）：`todo_write` 待办清单（`agent_todos` + 输入框上方的进度面板）、`ask_user` 反问（弹窗里选或自填）、`task` 子智能体（独立上下文跑只读/完整工具，只把结论带回主线）、侧边面板（多页签：产出物 / 审查 / 文件 / 终端 / 浏览器 + 预览页签，左侧分隔条可拖宽）—— 产出物与工作区文件走回环文件服务的 `/artifact/<id>`、`/workspace/<rootId>/<路径>`，HTML 在 iframe 里当网页加载；审查页签读 git 改动与 diff（`bun/workspace-changes.ts`，argv 调 git、路径限工作区内）；终端页签是真 PTY（`bun/terminal-sessions.ts` 的 `Bun.Terminal`，输出按帧批量推给 xterm，窗口关闭时统一 kill）、消息流渲染（工具调用一行一个、思考是「思考 · 持续了 N 秒」可展开行、正文不套气泡，见 `app/agent/message.tsx` 与 `app/agent/timeline.tsx`；正文与思考按 40ms 批量流式下发）、会话侧栏（置顶 / 归档 / 搜索 / 重命名 / 工作区分组，`conversations.workspace`）、自动化（`automations` + 30 秒巡检，到点开一条真实会话跑任务）、输入框的 `/` 命令与 `@` 文件提及。**运行中还能继续输入**：Enter 排队（本轮结束后逐条 drain）、Cmd/Ctrl+Enter 用 `Agent.steer` 立即插进当前这一轮，停止按钮会连队列一起取消。**授权与提问不做浮层弹窗**：请求与结果各落一条 `agent_events`（`permission_request` / `permission`、`question_request` / `question`，`args` 里带同一个 id），界面按 id 配对后在**触发它的那条消息下面**渲染确认卡片 —— 不遮挡输入框，答完收成一行记录留在流里。Agent 侧栏「新建任务」下面是搜索 / 自动化 / 插件 / Skills 四个入口，点开后在 Agent 主区域内渲染（`app/agent/agent-views.tsx`），它们不是应用的一级菜单。搜索走 `searchAgentSessions()`：标题 + 全部消息正文，结果带命中片段。通知中心（`bun/notifications.ts` + 顶栏铃铛）收集"后台发生的事"：需要授权的请求、自动化的成功 / 失败、无人值守回合的结束；助手消息支持**从这里分支**（`Chat.forkConversation`，复制到该条消息为止，原会话不动）。
 
 **素材工具**（`media-tools.ts`）把应用里已经产生的媒体资产接进 Agent —— 用户在界面手工生成的和 Agent 生成的图片 / 语音 / 视频记在同一批表里，`source` 字段（`manual` / `agent`）区分来源，所以「用户之前做过什么」对 Agent 是可见的：
 
@@ -271,7 +277,7 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 
 **导航是显式的双层状态，没有 URL 路由**：
 
-- `stores/app.ts` 管 `activeApp`（12 个应用：chat / agent / voicecall / voice / image / video / ocr / translate / prompt / skills / kb / memory）
+- `stores/app.ts` 管 `activeApp`（13 个应用：chat / agent / voicecall / voice / image / video / ocr / translate / prompt / skills / kb / memory / automations）
 - `stores/router.ts` 管 8 种路由（index / settings / server / stats / models / model-detail / chat / document）
 - `AppRail`（左侧 48px 图标栏）切应用并把路由重置为 index；`AppSidebar` 按 `activeApp` 渲染不同的列表；`main-layout/index.tsx` 的 Outlet 里，settings / models / model-detail / document 这类覆盖整个内容区，其余兜底 `renderActiveApp(activeApp)`
 

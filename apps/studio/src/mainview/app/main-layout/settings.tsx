@@ -19,6 +19,7 @@ import {
   WaypointsIcon,
   GithubIcon,
   PlugIcon,
+  ShieldIcon,
   SlidersHorizontalIcon,
   PaletteIcon,
   BrainIcon,
@@ -42,6 +43,7 @@ import { MemoryTab } from "./memory-tab";
 import { GeneralPrefsTab, AppearanceTab } from "./prefs-tabs";
 import { CliTab } from "./cli-tab";
 import { BackupTab } from "./backup-tab";
+import { PermissionsTab } from "./permissions-tab";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import { DashboardScreen } from "../dashboard-screen";
@@ -135,6 +137,7 @@ type SettingsTab =
   | "websearch"
   | "memory"
   | "mcp"
+  | "permissions"
   | "cli"
   | "backup"
   | "general"
@@ -155,6 +158,7 @@ const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
   websearch: { icon: <GlobeIcon className="size-4" />, labelKey: "settings.webSearch.title" },
   memory: { icon: <BrainIcon className="size-4" />, labelKey: "settings.memory.title" },
   mcp: { icon: <PlugIcon className="size-4" />, labelKey: "settings.mcp.title" },
+  permissions: { icon: <ShieldIcon className="size-4" />, labelKey: "settings.permissions.title" },
   cli: { icon: <TerminalIcon className="size-4" />, labelKey: "settings.cli.title" },
   backup: { icon: <ArchiveIcon className="size-4" />, labelKey: "settings.backup.title" },
   general: { icon: <SlidersHorizontalIcon className="size-4" />, labelKey: "settings.prefs.general" },
@@ -173,7 +177,7 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
     labelKey: "settings.group.services",
     tabs: ["gateway", "integrations", "performance"],
   },
-  { labelKey: "settings.group.tools", tabs: ["websearch", "memory", "mcp", "cli"] },
+  { labelKey: "settings.group.tools", tabs: ["websearch", "memory", "mcp", "permissions", "cli"] },
   { labelKey: "settings.group.prefs", tabs: ["general", "appearance", "about"] },
   { labelKey: "settings.group.data", tabs: ["logs", "backup"] },
 ];
@@ -186,6 +190,7 @@ const SELF_HEADED_TABS: SettingsTab[] = [
   "websearch",
   "memory",
   "mcp",
+  "permissions",
   "cli",
   "backup",
   "general",
@@ -650,6 +655,7 @@ export function SettingsScreen() {
             {activeTab === "memory" && <MemoryTab />}
 
             {activeTab === "mcp" && <McpTab />}
+            {activeTab === "permissions" && <PermissionsTab />}
 
             {activeTab === "cli" && <CliTab />}
 

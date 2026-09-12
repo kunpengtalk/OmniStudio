@@ -324,22 +324,24 @@ function MessageBubble({
             {reasoning ? (
               <ReasoningBlock reasoning={reasoning} streaming={isStreamingMessage} />
             ) : null}
-            <div className="rounded-2xl rounded-tl-md border bg-card px-4 py-2.5">
-              {content ? (
-                <Markdown content={content} />
-              ) : isStreamingMessage ? (
-                <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground">
-                  <Loader2Icon className="size-3.5 animate-spin" />
-                  {t("chat.generating")}
-                </div>
-              ) : null}
-              {errorHint && (
-              <p className="mt-2 flex items-start gap-1.5 rounded-lg bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
-                <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
-                <span className="min-w-0 break-words">{errorHint}</span>
-              </p>
-            )}
-            </div>
+            {/* 正文为空时不留空气泡：等首字时给一行"生成中"，出错给错误行，
+                其余情况什么都不画（之前会剩一条只有边框的空白条）。 */}
+            {content || errorHint ? (
+              <div className="rounded-2xl rounded-tl-md border bg-card px-4 py-2.5">
+                {content ? <Markdown content={content} /> : null}
+                {errorHint && (
+                  <p className="mt-2 flex items-start gap-1.5 rounded-lg bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
+                    <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+                    <span className="min-w-0 break-words">{errorHint}</span>
+                  </p>
+                )}
+              </div>
+            ) : isStreamingMessage ? (
+              <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground">
+                <Loader2Icon className="size-3.5 animate-spin" />
+                {t("chat.generating")}
+              </div>
+            ) : null}
             {!isStreamingMessage && citations && citations.length > 0 && (
               <CitationBar citations={citations} />
             )}

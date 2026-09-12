@@ -6,8 +6,14 @@ import { existsSync, rmSync, copyFileSync, mkdirSync, appendFileSync } from "fs"
 import { db, sqliteClient } from "../db";
 import { documents, pages } from "../db/schema";
 import { getAllSettings, getSetting, isConfigured, updateSettings } from "../db/settings";
-import { getImagesBaseDir, getUploadsBaseDir } from "../image-server";
+import {
+  getImagesBaseDir,
+  getUploadsBaseDir,
+  registerWorkspaceRoot,
+  setArtifactResolver,
+} from "../image-server";
 import { chatImageDir, chatImageUrl } from "../image-server";
+import { artifactPreviewUrl } from "../../shared/server-info";
 import { safeBaseName, safeJoin } from "../path-safety";
 import { processDocumentPages } from "../queue";
 import { updateState, checkForUpdate, type UpdateInfo } from "../updates";
@@ -25,7 +31,51 @@ import { getSetupEnvironment, type SetupEnvironment } from "../setup-env";
 import * as Chat from "../chat";
 import type { Conversation, ChatMessage, ChatStats } from "../chat";
 import * as Agent from "../agent";
-import type { AgentEventRow, AgentMode } from "../agent";
+import type {
+  AgentEventRow,
+  AgentMode,
+  AgentSessionSearchHit,
+  AgentSessionView,
+} from "../agent";
+import type { PendingPermission, PendingQuestion } from "../agent-interactions";
+import {
+  respondPermission as respondAgentPermissionRequest,
+  respondQuestion as respondAgentQuestionRequest,
+} from "../agent-interactions";
+import type { TodoItem } from "../agent-todos";
+import { listTodos as listAgentTodoItems } from "../agent-todos";
+import type { ArtifactItem, WorkspaceTreeNode } from "../agent-artifacts";
+import {
+  deleteArtifact as deleteAgentArtifactRow,
+  getArtifact as getAgentArtifact,
+  listArtifacts as listAgentArtifactItems,
+  readArtifact as readAgentArtifactFile,
+  readWorkspaceFile as readWorkspaceFileContent,
+  workspaceTree,
+} from "../agent-artifacts";
+import {
+  getWorkspaceChanges,
+  type WorkspaceChanges,
+  getWorkspaceDiff,
+  type WorkspaceDiff,
+} from "../workspace-changes";
+import {
+  closeTerminal,
+  getTerminal as getTerminalSession,
+  onTerminalData,
+  onTerminalExit,
+  resizeTerminal,
+  startTerminal,
+  writeTerminal,
+  type TerminalSessionInfo,
+} from "../terminal-sessions";
+import * as Permissions from "../permissions";
+import type { PermissionRule } from "../permissions";
+import type { ApprovalMode as AgentApprovalMode, EffectivePermissionRow } from "../permissions";
+import * as Automations from "../automations";
+import * as Notifications from "../notifications";
+import type { AppNotification } from "../notifications";
+import type { AutomationItem, AutomationRunItem } from "../automations";
 import * as Mcp from "../mcp";
 import type { McpServerConfig } from "../mcp";
 import * as Memory from "../memory";
@@ -550,6 +600,25 @@ export type AppRPC = {
         params: { conversationId: number };
         response: { ok: boolean };
       };
+      /** 运行中继续发消息：steer = 立即插话，queue = 排在本次之后（没在跑就直接开跑）。 */
+      followUpAgentMessage: {
+        params: {
+          conversationId: number;
+          content: string;
+          mode?: "steer" | "queue";
+          workspace?: string;
+        };
+        response: { ok: boolean; queued: boolean; error?: string };
+      };
+      /** 排队中的消息（输入框上方的队列面板）。 */
+      listQueuedAgentMessages: {
+        params: { conversationId: number };
+        response: { messages: string[] };
+      };
+      removeQueuedAgentMessage: {
+        params: { conversationId: number; index: number };
+        response: { messages: string[] };
+      };
       regenerateAgentMessage: {
         params: { conversationId: number; messageId: number };
         response: { ok: boolean; error?: string };
@@ -560,7 +629,245 @@ export type AppRPC = {
       };
       listAgentTools: {
         params: { mode?: string } | undefined;
-        response: { tools: { name: string; label: string; description: string }[] };
+        response: {
+          tools: { name: string; label: string; description: string; group: string; gated: boolean }[];
+        };
+      };
+
+      // -----------------------------------------------------------------
+      // Agent 会话管理（侧栏：新建 / 重命名 / 置顶 / 归档 / 工作区）
+      // -----------------------------------------------------------------
+      /** 会话列表（含 per-conversation 工作区与归档状态）。 */
+      listAgentSessions: {
+        params: { includeArchived?: boolean; query?: string } | undefined;
+        response: { sessions: AgentSessionView[] };
+      };
+      /** 会话搜索：标题 + 全部消息正文（结果带命中片段）。 */
+      searchAgentSessions: {
+        params: { query: string; limit?: number };
+        response: { hits: AgentSessionSearchHit[] };
+      };
+      createAgentSession: {
+        params: { title?: string; workspace?: string };
+        response: { session: AgentSessionView };
+      };
+      /** 从某条消息分叉出新会话（原会话不动）。 */
+      forkAgentSession: {
+        params: { conversationId: number; messageId: number };
+        response: { ok: boolean; conversationId?: number; error?: string };
+      };
+      renameAgentSession: {
+        params: { conversationId: number; title: string };
+        response: { ok: boolean; error?: string };
+      };
+      setAgentSessionPinned: {
+        params: { conversationId: number; pinned: boolean };
+        response: { ok: boolean };
+      };
+      setAgentSessionArchived: {
+        params: { conversationId: number; archived: boolean };
+        response: { ok: boolean; error?: string };
+      };
+      setAgentSessionWorkspace: {
+        params: { conversationId: number; workspace: string | null };
+        response: { ok: boolean; workspace: string };
+      };
+
+      // -----------------------------------------------------------------
+      // Agent 交互：工具授权 / 反问 / 待办 / 产出物
+      // -----------------------------------------------------------------
+      /** 打开会话时恢复挂起的授权与提问（切会话 / 重启窗口后不能丢弹窗）。 */
+      listAgentInteractions: {
+        params: { conversationId: number };
+        response: {
+          permissions: PendingPermission[];
+          questions: PendingQuestion[];
+        };
+      };
+      respondAgentPermission: {
+        params: { id: string; reply: "once" | "session" | "workspace" | "deny" };
+        response: { ok: boolean };
+      };
+      respondAgentQuestion: {
+        params: { id: string; answers: string[][] };
+        response: { ok: boolean };
+      };
+      listAgentTodos: {
+        params: { conversationId: number };
+        response: { todos: TodoItem[] };
+      };
+      listAgentArtifacts: {
+        params: { conversationId: number };
+        response: { artifacts: ArtifactItem[] };
+      };
+      readAgentArtifact: {
+        params: { artifactId: number };
+        response: {
+          kind: string;
+          text: string | null;
+          dataUrl: string | null;
+          truncated: boolean;
+          size: number;
+          title: string;
+        };
+      };
+      deleteAgentArtifact: {
+        params: { artifactId: number };
+        response: { ok: boolean };
+      };
+      /** 用系统默认浏览器打开产出物（HTML / PDF 这类适合外部打开的）。 */
+      openAgentArtifactExternal: {
+        params: { artifactId: number };
+        response: { ok: boolean };
+      };
+      /** 在访达 / 文件管理器里定位产出物。 */
+      revealAgentArtifact: {
+        params: { artifactId: number };
+        response: { ok: boolean };
+      };
+      /** 工作区文件树（产出物面板的「文件」页签）。 */
+      listWorkspaceFiles: {
+        params: { workspace?: string } | undefined;
+        response: { root: string; rootId: string; nodes: WorkspaceTreeNode[] };
+      };
+      readWorkspaceFile: {
+        params: { path: string; workspace?: string };
+        response: { kind: string; text: string | null; dataUrl: string | null; size: number };
+      };
+      /** 工作区改动（侧边面板「审查」页签）：git 仓库给文件清单 + 增删行数。 */
+      getWorkspaceChanges: {
+        params: { workspace?: string } | undefined;
+        response: WorkspaceChanges;
+      };
+      /** 单个文件的 unified diff。 */
+      getWorkspaceDiff: {
+        params: { path: string; workspace?: string };
+        response: WorkspaceDiff;
+      };
+
+      // -----------------------------------------------------------------
+      // 侧边面板的终端（真实 PTY）
+      // -----------------------------------------------------------------
+      startTerminal: {
+        params: { cwd?: string; cols?: number; rows?: number } | undefined;
+        response: TerminalSessionInfo;
+      };
+      /** 键盘输入（原样写进 PTY，含控制序列）。 */
+      writeTerminal: {
+        params: { id: string; data: string };
+        response: { ok: boolean };
+      };
+      resizeTerminal: {
+        params: { id: string; cols: number; rows: number };
+        response: { ok: boolean };
+      };
+      closeTerminal: {
+        params: { id: string };
+        response: { ok: boolean };
+      };
+      /** 面板重新挂载时取回会话（含回放缓冲），终端不会变成空白。 */
+      getTerminal: {
+        params: { id: string };
+        response: TerminalSessionInfo | null;
+      };
+
+      // -----------------------------------------------------------------
+      // Agent 权限（设置页 + 授权弹窗的「总是允许」管理）
+      // -----------------------------------------------------------------
+      getAgentPermissions: {
+        params: { conversationId?: number; workspace?: string } | undefined;
+        response: {
+          mode: AgentApprovalMode;
+          rules: (PermissionRule & { id?: number; scope?: string; scopeRef?: string })[];
+          effective: EffectivePermissionRow[];
+          authorizedFolders: string[];
+          sessionGrants: (PermissionRule & { id: number; scopeRef: string })[];
+        };
+      };
+      setAgentApprovalMode: {
+        params: { mode: AgentApprovalMode };
+        response: { ok: boolean };
+      };
+      setAgentPermissionRules: {
+        params: { rules: PermissionRule[] };
+        response: { ok: boolean; error?: string };
+      };
+      deleteAgentPermissionRule: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      clearAgentPermissionGrants: {
+        params: { conversationId?: number; workspace?: string; scope: "session" | "workspace" };
+        response: { ok: boolean };
+      };
+      setAgentAuthorizedFolders: {
+        params: { folders: string[] };
+        response: { ok: boolean };
+      };
+
+      // -----------------------------------------------------------------
+      // 自动化（定时把 Agent 跑起来）
+      // -----------------------------------------------------------------
+      listAutomations: {
+        params: undefined;
+        response: { automations: AutomationItem[] };
+      };
+      createAutomation: {
+        params: {
+          name: string;
+          instructions: string;
+          workspace: string;
+          scheduleKind: "once" | "daily" | "weekly";
+          schedule: { at?: string; hour?: number; minute?: number; daysOfWeek?: number[] };
+          timezone: string;
+          mode?: string;
+        };
+        response: { ok: boolean; automation?: AutomationItem; error?: string };
+      };
+      updateAutomation: {
+        params: {
+          id: number;
+          patch: {
+            name?: string;
+            instructions?: string;
+            workspace?: string;
+            scheduleKind?: "once" | "daily" | "weekly";
+            schedule?: { at?: string; hour?: number; minute?: number; daysOfWeek?: number[] };
+            timezone?: string;
+            mode?: string;
+            enabled?: boolean;
+          };
+        };
+        response: { ok: boolean; automation?: AutomationItem; error?: string };
+      };
+      deleteAutomation: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      /** 立刻跑一次（不等到计划时间）。 */
+      runAutomationNow: {
+        params: { id: number };
+        response: { ok: boolean; runId: number; conversationId: number | null; error?: string };
+      };
+      listAutomationRuns: {
+        params: { automationId?: number; limit?: number } | undefined;
+        response: { runs: AutomationRunItem[] };
+      };
+
+      // -----------------------------------------------------------------
+      // 通知中心（后台跑完 / 需要授权 / 自动化结果）
+      // -----------------------------------------------------------------
+      listNotifications: {
+        params: { limit?: number } | undefined;
+        response: { notifications: AppNotification[]; unread: number };
+      };
+      markNotificationsRead: {
+        params: { ids?: string[] } | undefined;
+        response: { ok: boolean; unread: number };
+      };
+      clearNotifications: {
+        params: undefined;
+        response: { ok: boolean };
       };
 
       // -----------------------------------------------------------------
@@ -1816,6 +2123,30 @@ export type AppRPC = {
       knowledgeChanged: { kbId?: number; docId?: number };
       chatStats: ChatStats;
       agentEvent: AgentEventRow;
+      /** 工具授权请求 / 已结束（弹窗的显示与收起）。 */
+      agentPermissionRequest: PendingPermission;
+      agentPermissionSettled: {
+        conversationId: number;
+        id: string;
+        reply: "once" | "session" | "workspace" | "deny";
+        permission: string;
+        pattern: string;
+      };
+      /** ask_user 的提问 / 已作答。 */
+      agentQuestion: PendingQuestion;
+      agentQuestionSettled: { conversationId: number; id: string; answers: string[][] };
+      /** 待办清单变化（全量覆盖）。 */
+      agentTodos: { conversationId: number; todos: TodoItem[] };
+      /** 新产出物登记。 */
+      agentArtifact: { conversationId: number; artifact: ArtifactItem };
+      /** 终端输出（按帧批量推送）。 */
+      terminalData: { id: string; data: string };
+      /** 终端里的 shell 退出了（界面标一下，可以一键重开）。 */
+      terminalExit: { id: string; exitCode: number; signal: string | null };
+      /** 自动化任务 / 运行记录变化，前端刷新列表。 */
+      automationsChanged: { id?: number };
+      /** 新通知（后台跑完 / 需要授权 / 自动化结果）。 */
+      notificationAdded: AppNotification;
       /** Agent 生图前需要用户介入（配后端 / 选模型）：界面弹窗，用户点确认后回传结果。 */
       mediaSetup: MediaSetupPayload;
       voicecallPartial: { conversationId: number; text: string };
@@ -1868,6 +2199,10 @@ export type AppRPC = {
 };
 
 export type BrowserWindowWithRPC = BrowserWindow<typeof appRPC>;
+
+// 产出物预览（/artifact/<id>）的路径解析：只在服务端按 id 查库，
+// 预览地址里带不了任意路径 —— 这是"只服务登记过的产出物"的关键。
+setArtifactResolver((id) => getAgentArtifact(id)?.absPath ?? null);
 
 export const appRPC = BrowserView.defineRPC<AppRPC>({
   maxRequestTime: 900_000, // 15 minutes (large TTS model downloads)
@@ -2476,6 +2811,15 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       stopAgentRun: async ({ conversationId }) => {
         return Agent.stopAgentRun(conversationId);
       },
+      followUpAgentMessage: async ({ conversationId, content, mode, workspace }) => {
+        return Agent.followUpAgentMessage({ conversationId, content, mode, workspace });
+      },
+      listQueuedAgentMessages: async ({ conversationId }) => {
+        return { messages: Agent.listQueuedMessages(conversationId) };
+      },
+      removeQueuedAgentMessage: async ({ conversationId, index }) => {
+        return { messages: Agent.removeQueuedMessage(conversationId, index) };
+      },
 
       regenerateAgentMessage: async ({ conversationId, messageId }) => {
         return Agent.regenerateAgentMessage(conversationId, messageId);
@@ -2488,6 +2832,219 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       listAgentTools: async (params) => {
         const mode = params?.mode as AgentMode | undefined;
         return { tools: await Agent.listAgentTools(mode) };
+      },
+
+      // ---- Agent 会话管理 ----
+      listAgentSessions: async (params) => {
+        return { sessions: Agent.listAgentSessions(params ?? undefined) };
+      },
+      searchAgentSessions: async ({ query, limit }) => {
+        return { hits: Agent.searchAgentSessions(query, limit ?? 20) };
+      },
+      createAgentSession: async (params) => {
+        return { session: Agent.createAgentSession(params ?? undefined) };
+      },
+      forkAgentSession: async ({ conversationId, messageId }) => {
+        return Chat.forkConversation(conversationId, messageId);
+      },
+      renameAgentSession: async ({ conversationId, title }) => {
+        return Chat.renameConversation(conversationId, title);
+      },
+      setAgentSessionPinned: async ({ conversationId, pinned }) => {
+        const result = Chat.setConversationPinned(conversationId, pinned);
+        return { ok: result.ok };
+      },
+      setAgentSessionArchived: async ({ conversationId, archived }) => {
+        // 归档等价于"把这条会话收起来"：归档时顺手停掉正在跑的运行。
+        if (archived) Agent.stopAgentRun(conversationId);
+        return Chat.setConversationArchived(conversationId, archived);
+      },
+      setAgentSessionWorkspace: async ({ conversationId, workspace }) => {
+        Agent.setConversationWorkspace(conversationId, workspace);
+        return { ok: true, workspace: Agent.workspaceForConversation(conversationId) };
+      },
+
+      // ---- Agent 交互 ----
+      listAgentInteractions: async ({ conversationId }) => {
+        const all = Agent.listAgentInteractions(conversationId);
+        return { permissions: all.permissions, questions: all.questions };
+      },
+      respondAgentPermission: async ({ id, reply }) => {
+        return respondAgentPermissionRequest(id, reply);
+      },
+      respondAgentQuestion: async ({ id, answers }) => {
+        return respondAgentQuestionRequest(id, answers);
+      },
+      listAgentTodos: async ({ conversationId }) => {
+        return { todos: listAgentTodoItems(conversationId) };
+      },
+      listAgentArtifacts: async ({ conversationId }) => {
+        return { artifacts: listAgentArtifactItems(conversationId) };
+      },
+      readAgentArtifact: async ({ artifactId }) => {
+        const found = getAgentArtifact(artifactId);
+        if (!found) throw new Error("Artifact not found");
+        const content = readAgentArtifactFile(found.absPath);
+        return {
+          kind: content.kind,
+          text: content.text,
+          dataUrl: content.dataUrl,
+          truncated: content.truncated,
+          size: content.size,
+          title: found.title,
+        };
+      },
+      deleteAgentArtifact: async ({ artifactId }) => {
+        deleteAgentArtifactRow(artifactId);
+        return { ok: true };
+      },
+      openAgentArtifactExternal: async ({ artifactId }) => {
+        if (!getAgentArtifact(artifactId)) throw new Error("Artifact not found");
+        return { ok: Utils.openExternal(artifactPreviewUrl(artifactId)) };
+      },
+      revealAgentArtifact: async ({ artifactId }) => {
+        const found = getAgentArtifact(artifactId);
+        if (!found) throw new Error("Artifact not found");
+        Utils.showItemInFolder(found.absPath);
+        return { ok: true };
+      },
+      listWorkspaceFiles: async (params) => {
+        const root = params?.workspace?.trim()
+          ? path.resolve(params.workspace)
+          : Agent.getAgentWorkspace();
+        // 登记工作区根目录，预览地址里只出现 rootId（见 image-server 的 /workspace 路由）。
+        return { root, rootId: registerWorkspaceRoot(root), nodes: workspaceTree(root) };
+      },
+      getWorkspaceChanges: async (params) => {
+        const root = params?.workspace?.trim()
+          ? path.resolve(params.workspace)
+          : Agent.getAgentWorkspace();
+        return getWorkspaceChanges(root);
+      },
+      getWorkspaceDiff: async ({ path: filePath, workspace }) => {
+        const root = workspace?.trim() ? path.resolve(workspace) : Agent.getAgentWorkspace();
+        return getWorkspaceDiff(root, filePath);
+      },
+      startTerminal: async (params) => {
+        const cwd = params?.cwd?.trim() ? path.resolve(params.cwd) : Agent.getAgentWorkspace();
+        return startTerminal({ cwd, cols: params?.cols, rows: params?.rows });
+      },
+      writeTerminal: async ({ id, data }) => ({ ok: writeTerminal(id, data) }),
+      resizeTerminal: async ({ id, cols, rows }) => ({ ok: resizeTerminal(id, cols, rows) }),
+      closeTerminal: async ({ id }) => {
+        closeTerminal(id);
+        return { ok: true };
+      },
+      getTerminal: async ({ id }) => getTerminalSession(id),
+      readWorkspaceFile: async ({ path: filePath, workspace }) => {
+        const root = workspace?.trim() ? path.resolve(workspace) : Agent.getAgentWorkspace();
+        const content = readWorkspaceFileContent(root, filePath);
+        return {
+          kind: content.kind,
+          text: content.text,
+          dataUrl: content.dataUrl,
+          size: content.size,
+        };
+      },
+
+      // ---- Agent 权限 ----
+      getAgentPermissions: async (params) => {
+        const workspace = params?.workspace?.trim() ? path.resolve(params.workspace) : Agent.getAgentWorkspace();
+        const conversationId = params?.conversationId ?? null;
+        const rows = Permissions.listPermissionRows();
+        return {
+          mode: Permissions.approvalMode(),
+          rules: Permissions.settingRules().map((rule) => ({ ...rule })),
+          effective: Permissions.summarizeEffectivePermissions(conversationId, workspace),
+          authorizedFolders: Permissions.getAuthorizedFolders(),
+          sessionGrants: rows
+            .filter((row) => row.scope === "session")
+            .map((row) => ({
+              id: row.id,
+              permission: row.permission,
+              pattern: row.pattern,
+              action: row.action,
+              scopeRef: row.scopeRef,
+            })),
+        };
+      },
+      setAgentApprovalMode: async ({ mode }) => {
+        updateSettings({ AGENT_APPROVAL_MODE: mode });
+        return { ok: true };
+      },
+      setAgentPermissionRules: async ({ rules }) => {
+        for (const rule of rules) {
+          if (!rule?.permission?.trim() || !rule?.pattern?.trim()) {
+            return { ok: false, error: "权限名与模式都不能为空" };
+          }
+        }
+        updateSettings({ AGENT_PERMISSION_RULES: JSON.stringify(rules) });
+        return { ok: true };
+      },
+      deleteAgentPermissionRule: async ({ id }) => {
+        Permissions.deletePermissionRow(id);
+        return { ok: true };
+      },
+      clearAgentPermissionGrants: async ({ conversationId, workspace, scope }) => {
+        const ref =
+          scope === "session"
+            ? String(conversationId ?? 0)
+            : path.resolve(workspace?.trim() ? workspace : Agent.getAgentWorkspace());
+        Permissions.clearPermissions(scope, ref);
+        return { ok: true };
+      },
+      setAgentAuthorizedFolders: async ({ folders }) => {
+        Permissions.setAuthorizedFolders(folders);
+        return { ok: true };
+      },
+
+      // ---- 自动化 ----
+      listAutomations: async () => ({ automations: Automations.listAutomations() }),
+      createAutomation: async (params) => {
+        const automation = Automations.createAutomation({
+          name: params.name,
+          instructions: params.instructions,
+          workspace: path.resolve(params.workspace),
+          scheduleKind: params.scheduleKind,
+          schedule: params.schedule as never,
+          timezone: params.timezone,
+          mode: params.mode as AgentMode | undefined,
+        });
+        return { ok: true, automation };
+      },
+      updateAutomation: async ({ id, patch }) => {
+        const automation = Automations.updateAutomation(id, {
+          ...patch,
+          workspace: patch.workspace ? path.resolve(patch.workspace) : undefined,
+          schedule: patch.schedule as never,
+          mode: patch.mode as AgentMode | undefined,
+        });
+        return automation ? { ok: true, automation } : { ok: false, error: "自动化任务不存在" };
+      },
+      deleteAutomation: async ({ id }) => {
+        Automations.deleteAutomation(id);
+        return { ok: true };
+      },
+      runAutomationNow: async ({ id }) => {
+        return Automations.runAutomation(id, "manual");
+      },
+      listAutomationRuns: async (params) => {
+        return { runs: Automations.listAutomationRuns(params?.automationId, params?.limit ?? 50) };
+      },
+
+      listNotifications: async (params) => {
+        return {
+          notifications: Notifications.listNotifications(params?.limit ?? 50),
+          unread: Notifications.unreadNotificationCount(),
+        };
+      },
+      markNotificationsRead: async (params) => {
+        Notifications.markNotificationsRead(params?.ids);
+        return { ok: true, unread: Notifications.unreadNotificationCount() };
+      },
+      clearNotifications: async () => {
+        Notifications.clearNotifications();
+        return { ok: true };
       },
 
       // MCP 服务器管理
@@ -3959,6 +4516,62 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
       win.webview.rpc?.send.chatStats(payload);
     } catch {}
   });
+  // Agent 交互：工具授权弹窗、ask_user 提问、待办清单、产出物登记。
+  Agent.onAgentPermissionRequest((payload) => {
+    try {
+      win.webview.rpc?.send.agentPermissionRequest(payload);
+    } catch {}
+  });
+  Agent.onAgentPermissionSettled((payload) => {
+    try {
+      win.webview.rpc?.send.agentPermissionSettled(payload);
+    } catch {}
+  });
+  Agent.onAgentQuestion((payload) => {
+    try {
+      win.webview.rpc?.send.agentQuestion(payload);
+    } catch {}
+  });
+  Agent.onAgentQuestionSettled((payload) => {
+    try {
+      win.webview.rpc?.send.agentQuestionSettled(payload);
+    } catch {}
+  });
+  Agent.onAgentTodos((payload) => {
+    try {
+      win.webview.rpc?.send.agentTodos(payload);
+    } catch {}
+  });
+  Agent.onAgentArtifact((payload) => {
+    try {
+      win.webview.rpc?.send.agentArtifact(payload);
+    } catch {}
+  });
+  // 侧边面板的终端：输出与退出事件按会话 id 推给界面。
+  onTerminalData((payload) => {
+    try {
+      win.webview.rpc?.send.terminalData(payload);
+    } catch {}
+  });
+  onTerminalExit((payload) => {
+    try {
+      win.webview.rpc?.send.terminalExit(payload);
+    } catch {}
+  });
+  // 自动化：计划 / 运行记录变化 → 前端刷新。
+  Automations.onAutomationsChanged(() => {
+    try {
+      win.webview.rpc?.send.automationsChanged({});
+    } catch {}
+  });
+  // 通知中心：后台发生的事推给界面（铃铛未读数）。
+  Notifications.onNotification(({ notification }) => {
+    try {
+      win.webview.rpc?.send.notificationAdded(notification);
+    } catch {}
+  });
+  // 定时巡检：应用起来就按计划跑自动化任务（30 秒一次）。
+  Automations.startAutomationScheduler();
   // 知识库：摄取进度 / 删除 / 向量补齐 → 前端刷新列表。
   Knowledge.onKnowledgeChanged((payload) => {
     try {

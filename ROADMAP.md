@@ -6,9 +6,38 @@
 > 同步到 GitHub Projects 用 `scripts/create-project-backlog.sh`，数据源是 `scripts/backlog.tsv`。
 > 注意：该 TSV 是**一次性导入载荷**（脚本按标题幂等，已存在的 issue 会跳过），导入后看板状态以 GitHub Projects 为准，本文件不再反向同步。
 
+## M0 · Agent 能力对齐 OpenWork（Claude Cowork 开源版）—— ✅ 已完成
+
+对照 [different-ai/openwork](https://github.com/different-ai/openwork) 把 Agent 从「一个会话 + 工具卡片」
+补齐到产品级形态。逐项对照与差异说明见 [docs/openwork-parity.md](./docs/openwork-parity.md)。
+
+| # | 任务 | 状态 | 实际落地 |
+|---|---|---|---|
+| OW-01 | 工具授权（allow / ask / deny + 弹窗四选） | ✅ | `bun/permissions.ts` + `bun/agent-interactions.ts` + `Agent.beforeToolCall` 闸门 + `app/agent/permission-modal.tsx`；审批模式 `AGENT_APPROVAL_MODE`（smart/manual/auto/strict） |
+| OW-02 | 生效权限面板 + 记住的授权 | ✅ | 设置页「Agent 权限」：探针 + 命中规则 + 来源归属 + 例外计数 + 会话/工作区授权列表 + 授权目录 |
+| OW-03 | 待办清单（todowrite） | ✅ | `agent-todos.ts` + `todo_write` 工具 + 输入框上方的进度面板 |
+| OW-04 | 反问用户（question） | ✅ | `ask_user` 工具 + 选项/多选/自填答案弹窗 |
+| OW-05 | 子智能体（task） | ✅ | `runSubagent()` 独立上下文循环 + 时间线里的折叠行（未做子会话单独打开） |
+| OW-06 | 侧边面板：产出物 / 审查 / 文件 / 终端 / 浏览器（多页签、可拖动、HTML 当网页打开） | ✅ | `agent-artifacts.ts` + 右侧「产出物 / 文件」面板：markdown/代码/图片/音视频/PDF 预览；**HTML 走本地回环文件服务在 iframe 里当网页加载**（同目录 css/js 一起取到，带刷新 / 默认浏览器打开 / 访达定位），面板左侧分隔条可拖宽（宽度本机记住，双击回默认），新产出的 HTML 自动推进预览位 |
+| OW-07 | 会话侧栏（置顶 / 归档 / 搜索 / 重命名 / 工作区分组） | ✅ | `listAgentSessions()` + `app/agent/session-sidebar.tsx`；`conversations.workspace` / `archived_at` |
+| OW-08 | 自动化（once / daily / weekly + 运行记录） | ✅ | `bun/automations.ts`（含 DST 的时区换算 + 30s 巡检）+ `automations-screen.tsx` 与 App Rail 入口 |
+| OW-09 | 输入框斜杠命令 + @ 文件提及 | 🟡 | `/agent /plan /goal /new /tools /help` 与 `@` 工作区文件（上下键 + Tab/回车补全）；应用/连接器提及未做 |
+| OW-09b | 上下文压缩（长任务不炸窗口） | ✅ | `bun/agent-compaction.ts` + `Agent.transformContext`；子智能体轮数独立上限 `AGENT_SUBAGENT_MAX_STEPS` |
+| OW-10 | 编辑 diff 视图 | ✅ | LCS 行级 diff（+/- 计数）内联在 edit_file / write_file 卡片里 |
+| OW-11 | 运行中排队消息 / 插话（steer） | ✅ | `followUpAgentMessage()` + 队列面板：Enter 排队、Cmd/Ctrl+Enter 立即插话、停止时连队列一起取消 |
+| OW-12 | 会话分叉（从某条消息分支） | 🟡 | `Chat.forkConversation()` + 消息操作条「分支」按钮；回退 / 上下文压缩未做 |
+| OW-12b | 确认改到消息流内（不遮挡输入框、可回看） | ✅ | 授权 / 提问的请求与结果各落一条事件（按 id 配对），卡片画在触发它的消息下方，答完收成一行记录 |
+| OW-12c | 搜索 / 自动化 / 插件 / Skills 收到 Agent 侧栏 | ✅ | 「新建任务」下面四个入口，点开在 Agent 主区域内显示（带返回对话）；一级菜单移除「自动化」；搜索支持正文命中与片段 |
+| OW-13 | 通知中心 | ✅ | `bun/notifications.ts` + 顶栏铃铛：后台授权请求、自动化结果、无人值守回合结束 |
+| OW-16 | 审查 / 终端 / 浏览器页签（对齐 ZCode 侧栏） | ✅ | **审查**：工作区是 git 仓库时列 `git status` 改动 + numstat 增删行数，点开看 unified diff（`bun/workspace-changes.ts`，只走 argv 不经过 shell，路径限工作区内）；不是仓库时回落到「本会话 agent 改过的文件」（从工具事件里的 diff 汇总）。**终端**：`bun/terminal-sessions.ts` 起真实 PTY（`Bun.Terminal` + `zsh -l`），输出按 32ms 批量推送直通 xterm.js（`subscribeOutput` 不走 React 渲染），支持清屏 / 重开 / 跟随工作区，窗口关闭时统一收摊。**浏览器**：地址栏 + iframe，看本地产物页 / dev server，可转默认浏览器打开 |
+| OW-15 | 消息流渲染（轨迹行 / 思考行 / 正文流式） | ✅ | 工具调用收成一行「图标 + 动作 + 参数 + diff 计数」（点开看命令原文 / diff / 输出，diff 结果按参数串缓存），思考是「思考 · 持续了 N 秒」可展开行，正文不再套气泡、产出文件在正文下挂卡片（点「打开」进右侧预览）；正文与思考按 40ms 批量流式下发（`bun/agent.ts`），会话重取不再覆盖流式中的正文（`stores/chat.ts` 的 `mergeServerMessages`），没有正文时不再留空白气泡 |
+| OW-14 | 未做项（记录在案） | ❌ | 浏览器自动化、Computer Use、系统级通知、分屏、子智能体独立子会话、侧栏「辅助对话」 |
+
+---
+
 当前完成度概览（截至 0.0.7-canary.0）：
 
-- ✅ **已落地**：仪表盘、网络/服务配置、模型市集 + 下载器（含任务持久化与断点续传）、模型分类、多 App 结构 + 多模态聊天、集成 Launcher（`omi launch`）、基准测试（吞吐）、日志查看器（基础）、更新通道 / i18n、语音工作台（TTS / ASR / 克隆 / 实时通话）、**图片生图闭环**、**视频生成**、**OCR 三引擎 + 文档管线**、**知识库（本地 RAG）**、**共享记忆**、**MCP 客户端 + 服务端**、**Skills 管理**、云端厂商多配置。
+- ✅ **已落地**：仪表盘、网络/服务配置、模型市集 + 下载器（含任务持久化与断点续传）、模型分类、多 App 结构 + 多模态聊天、集成 Launcher（`omi launch`）、基准测试（吞吐）、日志查看器（基础）、更新通道 / i18n、语音工作台（TTS / ASR / 克隆 / 实时通话）、**图片生图闭环**、**视频生成**、**OCR 三引擎 + 文档管线**、**知识库（本地 RAG）**、**共享记忆**、**MCP 客户端 + 服务端**、**Skills 管理**、云端厂商多配置、**Agent 能力面对齐 OpenWork**（授权 / 待办 / 反问 / 子智能体 / 产出物面板 / 会话侧栏 / 自动化，见 M0）。
 - 🟡 **部分完成**：vLLM / SGLang 运行时（参数组装 + 二进制探测 + 安装提示已实现，**仍缺一键安装与实测验证**）、引擎状态 UI（有启停与运行状态，缺版本 / 路径 / 健康度）、性能与内存生命周期、平台支持（配置与发布流程已覆盖 Linux / Windows 构建，未做端到端验证）。
 - ❌ **未启动**：外观（托盘 / Dock 指标）、安全（API Key 加密存储 / 日志脱敏）。
 

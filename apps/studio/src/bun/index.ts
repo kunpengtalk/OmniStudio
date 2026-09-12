@@ -5,6 +5,7 @@ import Electrobun, { Utils } from "electrobun/bun";
 import { BrowserWindow, Updater } from "electrobun/bun";
 import "./db";
 import { startImageServer } from "./image-server";
+import { closeAllTerminals } from "./terminal-sessions";
 import { setWindowRef } from "./window";
 import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initMediaSetupBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast, initBackupBroadcast, broadcastCurrentStatus } from "./rpc";
 import { seedIfNeeded } from "./prompt-library";
@@ -155,6 +156,8 @@ void Promise.resolve()
 mainWindow.on("close", async () => {
   // 停掉**全部**已启动模型：推理进程是 detached 的，漏一个就留下占显存的孤儿。
   await Promise.all([stopAllServed(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
+  // 侧边面板里的终端 shell：跟着窗口一起收掉，别留下没人管的会话。
+  closeAllTerminals();
   shutdownSkills();
   stopControlServer();
   Utils.quit();
@@ -163,6 +166,7 @@ mainWindow.on("close", async () => {
 // Cleanup on quit
 Electrobun.events.on("before-quit", async () => {
   await Promise.all([stopAllServed(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
+  closeAllTerminals();
   shutdownSkills();
   stopControlServer();
 });

@@ -36,6 +36,12 @@ const EXPECTED_TABLES = [
   "knowledge_chunks",
   "memories",
   "video_records",
+  "benchmark_records",
+  "agent_permissions",
+  "agent_todos",
+  "agent_artifacts",
+  "automations",
+  "automation_runs",
 ];
 
 function assert(cond: unknown, msg: string): asserts cond {

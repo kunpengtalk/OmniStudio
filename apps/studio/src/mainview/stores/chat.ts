@@ -15,6 +15,12 @@ interface ChatState {
   setConversations: (conversations: Conversation[]) => void;
   setActiveConversation: (id: number | null) => void;
   setActiveMessages: (messages: ChatMessage[]) => void;
+  /**
+   * 服务端消息合并进当前列表（打开会话 / 回合结束后重取时用）。
+   * 与 setActiveMessages 的区别：不丢本地独有的消息，也不用服务端那份更短的
+   * 内容覆盖正在流式的正文 —— 流式期间的一次重取不会再把正文抹成空白。
+   */
+  mergeServerMessages: (messages: ChatMessage[]) => void;
   setStreaming: (streaming: boolean) => void;
   setMessageStats: (conversationId: number, messageId: number, stats: ChatStats) => void;
   appendChunk: (
@@ -60,6 +66,58 @@ export const useChatStore = create<ChatState>((set, get) => ({
       ),
     })),
   setStreaming: (streaming) => set({ streaming }),
+
+  mergeServerMessages: (messages) =>
+    set((state) => {
+      const serverIds = new Set(messages.map((m) => m.id));
+      // 服务端已经收录的同内容用户消息：本地乐观插入的那条（id 是时间戳）要丢掉，
+      // 否则界面上会出现两条一样的用户消息。
+      const isDuplicatedByServer = (m: ChatMessage) =>
+        m.role === "user" && messages.some((s) => s.role === "user" && s.content === m.content);
+
+      const reconcile = (server: ChatMessage): ChatMessage => {
+        const local = state.activeMessages.find((m) => m.id === server.id);
+        if (!local) return server;
+        // 服务端这份更短 = 这条还在流式（正文尚未落库）：保留本地已累积的部分。
+        const content = local.content.length > server.content.length ? local.content : server.content;
+        const reasoning =
+          (local.reasoning?.length ?? 0) > (server.reasoning?.length ?? 0)
+            ? local.reasoning
+            : server.reasoning;
+        if (content === server.content && reasoning === server.reasoning) return server;
+        return { ...server, content, reasoning };
+      };
+
+      const merged: ChatMessage[] = [];
+      for (const server of messages) {
+        // 本地独有、且排在它前面的消息（乐观插入的用户消息）按原位插回来。
+        const localIndex = state.activeMessages.findIndex((m) => m.id === server.id);
+        if (localIndex >= 0) {
+          for (const candidate of state.activeMessages.slice(0, localIndex)) {
+            if (serverIds.has(candidate.id) || merged.some((m) => m.id === candidate.id)) continue;
+            if (isDuplicatedByServer(candidate)) continue;
+            merged.push(candidate);
+          }
+        }
+        merged.push(reconcile(server));
+      }
+      // 服务端列表之后才有的本地消息（刚发出去、还没被服务端返回的）。
+      for (const candidate of state.activeMessages) {
+        if (serverIds.has(candidate.id) || merged.some((m) => m.id === candidate.id)) continue;
+        if (isDuplicatedByServer(candidate)) continue;
+        merged.push(candidate);
+      }
+
+      return {
+        activeMessages: merged,
+        // 只保留仍被当前消息引用的统计，切换会话后自动清理陈旧 id。
+        messageStats: Object.fromEntries(
+          Object.entries(state.messageStats).filter(
+            ([id]) => id !== "prototype" && merged.some((m) => String(m.id) === id),
+          ),
+        ),
+      };
+    }),
 
   setMessageStats: (conversationId, messageId, stats) => {
     if (conversationId !== get().activeConversationId) return;

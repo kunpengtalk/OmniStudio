@@ -26,6 +26,7 @@ import { KbScreen } from "../kb";
 import { BenchmarkScreen } from "../benchmark-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { DownloadsButton } from "@components/download-panel";
+import { NotificationBell } from "../agent/notification-bell";
 import { MediaSetupDialog } from "@components/media-setup-dialog";
 import { StatusPill } from "@components/status-pill";
 import { ErrorBoundary } from "@components/error-boundary";
@@ -95,9 +96,11 @@ export function MainLayout() {
   const setLang = useUILang((s) => s.setLang);
   const route = useRouter((s) => s.route);
   const setRoute = useRouter((s) => s.setRoute);
+  const activeApp = useAppStore((s) => s.activeApp);
 
-  // 设置页是全新的一级页面，不显示左侧对话菜单。
-  const showSidebar = route.path !== "settings";
+  // 设置页是全新的一级页面，不显示左侧对话菜单；
+  // Agent 页自带会话侧栏（置顶 / 归档 / 工作区分组），全局侧栏会重复列出同一批会话。
+  const showSidebar = route.path !== "settings" && activeApp !== "agent";
 
   const { data } = useQuery({
     queryKey: ["settings"],
@@ -137,6 +140,7 @@ export function MainLayout() {
           )}
           <div className="ml-auto flex items-center gap-2">
             <StatusPill />
+            <NotificationBell />
             <DownloadsButton />
           </div>
         </header>

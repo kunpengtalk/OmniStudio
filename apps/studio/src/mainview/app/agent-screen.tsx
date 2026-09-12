@@ -1,9 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpIcon,
-  BotIcon,
-  BrainIcon,
   ChevronDownIcon,
   CircuitBoardIcon,
   FolderOpenIcon,
@@ -14,33 +12,41 @@ import {
   PlusIcon,
   FileTextIcon,
   XIcon,
-  CopyIcon,
   CheckIcon,
-  RotateCcwIcon,
-  Trash2Icon,
-  AlertTriangleIcon,
-  TerminalIcon,
+  PanelRightIcon,
+  ShieldCheckIcon,
+  MessageSquarePlusIcon,
+  SendIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { Textarea } from "@ui/textarea";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@ui/select";
 import { ModelPicker } from "@components/model-picker";
-import { Markdown } from "@components/markdown";
+import { AgentSessionSidebar } from "./agent/session-sidebar";
+import { AgentTodoPanel } from "./agent/todo-panel";
+import { AgentQueuePanel } from "./agent/queue-panel";
+import { AgentRightPanel } from "./agent/right-panel";
+import { AgentAssistantMessage, AgentUserMessage } from "./agent/message";
+import {
+  ComposerSuggestions,
+  SLASH_COMMANDS,
+  type SlashCommandId,
+} from "./agent/composer-suggestions";
+import {
+  AgentAutomationsView,
+  AgentPluginsView,
+  AgentSearchView,
+  AgentSkillsView,
+} from "./agent/agent-views";
 import { useChatStore } from "@stores/chat";
 import { useAgentStore } from "@stores/agent";
 import { useAppStore } from "@stores/app";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
-import type { AgentEventRow, AgentMode } from "../../bun/agent";
+import type { ArtifactItem } from "../../bun/agent-artifacts";
+import type { AgentMode } from "../../bun/agent";
 
 const MODES: AgentMode[] = ["agent", "plan", "goal"];
 
@@ -51,241 +57,6 @@ const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 const TEXT_EXTS =
   "txt,md,markdown,json,csv,tsv,log,xml,yml,yaml,html,htm,js,jsx,ts,tsx,mjs,cjs,css,scss,less,py,rb,rs,go,java,kt,swift,c,h,cpp,hpp,cs,php,sh,bash,zsh,toml,ini,cfg,conf,sql,vue,svelte,graphql,proto";
 
-function formatTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
-}
-
-/** 单条工具调用：工具名 + 入参 + 输出（默认折叠输出）。 */
-function ToolCallCard({ start, end }: { start: AgentEventRow; end?: AgentEventRow }) {
-  const t = useT();
-  const [open, setOpen] = useState(false);
-  const pending = !end;
-  const failed = end?.isError === 1;
-  const output = end?.output ?? "";
-
-  return (
-    <div
-      className={cn(
-        "overflow-hidden rounded-xl border text-xs",
-        failed
-          ? "border-destructive/30 bg-destructive/5"
-          : "bg-muted/30",
-      )}
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] transition-colors hover:text-foreground"
-      >
-        {pending ? (
-          <Loader2Icon className="size-3 shrink-0 animate-spin" />
-        ) : failed ? (
-          <AlertTriangleIcon className="size-3 shrink-0 text-destructive" />
-        ) : (
-          <WrenchIcon className="size-3 shrink-0" />
-        )}
-        <span className="font-medium">{start.toolName}</span>
-        <span className="truncate text-muted-foreground/70">{start.output}</span>
-        <ChevronDownIcon
-          className={cn("ml-auto size-3.5 shrink-0 transition-transform", open && "rotate-180")}
-        />
-      </button>
-      {open && (
-        <div className="space-y-1.5 border-t bg-background/40 px-3 py-2">
-          {start.args && (
-            <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all text-[10px] text-muted-foreground">
-              {start.args}
-            </pre>
-          )}
-          {output ? (
-            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all text-[10px]">
-              {output}
-            </pre>
-          ) : (
-            !pending && <span className="text-[10px] text-muted-foreground">{t("agent.noOutput")}</span>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** 一次运行里的「正在做什么」提示条（状态 / 错误事件）。 */
-function StatusLine({ event }: { event: AgentEventRow }) {
-  const isError = event.kind === "error" || event.isError === 1;
-  return (
-    <div
-      className={cn(
-        "flex items-start gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px]",
-        isError ? "bg-destructive/10 text-destructive" : "bg-muted/40 text-muted-foreground",
-      )}
-    >
-      {isError ? (
-        <AlertTriangleIcon className="mt-0.5 size-3 shrink-0" />
-      ) : (
-        <TerminalIcon className="mt-0.5 size-3 shrink-0" />
-      )}
-      <span className="min-w-0 break-words">{event.output}</span>
-    </div>
-  );
-}
-
-function ReasoningBlock({ reasoning, streaming }: { reasoning: string; streaming: boolean }) {
-  const t = useT();
-  const [open, setOpen] = useState(streaming);
-  const wasStreaming = useRef(streaming);
-  const bodyRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (wasStreaming.current && !streaming) setOpen(false);
-    wasStreaming.current = streaming;
-  }, [streaming]);
-
-  useEffect(() => {
-    if (!open || !streaming) return;
-    const el = bodyRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [reasoning, open, streaming]);
-
-  return (
-    <div className="overflow-hidden rounded-xl border bg-muted/30">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-      >
-        {streaming ? (
-          <Loader2Icon className="size-3 shrink-0 animate-spin" />
-        ) : (
-          <BrainIcon className="size-3 shrink-0" />
-        )}
-        <span className="font-medium">{streaming ? t("chat.thinking") : t("chat.reasoning")}</span>
-        <ChevronDownIcon
-          className={cn("ml-auto size-3.5 shrink-0 transition-transform", open && "rotate-180")}
-        />
-      </button>
-      {open && (
-        <div
-          ref={bodyRef}
-          className="max-h-48 overflow-y-auto whitespace-pre-wrap border-t bg-background/40 px-3 py-2 text-xs leading-5 text-muted-foreground"
-        >
-          {reasoning}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MessageActionBar({
-  messageId,
-  conversationId,
-  content,
-  isStreamingMessage,
-}: {
-  messageId: number;
-  conversationId: number;
-  content: string;
-  isStreamingMessage: boolean;
-}) {
-  const t = useT();
-  const queryClient = useQueryClient();
-  const streaming = useChatStore((s) => s.streaming);
-  const stats = useChatStore((s) => s.messageStats[messageId]);
-  const [copied, setCopied] = useState(false);
-
-  const invalidate = () => {
-    queryClient.invalidateQueries({ queryKey: ["conversations"] });
-    queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
-    queryClient.invalidateQueries({ queryKey: ["agent-events", conversationId] });
-  };
-
-  const deleteMutation = useMutation({
-    mutationFn: () => rpcClient.deleteMessage({ conversationId, messageId }),
-    onSuccess: () => {
-      useChatStore.getState().removeMessage(conversationId, messageId);
-      invalidate();
-    },
-  });
-
-  const regenerateMutation = useMutation({
-    onMutate: () => {
-      useChatStore.getState().rewindMessages(conversationId, messageId);
-      useChatStore.getState().setStreaming(true);
-      useAgentStore.getState().setRunning(true);
-    },
-    mutationFn: () => rpcClient.regenerateAgentMessage({ conversationId, messageId }),
-    onSuccess: invalidate,
-    onError: () => {
-      useChatStore.getState().setStreaming(false);
-      useAgentStore.getState().setRunning(false);
-      invalidate();
-    },
-  });
-
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(content);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // clipboard unavailable — ignore
-    }
-  };
-
-  const speedLabel = stats
-    ? `${stats.tokensPerSec.toFixed(1)} tok/s · ${formatTokens(stats.tokens)} tokens`
-    : null;
-
-  const iconBtn = (tooltip: string, onClick: () => void, icon: ReactNode, extraDisabled = false) => (
-    <Button
-      variant="ghost"
-      size="icon-sm"
-      tooltip={tooltip}
-      onClick={onClick}
-      disabled={streaming || extraDisabled}
-      className="size-6 text-muted-foreground/80 hover:text-foreground"
-    >
-      {icon}
-    </Button>
-  );
-
-  return (
-    <div className="mt-1.5 flex items-center gap-0.5">
-      {speedLabel && (
-        <span className="mr-1.5 text-[10px] tabular-nums text-muted-foreground/70">
-          {speedLabel}
-        </span>
-      )}
-      {iconBtn(
-        copied ? t("chat.copied") : t("chat.copy"),
-        handleCopy,
-        copied ? <CheckIcon className="size-3.5 text-emerald-500" /> : <CopyIcon className="size-3.5" />,
-        !content,
-      )}
-      {iconBtn(
-        t("chat.regenerate"),
-        () => regenerateMutation.mutate(),
-        regenerateMutation.isPending ? (
-          <Loader2Icon className="size-3.5 animate-spin" />
-        ) : (
-          <RotateCcwIcon className="size-3.5" />
-        ),
-        isStreamingMessage,
-      )}
-      {iconBtn(
-        t("chat.delete"),
-        () => deleteMutation.mutate(),
-        <Trash2Icon className="size-3.5" />,
-        isStreamingMessage,
-      )}
-    </div>
-  );
-}
-
-/**
- * 模式切换（Agent / Plan / Goal）：放在输入框底部工具条的左侧，
- * 跟 PI-Desktop 的 Composer 一样在输入区里直接定模式，不用去别处找。
- */
 function ModeSwitch({
   mode,
   onChange,
@@ -528,13 +299,23 @@ function AgentMessages({ conversationId }: { conversationId: number }) {
   });
   const defaultWorkspace = defaultWorkspaceQuery.data?.workspace ?? "";
 
-  /** 选中工作区：写设置 + 同步 store。 */
+  /**
+   * 选中工作区：写到当前会话（会话级工作区，同一份会话列表可以横跨多个项目）。
+   * 空路径 = 恢复跟随全局设置。
+   */
   const applyWorkspace = useMutation({
     mutationFn: async (path: string) => {
-      await rpcClient.updateSettings({ settings: { AGENT_WORKSPACE: path } });
-      useAgentStore.getState().setWorkspace(path);
-      useAgentStore.getState().setWorkspaceIsDefault(!path);
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
+      // 选中「默认工作区」= 跟随全局设置（写 null），而不是把当时的默认路径钉在这个会话上：
+      // 否则以后改全局默认，老会话不会跟着走。
+      const followsGlobal = !path || path === defaultWorkspace;
+      const result = await rpcClient.setAgentSessionWorkspace({
+        conversationId,
+        workspace: followsGlobal ? null : path,
+      });
+      useAgentStore.getState().setWorkspace(result.workspace);
+      useAgentStore.getState().setWorkspaceIsDefault(followsGlobal);
+      queryClient.invalidateQueries({ queryKey: ["agent-sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
     },
   });
 
@@ -557,11 +338,49 @@ function AgentMessages({ conversationId }: { conversationId: number }) {
     if (eventsQuery.data) useAgentStore.getState().setEvents(eventsQuery.data.events);
   }, [eventsQuery.data]);
 
+  // 打开会话时恢复上下文：待办清单、产出物、以及还挂着等的授权 / 提问。
+  const interactionsQuery = useQuery({
+    queryKey: ["agent-interactions", conversationId],
+    queryFn: () => rpcClient.listAgentInteractions({ conversationId }),
+  });
+  const todosQuery = useQuery({
+    queryKey: ["agent-todos", conversationId],
+    queryFn: () => rpcClient.listAgentTodos({ conversationId }),
+  });
+  const artifactsQuery = useQuery({
+    queryKey: ["agent-artifacts", conversationId],
+    queryFn: () => rpcClient.listAgentArtifacts({ conversationId }),
+  });
+
+  useEffect(() => {
+    const store = useAgentStore.getState();
+    if (interactionsQuery.data) {
+      store.setPermissions(interactionsQuery.data.permissions);
+      store.setQuestions(interactionsQuery.data.questions);
+    }
+    if (todosQuery.data) store.setTodos(todosQuery.data.todos);
+    if (artifactsQuery.data) store.setArtifacts(artifactsQuery.data.artifacts);
+  }, [interactionsQuery.data, todosQuery.data, artifactsQuery.data]);
+
+  // 会话自己的工作区（没设过就跟随全局）。
+  useEffect(() => {
+    const sessionWorkspace = convQuery.data?.conversation?.workspace ?? "";
+    if (sessionWorkspace) {
+      useAgentStore.getState().setWorkspace(sessionWorkspace);
+      useAgentStore.getState().setWorkspaceIsDefault(false);
+    }
+  }, [convQuery.data]);
+
+  // 切换会话：清掉上一个会话的运行态。
   useEffect(() => {
     useChatStore.getState().setStreaming(false);
     useAgentStore.getState().setRunning(false);
-    if (convQuery.data) useChatStore.getState().setActiveMessages(convQuery.data.messages);
-  }, [conversationId, convQuery.data]);
+  }, [conversationId]);
+
+  // 服务端消息合并（不是整体替换）：正在流式的正文不会被服务端那份空内容覆盖。
+  useEffect(() => {
+    if (convQuery.data) useChatStore.getState().mergeServerMessages(convQuery.data.messages);
+  }, [convQuery.data]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -572,30 +391,6 @@ function AgentMessages({ conversationId }: { conversationId: number }) {
     activeMessages[activeMessages.length - 1]?.reasoning,
     events.length,
   ]);
-
-  const workspaceMutation = useMutation({
-    mutationFn: async () => {
-      const { path } = await rpcClient.openDirectoryDialog(undefined);
-      if (!path) return null;
-      await rpcClient.updateSettings({ settings: { AGENT_WORKSPACE: path } });
-      useAgentStore.getState().setWorkspace(path);
-      useAgentStore.getState().setWorkspaceIsDefault(false);
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-      return path;
-    },
-  });
-
-  /** 恢复默认工作区：清空设置里的自定义路径即可。 */
-  const resetWorkspaceMutation = useMutation({
-    mutationFn: async () => {
-      await rpcClient.updateSettings({ settings: { AGENT_WORKSPACE: "" } });
-      const { workspace } = await rpcClient.getAgentWorkspace(undefined);
-      useAgentStore.getState().setWorkspace(workspace);
-      useAgentStore.getState().setWorkspaceIsDefault(true);
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-      queryClient.invalidateQueries({ queryKey: ["agent-workspace"] });
-    },
-  });
 
   const modeMutation = useMutation({
     mutationFn: async (next: AgentMode) => {
@@ -700,12 +495,58 @@ function AgentMessages({ conversationId }: { conversationId: number }) {
     }
   };
 
-  const handleSend = () => {
+  /** 执行输入框里的斜杠命令（选完就清空输入，命令本身不发给模型）。 */
+  const runSlashCommand = (id: SlashCommandId) => {
+    setInput("");
+    requestAnimationFrame(autoResize);
+    if (id === "new") {
+      useChatStore.getState().setActiveConversation(null);
+      return;
+    }
+    if (id === "tools") {
+      setShowTools((v) => !v);
+      return;
+    }
+    if (id === "clear") {
+      useAgentStore.getState().clear();
+      return;
+    }
+    if (id === "help") {
+      setShowTools(true);
+      return;
+    }
+    modeMutation.mutate(id);
+  };
+
+  /** 选中 @ 提及的文件：把 @fragment 换成相对路径（带引号，方便直接读）。 */
+  const insertMention = (path: string) => {
+    setInput((prev) => prev.replace(/@([^\s@]*)$/, `@"${path}" `));
+    requestAnimationFrame(autoResize);
+  };
+
+  /** 运行中继续发消息：默认排队，Cmd/Ctrl+Enter 立即插话。 */
+  const queueMutation = useMutation({
+    mutationFn: (mode: "steer" | "queue") =>
+      rpcClient.followUpAgentMessage({ conversationId, content: input.trim(), mode }),
+    onSuccess: (_data, mode) => {
+      setInput("");
+      requestAnimationFrame(autoResize);
+      queryClient.invalidateQueries({ queryKey: ["agent-queue", conversationId] });
+      if (mode === "steer") queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
+    },
+  });
+
+  const handleSend = (mode: "send" | "queue" | "steer" = "send") => {
     const content = input.trim();
     const images = attachments.map((a) => a.ref);
     const files = fileAttachments;
     if (!content && images.length === 0 && files.length === 0) return;
-    if (running || streaming) return;
+    // 运行中：不打断当前回合，按选择排队或插话。
+    if (running || streaming) {
+      if (!content) return;
+      queueMutation.mutate(mode === "steer" ? "steer" : "queue");
+      return;
+    }
     setInput("");
     setAttachments([]);
     setFileAttachments([]);
@@ -720,25 +561,34 @@ function AgentMessages({ conversationId }: { conversationId: number }) {
     sendMutation.mutate({ content, files, imagePaths: images });
   };
 
-  /** 按 messageId 归组工具事件：tool_start 与随后的 tool_end 配对成一张卡片。 */
-  const grouped = useMemo(() => {
-    const map = new Map<number, { cards: { start: AgentEventRow; end?: AgentEventRow }[]; status: AgentEventRow[] }>();
+  /** 事件按所属消息预分组：原来在 messages.map 里逐个 filter 事件，消息一多就是 O(n×m)。 */
+  const eventsByMessage = useMemo(() => {
+    const map = new Map<number, typeof events>();
     for (const event of events) {
       if (event.messageId == null) continue;
-      const bucket = map.get(event.messageId) ?? { cards: [], status: [] };
-      if (event.kind === "tool_start") {
-        bucket.cards.push({ start: event });
-      } else if (event.kind === "tool_end") {
-        const last = bucket.cards[bucket.cards.length - 1];
-        if (last && !last.end && last.start.toolName === event.toolName) last.end = event;
-        else bucket.cards.push({ start: event, end: event });
-      } else {
-        bucket.status.push(event);
-      }
-      map.set(event.messageId, bucket);
+      const bucket = map.get(event.messageId);
+      if (bucket) bucket.push(event);
+      else map.set(event.messageId, [event]);
     }
     return map;
   }, [events]);
+
+  /** 产出物按所属消息预分组（消息里的文件卡片 + 「打开」进右侧预览）。 */
+  const artifacts = useAgentStore((s) => s.artifacts);
+  const artifactsByMessage = useMemo(() => {
+    const map = new Map<number, ArtifactItem[]>();
+    for (const artifact of artifacts) {
+      if (artifact.messageId == null) continue;
+      const bucket = map.get(artifact.messageId);
+      if (bucket) bucket.push(artifact);
+      else map.set(artifact.messageId, [artifact]);
+    }
+    return map;
+  }, [artifacts]);
+
+  const openArtifact = (artifact: ArtifactItem) => {
+    useAgentStore.getState().setPreview({ source: "artifact", artifactId: artifact.id });
+  };
 
   const hasMessages = activeMessages.length > 0;
   const canSend =
@@ -746,10 +596,41 @@ function AgentMessages({ conversationId }: { conversationId: number }) {
     !running &&
     !streaming;
 
+  const sessionTitle = convQuery.data?.conversation?.title ?? t("agent.title");
+  const panelOpen = useAgentStore((s) => s.panelOpen);
+  const permissions = useAgentStore((s) => s.permissions);
+  const questions = useAgentStore((s) => s.questions);
+  const waitingCount = permissions.length + questions.length;
+
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* 会话头部：标题 / 工作区 / 待办进度 / 面板开关（对齐 OpenWork 的 session header） */}
+      <div className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5">
+        <span className="min-w-0 max-w-64 truncate text-xs font-medium">{sessionTitle}</span>
+        <span className="hidden min-w-0 items-center gap-1 text-[10px] text-muted-foreground sm:flex">
+          <FolderIcon className="size-3" />
+          <span className="max-w-40 truncate">{workspaceLabel(workspace)}</span>
+        </span>
+        {waitingCount > 0 && (
+          <span className="flex items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-400">
+            <ShieldCheckIcon className="size-3" />
+            {t("agent.waitingApproval")}
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className={cn("text-muted-foreground", panelOpen && "bg-muted text-foreground")}
+            tooltip={t("agent.panel.toggle")}
+            onClick={() => useAgentStore.getState().setPanelOpen(!panelOpen)}
+          >
+            <PanelRightIcon className="size-4" />
+          </Button>
+        </div>
+      </div>
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-6 py-6">
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-6 py-6">
           {!hasMessages ? (
             <div className="flex flex-col items-center justify-center gap-2 py-20 text-center">
               <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
@@ -762,53 +643,21 @@ function AgentMessages({ conversationId }: { conversationId: number }) {
             activeMessages.map((m, index) => {
               const isLast = index === activeMessages.length - 1;
               const isStreamingMessage = (streaming || running) && isLast && m.role === "assistant";
-              const bucket = grouped.get(m.id);
 
               if (m.role === "user") {
-                return (
-                  <div key={m.id} className="flex flex-col items-end">
-                    <div className="max-w-[75%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm text-primary-foreground whitespace-pre-wrap">
-                      {m.content}
-                    </div>
-                  </div>
-                );
+                return <AgentUserMessage key={m.id} message={m} />;
               }
 
               return (
-                <div key={m.id} className="flex flex-col items-start">
-                  <div className="flex w-full gap-3">
-                    <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted">
-                      <BotIcon className="size-4 text-muted-foreground" />
-                    </div>
-                    <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                      {bucket?.cards.map((card) => (
-                        <ToolCallCard key={card.start.id} start={card.start} end={card.end} />
-                      ))}
-                      {bucket?.status.map((event) => (
-                        <StatusLine key={event.id} event={event} />
-                      ))}
-                      {m.reasoning ? (
-                        <ReasoningBlock reasoning={m.reasoning} streaming={isStreamingMessage} />
-                      ) : null}
-                      <div className="rounded-2xl rounded-tl-md border bg-card px-4 py-2.5">
-                        {m.content ? (
-                          <Markdown content={m.content} />
-                        ) : isStreamingMessage ? (
-                          <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground">
-                            <Loader2Icon className="size-3.5 animate-spin" />
-                            {t("agent.working")}
-                          </div>
-                        ) : null}
-                      </div>
-                      <MessageActionBar
-                        messageId={m.id}
-                        conversationId={conversationId}
-                        content={m.content}
-                        isStreamingMessage={isStreamingMessage}
-                      />
-                    </div>
-                  </div>
-                </div>
+                <AgentAssistantMessage
+                  key={m.id}
+                  message={m}
+                  conversationId={conversationId}
+                  events={eventsByMessage.get(m.id) ?? []}
+                  artifacts={artifactsByMessage.get(m.id) ?? []}
+                  streaming={isStreamingMessage}
+                  onOpenArtifact={openArtifact}
+                />
               );
             })
           )}
@@ -817,6 +666,8 @@ function AgentMessages({ conversationId }: { conversationId: number }) {
 
       <div className="shrink-0 border-t bg-gradient-to-t from-muted/40 to-transparent p-4">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
+          <AgentQueuePanel conversationId={conversationId} />
+          <AgentTodoPanel />
           {showTools && <ToolsPanel tools={tools} />}
 
           {/* 工作区：输入框左上角外侧，点击向上弹出选择面板 */}
@@ -876,23 +727,47 @@ function AgentMessages({ conversationId }: { conversationId: number }) {
               </div>
             )}
 
+            <div className="relative">
+              <ComposerSuggestions
+                input={input}
+                workspace={workspace}
+                onPickCommand={runSlashCommand}
+                onPickFile={insertMention}
+              />
             <Textarea
               ref={textareaRef}
-              placeholder={t("agent.inputPlaceholder")}
+              placeholder={running ? t("agent.queue.placeholder") : t("agent.inputPlaceholder")}
               value={input}
               onChange={(e) => {
                 setInput(e.target.value);
                 autoResize();
               }}
               onKeyDown={(e) => {
+                // 补全面板打开时，回车先给"选中命令"用（这里只在输入是纯命令时触发）。
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
+                  // 运行中时 Cmd/Ctrl+Enter = 立即插话，单独 Enter = 排队等本轮结束。
+                  if (running || streaming) {
+                    handleSend(e.metaKey || e.ctrlKey ? "steer" : "queue");
+                    return;
+                  }
+                  const slash = /^\/([a-z]+)\s*$/i.exec(input);
+                  if (slash) {
+                    const match = SLASH_COMMANDS.find(
+                      (command) => command.command === slash[1]!.toLowerCase(),
+                    );
+                    if (match) {
+                      runSlashCommand(match.id);
+                      return;
+                    }
+                  }
                   handleSend();
                 }
               }}
               className="max-h-56 min-h-16 resize-none border-none bg-transparent px-4 pt-3.5 text-[0.9rem] shadow-none focus-visible:ring-0 dark:bg-transparent"
               rows={2}
             />
+            </div>
 
             {/* 左下角：+ 上传 / 模式 / 工具；右下角：模型 + 发送/停止 */}
             <div className="flex items-center gap-1 px-2.5 pb-2.5">
@@ -933,23 +808,35 @@ function AgentMessages({ conversationId }: { conversationId: number }) {
               <div className="ml-auto flex min-w-0 items-center gap-1.5">
                 <ModelPicker disabled={running || streaming} />
                 {running ? (
-                  <Button
-                    variant="secondary"
-                    size="icon-lg"
-                    className="shrink-0 rounded-full"
-                    tooltip={t("agent.stop")}
-                    onClick={() => stopMutation.mutate()}
-                    disabled={stopMutation.isPending}
-                  >
-                    <SquareIcon className="size-3.5" />
-                  </Button>
+                  <>
+                    <Button
+                      variant="outline"
+                      size="icon-lg"
+                      className="shrink-0 rounded-full"
+                      tooltip={t("agent.queue.send")}
+                      onClick={() => handleSend("queue")}
+                      disabled={!input.trim() || queueMutation.isPending}
+                    >
+                      <SendIcon className="size-3.5" />
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="icon-lg"
+                      className="shrink-0 rounded-full"
+                      tooltip={t("agent.stop")}
+                      onClick={() => stopMutation.mutate()}
+                      disabled={stopMutation.isPending}
+                    >
+                      <SquareIcon className="size-3.5" />
+                    </Button>
+                  </>
                 ) : (
                   <Button
                     variant="default"
                     size="icon-lg"
                     className="shrink-0 rounded-full"
                     tooltip={`${t("agent.send")} · ${t("chat.enterHint")}`}
-                    onClick={handleSend}
+                    onClick={() => handleSend()}
                     disabled={!canSend || sendMutation.isPending}
                   >
                     {sendMutation.isPending ? (
@@ -973,6 +860,7 @@ export function AgentWindow() {
   const activeConversationId = useChatStore((s) => s.activeConversationId);
   const activeApp = useAppStore((s) => s.activeApp);
   const queryClient = useQueryClient();
+  void activeApp;
 
   const { data: settingsData } = useQuery({
     queryKey: ["settings"],
@@ -1037,10 +925,27 @@ export function AgentWindow() {
     createMutation.isPending,
   ]);
 
+  // 侧栏「搜索 / 自动化 / 插件 / Skills」把主区域切换成对应视图，对话本身让位。
+  const subView = useAgentStore((s) => s.subView);
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1">
-      {activeConversationId ? (
-        <AgentMessages conversationId={activeConversationId} />
+      {/* 左：新建任务 + 四个入口 + 会话列表（置顶 / 归档 / 工作区分组） */}
+      <AgentSessionSidebar activeConversationId={activeConversationId} />
+      {subView === "search" ? (
+        <AgentSearchView />
+      ) : subView === "automations" ? (
+        <AgentAutomationsView />
+      ) : subView === "plugins" ? (
+        <AgentPluginsView />
+      ) : subView === "skills" ? (
+        <AgentSkillsView />
+      ) : activeConversationId ? (
+        <>
+          <AgentMessages conversationId={activeConversationId} />
+          {/* 右：多页签面板（产出物 / 审查 / 文件 / 终端 / 浏览器 + 预览） */}
+          <AgentRightPanel conversationId={activeConversationId} />
+        </>
       ) : (
         <div className="flex flex-1 items-center justify-center">
           {createMutation.isPending ? (
@@ -1051,6 +956,15 @@ export function AgentWindow() {
                 <CircuitBoardIcon className="size-7" />
               </div>
               <p className="text-sm font-medium">{t("agent.placeholder")}</p>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="mt-1 gap-1.5 text-xs"
+                onClick={() => createMutation.mutate()}
+              >
+                <MessageSquarePlusIcon className="size-3.5" />
+                {t("agent.session.new")}
+              </Button>
             </div>
           )}
         </div>

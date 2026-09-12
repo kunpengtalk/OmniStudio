@@ -53,6 +53,10 @@ export const conversations = sqliteTable("conversations", {
   app: text("app").notNull().default("chat"),
   modelId: text("model_id"),
   pinned: int("pinned").notNull().default(0),
+  /** 会话级工作区（绝对路径）。NULL = 使用全局 AGENT_WORKSPACE。 */
+  workspace: text("workspace"),
+  /** 归档时间；非空表示已归档（默认不出现在侧栏，可恢复）。 */
+  archivedAt: int("archived_at"),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
   updatedAt: int("updated_at")
     .$defaultFn(() => Date.now())
@@ -88,9 +92,11 @@ export const agentEvents = sqliteTable("agent_events", {
   /** 事件归属的助手消息（一次运行对应一条 assistant 消息）。 */
   messageId: int("message_id"),
   kind: text("kind")
-    .$type<"status" | "tool_start" | "tool_end" | "error">()
+    .$type<"status" | "tool_start" | "tool_end" | "error" | "subagent_start" | "subagent_end">()
     .notNull(),
   toolName: text("tool_name"),
+  /** 子智能体事件的归属 id（task 工具派出的子任务），主 Agent 的事件为 NULL。 */
+  subagentId: text("subagent_id"),
   /** JSON 序列化的工具入参。 */
   args: text("args"),
   /** 工具输出 / 状态描述。 */
@@ -708,3 +714,146 @@ export const benchmarkRecords = sqliteTable("benchmark_records", {
 });
 
 export type BenchmarkRecord = typeof benchmarkRecords.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// Agent 会话增强（对齐 OpenWork / Claude Cowork 的能力面）
+//
+// conversations 增加 workspace / archived_at：
+// - workspace：会话级工作目录，为空时回落到全局 AGENT_WORKSPACE，让同一份
+//   会话列表能横跨多个项目（OpenWork 的 workspace 概念在这里落地）。
+// - archivedAt：归档会话仍可读但默认不出现在侧栏，避免列表被历史任务淹没。
+// ---------------------------------------------------------------------------
+
+export const agentPermissions = sqliteTable(
+  "agent_permissions",
+  {
+    id: int("id").primaryKey({ autoIncrement: true }),
+    /** 作用域：session = 本次会话有效；workspace = 该工作区长期有效。 */
+    scope: text("scope").$type<"session" | "workspace">().notNull(),
+    /** 会话 id（字符串）或工作区绝对路径。 */
+    scopeRef: text("scope_ref").notNull(),
+    /** 权限名：bash / edit / webfetch / external_directory / mcp / doom_loop … */
+    permission: text("permission").notNull(),
+    /** 通配模式（`*` 任意多字符，`?` 单字符，末尾「 *」可省）。 */
+    pattern: text("pattern").notNull(),
+    action: text("action").$type<"allow" | "ask" | "deny">().notNull(),
+    createdAt: int("created_at").$defaultFn(() => Date.now()),
+  },
+  (t) => ({
+    scopeIdx: index("agent_permissions_scope_idx").on(t.scope, t.scopeRef),
+  }),
+);
+
+export type AgentPermissionRow = typeof agentPermissions.$inferSelect;
+
+/** Agent 待办清单：一个会话一份（todowrite 全量覆盖写入）。 */
+export const agentTodos = sqliteTable(
+  "agent_todos",
+  {
+    id: int("id").primaryKey({ autoIncrement: true }),
+    conversationId: int("conversation_id").notNull(),
+    /** 清单内序号，决定展示顺序。 */
+    seq: int("seq").notNull().default(0),
+    content: text("content").notNull(),
+    status: text("status")
+      .$type<"pending" | "in_progress" | "completed" | "cancelled">()
+      .notNull()
+      .default("pending"),
+    priority: text("priority").$type<"high" | "medium" | "low">().notNull().default("medium"),
+    createdAt: int("created_at").$defaultFn(() => Date.now()),
+    updatedAt: int("updated_at")
+      .$defaultFn(() => Date.now())
+      .$onUpdateFn(() => Date.now()),
+  },
+  (t) => ({
+    convIdx: index("agent_todos_conversation_id_idx").on(t.conversationId),
+  }),
+);
+
+export type AgentTodoRow = typeof agentTodos.$inferSelect;
+
+/**
+ * Agent 产出物：写文件 / 生成图片语音视频都登记一条，
+ * 供会话右侧「产出物」面板预览（OpenWork 的 artifacts 面板）。
+ */
+export const agentArtifacts = sqliteTable(
+  "agent_artifacts",
+  {
+    id: int("id").primaryKey({ autoIncrement: true }),
+    conversationId: int("conversation_id").notNull(),
+    messageId: int("message_id"),
+    /** 工作区内的相对路径（媒体产物为绝对路径）。 */
+    path: text("path").notNull(),
+    /** 绝对路径，便于直接读取。 */
+    absPath: text("abs_path").notNull(),
+    title: text("title").notNull(),
+    /** 由扩展名推导的展示类型。 */
+    kind: text("kind")
+      .$type<"markdown" | "code" | "image" | "video" | "audio" | "pdf" | "html" | "text" | "other">()
+      .notNull()
+      .default("other"),
+    size: int("size"),
+    /** 写入该产出物的工具名（write_file / edit_file / generate_image …）。 */
+    tool: text("tool"),
+    createdAt: int("created_at").$defaultFn(() => Date.now()),
+  },
+  (t) => ({
+    convIdx: index("agent_artifacts_conversation_id_idx").on(t.conversationId),
+  }),
+);
+
+export type AgentArtifactRow = typeof agentArtifacts.$inferSelect;
+
+/**
+ * 自动化任务：按 once / daily / weekly 计划在指定工作区跑一次 Agent。
+ * 计划按任务自己的时区计算，执行历史落在 automation_runs。
+ */
+export const automations = sqliteTable("automations", {
+  id: int("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  instructions: text("instructions").notNull(),
+  /** 执行目标工作区绝对路径。 */
+  workspace: text("workspace").notNull(),
+  enabled: int("enabled").notNull().default(1),
+  /** once | daily | weekly */
+  scheduleKind: text("schedule_kind").$type<"once" | "daily" | "weekly">().notNull(),
+  /** JSON：{ at } | { hour, minute } | { hour, minute, daysOfWeek } */
+  schedule: text("schedule").notNull(),
+  /** IANA 时区，如 Asia/Shanghai。 */
+  timezone: text("timezone").notNull().default("UTC"),
+  /** 会话模式：agent / plan / goal。 */
+  mode: text("mode").$type<"agent" | "plan" | "goal">().notNull().default("agent"),
+  lastRunAt: int("last_run_at"),
+  nextRunAt: int("next_run_at"),
+  createdAt: int("created_at").$defaultFn(() => Date.now()),
+  updatedAt: int("updated_at")
+    .$defaultFn(() => Date.now())
+    .$onUpdateFn(() => Date.now()),
+});
+
+export type AutomationRow = typeof automations.$inferSelect;
+
+export const automationRuns = sqliteTable(
+  "automation_runs",
+  {
+    id: int("id").primaryKey({ autoIncrement: true }),
+    automationId: int("automation_id").notNull(),
+    /** scheduled | manual */
+    trigger: text("trigger").$type<"scheduled" | "manual">().notNull().default("scheduled"),
+    status: text("status")
+      .$type<"running" | "succeeded" | "failed" | "cancelled">()
+      .notNull()
+      .default("running"),
+    /** 本次运行落到的会话（点开即可回看完整轨迹）。 */
+    conversationId: int("conversation_id"),
+    summary: text("summary"),
+    error: text("error"),
+    startedAt: int("started_at").$defaultFn(() => Date.now()),
+    finishedAt: int("finished_at"),
+  },
+  (t) => ({
+    automationIdx: index("automation_runs_automation_id_idx").on(t.automationId),
+  }),
+);
+
+export type AutomationRunRow = typeof automationRuns.$inferSelect;
