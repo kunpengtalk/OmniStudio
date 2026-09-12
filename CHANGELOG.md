@@ -6,12 +6,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 ## [未发布] / Unreleased
 
+## [0.0.8-canary.0] - 2026-09-13
+
 ### Added / 新增
 
 - **大模型基准测试（独立应用，重做）**：从设置页标签升级为图标栏「基准测试」应用——左侧参数面板（模型快选 / 生成长度 / 并发请求数 / 上下文档位 1k–32k 扫描）+ 右侧结果区，侧栏沉淀**历史测试记录**（模型 · 平均 TPS · 时间，点击回放、可单删 / 清空）；测试改为**异步任务 + 轮询**模式（实时进度、可随时停止，取消时已完成档位仍入历史）；指标从 3 项扩到 9 项——TTFT / TPOT / 单流 TPS / 并发聚合吞吐 / Prefill 吞吐 / 精确输入输出 tokens（`stream_options.include_usage` + 预热请求，回退 chunk 计数）/ 成功失败数 / 总耗时，汇总卡展示平均与峰值；结果落库 `benchmark_records`（迁移 `0025_add_benchmark_records`，`kind` 字段为后续 MMLU / GSM8K 等本地能力评测脚本预留）。
 - **基准测试 · 能力评测（MMLU / CMMLU / GSM8K / MMLU-Pro）**：基准测试页新增「能力评测」模式——四个主流评测套件：MMLU（英文综合，57 科目 4 选 1，5-shot）、CMMLU（中文综合，67 科目，5-shot 中文指令）、GSM8K（数学推理，5-shot CoT + `####` 数字答案）、MMLU-Pro（14 科目 10 选 1，0-shot，2048 tokens 预算），题面构造与判分遵循各数据集官方评测协议；题库 JSONL（HuggingFace 公开数据集打包）首次使用时自动下载缓存到 `userData/eval-data`（双镜像源、字节数校验），之后离线可用；抽样按固定种子做类别配额（同题数结果可对比，0 = 全量），并发跑题 worker 池 + 实时正确率进度 + 可取消；结果区展示综合准确率大卡、答对 / 已答 / 失败数 / 耗时、**分科目得分条形列表**（≥60% 绿 / ≥30% 主色 / 其余红）；评测记录入同一历史库（`kind='eval'`，侧栏显示套件名 + 准确率），与速度记录并列回放；`<think>` 推理段自动剥离、中文「答案：X」提取兼容。
 - **能力评测 · 垂类套件（编程 / 写作 / 长上下文）**：新增四个垂类评测——**HumanEval 代码补全**（164 题，函数签名 + docstring 补全，提取生成代码后在本机 python3 沙箱执行单元测试判 pass@1，15 秒超时、临时文件即删、无 python3 时任务级报错）、**MBPP 编程实现**（500 题，自然语言题面 + assert 用例，同款沙箱执行判分）、**IFEval 指令写作**（540 题官方题库，25 种可编程校验指令——字数 / 句数 / 段落 / 禁词 / 词频 / 字母频次 / 大小写 / 引号包裹 / markdown 高亮 / bullet / JSON 整体 / 多段 Section / 占位符 / P.S. / 结尾短语 / 双响应 / 重复题面 / 约束选项 / 响应语言等，strict 口径全部指令通过才算对，HF 官方 + hf-mirror 双源下载）、**长文多针检索**（本地合成约 8k tokens 噪声长文埋 5 支「魔数」针，答案子串精确判分，**按针深度 ≤30% / 31–60% / ≥61% 分档统计**，直指 lost-in-the-middle 现象，无需下载题库）；套件列表数据驱动渲染，垂类附加说明随选中套件展示。
 - **基准测试 · 云端直连测速 + CLI**：测试目标支持「云端 API」——直接选择 `cloud_providers` 里的任一服务商按 id 直连（无需全局激活），模型列表联动填充；云 API 参数自适应（首 400 按错误文案降级 `max_tokens`→`max_completion_tokens`、去 `stream_options`，结果按 base 缓存）；新增 `omi benchmark` CLI——终端跑测速并与应用内共用同一任务单例与历史表（应用运行走控制 socket 实时显示进度，未运行时进程内直连 SQLite 兜底）。
+- **Agent 权限与授权（对齐 OpenWork / Claude Cowork）**：工具调用先被翻译成一条 `(permission, pattern)` 请求（`bash` → 命令、`write_file` → 路径、工作区外读取 → `external_directory`），规则表按「后匹配覆盖先匹配」求值、无匹配回落到该权限的内置默认动作；动作 `allow / ask / deny` 中 `ask` 会挂起工具执行，把请求推给**消息流里的确认卡片**（仅本次 / 本会话总是 / 始终允许写进工作区规则 / 拒绝），「始终允许」落 `agent_permissions` 表（session / workspace 两级作用域，重放不越权）。审批模式 `AGENT_APPROVAL_MODE` 四档（`smart` 默认 / `manual` / `auto` / `strict`），另有 `doom_loop` 检测——同一动作反复被拒时收尾，不再空转。设置页新增「Agent 权限」面板：生效规则、命中来源（builtin / settings / workspace / session）、例外规则计数与授权目录管理。
+- **Agent 会话交互（消息流内，不弹窗）**：`ask_user` 提问卡片支持单选 / 多选 / 自定义答案；授权与提问的「请求 + 结果」各落一条 `agent_events`，回看历史能看到当时问了什么、选了什么，与工具调用在时间线里对齐。待办清单 `todo_write` 全量覆盖 + 输入框上方的进度面板（`agent_todos`）。子智能体 `task` 起独立上下文的 Agent 循环（事件带 `subagentId`），轨迹里折成一行、点开可见过程。上下文压缩在请求前做确定性裁剪（保留任务陈述 + 最近消息，中间用一条说明占位），丢掉的量在轨迹里明说——本地模型 8k 上下文下长任务能继续跑下去。
+- **Agent 产出物与工作区面板（右侧多页签）**：产出物登记 `agent_artifacts`，工具写出的文件与生成的图片 / 语音 / 视频各落一条，面板列出并预览（markdown / 代码 / 图片 / PDF / 表格）；页签为产出物 / 审查 / 文件 / 终端 / 浏览器 + 产物预览，左边界分隔条可拖宽，HTML 产物与工作区文件经 image-server 新增的 `/artifact/<id>`、`/workspace/<rootId>/<路径>` 在 iframe 里当网页加载。「审查」页签在工作区是 git 仓库时给出改动清单（`git status` + `--numstat`）与单文件 unified diff，只用 argv 调 git、路径经 safeJoin 限制在工作区内。
+- **Agent 终端页签（真实 PTY）**：Bun 伪终端起一个真实 shell，键盘输入写进 PTY，输出按帧批量推给前端 xterm.js——`top` / `vi` / 交互式 npm 提示都能正常跑；一个会话一个 shell，面板切走再切回是同一个（含回放缓冲），只有显式关闭或应用退出才杀进程。
+- **会话侧栏**：新建 / 搜索 / 置顶 / 归档 / 重命名 / 工作区分组（`conversations.workspace`、`archived_at`），另有排队消息面板与分支会话；四个入口（搜索 / 自动化 / 插件 / Skills）都在 Agent 主区域内打开，不占一级菜单。
+- **自动化任务**：`once` / `daily` / `weekly` 计划（纯函数计算，支持 IANA 时区与 DST）在指定工作区自动跑一次 Agent，结果落成一条会话可回看完整轨迹；30 秒巡检查询调度，不引入 job 队列。
+- **通知中心**：会话跑完、Agent 需要授权、自动化成功 / 失败在标题栏铃铛里提醒，点击跳回对应会话（内存态，重启不保留）。
+- **Agent 界面重做**：工具轨迹收成一行（点开看命令、diff、输出）、正文不再套气泡、思考可展开，正文与思考按 40ms 批量流式下发。
+- **迁移 0026**：新增 `agent_artifacts` / `agent_permissions` / `agent_todos` / `automations` 与 `conversations` 的 `workspace` / `archived_at` 列（`benchmark_records` 已由 0025 手写迁移建过，0026 里去掉 drizzle-kit 的重复生成，避免老库升级建表失败）。
+- **Agent 能力冒烟**：`scripts/agent-capabilities-smoke.ts` 与 `scripts/agent-live-check.ts`（工具面、授权与提问落事件、上下文压缩触发）接入 `test:smoke`。
+
+### Changed / 变更
+
+- **Agent 生图的后端来源**：`generate_image` 与它的配置弹窗过去只认「图像」页保存的那份配置，用户在设置 →「云端模型」里配好的服务商与模型完全看不见——表现就是「已经配过了还被要求再填一遍地址」。现在已配置服务商（地址与 Key 齐全）里分类为生图的模型会作为候选：恰好一个直接采用、不弹窗，多个弹窗让用户挑，一个都没有才轮到手填；候选自带服务商地址与 Key，选中即切到「云端生图」并按这份配置落盘（选自建服务那一行就不会串到别家）。弹窗顶部的后端状态点也把「云端模型里有生图模型」算作就绪。
+- **MLX 引擎的就绪判定**：`mlx_lm.server` 的模型加载在后台线程里，架构不认识时线程直接退出而 HTTP 服务照常起来（`/v1/models` 返回 200），过去会被当成「运行中」——界面写着运行中、每次对话却没有返回。现在启动阶段识别 `Exception in thread` 即收尾进程并给出原因。
+- **测试**：`media-setup` 的云服务商用例改用内存 fake——bun 的 `mock.module` 会跨文件泄漏，别的测试文件把 `./db` 换成自己的临时库并在收尾删除后，真实表读写会直接 `SQLITE_IOERR_VNODE`（整个套件一起跑才暴露，单跑本文件正常）；新增 `runtimes/errors.test.ts`。
+
+### Fixed / 修复
+
+- **Agent 生图不再要求重复配置**：在「云端模型」里配好生图模型后，Agent 不再弹窗索要接口地址；只有一个候选时连弹窗都没有。
+- **MLX 不再假报「运行中」**：模型架构不支持（如 `model_type = deepseek_v41`，mlx-lm 至今没有对应实现）时，启动直接失败并说明「模型加载线程已退出、服务起来了也不会出图」，而不是挂着一个假的运行状态等用户一次次重发消息。
+- **Agent 右侧面板「+」菜单被裁成一条图标列**：菜单左对齐展开时右边 148px 与全部文字标签被面板的 `overflow-hidden` 裁掉，看起来像一条莫名的竖排图标栏；改为右对齐向左展开。
 
 ## [0.0.7-canary.0] - 2026-09-12
 

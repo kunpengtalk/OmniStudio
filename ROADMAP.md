@@ -1,6 +1,6 @@
 # OmniStudio 迭代规划与未完成任务清单
 
-> 更新：2026-09-12　结构说明见 [docs/architecture.md](./docs/architecture.md)
+> 更新：2026-09-13　结构说明见 [docs/architecture.md](./docs/architecture.md)
 > 图例：✅ 已完成 / 🟡 部分完成 / ❌ 未启动　优先级：P0 核心 / P1 重要 / P2 远期
 >
 > 同步到 GitHub Projects 用 `scripts/create-project-backlog.sh`，数据源是 `scripts/backlog.tsv`。
