@@ -28,6 +28,12 @@ type ServerConfig = {
   stallOnce?: boolean;
   /** 卡死时长。 */
   stallOnceMs?: number;
+  /**
+   * 分片之间的间隔（毫秒）。回环 + 64KB 分片下，512KB 常在客户端处理第一次进度
+   * 回调之前就发完了，「下到一半中断」这类用例于是在快机器上随机失败；给分片之间
+   * 加一点间隔，中断点才是确定的。
+   */
+  chunkDelayMs?: number;
   /** 服务器忽略 Range，总是回 200 全量。 */
   ignoreRange?: boolean;
   /** 只让「从 0 开始的区间」失败（构造前缀分片失败的场景）。 */
@@ -73,6 +79,8 @@ function startServer(cfg: ServerConfig) {
                 first = false;
                 await Bun.sleep(cfg.stallOnceMs ?? 200);
               }
+              // 分片间隔：让"下到一半中断"有确定的窗口（见 chunkDelayMs 注释）。
+              if (cfg.chunkDelayMs && offset <= to) await Bun.sleep(cfg.chunkDelayMs);
             }
             controller.close();
           },
@@ -403,7 +411,9 @@ describe("旁路数据管理", () => {
   test("小文件走单流也能断点续传", async () => {
     const size = 512 * 1024; // 低于并行门槛
     const data = makeData(size);
-    const { server, requests } = startServer({ data });
+    // 分片之间留间隔：否则整个文件可能在第一次进度回调被处理前就发完了，
+    // 「中断」落到下载结束之后，断言随即随机失败（CI 上就是这样挂的）。
+    const { server, requests } = startServer({ data, chunkDelayMs: 25 });
     servers.push(server);
     const dest = path.join(dir, "small.json");
 
@@ -412,7 +422,7 @@ describe("旁路数据管理", () => {
       total: size,
       signal: ac.signal,
       onProgress: (p) => {
-        if (p.received > size * 0.3) ac.abort();
+        if (p.received > 0) ac.abort();
       },
     }).catch(() => undefined);
 
