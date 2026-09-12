@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import path from "path";
 
 import { getChatRequestModelId, getLocalRequestModelId } from "../src/bun/chat-model";
+import { localBenchmarkModelId } from "../src/bun/benchmark";
 import { getSetting, updateSettings } from "../src/bun/db/settings";
 import { setActiveModel } from "../src/bun/model-store";
 import { resolveMlxModel } from "../src/bun/runtimes/mlx";
@@ -172,6 +173,37 @@ describe("MLX 请求模型 id", () => {
         },
       );
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * 基准测试页也会把服务名发给本地引擎。库里挑的模型本身是目录条目，
+ * 传给 mlx_lm.server 必须是它的加载目标（绝对路径），否则就是
+ * `404 ... Repository Not Found for url: .../models/<slug>/revision/main`。
+ */
+describe("基准测试的本地模型 id", () => {
+  test("活动模型用引擎认的 id，已装模型用它的加载目标", async () => {
+    const root = tempDir("bench");
+    const repoDir = path.join(root, "My-MLX-4bit");
+    mkdirSync(repoDir, { recursive: true });
+    writeFileSync(path.join(repoDir, "config.json"), "{}");
+    writeFileSync(path.join(repoDir, "model.safetensors"), "st");
+    const before = getSetting("MODEL_DIRS");
+    try {
+      updateSettings({ MODEL_DIRS: root, INFERENCE_ENGINE: "mlx", SERVER_MODE: "local" });
+      expect(setActiveModel(repoDir).ok).toBe(true);
+      // 界面默认填的是服务名 → 换算成目录绝对路径
+      expect(localBenchmarkModelId("my-mlx-4bit")).toBe(repoDir);
+      // 已经就是路径的照旧
+      expect(localBenchmarkModelId(repoDir)).toBe(repoDir);
+      // 库里其它模型：按文件名 / slug 命中，同样给出加载目标
+      expect(localBenchmarkModelId("My-MLX-4bit")).toBe(repoDir);
+      // 认不出来就原样返回，交给服务端报错
+      expect(localBenchmarkModelId("不存在的模型")).toBe("不存在的模型");
+    } finally {
+      updateSettings({ MODEL_DIRS: before });
       rmSync(root, { recursive: true, force: true });
     }
   });

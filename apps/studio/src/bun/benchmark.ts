@@ -7,6 +7,9 @@ import {
   getActiveInferenceEngine,
 } from "./db/settings";
 import { getCloudProviderInfo } from "./cloud-providers";
+import { getChatModelName, getLocalRequestModelId } from "./chat-model";
+import { listInstalledModels, slugModelFileName } from "./model-store";
+import { isMlxActive } from "./runtimes/mlx";
 import {
   ensureEvalData,
   evalDataReady,
@@ -475,6 +478,35 @@ type ActiveRun = { state: BenchmarkRunState; cancel: AbortController };
 const runs = new Map<string, ActiveRun>();
 let runCounter = 0;
 
+/**
+ * 本地引擎的基准测试模型 id。
+ *
+ * 界面传来的通常是服务名 slug，直接发过去在 MLX 上会失败：mlx_lm.server 没有
+ * `--served-model-name`，对本地目录暴露的 id 是**解析后的绝对路径**（见 resolveMlxModel），
+ * 拿到不认识的名字它会去 HuggingFace 找仓库 —— 基准测试页看到的就是
+ * `404 ... Repository Not Found for url: .../models/<slug>/revision/main`。
+ *
+ * - 活动模型（界面默认填的就是它）→ 本地引擎认的 id；
+ * - 已装的其它模型 → 用它的加载目标（MLX 能按需加载该目录；其它引擎认服务名 slug）。
+ */
+export function localBenchmarkModelId(requested: string): string {
+  const active = new Set(
+    [getChatModelName(), getSetting("LOCAL_MODEL_NAME"), getSetting("LOCAL_MODEL_PATH")].filter(Boolean),
+  );
+  if (!requested || active.has(requested)) return getLocalRequestModelId() || requested;
+
+  const slug = slugModelFileName(requested);
+  const hit = listInstalledModels().find(
+    (m) =>
+      m.path === requested ||
+      m.runtimeTarget === requested ||
+      m.fileName === requested ||
+      slugModelFileName(m.fileName) === slug,
+  );
+  if (!hit) return requested;
+  return isMlxActive() ? hit.runtimeTarget : slugModelFileName(hit.fileName);
+}
+
 export function startBenchmark(params: BenchmarkParams): { runId: string } | { error: string } {
   for (const run of runs.values()) {
     if (run.state.status === "running") return { error: "benchmark_already_running" };
@@ -504,10 +536,12 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
   }
 
   if (!base) return { error: "No inference server configured" };
-  const model = params.providerId
+  const requested = params.providerId
     ? params.model.trim()
     : params.model || getSetting("CHAT_MODEL") || getSetting("VLLM_MODEL_NAME");
-  if (!model) return { error: "No model configured" };
+  if (!requested) return { error: "No model configured" };
+  // 本地目标要把服务名换算成引擎认的 id（云端按模型 id 直传）。
+  const model = params.providerId || serverMode === "remote" ? requested : localBenchmarkModelId(requested);
 
   const batchSize = Math.max(params.batchSize ?? 1, 1);
   const genLength = Math.max(params.genLength ?? 128, 16);
