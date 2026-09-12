@@ -15,6 +15,12 @@ import {
   SelectValue,
 } from "@ui/select";
 import { rpcClient } from "@lib/rpc";
+import {
+  classifyModelName,
+  filterModelIds,
+  isChatModelCategory,
+  MODEL_CATEGORY_SETS,
+} from "@/shared/modelscope";
 import { useT } from "@stores/ui-lang";
 import { useBenchmarkStore } from "@stores/benchmark";
 import { useRouter } from "@stores/router";
@@ -118,9 +124,16 @@ export function BenchmarkScreen() {
   }, [runStatus]);
 
   const records = recordsQuery.data?.records ?? [];
+  // 测速 / 评测跑的是 LLM：本机模型的嵌入 / 语音 / 生图条目不进候选。
   const modelOptions = useMemo(
     () =>
-      Array.from(new Set((installed?.models ?? []).map((m) => m.fileName.replace(/\.gguf$/i, "")))).filter(Boolean),
+      Array.from(
+        new Set(
+          (installed?.models ?? [])
+            .filter((m) => isChatModelCategory(m.category ?? classifyModelName(m.fileName)))
+            .map((m) => m.fileName.replace(/\.gguf$/i, "")),
+        ),
+      ).filter(Boolean),
     [installed],
   );
   const effectiveModel = model || settingsData?.settings?.CHAT_MODEL || modelOptions[0] || "";
@@ -138,8 +151,14 @@ export function BenchmarkScreen() {
     }
   }, [providers, cloudActiveId, providerId]);
   const selectedProvider = providers.find((p) => p.id === providerId) ?? null;
+  // 服务商清单里混着嵌入 / 语音 / 生图模型，测速只列对话模型（认不出的保留）。
   const cloudModelOptions = useMemo(
-    () => Array.from(new Set((selectedProvider?.models ?? []).map((m) => m.id).filter(Boolean))),
+    () =>
+      filterModelIds(
+        Array.from(new Set((selectedProvider?.models ?? []).map((m) => m.id).filter(Boolean))),
+        MODEL_CATEGORY_SETS.chat,
+        { keepOther: true },
+      ).ids,
     [selectedProvider],
   );
   const effectiveCloudModel = cloudModel || cloudModelOptions[0] || "";

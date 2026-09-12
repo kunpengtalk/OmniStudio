@@ -9,7 +9,7 @@ import { DEFAULT_ASR_MODEL_FILE } from "../shared/modelscope";
 import { getTTSProviderConfig, synthesizeCallSpeech } from "./voice";
 import { isTtsLocalActive } from "./tts-local";
 import { createConversation, getChatBaseUrl, streamChatTurn, type Conversation } from "./chat";
-import { getChatModelName } from "./chat-model";
+import { getChatModelLabel } from "./chat-model";
 import {
   RealtimeVoiceClient,
   getVoiceCallProvider,
@@ -592,10 +592,11 @@ function onRealtimeEvent(session: Session, ev: RealtimeVoiceEvent): void {
 
 export function voiceCallPreflight(): Promise<VoiceCallPreflight> {
   return (async () => {
-    const modelDetail = getChatModelName()
-      ? `模型：${getChatModelName()}`
+    const modelLabel = getChatModelLabel();
+    const modelDetail = modelLabel
+      ? `模型：${modelLabel}`
       : "未配置对话模型，请先在设置中选择模型";
-    const model = { available: !!getChatModelName() && !!getChatBaseUrl(), detail: modelDetail };
+    const model = { available: !!modelLabel && !!getChatBaseUrl(), detail: modelDetail };
 
     let asr: VoiceCallPreflight["asr"];
     try {

@@ -3,7 +3,7 @@ import { controlSocketPath } from "./paths";
 import { getWindowRef } from "./window";
 import * as ServerManager from "./server-manager";
 import * as Gateway from "./gateway";
-import { getSetting, updateSettings, getAllSettings } from "./db/settings";
+import { getSetting, updateSettings, getAllSettings, getActiveServerPort } from "./db/settings";
 import { listInstalledModels, setActiveModel, getActiveModelPath, slugModelFileName } from "./model-store";
 import { downloadManager } from "./download-manager";
 import { updateState } from "./updates";
@@ -74,7 +74,8 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
             status: ServerManager.getStatus(),
             pid: ServerManager.getPid(),
             host: getSetting("SERVER_HOST") || "127.0.0.1",
-            port: Number(getSetting("SERVER_PORT") || 8080),
+            // 多实例下活动模型的端口未必等于引擎设置端口（见 model-servers.ts）。
+            port: Number(getActiveServerPort()),
             engine: getSetting("INFERENCE_ENGINE") || "llama.cpp",
             logs: ServerManager.getLogs().slice(-8000),
             error: ServerManager.getLastError() || undefined,
@@ -145,11 +146,16 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
       const repo = String(payload.repo ?? "");
       const fileName = String(payload.fileName ?? "");
       if (!repo || !fileName) return { ok: false, error: "缺少 repo / fileName" };
+      const sizeHint = Number(payload.size);
       const task = downloadManager.start(
         repo,
         fileName,
         typeof payload.category === "string" ? (payload.category as never) : undefined,
         (payload.source as "modelscope" | "huggingface") ?? "modelscope",
+        {
+          size: Number.isFinite(sizeHint) && sizeHint > 0 ? sizeHint : null,
+          explicit: payload.explicit === true,
+        },
       );
       return { ok: true, data: { task } };
     }

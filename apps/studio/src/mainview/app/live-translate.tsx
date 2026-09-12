@@ -249,6 +249,8 @@ export function LiveTranslateTab() {
       rpcClient.listProviderModels({
         base: pBase.trim() || provider?.base || undefined,
         apiKey: pKey.trim() || provider?.apiKey || undefined,
+        // 实时翻译的转写走 ASR：服务商清单里只列语音识别模型。
+        kind: "asr",
       }),
     onSuccess: (r) => {
       if (r.error) {

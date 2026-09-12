@@ -35,6 +35,10 @@ mock.module("./db/settings", () => {
     updateSettings: () => {},
     getAllSettings: () => ({}),
     getActiveServerPort: () => "18080",
+    // 已启动模型注册表（chat.ts → model-servers.ts）会经 runtimes/* 读这两个：
+    // 部分 mock 少了它们会让整个模块图命名导入失败（"Export named ... not found"）。
+    getServerPort: () => "18080",
+    ENGINE_EXTRA_ARGS_KEYS: { "llama.cpp": "", vllm: "", sglang: "", mlx: "" },
   };
 });
 mock.module("./chat-model", () => ({ getChatModelName: () => "test-model" }));
@@ -54,7 +58,7 @@ mock.module("./image-server", () => ({
     throw new Error("image-server mocked: no server in chat tests");
   },
 }));
-mock.module("./stats", () => ({ recordUsage: () => {} }));
+mock.module("./stats", () => ({ recordUsage: () => {}, markServerStarted: () => {} }));
 mock.module("./server-manager", () => ({
   getStatus: () => "running",
   getLastError: () => null,

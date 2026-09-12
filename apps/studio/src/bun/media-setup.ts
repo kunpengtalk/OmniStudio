@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 
 import * as ImageGen from "./image-gen";
 import * as MlxGen from "./mlx-gen";
+import { filterModelIds, MODEL_CATEGORY_SETS } from "../shared/modelscope";
 
 /**
  * Agent 的「需要用户介入」通道。
@@ -195,7 +196,9 @@ export async function scanSetupCandidates(input: {
     const base = (input.base ?? cfg.apiBase).trim();
     if (!base) return { candidates: [], error: "请先填写服务地址" };
     const models = await ImageGen.listImageApiModels(base, (input.apiKey ?? cfg.apiKey).trim());
-    return { candidates: models.map((m) => ({ id: m, label: m, ready: true })) };
+    // 生图服务的 /v1/models 也会列对话模型：只挑生图模型，认不出时保留全量。
+    const picked = filterModelIds(models, MODEL_CATEGORY_SETS.image, { relax: true });
+    return { candidates: picked.ids.map((m) => ({ id: m, label: m, ready: true })) };
   } catch (e) {
     return { candidates: [], error: e instanceof Error ? e.message : String(e) };
   }

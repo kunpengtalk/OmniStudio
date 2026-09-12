@@ -8,6 +8,7 @@ import {
   EyeIcon,
   EyeOffIcon,
   PlusIcon,
+  RefreshCwIcon,
   SearchIcon,
   StarIcon,
   Trash2Icon,
@@ -33,8 +34,11 @@ import { cn } from "@/mainview/lib/utils";
 import {
   CLOUD_PRESETS,
   providerColor,
+  type CloudModelEntry,
   type CloudProviderInfo,
 } from "@/shared/cloud-providers";
+import { classifyModelName, MODEL_CATEGORIES, type ModelCategory } from "@/shared/modelscope";
+import { ModelCategoryBadge, ModelCategoryIcon } from "@components/model-category-badge";
 import { PROVIDER_LOGOS, MONO_LOGO_PATHS } from "./provider-logos";
 
 /**
@@ -75,7 +79,9 @@ function ProviderLogo({
   }
   if (img) {
     return (
-      <span className={cn("flex shrink-0 items-center justify-center overflow-hidden bg-muted/60", box)}>
+      <span
+        className={cn("flex shrink-0 items-center justify-center overflow-hidden bg-muted/60", box)}
+      >
         <img src={img} alt="" draggable={false} className="size-full object-contain" />
       </span>
     );
@@ -84,7 +90,7 @@ function ProviderLogo({
     <span
       className={cn(
         "flex shrink-0 items-center justify-center font-semibold text-white",
-        size === "lg" ? "size-11 text-base rounded-xl" : "size-8 text-xs rounded-lg",
+        size === "lg" ? "size-11 rounded-xl text-base" : "size-8 rounded-lg text-xs",
       )}
       style={{ backgroundColor: color }}
     >
@@ -241,37 +247,48 @@ export function CloudProviderPanel() {
   // 模型管理：获取 / 添加 / 删除 / 设为默认
   // ------------------------------------------------------------------
   const [modelSearch, setModelSearch] = useState("");
+  const [modelTab, setModelTab] = useState<ModelCategory | "all">("all");
   const models = selected?.models ?? [];
-  const modelNeedle = modelSearch.trim().toLowerCase();
-  const filteredModels = useMemo(
-    () =>
-      modelNeedle
-        ? models.filter((m) =>
-            `${m.id} ${m.name ?? ""} ${m.group ?? ""}`.toLowerCase().includes(modelNeedle),
-          )
-        : models,
-    [models, modelNeedle],
+  // 每个模型按 id 判分类（云端返回的清单里对话 / 嵌入 / 重排 / 语音 / 生图混在一起，
+  // 按分类打标 + 筛选，用户才能一眼看出哪个模型该用在哪个场景）。
+  const modelsWithCategory = useMemo(
+    () => models.map((m) => ({ entry: m, category: classifyModelName(m.id) })),
+    [models],
   );
+  const modelNeedle = modelSearch.trim().toLowerCase();
+  const filteredModels = useMemo(() => {
+    const byTab =
+      modelTab === "all"
+        ? modelsWithCategory
+        : modelsWithCategory.filter((m) => m.category === modelTab);
+    if (!modelNeedle) return byTab;
+    return byTab.filter((m) =>
+      `${m.entry.id} ${m.entry.name ?? ""} ${m.entry.group ?? ""}`
+        .toLowerCase()
+        .includes(modelNeedle),
+    );
+  }, [modelsWithCategory, modelTab, modelNeedle]);
+  const categoryCount = (value: ModelCategory | "all") =>
+    value === "all"
+      ? modelsWithCategory.length
+      : modelsWithCategory.filter((m) => m.category === value).length;
+  /** 只显示该服务商实际有的分类，避免一排 0 的 tab。 */
+  const modelTabs = MODEL_CATEGORIES.filter((c) => c.value === "all" || categoryCount(c.value) > 0);
 
+  // 「获取模型列表」只负责把服务商清单拉回来，弹框里让用户逐个挑：
+  // 一个 /v1/models 动辄上百条，全量写进配置等于把模型列表塞爆。
+  const [pickerOpen, setPickerOpen] = useState(false);
   const fetchModelsMutation = useMutation({
     mutationFn: async () => {
-      if (!selected) return { ok: false, models: [] as string[] };
-      const res = await rpcClient.listRemoteModels({
+      if (!selected) return { ok: false, models: [] as string[], error: undefined };
+      return rpcClient.listRemoteModels({
         baseUrl: draftBase.trim(),
         apiKey: draftKey.trim() || "EMPTY",
       });
-      if (!res.ok) return res;
-      // 合并：保留已有条目的 name/group/remark，新增的只带 id
-      const merged = new Map(models.map((m) => [m.id, m]));
-      for (const id of res.models) if (!merged.has(id)) merged.set(id, { id });
-      await rpcClient.cloudProviderUpdate({
-        id: selected.id,
-        models: Array.from(merged.values()),
-      });
-      return res;
     },
-    onSuccess: invalidate,
+    onSuccess: () => setPickerOpen(true),
   });
+  const remoteIds = fetchModelsMutation.data?.models ?? [];
 
   const [showAddModel, setShowAddModel] = useState(false);
   const [dlgId, setDlgId] = useState("");
@@ -310,11 +327,27 @@ export function CloudProviderPanel() {
   });
 
   const removeModelMutation = useMutation({
-    mutationFn: async (modelId: string) => {
+    mutationFn: async (modelIds: string[]) => {
       if (!selected) return;
+      const drop = new Set(modelIds);
       await rpcClient.cloudProviderUpdate({
         id: selected.id,
-        models: models.filter((m) => m.id !== modelId),
+        models: models.filter((m) => !drop.has(m.id)),
+      });
+    },
+    onSuccess: invalidate,
+  });
+
+  /** 批量添加（弹框里的单个 / 整个分组 / 全部）：只补还没有的 id，不覆盖已有条目。 */
+  const addModelsMutation = useMutation({
+    mutationFn: async (modelIds: string[]) => {
+      if (!selected) return;
+      const have = new Set(models.map((m) => m.id));
+      const added = modelIds.filter((id) => !have.has(id)).map((id) => ({ id }));
+      if (added.length === 0) return;
+      await rpcClient.cloudProviderUpdate({
+        id: selected.id,
+        models: [...models, ...added],
       });
     },
     onSuccess: invalidate,
@@ -387,9 +420,7 @@ export function CloudProviderPanel() {
                   onKeyDown={(e) => e.key === "Enter" && setSelectedId(p.id)}
                   className={cn(
                     "flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
-                    isSelected
-                      ? "bg-primary/10 text-primary"
-                      : "text-foreground hover:bg-muted",
+                    isSelected ? "bg-primary/10 text-primary" : "text-foreground hover:bg-muted",
                   )}
                 >
                   <ProviderLogo provider={p} />
@@ -399,7 +430,7 @@ export function CloudProviderPanel() {
                       <span className="block truncate text-[11px] opacity-60">{p.vendor}</span>
                     )}
                   </span>
-                  <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground tabular-nums">
                     {p.models.length}
                   </span>
                   <Toggle
@@ -415,7 +446,9 @@ export function CloudProviderPanel() {
               );
             })}
             {filteredProviders.length === 0 && (
-              <p className="py-6 text-center text-xs text-muted-foreground">{t("cloud.noProviders")}</p>
+              <p className="py-6 text-center text-xs text-muted-foreground">
+                {t("cloud.noProviders")}
+              </p>
             )}
           </div>
           <Button
@@ -495,7 +528,11 @@ export function CloudProviderPanel() {
                             onClick={() => setShowKey((v) => !v)}
                             className="text-muted-foreground transition-colors hover:text-foreground"
                           >
-                            {showKey ? <EyeOffIcon className="size-3.5" /> : <EyeIcon className="size-3.5" />}
+                            {showKey ? (
+                              <EyeOffIcon className="size-3.5" />
+                            ) : (
+                              <EyeIcon className="size-3.5" />
+                            )}
                           </button>
                           <button
                             type="button"
@@ -550,7 +587,9 @@ export function CloudProviderPanel() {
                     className="h-8 font-mono text-xs"
                   />
                   {isSelectedActive && (
-                    <p className="mt-1.5 text-[11px] text-muted-foreground">{t("cloud.activeHint")}</p>
+                    <p className="mt-1.5 text-[11px] text-muted-foreground">
+                      {t("cloud.activeHint")}
+                    </p>
                   )}
                 </div>
               </div>
@@ -559,7 +598,7 @@ export function CloudProviderPanel() {
               <div className="rounded-xl border bg-card shadow-sm">
                 <div className="flex items-center gap-2 border-b px-4 py-2.5">
                   <p className="text-[13px] font-medium">{t("cloud.models")}</p>
-                  <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
+                  <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
                     {models.length}
                   </span>
                   <div className="ml-auto flex items-center gap-2">
@@ -598,20 +637,32 @@ export function CloudProviderPanel() {
                 </div>
 
                 <div className="flex flex-col gap-2 p-3">
-                  {fetchModelsMutation.isSuccess && !fetchModelsMutation.data?.ok && (
-                    <p className="flex items-start gap-1 text-[11px] text-destructive">
-                      <XCircleIcon className="mt-0.5 size-3 shrink-0" />
-                      <span className="min-w-0 break-words">
-                        {t("cloud.fetchFailed")}：{fetchModelsMutation.data?.error}
-                      </span>
-                    </p>
-                  )}
-                  {fetchModelsMutation.isSuccess && fetchModelsMutation.data?.ok && (
-                    <p className="flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400">
-                      <CheckIcon className="size-3" />
-                      {t("cloud.fetchedPrefix")} {fetchModelsMutation.data.models.length}{" "}
-                      {t("cloud.modelsUnit")}
-                    </p>
+                  {models.length > 0 && (
+                    /* 分类筛选：模型带分类进场（云端清单里对话 / 嵌入 / 重排 / 语音…混在一起），
+                       切 tab 只看一类，右侧标出该类模型数。 */
+                    <div className="flex flex-wrap items-center gap-1">
+                      {modelTabs.map((cat) => {
+                        const active = modelTab === cat.value;
+                        return (
+                          <button
+                            key={cat.value}
+                            type="button"
+                            onClick={() => setModelTab(cat.value)}
+                            className={cn(
+                              "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
+                              active
+                                ? "border-primary bg-primary/10 text-primary"
+                                : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
+                            )}
+                          >
+                            {t(cat.labelKey)}
+                            <span className="ml-1 tabular-nums opacity-60">
+                              {categoryCount(cat.value)}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
                   )}
 
                   {models.length === 0 ? (
@@ -623,13 +674,16 @@ export function CloudProviderPanel() {
                       <thead>
                         <tr className="border-b text-left text-muted-foreground">
                           <th className="px-2 py-1.5 font-medium">{t("cloud.colModel")}</th>
+                          <th className="px-2 py-1.5 font-medium">{t("cloud.colCategory")}</th>
                           <th className="px-2 py-1.5 font-medium">{t("cloud.colGroup")}</th>
                           <th className="px-2 py-1.5 font-medium">{t("cloud.colStatus")}</th>
-                          <th className="px-2 py-1.5 text-right font-medium">{t("cloud.colActions")}</th>
+                          <th className="px-2 py-1.5 text-right font-medium">
+                            {t("cloud.colActions")}
+                          </th>
                         </tr>
                       </thead>
                       <tbody>
-                        {filteredModels.map((entry) => {
+                        {filteredModels.map(({ entry, category }) => {
                           const isDefault = cloudActive && entry.id === currentModel;
                           return (
                             <tr key={entry.id} className="border-b border-muted/50 last:border-0">
@@ -642,6 +696,12 @@ export function CloudProviderPanel() {
                                     </span>
                                   )}
                                 </span>
+                              </td>
+                              <td className="px-2 py-1.5">
+                                <ModelCategoryBadge
+                                  category={category}
+                                  label={t(`models.cat.${category}`)}
+                                />
                               </td>
                               <td className="px-2 py-1.5">
                                 {entry.group ? (
@@ -681,7 +741,7 @@ export function CloudProviderPanel() {
                                     className="h-6 w-6 text-muted-foreground hover:text-destructive"
                                     tooltip={t("cloud.removeModel")}
                                     disabled={removeModelMutation.isPending}
-                                    onClick={() => removeModelMutation.mutate(entry.id)}
+                                    onClick={() => removeModelMutation.mutate([entry.id])}
                                   >
                                     <Trash2Icon className="size-3.5" />
                                   </Button>
@@ -692,7 +752,7 @@ export function CloudProviderPanel() {
                         })}
                         {filteredModels.length === 0 && (
                           <tr>
-                            <td colSpan={4} className="px-2 py-4 text-center text-muted-foreground">
+                            <td colSpan={5} className="px-2 py-4 text-center text-muted-foreground">
                               {t("cloud.noModelMatch")}
                             </td>
                           </tr>
@@ -720,10 +780,19 @@ export function CloudProviderPanel() {
                 ["dlg-model-id", t("cloud.modelId"), "例如 gpt-5.5", dlgId, setDlgId, true],
                 ["dlg-model-name", t("cloud.modelName"), "例如 GPT-5.5", dlgName, setDlgName],
                 ["dlg-model-group", t("cloud.modelGroup"), "例如 ChatGPT", dlgGroup, setDlgGroup],
-                ["dlg-model-remark", t("cloud.modelRemark"), t("cloud.modelRemarkPh"), dlgRemark, setDlgRemark],
+                [
+                  "dlg-model-remark",
+                  t("cloud.modelRemark"),
+                  t("cloud.modelRemarkPh"),
+                  dlgRemark,
+                  setDlgRemark,
+                ],
               ] as const
             ).map(([id, label, ph, value, setValue, required], idx) => (
-              <div key={id} className={cn("flex items-center gap-3", idx === 3 && !dlgMore && "hidden")}>
+              <div
+                key={id}
+                className={cn("flex items-center gap-3", idx === 3 && !dlgMore && "hidden")}
+              >
                 <Label htmlFor={id} className="w-20 shrink-0 text-xs">
                   {label}
                   {required && <span className="text-destructive"> *</span>}
@@ -746,7 +815,9 @@ export function CloudProviderPanel() {
               className="flex w-fit items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
             >
               {t("cloud.moreSettings")}
-              <ChevronDownIcon className={cn("size-3.5 transition-transform", dlgMore && "rotate-180")} />
+              <ChevronDownIcon
+                className={cn("size-3.5 transition-transform", dlgMore && "rotate-180")}
+              />
             </button>
           </div>
 
@@ -754,7 +825,11 @@ export function CloudProviderPanel() {
             <Button variant="outline" size="sm" onClick={() => setShowAddModel(false)}>
               {t("common.cancel")}
             </Button>
-            <Button size="sm" onClick={() => addModelMutation.mutate()} disabled={!dlgId.trim() || addModelMutation.isPending}>
+            <Button
+              size="sm"
+              onClick={() => addModelMutation.mutate()}
+              disabled={!dlgId.trim() || addModelMutation.isPending}
+            >
               {addModelMutation.isPending ? <Spinner data-icon="inline-start" /> : null}
               {t("cloud.addModel")}
             </Button>
@@ -789,6 +864,25 @@ export function CloudProviderPanel() {
         </DialogContent>
       </Dialog>
 
+      {/* 获取模型列表 → 逐个挑模型 */}
+      <RemoteModelsDialog
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        providerName={selected?.name ?? ""}
+        loading={fetchModelsMutation.isPending}
+        error={
+          fetchModelsMutation.data && !fetchModelsMutation.data.ok
+            ? fetchModelsMutation.data.error
+            : undefined
+        }
+        remoteIds={remoteIds}
+        models={models}
+        busy={addModelsMutation.isPending || removeModelMutation.isPending}
+        onAdd={(ids) => addModelsMutation.mutate(ids)}
+        onRemove={(ids) => removeModelMutation.mutate(ids)}
+        onRetry={() => fetchModelsMutation.mutate()}
+      />
+
       {/* 添加服务商弹窗 */}
       <AddProviderDialog
         open={showAddProvider}
@@ -800,6 +894,337 @@ export function CloudProviderPanel() {
         }}
       />
     </div>
+  );
+}
+
+/** 弹框里的一行：远程模型 id + 分类 + 是不是已经加过。 */
+type RemoteModelRow = { id: string; category: ModelCategory; added: boolean; stale: boolean };
+
+/**
+ * 「获取模型列表」结果弹框：服务商的 /v1/models 会把对话 / 嵌入 / 重排 / 语音 / 生图
+ * 一起返回，动辄几十上百条。这里按 id 前缀分组列出来，用户逐个「+」添加；
+ * 顺带把本地配了、服务商已经不再返回的模型标成「失效」，可一键清理。
+ */
+function RemoteModelsDialog({
+  open,
+  onOpenChange,
+  providerName,
+  loading,
+  error,
+  remoteIds,
+  models,
+  busy,
+  onAdd,
+  onRemove,
+  onRetry,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  providerName: string;
+  loading: boolean;
+  error?: string;
+  remoteIds: string[];
+  models: CloudModelEntry[];
+  busy: boolean;
+  onAdd: (ids: string[]) => void;
+  onRemove: (ids: string[]) => void;
+  onRetry: () => void;
+}) {
+  const t = useT();
+  const [search, setSearch] = useState("");
+  const [tab, setTab] = useState<ModelCategory | "all" | "stale">("all");
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (open) {
+      setSearch("");
+      setTab("all");
+      setCollapsed(new Set());
+    }
+  }, [open]);
+
+  const haveSet = useMemo(() => new Set(models.map((m) => m.id)), [models]);
+  const candidates = useMemo(
+    () => remoteIds.map((id) => ({ id, category: classifyModelName(id), added: haveSet.has(id) })),
+    [remoteIds, haveSet],
+  );
+  /** 本地配了、服务商这次没返回的模型（多半已下线）—— 清干净前先让用户看见。 */
+  const stale = useMemo(
+    () => (remoteIds.length > 0 ? models.filter((m) => !remoteIds.includes(m.id)) : []),
+    [models, remoteIds],
+  );
+  const missing = candidates.filter((c) => !c.added).map((c) => c.id);
+
+  const needle = search.trim().toLowerCase();
+  const rows: RemoteModelRow[] = useMemo(() => {
+    if (tab === "stale") {
+      return stale.map((m) => ({
+        id: m.id,
+        category: classifyModelName(m.id),
+        added: true,
+        stale: true,
+      }));
+    }
+    const base = tab === "all" ? candidates : candidates.filter((c) => c.category === tab);
+    return base.map((c) => ({ ...c, stale: false }));
+  }, [tab, candidates, stale]);
+  const visible = needle ? rows.filter((r) => r.id.toLowerCase().includes(needle)) : rows;
+
+  // 按 id 前缀（厂商 / 组织名）分组：一个服务商动辄上百个模型，分组才好找。
+  const groups = useMemo(() => {
+    const map = new Map<string, RemoteModelRow[]>();
+    for (const r of visible) {
+      const slash = r.id.indexOf("/");
+      const key = slash > 0 ? r.id.slice(0, slash) : "";
+      const bucket = map.get(key);
+      if (bucket) bucket.push(r);
+      else map.set(key, [r]);
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [visible]);
+
+  const tabCount = (value: ModelCategory | "all" | "stale") =>
+    value === "stale"
+      ? stale.length
+      : value === "all"
+        ? candidates.length
+        : candidates.filter((c) => c.category === value).length;
+  // 分类是固定的：云端有没有这一类、请求通不通，都照常展示（计数可能是 0），
+  // 免得每次拉取回来 tab 条都在变，用户也分不清是自己没拉到还是这一类本来就没有。
+  const tabs: { value: ModelCategory | "all" | "stale"; label: string }[] = [
+    ...MODEL_CATEGORIES.map((c) => ({ value: c.value, label: t(c.labelKey) })),
+    { value: "stale" as const, label: t("cloud.tabStale") },
+  ];
+
+  const toggleGroup = (key: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      {/* DialogContent 自带 sm:max-w-sm，宽屏下得用同样的断点前缀才盖得住 */}
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            {t("cloud.pickTitle")}
+            <span className="font-mono text-[10px] font-normal text-muted-foreground tabular-nums">
+              {providerName}
+            </span>
+          </DialogTitle>
+          <DialogDescription>{t("cloud.pickDesc")}</DialogDescription>
+        </DialogHeader>
+
+        {/* 弹框永远是同一套页面：工具栏 + 固定分类条 + 清单。
+            拉取失败或没数据只是清单变空，不把整页换成报错。 */}
+        <>
+          {/* 工具栏：搜索 + 批量 */}
+          <div className="flex items-center gap-2">
+            <div className="relative min-w-0 flex-1">
+              <Input
+                placeholder={t("cloud.modelSearch")}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="h-8 rounded-lg pl-8 text-xs"
+              />
+              <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 opacity-50" />
+            </div>
+            {tab !== "stale" && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 shrink-0 text-xs"
+                disabled={busy || missing.length === 0}
+                onClick={() => onAdd(missing)}
+              >
+                <PlusIcon data-icon="inline-start" className="size-3.5" />
+                {t("cloud.addAll")}
+              </Button>
+            )}
+            {stale.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 shrink-0 text-xs text-muted-foreground hover:text-destructive"
+                disabled={busy}
+                onClick={() => onRemove(stale.map((m) => m.id))}
+              >
+                <Trash2Icon data-icon="inline-start" className="size-3.5" />
+                {t("cloud.cleanStale")}
+              </Button>
+            )}
+          </div>
+
+          {/* 分类筛选：切 tab 只看一类，右边跟数量 */}
+          <div className="flex flex-wrap items-center gap-1">
+            {tabs.map((item) => {
+              const active = tab === item.value;
+              return (
+                <button
+                  key={item.value}
+                  type="button"
+                  onClick={() => setTab(item.value)}
+                  className={cn(
+                    "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
+                    active
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
+                  )}
+                >
+                  {item.label}
+                  <span className="ml-1 tabular-nums opacity-60">{tabCount(item.value)}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {tab === "stale" && (
+            <p className="text-[11px] text-muted-foreground">{t("cloud.staleHint")}</p>
+          )}
+
+          {/* 分组清单 */}
+          <div className="max-h-[52vh] overflow-y-auto rounded-xl border">
+            {groups.map(([group, items]) => {
+              const groupMissing = items.filter((r) => !r.stale && !r.added).map((r) => r.id);
+              const isCollapsed = collapsed.has(group);
+              return (
+                <div key={group || "__other"} className="border-b last:border-0">
+                  <div className="sticky top-0 z-10 flex items-center gap-1.5 bg-muted/60 px-2 py-1 backdrop-blur">
+                    <button
+                      type="button"
+                      onClick={() => toggleGroup(group)}
+                      className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                    >
+                      <ChevronDownIcon
+                        className={cn(
+                          "size-3.5 shrink-0 text-muted-foreground transition-transform",
+                          isCollapsed && "-rotate-90",
+                        )}
+                      />
+                      <span className="truncate text-[11px] font-medium">
+                        {group || t("cloud.groupOther")}
+                      </span>
+                      <span className="shrink-0 font-mono text-[10px] text-muted-foreground tabular-nums">
+                        {items.length}
+                      </span>
+                    </button>
+                    {groupMissing.length > 1 && (
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        className="h-5 w-5 text-muted-foreground"
+                        tooltip={t("cloud.addGroup")}
+                        disabled={busy}
+                        onClick={() => onAdd(groupMissing)}
+                      >
+                        <PlusIcon className="size-3" />
+                      </Button>
+                    )}
+                  </div>
+                  {!isCollapsed &&
+                    items.map((row) => {
+                      const slash = row.id.indexOf("/");
+                      const label = slash > 0 ? row.id.slice(slash + 1) : row.id;
+                      return (
+                        <div
+                          key={row.id}
+                          data-remote-model={row.id}
+                          className="flex items-center gap-2 px-2 py-1.5 pl-7 hover:bg-muted/40"
+                        >
+                          <ModelCategoryIcon
+                            category={row.category}
+                            label={t(`models.cat.${row.category}`)}
+                          />
+                          <span
+                            className="min-w-0 flex-1 truncate font-mono text-[11px]"
+                            title={row.id}
+                          >
+                            {label}
+                          </span>
+                          {row.stale ? (
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              className="h-6 w-6 shrink-0 text-muted-foreground hover:text-destructive"
+                              tooltip={t("cloud.removeModel")}
+                              disabled={busy}
+                              onClick={() => onRemove([row.id])}
+                            >
+                              <Trash2Icon className="size-3.5" />
+                            </Button>
+                          ) : row.added ? (
+                            <span className="flex shrink-0 items-center gap-1 text-[10px] text-muted-foreground">
+                              <CheckIcon className="size-3" />
+                              {t("cloud.pickAdded")}
+                            </span>
+                          ) : (
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              className="h-6 w-6 shrink-0 text-muted-foreground"
+                              tooltip={t("cloud.addModel")}
+                              disabled={busy}
+                              onClick={() => onAdd([row.id])}
+                            >
+                              <PlusIcon className="size-3.5" />
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              );
+            })}
+            {/* 清单为空分三种：正在拉、没拉到（网络/密钥问题）、这一类本来就没有 */}
+            {loading && (
+              <div className="flex items-center justify-center gap-2 px-3 py-8 text-xs text-muted-foreground">
+                <Spinner className="size-4" />
+                {t("cloud.pickLoading")}
+              </div>
+            )}
+            {!loading && visible.length === 0 && (
+              <div className="flex flex-col items-center gap-2 px-3 py-8">
+                <p
+                  className={cn(
+                    "text-center text-xs",
+                    error ? "text-destructive" : "text-muted-foreground",
+                  )}
+                >
+                  {error
+                    ? `${t("cloud.fetchFailed")}：${error}`
+                    : needle
+                      ? t("cloud.noModelMatch")
+                      : tab === "stale"
+                        ? t("cloud.staleEmpty")
+                        : t("cloud.pickEmpty")}
+                </p>
+                {error && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={onRetry}
+                    disabled={busy}
+                  >
+                    <RefreshCwIcon data-icon="inline-start" className="size-3.5" />
+                    {t("common.retry")}
+                  </Button>
+                )}
+              </div>
+            )}
+          </div>
+        </>
+
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
+            {t("common.done")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -864,9 +1289,7 @@ function AddProviderDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>
-            {customStep ? t("cloud.custom") : t("cloud.add")}
-          </DialogTitle>
+          <DialogTitle>{customStep ? t("cloud.custom") : t("cloud.add")}</DialogTitle>
           {!customStep && <DialogDescription>{t("cloud.addDesc")}</DialogDescription>}
         </DialogHeader>
 

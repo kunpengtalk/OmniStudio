@@ -61,11 +61,21 @@ mock.module("@lib/rpc", () => ({
   rpcClient: {
     kbEmbeddingModels: async () => {
       calls.embedding += 1;
-      return { models: ["bge-m3"] };
+      return {
+        local: ["bge-m3"],
+        remote: [],
+        service: { base: "http://127.0.0.1:8123", kind: "local" },
+        relaxed: false,
+      };
     },
     kbRerankModels: async () => {
       calls.rerank += 1;
-      return { models: ["bge-reranker-v2-m3"] };
+      return {
+        local: ["bge-reranker-v2-m3"],
+        remote: [],
+        service: { base: "http://127.0.0.1:8123", kind: "local" },
+        relaxed: false,
+      };
     },
     kbCreate: async () => ({ kb: { id: 1 } }),
   },

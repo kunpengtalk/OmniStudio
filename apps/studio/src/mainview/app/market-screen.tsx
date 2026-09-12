@@ -13,6 +13,7 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { SourceBadge } from "@components/source-badge";
+import { ModelCategoryBadge, ModelFormatBadge } from "@components/model-category-badge";
 import { useEngine } from "@lib/use-engine";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
@@ -55,21 +56,6 @@ function formatCount(n: number): string {
   return String(n);
 }
 
-const CAT_BADGE_CLASSES: Record<string, string> = {
-  chat: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400",
-  tts: "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-400",
-  asr: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
-  image: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
-  other: "bg-muted text-muted-foreground",
-};
-
-/** 格式徽标的配色：与文件列表/本地模型库里的格式徽标保持一致。 */
-const FORMAT_BADGE_CLASSES: Record<SearchFormat, string> = {
-  gguf: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400",
-  safetensors: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
-  mlx: "bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-400",
-};
-
 function SearchResultRow({
   model,
   onOpenDetail,
@@ -100,24 +86,9 @@ function SearchResultRow({
         <div className="flex flex-wrap items-center gap-2">
           <span className="truncate text-sm font-medium">{model.name || model.id}</span>
           <SourceBadge source={model.source} />
-          <span
-            className={cn(
-              "inline-flex h-5 items-center rounded-full px-1.5 text-[10px] font-medium",
-              CAT_BADGE_CLASSES[cat],
-            )}
-          >
-            {t(`models.cat.${cat}`)}
-          </span>
+          <ModelCategoryBadge category={cat} label={t(`models.cat.${cat}`)} />
           {model.formats.map((f) => (
-            <span
-              key={f}
-              className={cn(
-                "inline-flex h-5 shrink-0 items-center rounded-full px-1.5 text-[10px] font-medium",
-                FORMAT_BADGE_CLASSES[f],
-              )}
-            >
-              {t(`models.format.${f}`)}
-            </span>
+            <ModelFormatBadge key={f} kind={f} label={t(`models.format.${f}`)} />
           ))}
         </div>
         <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/70">

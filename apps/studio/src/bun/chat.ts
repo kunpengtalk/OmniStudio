@@ -4,12 +4,13 @@ import { desc, eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { conversations, messages } from "./db/schema";
 import { getSetting, getActiveServerPort } from "./db/settings";
-import { getChatModelName, getChatRequestModelId } from "./chat-model";
+import { getChatModelLabel, getChatRequestModelId } from "./chat-model";
 import { mergeSystemMessages, parseChatDelta } from "./chat-messages";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { recordUsage } from "./stats";
 import { webSearch } from "./web-search";
-import { getStatus, getLastError, startServer } from "./server-manager";
+import { getLastError, startServer } from "./server-manager";
+import * as Served from "./model-servers";
 import { buildChatContext } from "./knowledge";
 import { memoryEnabled, memoryRecallSection } from "./memory";
 import type { KbCitation } from "../shared/knowledge";
@@ -253,7 +254,7 @@ export function getConversation(id: number): {
 export function createConversation(title?: string, app: string = "chat"): Conversation {
   const result = db
     .insert(conversations)
-    .values({ title: title?.trim() || "New conversation", app, modelId: getChatModelName() || getSetting("CHAT_MODEL") || null })
+    .values({ title: title?.trim() || "New conversation", app, modelId: getChatModelLabel() || getSetting("CHAT_MODEL") || null })
     .returning()
     .get();
   return result as Conversation;
@@ -325,31 +326,73 @@ export function getChatBaseUrl(): string {
 }
 
 /**
- * Ensure the local inference server is ready before sending: auto-start it when
- * stopped, and wait for an already-triggered start (e.g. from the model picker)
- * to reach "running". Startup progress is streamed to the UI via
- * serverStatusChanged, so the frontend can show a progress indicator meanwhile.
+ * 本地模式发消息前的就绪检查。
+ *
+ * 已启动模型注册表里没有实例时**不再自动冷启动**：启动 / 卸载是控制台的事，
+ * 让人在对话框里等一次几分钟的加载（还看不到进度）体验很差 —— 这里直接给提示，
+ * 让用户去控制台启动，或换成已启动的模型 / 云端模型。
+ *
+ * 两个例外：
+ * - `autoStart: true`（`omi chat` / `omi launch`）仍按设置后台拉起，CLI 没有控制台；
+ * - 端口上本来就有别人起的 OpenAI 兼容服务（外部 llama-server / `omi serve`）时直接复用。
  */
 export async function ensureServerReady(
-  timeoutMs = 180_000,
+  opts: { autoStart?: boolean; timeoutMs?: number } = {},
 ): Promise<{ ok: boolean; error?: string }> {
+  const timeoutMs = opts.timeoutMs ?? 180_000;
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const status = getStatus();
-    if (status === "running") return { ok: true };
-    if (status === "error") {
-      return { ok: false, error: getLastError() || "Inference server failed to start" };
+
+  let served = Served.getRequestTargetServedModel();
+  if (served) {
+    while (Date.now() < deadline) {
+      served = Served.getRequestTargetServedModel();
+      if (!served) break;
+      if (served.status === "running") return { ok: true };
+      // 启动失败：把注册表里记的原因给出来（比一句 "not ready" 有用）。
+      if (served.status === "error") {
+        return { ok: false, error: served.error || getLastError() || "Inference server failed to start" };
+      }
+      if (served.status === "stopped") break;
+      // starting / downloading —— 加载中，继续等。
+      await Bun.sleep(500);
     }
-    if (status === "stopped") {
-      // startServer resolves only once the health check passes.
-      const result = await startServer();
-      if (!result.ok) return { ok: false, error: result.error || "Failed to start inference server" };
-      return { ok: true };
+    const current = Served.getRequestTargetServedModel();
+    if (current?.status === "error") {
+      return { ok: false, error: current.error || "Inference server failed to start" };
     }
-    // starting / downloading — keep waiting for the status to advance.
-    await Bun.sleep(500);
   }
-  return { ok: false, error: "Timed out waiting for the inference server to start" };
+
+  // 端口上有活着的 OpenAI 兼容服务（外部起的 / 应用启动时拉起的旧实例）：直接用。
+  if (await probeLocalServer()) return { ok: true };
+
+  if (opts.autoStart) {
+    // startServer 要等健康检查通过才 resolve。
+    const result = await startServer();
+    if (!result.ok) return { ok: false, error: result.error || "Failed to start inference server" };
+    return { ok: true };
+  }
+
+  return { ok: false, error: LOCAL_MODEL_NOT_RUNNING };
+}
+
+/**
+ * 「本地没有模型在跑」的统一提示：聊天里出现的就是这句话，
+ * 说清楚该去哪儿启动，而不是让人对着一个转圈的下拉框猜。
+ */
+export const LOCAL_MODEL_NOT_RUNNING =
+  "No local model is running. Start one in Settings → Console (控制台), or switch to a cloud model.";
+
+/** 探测本机推理端口上有没有活着的 OpenAI 兼容服务。 */
+async function probeLocalServer(): Promise<boolean> {
+  try {
+    const port = getActiveServerPort();
+    const res = await fetch(`http://localhost:${port}/v1/models`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -586,7 +629,7 @@ async function streamAssistantReply(opts: {
     }
     if (buffer.trim()) consumeLine(buffer);
 
-    recordUsage(getChatModelName() || model, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0);
+    recordUsage(getChatModelLabel() || model, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0);
     // 收尾前先冲掉最后一批增量，避免 emitDone 先到、尾巴几个字后到。
     flushChunks();
   } catch (e) {

@@ -331,7 +331,9 @@ export function MediaSetupDialog() {
                 <p className="text-[11px] text-muted-foreground">{t("media.setup.scanEmpty")}</p>
               )}
               {candidates.length > 0 && (
-                <ScrollArea className="max-h-44">
+                // 高度必须给到滚动区自己（确定高度）：只给 max-h 的话 Radix 视口
+                // 会被内容撑开、列表被裁掉且拉不动（见 download-panel 的同款说明）。
+                <ScrollArea className="h-44">
                   <div className="flex flex-col gap-1 pr-2">
                     {candidates.map((candidate) => {
                       const isReady = candidate.ready !== false;

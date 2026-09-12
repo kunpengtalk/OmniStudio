@@ -167,7 +167,9 @@ export type SettingsKey =
   // 模型云服务（cloud_providers 表的兼容槽位：激活行写回，网关 / CLI 消费）
   | "CLOUD_PROVIDER"
   | "CLOUD_MODELS"
-  | "CUSTOM_PROVIDERS";
+  | "CUSTOM_PROVIDERS"
+  // 已启动模型注册表：当前活动实例 id（本地模式请求的目标），见 bun/model-servers.ts
+  | "SERVED_ACTIVE_ID";
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
@@ -349,6 +351,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   CLOUD_PROVIDER: "",
   CLOUD_MODELS: "[]",
   CUSTOM_PROVIDERS: "[]",
+  SERVED_ACTIVE_ID: "",
 };
 
 /**
@@ -427,6 +430,16 @@ export function getActiveInferenceEngine(): InferenceEngine {
 }
 
 /** The listen port of the currently active LLM inference engine. */
+/**
+ * 运行期端口覆盖：同时驻留多个模型时，活动实例的端口未必等于引擎的设置端口
+ * （只有第一个启动的实例占设置端口）。由 model-servers 维护，不落库。
+ */
+let activePortOverride: string | null = null;
+
+export function setActiveServerPortOverride(port: string | null) {
+  activePortOverride = port;
+}
+
 export function getActiveServerPort(): string {
-  return getServerPort(getActiveInferenceEngine());
+  return activePortOverride || getServerPort(getActiveInferenceEngine());
 }

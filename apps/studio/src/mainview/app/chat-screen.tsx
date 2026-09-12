@@ -18,6 +18,7 @@ import {
   CopyIcon,
   RotateCcwIcon,
   LanguagesIcon,
+  SquareTerminalIcon,
   Trash2Icon,
 } from "lucide-react";
 
@@ -29,7 +30,9 @@ import type { KbCitation } from "../../shared/knowledge";
 import { useChatStore } from "@stores/chat";
 import { useAppStore } from "@stores/app";
 import { useT } from "@stores/ui-lang";
+import { useRouter } from "@stores/router";
 import { useServerStore } from "@stores/server";
+import { useServedStore } from "@stores/served";
 import { Markdown } from "@components/markdown";
 import { ModelPicker } from "@components/model-picker";
 import { persistedErrorMessage, serverErrorHint } from "@/mainview/lib/server-error";
@@ -454,6 +457,7 @@ const MemoizedMessageBubble = memo(MessageBubble);
 function ChatMessages({ conversationId }: { conversationId: number }) {
   const queryClient = useQueryClient();
   const t = useT();
+  const setRoute = useRouter((s) => s.setRoute);
   const activeMessages = useChatStore((s) => s.activeMessages);
   const streaming = useChatStore((s) => s.streaming);
   const serverStatus = useServerStore((s) => s.status);
@@ -485,9 +489,25 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
     setWebSearch(webSearchDefault);
   }
 
+  // 本地就绪状态看**已启动模型**：活动实例在加载中 / 报错，或者一个都没启动。
+  const servedModels = useServedStore((s) => s.models);
+  const activeServed = servedModels.find((m) => m.isActive);
+  const localReady = servedModels.some(
+    (m) => m.status === "running" || m.status === "starting" || m.status === "downloading",
+  );
   const serverStarting =
-    !isRemoteMode && (serverStatus === "starting" || serverStatus === "downloading");
-  const serverFailed = !isRemoteMode && serverStatus === "error";
+    !isRemoteMode &&
+    (activeServed?.status === "starting" || activeServed?.status === "downloading");
+  const serverFailed = !isRemoteMode && activeServed?.status === "error";
+  // 端口上可能已经有别人起的服务（`omi serve` / 自建 llama-server）：探到就不提示启动。
+  const { data: localStatus } = useQuery({
+    queryKey: ["server-status"],
+    queryFn: () => rpcClient.getServerStatus(),
+    enabled: !isRemoteMode && !localReady,
+    refetchInterval: 8000,
+  });
+  const noLocalModel =
+    !isRemoteMode && !localReady && localStatus !== undefined && !localStatus.reachable;
 
   useEffect(() => {
     useChatStore.getState().setStreaming(false);
@@ -653,27 +673,47 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
 
       <div className="shrink-0 border-t bg-gradient-to-t from-muted/40 to-transparent p-4">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
-          {(serverStarting || (sendMutation.isPending && serverFailed)) && (
+          {(noLocalModel || serverStarting || (sendMutation.isPending && serverFailed)) && (
             <div
               className={cn(
                 "flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs",
                 serverFailed
                   ? "border-destructive/30 bg-destructive/10 text-destructive"
-                  : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+                  : noLocalModel
+                    ? "border-border bg-muted/50 text-muted-foreground"
+                    : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400",
               )}
             >
-              <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+              {noLocalModel || serverFailed ? (
+                <AlertTriangleIcon className="size-3.5 shrink-0" />
+              ) : (
+                <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+              )}
               <span className="truncate">
-                {serverFailed
-                  ? t("server.startFailed")
-                  : serverStatus === "downloading"
-                    ? t("server.startingModel")
-                    : t("server.waitingForModel")}
+                {noLocalModel
+                  ? t("chat.noLocalModel")
+                  : serverFailed
+                    ? t("server.startFailed")
+                    : activeServed?.status === "downloading"
+                      ? t("server.startingModel")
+                      : t("server.waitingForModel")}
               </span>
-              {serverStarting && (
-                <span className="ml-auto h-1 w-20 shrink-0 overflow-hidden rounded-full bg-amber-500/20">
-                  <span className="block h-full w-1/2 animate-pulse rounded-full bg-amber-500" />
-                </span>
+              {noLocalModel ? (
+                <Button
+                  variant="outline"
+                  size="xs"
+                  className="ml-auto h-6 shrink-0"
+                  onClick={() => setRoute({ path: "settings", tab: "logs" })}
+                >
+                  <SquareTerminalIcon data-icon="inline-start" />
+                  {t("chat.modelStartInConsole")}
+                </Button>
+              ) : (
+                serverStarting && (
+                  <span className="ml-auto h-1 w-20 shrink-0 overflow-hidden rounded-full bg-amber-500/20">
+                    <span className="block h-full w-1/2 animate-pulse rounded-full bg-amber-500" />
+                  </span>
+                )
               )}
             </div>
           )}

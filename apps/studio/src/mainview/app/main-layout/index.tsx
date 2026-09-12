@@ -9,7 +9,7 @@ import { SidebarInset, SidebarProvider } from "@ui/sidebar";
 import { rpcClient } from "@lib/rpc";
 import { useRouter } from "@stores/router";
 import { SettingsScreen } from "./settings";
-import { ServerLogsScreen } from "./server-logs";
+import { ConsoleScreen } from "./console-screen";
 import { DashboardScreen } from "../dashboard-screen";
 import { ChatWindow } from "../chat-screen";
 import { AgentWindow } from "../agent-screen";
@@ -74,7 +74,7 @@ const Outlet = () => {
   } else if (route.path === "settings") {
     content = <SettingsScreen />;
   } else if (route.path === "server") {
-    content = <ServerLogsScreen />;
+    content = <ConsoleScreen />;
   } else if (route.path === "stats") {
     content = <DashboardScreen />;
   } else if (route.path === "document") {

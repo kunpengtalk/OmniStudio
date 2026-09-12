@@ -9,6 +9,7 @@ import type {
   BinaryCheckResult,
   LogListener,
   Runtime,
+  RuntimeOverrides,
   ServerStatus,
   StartResult,
   StatusListener,
@@ -32,6 +33,14 @@ function asMlxModelId(target: string): string {
   } catch {
     return target;
   }
+}
+
+/**
+ * 任意模型目标在 mlx_lm.server 侧会被认成什么 id（注册表算请求 id 用）。
+ * 与 `resolveMlxModel` 同一个约定：本地目录 → 绝对路径，repo id → 原样。
+ */
+export function mlxRequestModelId(target: string): string {
+  return asMlxModelId(target);
 }
 
 /**
@@ -78,6 +87,8 @@ export function resolveMlxModel(): { model: string; requestModelId: string } {
 export class MlxRuntime implements Runtime {
   readonly id = "mlx";
   readonly label = "MLX";
+
+  constructor(private readonly overrides: RuntimeOverrides = {}) {}
 
   private serverProcess: Subprocess | null = null;
   private serverStatus: ServerStatus = "stopped";
@@ -166,6 +177,12 @@ export class MlxRuntime implements Runtime {
    * 传 repo id 时启动阶段由 mlx-lm 自动下载，无需提前准备文件。
    */
   private resolveModel(): { model: string; servedName: string } {
+    const override = this.overrides.model;
+    if (override) {
+      const base = asMlxModelId(override).split(/[\\/]/).filter(Boolean).pop() ?? override;
+      return { model: override, servedName: this.overrides.servedName ?? slugModelName(base) };
+    }
+
     const { model, requestModelId } = resolveMlxModel();
     // servedName 只用于日志 / 命令预览的展示；请求侧要的是 requestModelId
     // （MLX 没有 --served-model-name，本地目录的 id 是绝对路径）。
@@ -175,7 +192,7 @@ export class MlxRuntime implements Runtime {
 
   private buildArgs(model: string): string[] {
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
-    const port = getServerPort(this.id);
+    const port = this.overrides.port ?? getServerPort(this.id);
 
     const args: string[] = [
       "--model",
@@ -313,7 +330,7 @@ export class MlxRuntime implements Runtime {
 
       // mlx_lm.server 不暴露 /health，用 /v1/models 做就绪探测。
       // 大模型加载可能较久，给足时间（约 3 分钟）。
-      const port = getServerPort(this.id);
+      const port = this.overrides.port ?? getServerPort(this.id);
       const healthUrl = `http://localhost:${port}/v1/models`;
       const maxIdleAttempts = 180;
       let idleCount = 0;

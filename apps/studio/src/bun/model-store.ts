@@ -14,9 +14,11 @@ import type { InstalledModel, ModelOrigin } from "../shared/modelscope";
 import { getSetting, updateSettings } from "./db/settings";
 import { isInsideDir } from "./path-safety";
 import {
+  classifyModelName,
   engineForModelKind,
   engineSupports,
   fileKind,
+  MODEL_CATEGORIES,
   type InferenceEngine,
   type ModelCategory,
   type ModelFileKind,
@@ -53,15 +55,13 @@ export function getModelsDirs(): string[] {
 
 /** Fallback classification from the file name when no persisted category exists. */
 export function classifyInstalledFilename(fileName: string): ModelCategory {
-  const name = fileName.toLowerCase();
-  if (["cosyvoice", "sovits", "tts", "gpt-sovits"].some((k) => name.includes(k))) return "tts";
-  if (["whisper", "sensevoice", "paraformer", "funasr"].some((k) => name.includes(k))) return "asr";
-  if (["stable-diffusion", "sdxl", "kolors", "flux", "sd3", "schnell"].some((k) => name.includes(k))) return "image";
-  if (["qwen", "llama", "chat", "instruct", "cogvlm", "glm", "deepseek", "mistral"].some((k) => name.includes(k))) return "chat";
-  return "other";
+  return classifyModelName(fileName);
 }
 
-const VALID_CATEGORIES: ModelCategory[] = ["chat", "tts", "asr", "image", "other"];
+/** 下载时写入的分类必须是已知分类，避免脏值把 UI 的 tab 打乱。 */
+const VALID_CATEGORIES: ModelCategory[] = MODEL_CATEGORIES.filter(
+  (c): c is { value: ModelCategory; labelKey: string } => c.value !== "all",
+).map((c) => c.value);
 const VALID_SOURCES: ModelSource[] = ["modelscope", "huggingface"];
 
 /**

@@ -1,4 +1,4 @@
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, statSync } from "fs";
 import path from "path";
 import {
   isModelWeightExt,
@@ -13,9 +13,16 @@ import {
 } from "../shared/modelscope";
 import { getDataDir } from "./paths";
 import { safeJoin } from "./path-safety";
+import {
+  downloadWithResume,
+  partialBytesFor,
+  removePartialFiles,
+  type DownloadOptions,
+  type DownloadProgress,
+} from "./downloader";
 
-export { isModelWeightExt, modelDisplayName, safeRepoId };
-export type { MarketFile, MarketModel };
+export { isModelWeightExt, modelDisplayName, safeRepoId, removePartialFiles };
+export type { MarketFile, MarketModel, DownloadProgress };
 
 const MODELSCOPE_BASE = "https://modelscope.cn";
 const OPENAPI_BASE = `${MODELSCOPE_BASE}/openapi/v1`;
@@ -204,29 +211,73 @@ export function installedModelSize(repo: string, fileName: string): number | nul
   const p = localModelPath(repo, fileName);
   if (!existsSync(p)) return null;
   try {
-    const stats = statSync(p);
-    return stats.size;
+    return statSync(p).size;
   } catch {
     return null;
   }
 }
 
-export type DownloadProgress = {
-  received: number;
-  total: number | null;
-  percent: number | null;
-};
+/**
+ * 磁盘上已经下过的字节数（分片 + 已就位部分），**不发网络请求**。
+ * 市场列表用它显示「继续下载（已 1.2/4.5 GB）」；`total` 传市场给的 size 时
+ * 会校验本地分片是否还属于这份文件（远端换过就返回 0）。
+ */
+export function downloadedBytesOf(repo: string, fileName: string, total?: number | null): number {
+  const dest = modelDestPath(repo, fileName);
+  if (!dest) return 0;
+  return partialBytesFor(dest, total);
+}
+
+/** 该仓库目录下所有 `.part*` / `.download.json` 旁路文件的体积合计（用于「清理未完成」）。 */
+export function partialBytesInRepo(repo: string): { files: number; bytes: number } {
+  const dir = path.join(getModelsBaseDir(), safeRepoId(repo));
+  let files = 0;
+  let bytes = 0;
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!name.includes(".part") && !name.endsWith(".download.json")) continue;
+      try {
+        const stat = statSync(path.join(dir, name));
+        if (stat.isFile()) {
+          files += 1;
+          bytes += stat.size;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { files, bytes };
+}
 
 /**
- * Download a raw file from a HuggingFace repo (audio.cpp GGUF 等不在 ModelScope 上的资源)。
- * 优先走国内镜像 hf-mirror.com，失败后回退官方 huggingface.co。
- * 与 downloadFile 相同：带 Range 断点续传，进度通过 onProgress 回调。
+ * 下载一个仓库文件到模型目录。多路并发、断点续传、卡死重连与重试都在
+ * downloader 内核里，这里只负责把 repo/fileName 映射成 URL 与落盘路径。
+ */
+export async function downloadFile(
+  repo: string,
+  fileName: string,
+  options: DownloadOptions = {},
+): Promise<{ path: string; size: number }> {
+  const dir = path.join(getModelsBaseDir(), safeRepoId(repo));
+  mkdirSync(dir, { recursive: true });
+  const destPath = modelDestPath(repo, fileName);
+  if (!destPath) throw new Error(`非法的模型文件名：${fileName}`);
+
+  return downloadWithResume(resolveFileUrl(repo, fileName), destPath, options);
+}
+
+/**
+ * 下载 HuggingFace 仓库里的单个文件（audio.cpp GGUF 等不在 ModelScope 上的资源）。
+ * 优先走国内镜像 hf-mirror.com，失败后回退官方 huggingface.co；每个镜像都继承
+ * 断点续传与重试（换镜像时保留已下载的分片，从断点接着下）。
  */
 export async function downloadHuggingFaceFile(
   repo: string,
   filePath: string,
-  onProgress?: (progress: DownloadProgress) => void,
-  signal?: AbortSignal,
+  options: DownloadOptions = {},
 ): Promise<{ path: string; size: number }> {
   const destPath = modelDestPath(repo, filePath);
   if (!destPath) throw new Error(`非法的模型文件路径：${filePath}`);
@@ -240,300 +291,19 @@ export async function downloadHuggingFaceFile(
   let lastError: Error | null = null;
   for (const url of mirrors) {
     try {
-      return await downloadHttpFile(url, destPath, onProgress, signal);
+      return await downloadWithResume(url, destPath, options);
     } catch (e) {
       lastError = e instanceof Error ? e : new Error(String(e));
-      // 域名不可达时换下一个镜像；被用户取消则直接抛出。
-      if (signal?.aborted) throw e;
+      // 被用户取消/暂停就直接抛出，不换镜像。
+      if (options.signal?.aborted) throw e;
     }
   }
   throw lastError ?? new Error("HF download failed");
 }
 
-/** 每个文件的并行分片数(多线程下载的线程数)。 */
-const PARALLEL_PARTS = 8;
-/** 文件小于该大小不分片,直接单流下载。 */
-const PARALLEL_MIN_TOTAL = 8 * 1024 * 1024;
-/** 每个分片至少包含的字节数(文件越大分片越多,但不超过 PARALLEL_PARTS)。 */
-const PART_MIN_BYTES = 2 * 1024 * 1024;
-
-function throttleReport(
-  fn: (p: DownloadProgress) => void,
-): (received: number, total: number) => void {
-  let lastTime = 0;
-  let lastBytes = -1;
-  return (received, total) => {
-    const now = Date.now();
-    // 进度回调很频繁(8 路并流),只在变化足够大或间隔足够长时才上报。
-    if (now - lastTime < 150 && received - lastBytes < 256 * 1024) return;
-    lastTime = now;
-    lastBytes = received;
-    fn({ received, total, percent: total > 0 ? (received / total) * 100 : null });
-  };
-}
-
-/** 探测文件总大小(Range: bytes=0-0 → Content-Range)。失败返回 null。 */
-async function probeTotalSize(url: string, signal?: AbortSignal): Promise<number | null> {
-  try {
-    const res = await fetch(url, {
-      headers: { Range: "bytes=0-0" },
-      redirect: "follow",
-      signal,
-    });
-    const cr = res.headers.get("content-range");
-    await res.body?.cancel();
-    if (cr) {
-      const m = /\/\s*(\d+)\s*$/.exec(cr);
-      if (m) {
-        const n = Number(m[1]);
-        if (Number.isFinite(n)) return n;
-      }
-    }
-    return parseContentLength(res);
-  } catch {
-    return null;
-  }
-}
-
-/** 分片边界(字节区间 [start, end) )。 */
-function partRanges(total: number, count: number): { start: number; end: number }[] {
-  return Array.from({ length: count }, (_, i) => ({
-    start: Math.floor((total * i) / count),
-    end: i === count - 1 ? total : Math.floor((total * (i + 1)) / count),
-  }));
-}
-
-/** 把已完成的分片按顺序合并为最终文件,完成后删除分片。 */
-async function mergeParts(destPath: string, partPaths: string[]): Promise<void> {
-  const tmp = `${destPath}.merge`;
-  await new Promise<void>((resolve, reject) => {
-    const ws = createWriteStream(tmp);
-    ws.on("error", reject);
-    ws.on("finish", () => resolve());
-
-    void (async () => {
-      try {
-        for (const p of partPaths) {
-          await new Promise<void>((done, fail) => {
-            const rs = createReadStream(p);
-            rs.on("error", fail);
-            rs.on("end", done);
-            rs.pipe(ws, { end: false });
-          });
-        }
-        ws.end();
-      } catch (e) {
-        try {
-          ws.destroy();
-        } catch {
-          // ignore
-        }
-        reject(e);
-      }
-    })();
-  });
-
-  try {
-    rmSync(destPath, { force: true });
-    renameSync(tmp, destPath);
-    for (const p of partPaths) rmSync(p, { force: true });
-  } catch (e) {
-    throw e;
-  }
-}
-
 /**
- * 多线程(并行分片)下载,每个分片独立 Range 请求,可逐片断点续传。
- * 服务器不支持 Range / 请求被取消时返回 false,由调用方回退单流或抛出。
- */
-async function downloadParallel(
-  url: string,
-  destPath: string,
-  total: number,
-  onProgress?: (progress: DownloadProgress) => void,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  const count = Math.min(PARALLEL_PARTS, Math.max(1, Math.ceil(total / PART_MIN_BYTES)));
-  const partPaths = Array.from({ length: count }, (_, i) => `${destPath}.part${i}`);
-  const ranges = partRanges(total, count);
-
-  // 已有分片的大小(已下载的字节数,用于断点续传)。
-  const existing = partPaths.map((p) => (existsSync(p) ? statSync(p).size : 0));
-
-  // 分片全部就绪(比如上次下载到合并前中断)→ 直接合并。
-  if (ranges.every((r, i) => existing[i]! >= r.end - r.start)) {
-    await mergeParts(destPath, partPaths);
-    onProgress?.({ received: total, total, percent: 100 });
-    return true;
-  }
-
-  const ac = new AbortController();
-  const onAbort = () => ac.abort();
-  if (signal) {
-    if (signal.aborted) return false;
-    signal.addEventListener("abort", onAbort, { once: true });
-  }
-
-  let received = existing.reduce((a, b) => a + b, 0);
-  let serverIgnoredRange = false;
-  const report = throttleReport((p) => onProgress?.(p));
-
-  try {
-    await Promise.all(
-      partPaths.map((p, i) =>
-        (async () => {
-          if (ac.signal.aborted) return;
-          const { start, end } = ranges[i]!;
-          const length = end - start;
-          let got = existing[i]!;
-          if (got >= length) return;
-
-          const res = await fetch(url, {
-            headers: { Range: `bytes=${start + got}-${end - 1}` },
-            redirect: "follow",
-            signal: ac.signal,
-          });
-          // 服务器忽略 Range 返回整个文件 → 无法并行,整体回退单流。
-          if (res.status === 200) {
-            serverIgnoredRange = true;
-            ac.abort();
-            await res.body?.cancel();
-            return;
-          }
-          if (res.status !== 206) {
-            throw new Error(`Range download failed: ${res.status}`);
-          }
-          const stream = res.body;
-          if (!stream) throw new Error("No response body");
-
-          const reader = stream.getReader();
-          const ws = createWriteStream(p, { flags: "a" });
-          await new Promise<void>((resolve, reject) => {
-            ws.on("error", reject);
-            ws.on("finish", () => resolve());
-            void (async () => {
-              try {
-                while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  if (value) {
-                    ws.write(value);
-                    received += value.byteLength;
-                    report(received, total);
-                  }
-                }
-              } catch (e) {
-                // 取消/IO 错误时保留已写分片,下次从分片大小继续。
-                try {
-                  ws.end();
-                } catch {
-                  // ignore
-                }
-                reject(e);
-                return;
-              }
-              ws.end();
-            })();
-          });
-        })(),
-      ),
-    );
-
-    if (serverIgnoredRange) return false;
-    if (signal?.aborted || ac.signal.aborted) return false;
-
-    await mergeParts(destPath, partPaths);
-    onProgress?.({ received: total, total, percent: 100 });
-    return true;
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
-  }
-}
-
-/** 单流下载(带 Range 断点续传),用于不支持 Range 或文件较小的场景。 */
-async function downloadSingle(
-  url: string,
-  destPath: string,
-  onProgress?: (progress: DownloadProgress) => void,
-  signal?: AbortSignal,
-): Promise<{ path: string; size: number }> {
-  const existing = existsSync(destPath) ? statSync(destPath).size : 0;
-  const headers: Record<string, string> = {};
-  if (existing > 0) headers["Range"] = `bytes=${existing}-`;
-
-  const res = await fetch(url, {
-    headers,
-    redirect: "follow",
-    signal: signal ?? AbortSignal.timeout(60_000),
-  });
-  if (res.status === 416) return { path: destPath, size: existing };
-  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
-
-  // 若服务器忽略 Range 返回完整 200,则从头写(覆盖可能不完整的部分文件)。
-  const isResume = res.status === 206 && existing > 0;
-  const contentLength = parseContentLength(res);
-  const total =
-    contentLength != null ? (isResume ? existing + contentLength : contentLength) : null;
-
-  const stream = res.body;
-  if (!stream) throw new Error("No response body");
-
-  const reader = stream.getReader();
-  const ws = createWriteStream(destPath, { flags: isResume ? "a" : "w" });
-  let received = isResume ? existing : 0;
-
-  return new Promise<{ path: string; size: number }>((resolve, reject) => {
-    ws.on("error", reject);
-    ws.on("finish", () => resolve({ path: destPath, size: received }));
-
-    void (async () => {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) {
-            ws.write(value);
-            received += value.byteLength;
-            if (total) {
-              onProgress?.({ received, total, percent: (received / total) * 100 });
-            } else {
-              onProgress?.({ received, total, percent: null });
-            }
-          }
-        }
-      } catch (e) {
-        // Abort (pause/cancel) or IO error — flush partial bytes so resume can
-        // resume from the exact file size on disk.
-        try {
-          ws.end();
-        } catch {
-          // ignore
-        }
-        reject(e instanceof Error ? e : new Error(String(e)));
-        return;
-      }
-      ws.end();
-    })();
-  });
-}
-
-/** 删除某个文件遗留的 .part 分片(合并完成后或取消时清理)。 */
-function cleanupParts(destPath: string): void {
-  try {
-    const dir = path.dirname(destPath);
-    const base = path.basename(destPath);
-    for (const n of readdirSync(dir)) {
-      if (n.startsWith(`${base}.part`)) rmSync(path.join(dir, n), { force: true });
-    }
-  } catch {
-    // ignore
-  }
-}
-
-/**
- * 带并行分片 + 断点续传的文件下载。最终落盘文件与单流一致,分片文件
- * 下载过程中存在于 destPath.partN,完成后合并删除。
- * 供通用 url+dest 下载复用（如 PaddleOCR 引擎的模型权重）。
+ * 通用 url + destPath 下载（PaddleOCR 引擎模型等复用）。
+ * 保留旧调用形状：`(url, destPath, onProgress, signal)`。
  */
 export async function downloadHttpFile(
   url: string,
@@ -541,52 +311,5 @@ export async function downloadHttpFile(
   onProgress?: (progress: DownloadProgress) => void,
   signal?: AbortSignal,
 ): Promise<{ path: string; size: number }> {
-  const existingFinal = existsSync(destPath) ? statSync(destPath).size : 0;
-  let hasParts = false;
-  try {
-    hasParts = readdirSync(path.dirname(destPath)).some((n) =>
-      n.startsWith(`${path.basename(destPath)}.part`),
-    );
-  } catch {
-    // ignore
-  }
-
-  // 尝试多线程:优先续传分片;无分片时若总大小已知且文件较大则全量分片。
-  if (hasParts || existingFinal === 0) {
-    const total = await probeTotalSize(url, signal);
-    if (total != null && total > existingFinal && total >= PARALLEL_MIN_TOTAL) {
-      const ok = await downloadParallel(url, destPath, total, onProgress, signal);
-      if (ok) return { path: destPath, size: total };
-      // 并行被取消/不支持 → 被取消时按取消处理,其余回退单流。
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-    } else if (total != null && existingFinal >= total) {
-      cleanupParts(destPath);
-      return { path: destPath, size: existingFinal };
-    }
-  }
-
-  const done = await downloadSingle(url, destPath, onProgress, signal);
-  cleanupParts(destPath);
-  return done;
-}
-
-export async function downloadFile(
-  repo: string,
-  fileName: string,
-  onProgress?: (progress: DownloadProgress) => void,
-  signal?: AbortSignal,
-): Promise<{ path: string; size: number }> {
-  const dir = path.join(getModelsBaseDir(), safeRepoId(repo));
-  mkdirSync(dir, { recursive: true });
-  const destPath = modelDestPath(repo, fileName);
-  if (!destPath) throw new Error(`非法的模型文件名：${fileName}`);
-
-  return downloadHttpFile(resolveFileUrl(repo, fileName), destPath, onProgress, signal);
-}
-
-function parseContentLength(res: Response): number | null {
-  const v = res.headers.get("content-length");
-  if (!v) return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
+  return downloadWithResume(url, destPath, { onProgress, signal });
 }

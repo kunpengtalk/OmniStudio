@@ -24,6 +24,7 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { SourceBadge } from "@components/source-badge";
+import { ModelCategoryBadge, ModelFormatBadge } from "@components/model-category-badge";
 import { useEngine } from "@lib/use-engine";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
@@ -40,6 +41,7 @@ import {
   ENGINE_PORT_KEYS,
   ENGINE_EXTRA_ARGS_KEYS,
   ENGINE_SHORT_NAMES,
+  MODEL_CATEGORIES,
   MODEL_PRESETS,
   fileKind,
   engineSupports,
@@ -658,14 +660,6 @@ function SupportedModels({ engine }: { engine: InferenceEngine }) {
 // 已安装模型管理（沿用原 InstalledModels）
 // ---------------------------------------------------------------------------
 
-const CAT_BADGE_CLASSES: Record<string, string> = {
-  chat: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400",
-  tts: "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-400",
-  asr: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
-  image: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
-  other: "bg-muted text-muted-foreground",
-};
-
 function InstalledModelRow({
   model,
   engine,
@@ -755,30 +749,20 @@ function InstalledModelRow({
             <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
           )}
           <span className="truncate text-sm font-medium">{model.fileName}</span>
-          <span
-            className={cn(
-              "inline-flex h-5 items-center rounded-full px-1.5 text-[10px] font-medium",
-              CAT_BADGE_CLASSES[model.category],
-            )}
-          >
-            {t(`models.cat.${model.category}`)}
-          </span>
-          <span
-            className={cn(
-              "inline-flex h-5 shrink-0 items-center rounded-full px-1.5 text-[10px] font-medium",
+          <ModelCategoryBadge
+            category={model.category}
+            label={t(`models.cat.${model.category}`)}
+          />
+          <ModelFormatBadge
+            kind={kind}
+            label={
               kind === "gguf"
-                ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400"
+                ? t("models.format.gguf")
                 : kind === "safetensors"
-                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
-                  : "bg-muted text-muted-foreground",
-            )}
-          >
-            {kind === "gguf"
-              ? t("models.format.gguf")
-              : kind === "safetensors"
-                ? t("models.format.safetensors")
-                : t("models.format.other")}
-          </span>
+                  ? t("models.format.safetensors")
+                  : t("models.format.other")
+            }
+          />
           {!compatible && (
             <span className="inline-flex h-5 items-center gap-1 rounded-full bg-amber-100 px-1.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
               <AlertTriangleIcon className="size-3" />
@@ -894,13 +878,8 @@ export function InstalledModels({ engine }: { engine: InferenceEngine }) {
   );
   const models = tab === "all" ? allModels : allModels.filter((m) => (m.category ?? "other") === tab);
 
-  const TABS: { value: "all" | ModelCategory; labelKey: string }[] = [
-    { value: "all", labelKey: "models.cat.all" },
-    { value: "chat", labelKey: "models.cat.chat" },
-    { value: "tts", labelKey: "models.cat.tts" },
-    { value: "asr", labelKey: "models.cat.asr" },
-    { value: "image", labelKey: "models.cat.image" },
-  ];
+  // 分类 tab 与模型库 / 本机模型页同一套口径（other 不单独成 tab）。
+  const TABS = MODEL_CATEGORIES.filter((c) => c.value !== "other");
 
   return (
     <div className="flex flex-col gap-3">

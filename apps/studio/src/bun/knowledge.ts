@@ -40,6 +40,12 @@ import type {
   KbIndexStats,
   KbIngestJobView,
 } from "../shared/knowledge";
+import {
+  filterModelIds,
+  MODEL_CATEGORY_SETS,
+  modelNameFromRef,
+  type ModelCategory,
+} from "../shared/modelscope";
 
 export { splitIntoChunks, splitIntoChunksWithMeta, tokenize };
 
@@ -616,41 +622,96 @@ export async function testEmbedding(input: {
   }
 }
 
-/** 嵌入模型候选：目标接口的 /v1/models + 已配置云厂商模型，合并去重。 */
+/**
+ * 模型候选：按来源分组返回，界面据此把「本地推理服务」和「云端 API」分开列，
+ * 并在本地服务上说明「无需 API Key」——地址/key 只在自定义时才需要填。
+ */
+export type KbModelCandidates = {
+  /** 本地推理服务 /v1/models 提供的模型（地址解析为本地时才有值）。 */
+  local: string[];
+  /** 云端 / 自定义地址的 /v1/models + 设置里配置的云端模型。 */
+  remote: string[];
+  /** 实际会用的服务地址与来源：local = 本地推理服务，remote = 云服务商槽位，custom = 手填地址。 */
+  service: { base: string; kind: "local" | "remote" | "custom" };
+  /** 服务端返回的模型里一个都没认出该分类、已回退成全量时为 true。 */
+  relaxed: boolean;
+};
+
+/** 设置里显式配置的云端模型（CLOUD_MODELS，支持字符串或 {id} 两种写法）。 */
+function cloudModelIds(): string[] {
+  const ids = new Set<string>();
+  try {
+    const parsed = JSON.parse(getSetting("CLOUD_MODELS")) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    for (const m of parsed) {
+      const id =
+        typeof m === "string"
+          ? m
+          : typeof m === "object" && m && "id" in m
+            ? String((m as { id: unknown }).id)
+            : "";
+      if (id) ids.add(id);
+    }
+  } catch {}
+  return [...ids];
+}
+
+/** 目标接口的 /v1/models（不可达时返回空数组，候选列表不应因此报错）。 */
+async function fetchServedModels(base: string, apiKey: string): Promise<string[]> {
+  if (!base) return [];
+  try {
+    const res = await fetch(`${base}/v1/models`, {
+      headers: embeddingHeaders(apiKey),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return [];
+    const json = (await res.json()) as { data?: { id?: string }[] };
+    return (json.data ?? [])
+      .map((m) => m.id)
+      .filter((id): id is string => typeof id === "string" && id.length > 0)
+      // MLX 对外暴露的 id 是本地绝对路径，列表里显示成模型名（该引擎不看请求里的
+      // model 字段，存下来的名字照样能用；llama.cpp / vLLM 的 id 本来就是服务名）。
+      .map((id) => modelNameFromRef(id));
+  } catch {
+    return [];
+  }
+}
+
+/** 嵌入 / 重排共用的模型候选收集（地址解析规则与真实请求一致）。 */
+export async function suggestModelCandidates(
+  input?: { base?: string; apiKey?: string },
+  /** 该选择器要哪几类模型：嵌入选择器只给嵌入、重排选择器只给重排。 */
+  want: readonly ModelCategory[] = ["embedding"],
+): Promise<KbModelCandidates> {
+  const custom = Boolean(input?.base?.trim());
+  const base = resolveEmbeddingBase({ embeddingBase: input?.base ?? "" });
+  const kind: KbModelCandidates["service"]["kind"] = custom
+    ? "custom"
+    : getSetting("SERVER_MODE") === "remote"
+      ? "remote"
+      : "local";
+  const served = await fetchServedModels(base, input?.apiKey ?? "");
+  const cloud = cloudModelIds();
+  const localRaw = kind === "local" ? served : [];
+  const remoteRaw = kind === "local" ? cloud : [...new Set([...served, ...cloud])].sort();
+  // 一个服务商的 /v1/models 会把对话 / 语音 / 生图模型一起返回：按分类挑干净，
+  // 挑不出任何一类（服务端命名认不出来）就保留全量并标记 relaxed，由界面说明。
+  const local = filterModelIds(localRaw, want, { relax: true });
+  const remote = filterModelIds(remoteRaw, want, { relax: true });
+  return {
+    local: local.ids,
+    remote: remote.ids,
+    service: { base, kind },
+    relaxed: local.relaxed || remote.relaxed,
+  };
+}
+
+/** 嵌入模型候选（本地推理服务 + 云端）。 */
 export async function suggestEmbeddingModels(input?: {
   base?: string;
   apiKey?: string;
-}): Promise<string[]> {
-  const models = new Set<string>();
-  try {
-    const raw = getSetting("CLOUD_MODELS");
-    const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) {
-      for (const m of parsed) {
-        const id =
-          typeof m === "string"
-            ? m
-            : typeof m === "object" && m && "id" in m
-              ? String((m as { id: unknown }).id)
-              : "";
-        if (id) models.add(id);
-      }
-    }
-  } catch {}
-  try {
-    const base = resolveEmbeddingBase({ embeddingBase: input?.base ?? "" });
-    const res = await fetch(`${base}/v1/models`, {
-      headers: embeddingHeaders(input?.apiKey ?? ""),
-      signal: AbortSignal.timeout(8_000),
-    });
-    if (res.ok) {
-      const json = (await res.json()) as { data?: { id?: string }[] };
-      for (const m of json.data ?? []) {
-        if (m.id) models.add(m.id);
-      }
-    }
-  } catch {}
-  return [...models].sort();
+}): Promise<KbModelCandidates> {
+  return suggestModelCandidates(input, MODEL_CATEGORY_SETS.embedding);
 }
 
 // ---------------------------------------------------------------------------
@@ -743,14 +804,16 @@ export async function testRerank(input: {
   }
 }
 
-/** 重排模型候选：优先名字带 rerank 的模型，没有则退回全量列表。 */
+/**
+ * 重排模型候选：只列重排模型（rerank / reranker / cross-encoder），
+ * 一个都认不出来时保留全量并标记 relaxed —— 本地推理服务大多不提供 /v1/rerank，
+ * 列表为空时界面会提示地址需支持该接口。
+ */
 export async function suggestRerankModels(input?: {
   base?: string;
   apiKey?: string;
-}): Promise<string[]> {
-  const all = await suggestEmbeddingModels(input);
-  const rerankOnly = all.filter((m) => /rerank/i.test(m));
-  return rerankOnly.length > 0 ? rerankOnly : all;
+}): Promise<KbModelCandidates> {
+  return suggestModelCandidates(input, MODEL_CATEGORY_SETS.rerank);
 }
 
 // ---------------------------------------------------------------------------

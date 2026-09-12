@@ -146,8 +146,16 @@ describe("classifyModel", () => {
     expect(classifyModel(model({ id: "org/model", tasks: ["image-text-to-text"] }))).toBe("chat");
   });
 
+  test("recognizes embedding / rerank / video repos", () => {
+    // 分类不只影响展示：挑选模型的场景（知识库嵌入 / 重排）按分类过滤候选，
+    // 判错分类 = 该模型在选择器里根本不出现。
+    expect(classifyModel(model({ id: "BAAI/bge-m3" }))).toBe("embedding");
+    expect(classifyModel(model({ id: "BAAI/bge-reranker-v2-m3" }))).toBe("rerank");
+    expect(classifyModel(model({ id: "Wan-AI/Wan2.2-T2V-A14B" }))).toBe("video");
+  });
+
   test("unrelated repos fall through to other", () => {
-    expect(classifyModel(model({ id: "org/random-embeddings" }))).toBe("other");
+    expect(classifyModel(model({ id: "org/random-repo" }))).toBe("other");
   });
 });
 

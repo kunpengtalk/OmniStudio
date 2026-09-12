@@ -35,7 +35,9 @@ import {
 } from "../../shared/modelscope";
 import type { ModelFileKind } from "../../shared/modelscope";
 import { SourceBadge } from "@components/source-badge";
+import { ModelCategoryBadge, ModelFormatBadge } from "@components/model-category-badge";
 import { installedFileNames } from "@/mainview/lib/installed-models";
+import { queuePositionOf, taskEta } from "@lib/download-view";
 import { cn } from "@/mainview/lib/utils";
 
 function formatBytes(bytes: number): string {
@@ -55,11 +57,13 @@ function formatParams(params: number): string {
 /** 加载必需的配套文件（config / tokenizer / chat template 等）。 */
 const SUPPORT_FILE_RE = /\.(json|model|txt|jinja|spm|ya?ml)$/i;
 
-const FORMAT_CLS: Record<MarketFile["kind"], string> = {
-  gguf: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400",
-  safetensors: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
-  other: "bg-muted text-muted-foreground",
-};
+/**
+ * 按体积升序：整仓库下载时小文件（config / tokenizer / index）先下完，模型目录
+ * 立刻具备可读性，几个 GB 的权重分片排最后。后端队列还会再按体积兜一次底。
+ */
+function sortBySizeAsc<T extends { size: number; name: string }>(files: readonly T[]): T[] {
+  return [...files].sort((a, b) => a.size - b.size || a.name.localeCompare(b.name));
+}
 
 function FileRow({
   file,
@@ -88,9 +92,22 @@ function FileRow({
   const installedPaths = installedFileNames(installedModels.data?.models ?? []);
   const isInstalledHere = installedPaths.has(fileBaseName(file.name));
   const task = tasks.find((t) => t.repo === repo && t.fileName === file.name && t.status !== "canceled");
+  const eta = task ? taskEta(task, t) : null;
+  const etaSuffix = eta ? ` · ${eta}` : "";
+  const position = task ? queuePositionOf(task, tasks) : null;
+  const queuedAhead = position != null ? Math.max(0, position - 1) : null;
 
   const startMutation = useMutation({
-    mutationFn: () => rpcClient.startModelDownload({ repo, fileName: file.name, category, source }),
+    mutationFn: () =>
+      rpcClient.startModelDownload({
+        repo,
+        fileName: file.name,
+        category,
+        source,
+        // 用户单独点的这一个：带上体积用于排队，并显式插队（不排在批量小文件后面）。
+        size: file.size,
+        explicit: true,
+      }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] }),
   });
   const pauseMutation = useMutation({
@@ -108,18 +125,17 @@ function FileRow({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <p className="truncate font-mono text-xs">{file.name}</p>
-          <span
-            className={cn(
-              "inline-flex h-4 shrink-0 items-center rounded px-1 text-[9px] font-medium",
-              FORMAT_CLS[file.kind],
-            )}
-          >
-            {file.kind === "gguf"
-              ? t("models.format.gguf")
-              : file.kind === "safetensors"
-                ? t("models.format.safetensors")
-                : t("models.format.other")}
-          </span>
+          <ModelFormatBadge
+            kind={file.kind}
+            label={
+              file.kind === "gguf"
+                ? t("models.format.gguf")
+                : file.kind === "safetensors"
+                  ? t("models.format.safetensors")
+                  : t("models.format.other")
+            }
+            className="h-4 px-1 text-[9px]"
+          />
           {!engineSupports(engine, file.kind) && (
             <span className="inline-flex h-4 shrink-0 items-center gap-0.5 rounded bg-amber-100 px-1 text-[9px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
               <AlertTriangleIcon className="size-2.5" />
@@ -130,7 +146,14 @@ function FileRow({
         <p className="text-[11px] text-muted-foreground">
           {formatBytes(file.size)}
           {task?.speed ? ` · ${formatBytes(task.speed)}/s` : ""}
+          {task ? etaSuffix : ""}
         </p>
+        {/* 排队中：告诉用户前面还有几个（小文件先下，队列会动）。 */}
+        {task && queuedAhead != null && queuedAhead > 0 && (
+          <p className="text-[10px] text-muted-foreground/80">
+            {t("downloads.queuedAhead", { n: String(queuedAhead) })}
+          </p>
+        )}
         {/* 任务的下载源和本页不一致时标出来（例如之前从另一个平台开始下的）。 */}
         {task && task.source !== source && <SourceBadge source={task.source} className="mt-1" />}
         {task && (task.status === "downloading" || task.status === "paused") && (
@@ -300,12 +323,15 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
 
   const downloadAll = useMutation({
     mutationFn: async () => {
-      for (const f of pendingFiles) {
+      // 小文件优先：config / tokenizer / index 这些几 KB 的先下完，模型目录立刻
+      // 具备可读性，几个 GB 的权重分片排在最后（后端队列也会按体积重排兜底）。
+      for (const f of sortBySizeAsc(pendingFiles)) {
         await rpcClient.startModelDownload({
           repo: repo!,
           fileName: f.name,
           category: category ?? undefined,
           source: modelSource,
+          size: f.size,
         });
       }
     },
@@ -347,9 +373,11 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
               </div>
             </div>
             {category && (
-              <span className="inline-flex h-6 items-center rounded-full bg-primary/10 px-2 text-xs font-medium text-primary">
-                {t(`models.cat.${category}`)}
-              </span>
+              <ModelCategoryBadge
+                category={category}
+                label={t(`models.cat.${category}`)}
+                className="h-6 px-2 text-xs"
+              />
             )}
           </div>
 
@@ -376,9 +404,7 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
                   </Badge>
                 )}
                 {source.model.formats.map((f) => (
-                  <Badge key={f} variant="secondary" className="text-[10px]">
-                    {t(`models.format.${f}`)}
-                  </Badge>
+                  <ModelFormatBadge key={f} kind={f} label={t(`models.format.${f}`)} />
                 ))}
                 <Badge variant="secondary" className="text-[10px]">
                   {source.model.downloads} downloads
@@ -613,12 +639,13 @@ function DownloadRecommendedButton({
 
   const mutation = useMutation({
     mutationFn: async () => {
-      for (const f of targets) {
+      for (const f of sortBySizeAsc(targets)) {
         await rpcClient.startModelDownload({
           repo,
           fileName: f.name,
           category: category ?? undefined,
           source,
+          size: f.size,
         });
       }
     },

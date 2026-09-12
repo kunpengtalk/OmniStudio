@@ -8,7 +8,7 @@ import { getCurrentModelProfile } from "./model-profile";
 import type { GenerationResult } from "./utils";
 import { detectRepeatToken, imageToBase64 } from "./utils";
 import { recordUsage } from "../stats";
-import { getChatModelName } from "../chat-model";
+import { getChatModelLabel } from "../chat-model";
 
 async function callModel(
   image: Sharp,
@@ -55,7 +55,7 @@ async function callModel(
     }
     raw = raw.replace(/ thinking[\s\S]*?<\/think>\s*/g, "").trim();
 
-    recordUsage(getChatModelName(), result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0);
+    recordUsage(getChatModelLabel(), result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0);
 
     return {
       raw,

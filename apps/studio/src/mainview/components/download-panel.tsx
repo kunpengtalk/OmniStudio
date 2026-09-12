@@ -16,16 +16,10 @@ import { Button } from "@ui/button";
 import { ScrollArea } from "@ui/scroll-area";
 import { useModelDownloadStore } from "@stores/model-download";
 import { useT } from "@stores/ui-lang";
+import { formatBytes, formatEta, queuePositionOf, summarizeDownloads, taskEta } from "@lib/download-view";
 import { SourceBadge } from "./source-badge";
 import type { DownloadTask } from "../../bun/download-manager";
 import { cn } from "@/mainview/lib/utils";
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
-  return `${Math.round(bytes / 1e3)} KB`;
-}
 
 const STATUS_STYLES: Record<DownloadTask["status"], string> = {
   queued: "bg-muted-foreground/15 text-muted-foreground",
@@ -36,7 +30,7 @@ const STATUS_STYLES: Record<DownloadTask["status"], string> = {
   canceled: "bg-muted-foreground/15 text-muted-foreground",
 };
 
-function TaskRow({ task }: { task: DownloadTask }) {
+function TaskRow({ task, tasks }: { task: DownloadTask; tasks: readonly DownloadTask[] }) {
   const t = useT();
   const queryClient = useQueryClient();
 
@@ -64,6 +58,8 @@ function TaskRow({ task }: { task: DownloadTask }) {
     task.status === "queued" ||
     task.status === "failed";
   const done = task.status === "completed";
+  const eta = taskEta(task, t);
+  const position = queuePositionOf(task, tasks);
 
   return (
     <div className="rounded-lg border px-3 py-2.5">
@@ -81,7 +77,14 @@ function TaskRow({ task }: { task: DownloadTask }) {
             {formatBytes(task.received)}
             {task.total ? ` / ${formatBytes(task.total)}` : ""}
             {task.speed ? ` · ${formatBytes(task.speed)}/s` : ""}
+            {/* 单个任务的剩余时间；排队中的显示「前面还有几个」。 */}
+            {eta ? ` · ${eta}` : ""}
           </p>
+          {position != null && (
+            <p className="mt-0.5 text-[10px] text-muted-foreground/80">
+              {t("downloads.queuedAhead", { n: String(Math.max(0, position - 1)) })}
+            </p>
+          )}
         </div>
         <span
           className={cn(
@@ -134,6 +137,8 @@ function TaskRow({ task }: { task: DownloadTask }) {
   );
 }
 
+const ACTIVE_STATUSES: DownloadTask["status"][] = ["downloading", "queued", "paused", "failed"];
+
 export function DownloadsButton() {
   const t = useT();
   const tasks = useModelDownloadStore((s) => s.tasks);
@@ -157,10 +162,27 @@ export function DownloadsButton() {
     return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
 
-  const active = tasks.filter((t) =>
-    t.status === "downloading" || t.status === "queued" || t.status === "paused" || t.status === "failed",
-  ).length;
+  const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status)).length;
   const completed = tasks.filter((t) => t.status === "completed").length;
+  // 正在下的排前面，历史（已完成/已取消）按时间倒序跟在后面。
+  const ordered = [
+    ...tasks.filter((t) => ACTIVE_STATUSES.includes(t.status)),
+    ...tasks.filter((t) => !ACTIVE_STATUSES.includes(t.status)),
+  ];
+  // 聚合信息：合计已下/总量 · 速度 · 剩余时间（总量未知时退化成只显示速度）。
+  const summary = summarizeDownloads(tasks);
+  const summaryEta = formatEta(summary.remainingBytes, summary.speed, t);
+  const summaryText =
+    summary.activeCount === 0
+      ? null
+      : summary.percent != null
+        ? t("downloads.summary", {
+            done: formatBytes(summary.received),
+            total: formatBytes(summary.total),
+            speed: formatBytes(summary.speed),
+            eta: summaryEta ?? t("downloads.etaUnknown"),
+          })
+        : t("downloads.speedOnly", { speed: formatBytes(summary.speed) });
 
   const clearCompleted = () => {
     const done = tasks.filter((t) => t.status === "completed");
@@ -192,22 +214,39 @@ export function DownloadsButton() {
       </Button>
 
       {open && (
-        <div className="absolute top-full right-0 z-50 mt-2 flex w-80 flex-col overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-lg">
-          <div className="flex items-center justify-between border-b px-3 py-2">
-            <span className="text-xs font-medium">
-              {t("downloads.title")}
-              {tasks.length > 0 && (
+        // 高度上限必须落在祖先的「确定高度」上（h-*，不是 max-h-*）—— Radix 视口的
+        // 高度是 height:100%，只有祖先链上有确定高度时才解析得出滚动高度。实测：
+        // 祖先只给 max-h 时视口被内容撑开 1889px、顶穿 384px 的盒子，列表被裁掉
+        // 且没法下拉。滚动区自己也带确定高度，双保险。
+        <div className="absolute top-full right-0 z-50 mt-2 flex h-[min(24rem,calc(100vh-4rem))] w-80 flex-col overflow-hidden rounded-xl border bg-popover text-popover-foreground shadow-lg">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2">
+            <div className="flex min-w-0 flex-col">
+              <span className="min-w-0 truncate text-xs font-medium">
+                {t("downloads.title")}
                 <span className="ml-1.5 text-muted-foreground">({tasks.length})</span>
+              </span>
+              {/* 聚合进度：合计已下/总量 · 速度 · 剩余时间 */}
+              {summaryText && (
+                <span className="truncate text-[10px] text-muted-foreground tabular-nums">
+                  {summaryText}
+                </span>
               )}
-            </span>
+            </div>
             {completed > 0 && (
-              <Button variant="ghost" size="sm" className="h-6 text-[11px]" onClick={clearCompleted}>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 shrink-0 text-[11px]"
+                onClick={clearCompleted}
+              >
                 <Trash2Icon data-icon="inline-start" className="size-3" />
                 {t("downloads.clearDone")}
               </Button>
             )}
           </div>
-          <ScrollArea className="max-h-80">
+          {/* type="always"：Radix 默认 hover —— 不悬停时压根不渲染滑轨，用户看不出
+              还能往下拉（历史记录一屏放不下）。列表类弹层要常驻滚动条。 */}
+          <ScrollArea type="always" className="h-[min(20rem,calc(100vh-8rem))] min-h-0">
             <div className="flex flex-col gap-2 p-2">
               {tasks.length === 0 ? (
                 <div className="flex flex-col items-center gap-1.5 py-10 text-center">
@@ -215,7 +254,7 @@ export function DownloadsButton() {
                   <p className="text-xs text-muted-foreground">{t("downloads.empty")}</p>
                 </div>
               ) : (
-                tasks.map((task) => <TaskRow key={task.id} task={task} />)
+                ordered.map((task) => <TaskRow key={task.id} task={task} tasks={tasks} />)
               )}
             </div>
           </ScrollArea>

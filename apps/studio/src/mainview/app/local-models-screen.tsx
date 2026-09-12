@@ -15,6 +15,7 @@ import {
   AlertTriangleIcon,
   SparklesIcon,
   SlidersHorizontalIcon,
+  TerminalSquareIcon,
   ChevronDownIcon,
   StoreIcon,
   FolderIcon,
@@ -23,6 +24,7 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { SourceBadge } from "@components/source-badge";
+import { ModelCategoryBadge, ModelFormatBadge, MODEL_TAG_CLASS } from "@components/model-category-badge";
 import { useEngine } from "@lib/use-engine";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
@@ -34,7 +36,7 @@ import { Tabs, TabsList, TabsTrigger } from "@ui/tabs";
 import { Spinner } from "@ui/spinner";
 import { useRouter } from "@stores/router";
 import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detail";
-import { useServerStore } from "@stores/server";
+import { useServedStore } from "@stores/served";
 import { useT } from "@stores/ui-lang";
 import {
   MODEL_PRESETS,
@@ -283,7 +285,8 @@ function LaunchBar({ installedModels, engine }: { installedModels: InstalledMode
   const compatibleModels = installedModels.filter((m) => engineSupports(engine, m.kind));
   const t = useT();
   const queryClient = useQueryClient();
-  const serverStatus = useServerStore((s) => s.status);
+  const setRoute = useRouter((s) => s.setRoute);
+  const servedModels = useServedStore((s) => s.models);
   const [startError, setStartError] = useState<string | null>(null);
 
   const { data } = useQuery({
@@ -291,6 +294,9 @@ function LaunchBar({ installedModels, engine }: { installedModels: InstalledMode
     queryFn: () => rpcClient.getSettings(undefined),
   });
   const activePath = data?.settings.LOCAL_MODEL_PATH ?? "";
+  // 状态按**这个模型自己的实例**看：多实例下"当前活动实例在跑"不代表所选模型在跑。
+  const servedForModel = servedModels.find((m) => m.modelRef === activePath);
+  const serverStatus = servedForModel?.status ?? "stopped";
 
   const selectMutation = useMutation({
     mutationFn: (path: string) => rpcClient.setActiveModel({ path }),
@@ -302,17 +308,18 @@ function LaunchBar({ installedModels, engine }: { installedModels: InstalledMode
   });
   const startMutation = useMutation({
     mutationFn: async () => {
-      const status = useServerStore.getState().status;
-      const res =
-        status === "running" || status === "starting" || status === "downloading"
-          ? await rpcClient.restartServer()
-          : await rpcClient.startServer();
+      // 已启动过就重启那个实例（换端口 / 重载设置），没启动过就按路径启动一个。
+      const res = servedForModel
+        ? await rpcClient.restartServedModel({ id: servedForModel.id })
+        : await rpcClient.startServedModel({ path: activePath });
       if (!res.ok) throw new Error(res.error || "Failed to start server");
       return res;
     },
     onSuccess: () => {
       setStartError(null);
       queryClient.invalidateQueries({ queryKey: ["installed-models"] });
+      queryClient.invalidateQueries({ queryKey: ["served-models"] });
+      queryClient.invalidateQueries({ queryKey: ["chat-models"] });
     },
     onError: (err: unknown) =>
       setStartError(err instanceof Error ? err.message.replace(/^Error:\s*/i, "") : String(err)),
@@ -388,6 +395,19 @@ function LaunchBar({ installedModels, engine }: { installedModels: InstalledMode
           )}
           {serverStatus === "running" ? t("models.restartServer") : t("models.launch")}
         </Button>
+        {/* 启动是后台进行的：进度 / 日志在控制台看，这里给个直达入口。 */}
+        {serverStatus !== "stopped" && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs"
+            tooltip={t("console.open")}
+            onClick={() => setRoute({ path: "settings", tab: "logs" })}
+          >
+            <TerminalSquareIcon data-icon="inline-start" />
+            {t("console.title")}
+          </Button>
+        )}
       </div>
       {startError && (
         <div className="space-y-0.5">
@@ -411,14 +431,6 @@ function LaunchBar({ installedModels, engine }: { installedModels: InstalledMode
 // 已安装模型管理
 // ---------------------------------------------------------------------------
 
-const CAT_BADGE_CLASSES: Record<string, string> = {
-  chat: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400",
-  tts: "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-400",
-  asr: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
-  image: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
-  other: "bg-muted text-muted-foreground",
-};
-
 function InstalledModelRow({
   model,
   engine,
@@ -440,12 +452,14 @@ function InstalledModelRow({
     isDir: boolean;
     /** 权重格式，目录条目按内容判定。 */
     kind: import("../../shared/modelscope").ModelFileKind;
+    /** 运行时实际加载的路径（分批 GGUF 指向第一个分片），与已启动实例对齐用。 */
+    runtimeTarget: string;
   };
   engine: InferenceEngine;
 }) {
   const queryClient = useQueryClient();
   const t = useT();
-  const serverStatus = useServerStore((s) => s.status);
+  const servedModels = useServedStore((s) => s.models);
   const kind = model.kind ?? fileKind(model.fileName);
   const compatible = engineSupports(engine, kind);
   const [startError, setStartError] = useState<string | null>(null);
@@ -475,17 +489,19 @@ function InstalledModelRow({
     mutationFn: () => rpcClient.toggleFavoriteModel({ path: model.path }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["installed-models"] }),
   });
+  const servedForModel = servedModels.find(
+    (m) => m.modelRef === model.runtimeTarget || m.modelRef === model.path,
+  );
   const startMutation = useMutation({
     mutationFn: async () => {
       if (!model.isActive) {
         const act = await rpcClient.setActiveModel({ path: model.path });
         if (!act.ok) throw new Error(act.error || "Failed to activate model");
       }
-      const status = useServerStore.getState().status;
-      const res =
-        status === "running" || status === "starting" || status === "downloading"
-          ? await rpcClient.restartServer()
-          : await rpcClient.startServer();
+      // 已启动过就重启那个实例，否则按路径启动新实例（可同时跑多个模型）。
+      const res = servedForModel
+        ? await rpcClient.restartServedModel({ id: servedForModel.id })
+        : await rpcClient.startServedModel({ path: model.runtimeTarget || model.path });
       if (!res.ok) throw new Error(res.error || "Failed to start server");
       return res;
     },
@@ -497,6 +513,7 @@ function InstalledModelRow({
     onError: (err: unknown) =>
       setStartError(err instanceof Error ? err.message.replace(/^Error:\s*/i, "") : String(err)),
   });
+  const serverStatus = servedForModel?.status ?? "stopped";
   const serverBusy = serverStatus === "starting" || serverStatus === "downloading";
   const startErrorHint = startError ? serverErrorHint(t, startError) : null;
   const [copied, setCopied] = useState(false);
@@ -519,30 +536,20 @@ function InstalledModelRow({
             <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
           )}
           <span className="truncate text-sm font-medium">{model.fileName}</span>
-          <span
-            className={cn(
-              "inline-flex h-5 items-center rounded-full px-1.5 text-[10px] font-medium",
-              CAT_BADGE_CLASSES[model.category],
-            )}
-          >
-            {t(`models.cat.${model.category}`)}
-          </span>
-          <span
-            className={cn(
-              "inline-flex h-5 shrink-0 items-center rounded-full px-1.5 text-[10px] font-medium",
+          <ModelCategoryBadge
+            category={model.category}
+            label={t(`models.cat.${model.category}`)}
+          />
+          <ModelFormatBadge
+            kind={kind}
+            label={
               kind === "gguf"
-                ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400"
+                ? t("models.format.gguf")
                 : kind === "safetensors"
-                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
-                  : "bg-muted text-muted-foreground",
-            )}
-          >
-            {kind === "gguf"
-              ? t("models.format.gguf")
-              : kind === "safetensors"
-                ? t("models.format.safetensors")
-                : t("models.format.other")}
-          </span>
+                  ? t("models.format.safetensors")
+                  : t("models.format.other")
+            }
+          />
           {!compatible && (
             <span className="inline-flex h-5 items-center gap-1 rounded-full bg-amber-100 px-1.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
               <AlertTriangleIcon className="size-3" />
@@ -663,15 +670,18 @@ function InstalledModelRow({
   );
 }
 
-/** 已安装模型 tab 页：全部 / 对话·VLM / TTS / ASR / 生图，切换展示，不再上下堆叠。 */
+/** 已安装模型 tab 页：全部分类各一个 tab（与模型库的分类口径一致），切换展示。 */
 type InstalledTab = "all" | ModelCategory;
 
 const INSTALLED_TABS: { value: InstalledTab; labelKey: string }[] = [
   { value: "all", labelKey: "models.cat.all" },
   { value: "chat", labelKey: "models.cat.chat" },
+  { value: "embedding", labelKey: "models.cat.embedding" },
+  { value: "rerank", labelKey: "models.cat.rerank" },
   { value: "tts", labelKey: "models.cat.tts" },
   { value: "asr", labelKey: "models.cat.asr" },
   { value: "image", labelKey: "models.cat.image" },
+  { value: "video", labelKey: "models.cat.video" },
 ];
 
 function InstalledModels({ engine }: { engine: InferenceEngine }) {
@@ -770,21 +780,9 @@ const ORIGIN_LABEL_KEYS: Record<ModelOrigin, string> = {
 /** 目录来源标签：应用下载目录 / HF 缓存 / 用户自己加的目录。 */
 function OriginBadge({ origin, className }: { origin: ModelOrigin; className?: string }) {
   const t = useT();
-  const cls =
-    origin === "hf-cache"
-      ? "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-300"
-      : origin === "external"
-        ? "bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300"
-        : "bg-muted text-muted-foreground";
   return (
-    <span
-      className={cn(
-        "inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-1.5 text-[10px] font-medium",
-        cls,
-        className,
-      )}
-    >
-      <FolderIcon className="size-2.5" />
+    <span className={cn(MODEL_TAG_CLASS, className)}>
+      <FolderIcon className="size-3" />
       {t(ORIGIN_LABEL_KEYS[origin])}
     </span>
   );

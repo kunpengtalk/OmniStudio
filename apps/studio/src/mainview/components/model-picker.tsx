@@ -1,9 +1,16 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangleIcon, FolderIcon, Loader2Icon, RefreshCwIcon } from "lucide-react";
+import {
+  AlertTriangleIcon,
+  ArrowUpRightIcon,
+  Loader2Icon,
+  RefreshCwIcon,
+  SquareTerminalIcon,
+} from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { ENGINE_SHORT_NAMES } from "@/shared/engines";
+import { ModelCategoryIcon } from "@components/model-category-badge";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import {
@@ -15,17 +22,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@ui/select";
+import { useRouter } from "@stores/router";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 
 /**
- * 模型选择器：本地已安装模型 + OpenAI 兼容 API 模型。
- * 对话与 Agent 共用同一份可选模型列表（「模型跟对话一样，选它能选的即可」）。
+ * 模型选择器：**已启动**的本地模型 + 已配置云服务商的模型。
+ *
+ * 本地列表里只有正在跑（或正在加载）的实例 —— 没启动的模型列在这里没有意义
+ * （选中要么等一次冷启动，要么报错）。启动 / 卸载在控制台做，这里只切换
+ * 「请求发给谁」，所以是瞬时的，没有启动进度要等。对话与 Agent 共用这一份列表。
  */
 export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
   const t = useT();
   const queryClient = useQueryClient();
-  const [pendingType, setPendingType] = useState<"local" | "api" | null>(null);
+  const setRoute = useRouter((s) => s.setRoute);
+  const [pendingValue, setPendingValue] = useState<string | null>(null);
 
   const { data: settingsData } = useQuery({
     queryKey: ["settings"],
@@ -40,29 +52,43 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
   const mode = settings?.SERVER_MODE ?? "local";
   const chatModel = settings?.CHAT_MODEL ?? "";
   const apiModel = settings?.VLLM_MODEL_NAME ?? "";
-  const activePath = settings?.LOCAL_MODEL_PATH ?? "";
 
   const options = modelsQuery.data?.models ?? [];
-  const current =
-    mode === "remote" ? apiModel || chatModel || "" : activePath || chatModel || "";
+  // 对话框里只给能立刻用的本地模型：**已启动**（running / 正在加载）的实例。
+  // 没启动的模型（state = stopped）留在接口里给控制台与「默认模型」面板用，不在这里列。
+  const localOptions = options.filter(
+    (o) =>
+      o.type === "local" &&
+      (o.state === "running" || o.state === "starting" || o.state === "downloading"),
+  );
+  const apiOptions = options.filter((o) => o.type === "api");
+
+  // 当前值：本地取活动实例 id，云端取模型名。活动实例不在列表里（已卸载）时留空，
+  // 让用户看到「没有可用的本地模型」，而不是显示一个跑不起来的名字。
+  const activeLocal = localOptions.find((o) => o.isActive);
+  const current = mode === "remote" ? apiModel || chatModel || "" : (activeLocal?.value ?? "");
 
   const selectMutation = useMutation({
-    mutationFn: (opt: { type: "local" | "api"; value: string }) =>
+    mutationFn: (opt: { type: "local" | "api"; value: string; providerId?: string }) =>
       rpcClient.selectChatModel(opt),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["installed-models"] });
       queryClient.invalidateQueries({ queryKey: ["chat-models"] });
-      queryClient.invalidateQueries({ queryKey: ["server-status"] });
+      queryClient.invalidateQueries({ queryKey: ["served-models"] });
     },
-    onSettled: () => setPendingType(null),
+    onSettled: () => setPendingValue(null),
   });
 
   const handleChange = (value: string) => {
-    const option = options.find((o) => o.value === value);
+    const option = [...localOptions, ...apiOptions].find((o) => o.value === value);
     if (!option || option.value === current) return;
-    setPendingType(option.type);
-    selectMutation.mutate(option);
+    setPendingValue(option.value);
+    selectMutation.mutate({
+      type: option.type,
+      value: option.value,
+      providerId: option.providerId,
+    });
   };
 
   // 下拉框内搜索：按名称 / 详情过滤本地与 API 模型。
@@ -79,9 +105,10 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
     if (!next) setQuery("");
   };
 
-  const localOptions = options.filter((o) => o.type === "local" && matches(o));
-  const apiOptions = options.filter((o) => o.type === "api" && matches(o));
-  const firstMatch = localOptions[0] ?? apiOptions[0];
+  const shownLocal = localOptions.filter(matches);
+  const visibleOptions = [...localOptions, ...apiOptions];
+  const shownApi = apiOptions.filter(matches);
+  const firstMatch = shownLocal[0] ?? shownApi[0];
   const busy = selectMutation.isPending || modelsQuery.isLoading;
   const selectError =
     selectMutation.isError
@@ -89,6 +116,12 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
       : !selectMutation.isPending && selectMutation.data && !selectMutation.data.ok
         ? (selectMutation.data.error ?? t("chat.modelSwitchFailed"))
         : null;
+  const pendingOption = pendingValue
+    ? [...localOptions, ...apiOptions].find((o) => o.value === pendingValue)
+    : undefined;
+
+  /** 本地一个都没启动：给去控制台的入口（启动是控制台的事，这里只引导）。 */
+  const showConsoleHint = localOptions.length === 0;
 
   return (
     <div className="flex min-w-0 items-center gap-1.5">
@@ -134,26 +167,45 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
               className="h-7 text-xs"
             />
           </div>
-          {localOptions.length > 0 && (
+          {shownLocal.length > 0 && (
             <SelectGroup>
-              <SelectLabel>{t("chat.modelLocal")}</SelectLabel>
-              {localOptions.map((o) => (
+              <SelectLabel>{t("chat.modelLocalRunning")}</SelectLabel>
+              {shownLocal.map((o) => (
                 <SelectItem key={`local-${o.value}`} value={o.value}>
                   <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                    {o.isDir && (
-                      <FolderIcon className="size-3 shrink-0 text-muted-foreground/60" />
-                    )}
                     <span className="truncate">{o.label}</span>
                   </span>
                   <span className="flex shrink-0 items-center gap-1.5">
+                    {o.state === "running" ? (
+                      <span className="size-1.5 rounded-full bg-emerald-500" />
+                    ) : (
+                      <Loader2Icon className="size-3 animate-spin text-amber-500" />
+                    )}
+                    <ModelCategoryIcon category={o.category} label={t(`models.cat.${o.category}`)} />
                     {o.engine && (
                       <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
                         {ENGINE_SHORT_NAMES[o.engine]}
                       </span>
                     )}
-                    {o.detail && (
+                    <span className="max-w-40 truncate font-mono text-[10px] text-muted-foreground/70">
+                      {o.endpoint?.replace(/^https?:\/\//, "")}
+                    </span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          )}
+          {shownApi.length > 0 && (
+            <SelectGroup>
+              <SelectLabel>{t("chat.modelApi")}</SelectLabel>
+              {shownApi.map((o) => (
+                <SelectItem key={`api-${o.providerId ?? "x"}-${o.value}`} value={o.value}>
+                  <span className="min-w-0 flex-1 truncate">{o.label}</span>
+                  <span className="flex shrink-0 items-center gap-1.5">
+                    <ModelCategoryIcon category={o.category} label={t(`models.cat.${o.category}`)} />
+                    {o.providerName && (
                       <span className="max-w-40 truncate text-[10px] text-muted-foreground/70">
-                        {o.detail}
+                        {o.providerName}
                       </span>
                     )}
                   </span>
@@ -161,43 +213,41 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
               ))}
             </SelectGroup>
           )}
-          {apiOptions.length > 0 && (
-            <SelectGroup>
-              <SelectLabel>{t("chat.modelApi")}</SelectLabel>
-              {apiOptions.map((o) => (
-                <SelectItem key={`api-${o.value}`} value={o.value}>
-                  <span className="min-w-0 flex-1 truncate">{o.label}</span>
-                  {o.detail && (
-                    <span className="max-w-40 shrink-0 truncate text-[10px] text-muted-foreground/70">
-                      {o.detail}
-                    </span>
-                  )}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          )}
-          {options.length === 0 && (
+          {visibleOptions.length === 0 && (
             <div className="px-2 py-3 text-center text-xs text-muted-foreground">
               {t("chat.modelEmpty")}
             </div>
           )}
-          {options.length > 0 && !firstMatch && (
+          {visibleOptions.length > 0 && !firstMatch && (
             <div className="px-2 py-3 text-center text-xs text-muted-foreground">
               {t("chat.modelNoMatch")}
             </div>
           )}
         </SelectContent>
       </Select>
+      {showConsoleHint && (
+        <Button
+          variant="outline"
+          size="xs"
+          className="h-8 shrink-0 text-[11px]"
+          tooltip={t("chat.modelStartInConsoleHint")}
+          onClick={() => setRoute({ path: "settings", tab: "logs" })}
+        >
+          <SquareTerminalIcon data-icon="inline-start" />
+          {t("chat.modelStartInConsole")}
+        </Button>
+      )}
       <Button
         variant="ghost"
         size="icon-sm"
         tooltip={t("chat.modelRefresh")}
-        onClick={() => queryClient.invalidateQueries({ queryKey: ["chat-models"] })}
+        onClick={() => {
+          queryClient.invalidateQueries({ queryKey: ["chat-models"] });
+          queryClient.invalidateQueries({ queryKey: ["served-models"] });
+        }}
         disabled={modelsQuery.isFetching}
       >
-        <RefreshCwIcon
-          className={cn("size-3.5", modelsQuery.isFetching && "animate-spin")}
-        />
+        <RefreshCwIcon className={cn("size-3.5", modelsQuery.isFetching && "animate-spin")} />
       </Button>
       {selectError && (
         <span className="flex min-w-0 items-center gap-1 text-[11px] text-destructive">
@@ -209,9 +259,22 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
         <span className="flex min-w-0 items-center gap-1 text-[11px] text-muted-foreground">
           <Loader2Icon className="size-3 shrink-0 animate-spin" />
           <span className="truncate">
-            {pendingType === "local" ? t("chat.modelRestarting") : t("chat.modelSwitching")}
+            {pendingOption?.type === "local"
+              ? t("chat.modelSwitchingLocal")
+              : t("chat.modelSwitching")}
           </span>
         </span>
+      )}
+      {/* 云端模式：换厂商 / 补 Key 的入口（列表只含已配置厂商） */}
+      {mode === "remote" && (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          tooltip={t("chat.modelCloudSettings")}
+          onClick={() => setRoute({ path: "settings", tab: "network" })}
+        >
+          <ArrowUpRightIcon className="size-3.5" />
+        </Button>
       )}
     </div>
   );

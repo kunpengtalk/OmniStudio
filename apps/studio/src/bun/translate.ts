@@ -2,7 +2,7 @@ import { eq, desc } from "drizzle-orm";
 import { db } from "./db";
 import { translationRecords } from "./db/schema";
 import { getSetting } from "./db/settings";
-import { getChatModelName, getChatRequestModelId } from "./chat-model";
+import { getChatModelLabel, getChatRequestModelId } from "./chat-model";
 import { ensureServerReady, getChatBaseUrl, maxOutputTokens } from "./chat";
 import { recordUsage } from "./stats";
 import { translationLangLabel } from "../shared/translate";
@@ -135,7 +135,7 @@ export async function runTranslation(params: {
 
   // 请求里填本地服务器认的 id（MLX 是绝对路径）；记录与展示仍用服务名。
   const model = getChatRequestModelId();
-  const modelLabel = getChatModelName() || model;
+  const modelLabel = getChatModelLabel() || model;
   const base = getChatBaseUrl();
   if (!model || !base) {
     return { error: !model ? "未配置模型" : "未配置推理服务器" };

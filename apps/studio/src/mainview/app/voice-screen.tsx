@@ -896,6 +896,8 @@ function TtsTab() {
       rpcClient.listProviderModels({
         base: pBase.trim() || provider?.base || undefined,
         apiKey: pKey.trim() || provider?.apiKey || undefined,
+        // 服务商清单里混着对话 / 嵌入模型：只列本场景要的 tts 模型。
+        kind: "tts",
       }),
     onSuccess: (r) => {
       if (r.error) {
@@ -1935,6 +1937,8 @@ function AsrTab() {
       rpcClient.listProviderModels({
         base: pBase.trim() || provider?.base || undefined,
         apiKey: pKey.trim() || provider?.apiKey || undefined,
+        // 服务商清单里混着对话 / 嵌入模型：只列本场景要的 asr 模型。
+        kind: "asr",
       }),
     onSuccess: (r) => {
       if (r.error) {

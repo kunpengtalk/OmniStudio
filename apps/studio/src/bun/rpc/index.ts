@@ -16,6 +16,9 @@ import type { ReleaseCheckResult } from "../../shared/release";
 import { getUserDataDir } from "../paths";
 import * as ServerManager from "../server-manager";
 import type { ServerStatus } from "../server-manager";
+import * as Served from "../model-servers";
+import type { ServedModelInfo, ServedModelsSnapshot } from "../../shared/served-models";
+import type { InferenceEngine } from "../../shared/engines";
 import * as Gateway from "../gateway";
 import type { GatewayStatus } from "../gateway";
 import { getSetupEnvironment, type SetupEnvironment } from "../setup-env";
@@ -98,7 +101,7 @@ import type {
   MlxGenPhase,
 } from "../mlx-gen";
 import type { EdgeVoice } from "../edge-tts";
-import type { ModelCategory } from "../../shared/modelscope";
+import { filterModelIds, MODEL_CATEGORY_SETS, type ModelCategory } from "../../shared/modelscope";
 import * as Skills from "../skills";
 import type {
   ToolInfo,
@@ -246,7 +249,14 @@ export type AppRPC = {
       };
       getServerStatus: {
         params: undefined;
-        response: { status: ServerStatus; pid?: number; logs: string; error?: string };
+        response: {
+          status: ServerStatus;
+          pid?: number;
+          logs: string;
+          error?: string;
+          /** 端口上有没有活着的推理服务（外部启动的也算）：UI 据此决定要不要提示去控制台启动。 */
+          reachable: boolean;
+        };
       };
       getServerStats: {
         params: undefined;
@@ -254,6 +264,35 @@ export type AppRPC = {
       };
       clearServerLogs: {
         params: undefined;
+        response: { ok: boolean };
+      };
+      // 已启动模型（可同时驻留多个）：控制台列表 / 启动 / 卸载 / 单模型日志
+      listServedModels: {
+        params: undefined;
+        response: ServedModelsSnapshot;
+      };
+      startServedModel: {
+        params: { path: string; engine?: InferenceEngine };
+        response: { ok: boolean; error?: string; model?: ServedModelInfo };
+      };
+      stopServedModel: {
+        params: { id: string };
+        response: { ok: boolean; error?: string };
+      };
+      restartServedModel: {
+        params: { id: string };
+        response: { ok: boolean; error?: string; model?: ServedModelInfo };
+      };
+      setActiveServedModel: {
+        params: { id: string };
+        response: { ok: boolean; error?: string };
+      };
+      getServedModelLogs: {
+        params: { id: string };
+        response: { logs: string };
+      };
+      clearServedModelLogs: {
+        params: { id: string };
         response: { ok: boolean };
       };
       getGatewayStatus: {
@@ -492,8 +531,8 @@ export type AppRPC = {
         response: { models: ChatModelOption[] };
       };
       selectChatModel: {
-        params: { type: "local" | "api"; value: string };
-        response: { ok: boolean; error?: string; restarting?: boolean };
+        params: { type: "local" | "api"; value: string; providerId?: string };
+        response: { ok: boolean; error?: string; needsStart?: boolean };
       };
       // Agent（Pi Agent Harness）
       sendAgentMessage: {
@@ -731,7 +770,16 @@ export type AppRPC = {
         response: { tasks: DownloadTask[] };
       };
       startModelDownload: {
-        params: { repo: string; fileName: string; category?: ModelCategory; source?: ModelSource };
+        params: {
+          repo: string;
+          fileName: string;
+          category?: ModelCategory;
+          source?: ModelSource;
+          /** 市场列表已知的字节数：用于「小文件先下」排队，省一次探测。 */
+          size?: number | null;
+          /** 用户单独点的文件插队优先（批量下载不传）。 */
+          explicit?: boolean;
+        };
         response: { task: DownloadTask };
       };
       pauseModelDownload: {
@@ -909,8 +957,9 @@ export type AppRPC = {
         response: { ok: boolean };
       };
       listProviderModels: {
-        params: { base?: string; apiKey?: string } | undefined;
-        response: { models: string[]; error?: string };
+        /**: `kind` = 这个场景要的模型分类（tts / asr / image / chat）：只列该类模型。 */
+        params: { base?: string; apiKey?: string; kind?: ModelCategory } | undefined;
+        response: { models: string[]; relaxed?: boolean; error?: string };
       };
       // Local ASR (whisper.cpp engine + remote fallback)
       listAsrModels: {
@@ -1061,7 +1110,7 @@ export type AppRPC = {
       };
       listOcrProviderModels: {
         params: { base?: string; apiKey?: string } | undefined;
-        response: { models: string[]; error?: string };
+        response: { models: string[]; relaxed?: boolean; error?: string };
       };
       // PaddleOCR（本地 PP-OCRv6 引擎）
       getPpOcrStatus: {
@@ -1149,7 +1198,7 @@ export type AppRPC = {
       };
       listImageGenModels: {
         params: { backend?: ImageGenBackend; base?: string; apiKey?: string } | undefined;
-        response: { models: string[]; error?: string };
+        response: { models: string[]; relaxed?: boolean; error?: string };
       };
       /** Agent 生图弹窗：用户点了确认 / 取消后回传，主进程继续那次工具调用。 */
       resolveMediaSetup: {
@@ -1612,7 +1661,7 @@ export type AppRPC = {
       };
       kbEmbeddingModels: {
         params: { base?: string; apiKey?: string } | undefined;
-        response: { models: string[] };
+        response: Knowledge.KbModelCandidates;
       };
       kbTestRerank: {
         params: { base?: string; apiKey?: string; model: string };
@@ -1620,7 +1669,7 @@ export type AppRPC = {
       };
       kbRerankModels: {
         params: { base?: string; apiKey?: string } | undefined;
-        response: { models: string[] };
+        response: Knowledge.KbModelCandidates;
       };
       /** 审计流水（谁在什么时候导入/删除/检索了什么）+ 各动作计数。 */
       kbEvents: {
@@ -1744,6 +1793,10 @@ export type AppRPC = {
       documentChanged: { id: number };
       serverLog: { text: string };
       serverStatusChanged: { status: ServerStatus };
+      /** 已启动模型列表变化（启动 / 就绪 / 出错 / 卸载）：整份快照推送。 */
+      servedModelsChanged: ServedModelsSnapshot;
+      /** 某个已启动模型的日志增量（按 id 区分，控制台里各自一个日志窗口）。 */
+      servedModelLog: { id: string; text: string };
       chatChunk: {
         conversationId: number;
         messageId: number;
@@ -1904,11 +1957,14 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       getServerStatus: async () => {
+        const status = ServerManager.getStatus();
         return {
-          status: ServerManager.getStatus(),
+          status,
           pid: ServerManager.getPid(),
           logs: ServerManager.getLogs(),
           error: ServerManager.getLastError() || undefined,
+          // 有实例在跑就不用探测；否则探一次端口，区分「没启动」和「外部服务在跑」。
+          reachable: status === "running" ? true : await ServerManager.probeLocalServer(),
         };
       },
 
@@ -1922,6 +1978,37 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       clearServerLogs: async () => {
         ServerManager.clearLogs();
+        return { ok: true };
+      },
+
+      listServedModels: async () => {
+        return Served.getServedModels();
+      },
+
+      startServedModel: async ({ path, engine }) => {
+        const result = await Served.startServedModel({ model: path, engine });
+        return { ok: result.ok, error: result.error, model: result.model };
+      },
+
+      stopServedModel: async ({ id }) => {
+        return Served.stopServedModel(id);
+      },
+
+      restartServedModel: async ({ id }) => {
+        const result = await Served.restartServedModel(id);
+        return { ok: result.ok, error: result.error, model: result.model };
+      },
+
+      setActiveServedModel: async ({ id }) => {
+        return Served.setActiveServedId(id);
+      },
+
+      getServedModelLogs: async ({ id }) => {
+        return { logs: Served.getServedModelLogs(id) };
+      },
+
+      clearServedModelLogs: async ({ id }) => {
+        Served.clearServedModelLogs(id);
         return { ok: true };
       },
 
@@ -2370,8 +2457,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return listChatModels();
       },
 
-      selectChatModel: async ({ type, value }) => {
-        return selectChatModel(type, value);
+      selectChatModel: async ({ type, value, providerId }) => {
+        return selectChatModel(type, value, providerId);
       },
 
       // Agent（Pi Agent Harness）
@@ -2616,8 +2703,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { tasks: downloadManager.list() };
       },
 
-      startModelDownload: async ({ repo, fileName, category, source }) => {
-        return { task: downloadManager.start(repo, fileName, category, source) };
+      startModelDownload: async ({ repo, fileName, category, source, size, explicit }) => {
+        return { task: downloadManager.start(repo, fileName, category, source, { size, explicit }) };
       },
 
       pauseModelDownload: async ({ id }) => {
@@ -2800,7 +2887,12 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
             params?.base ?? cfg.base,
             params?.apiKey ?? cfg.apiKey,
           );
-          return { models };
+          // 服务商返回的是一整份模型清单（对话/语音/嵌入…），按调用场景要的分类挑，
+          // 挑不出来时回退全量并标记 relaxed，由界面提示"没能识别出该类模型"。
+          const kind = params?.kind;
+          if (!kind) return { models };
+          const picked = filterModelIds(models, [kind], { relax: true });
+          return { models: picked.ids, relaxed: picked.relaxed };
         } catch (e) {
           return { models: [], error: e instanceof Error ? e.message : String(e) };
         }
@@ -3044,7 +3136,13 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
             params?.base ?? cfg.base,
             params?.apiKey ?? cfg.apiKey,
           );
-          return { models };
+          // OCR 走的是 VLM（对话分类的视觉模型），服务商清单里的嵌入 / 语音 / 生图
+          // 模型剔掉；认不出来的保留，避免把可用的 VLM 藏掉。
+          const picked = filterModelIds(models, MODEL_CATEGORY_SETS.chat, {
+            keepOther: true,
+            relax: true,
+          });
+          return { models: picked.ids, relaxed: picked.relaxed };
         } catch (e) {
           return { models: [], error: e instanceof Error ? e.message : String(e) };
         }
@@ -3193,7 +3291,10 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
                     params?.base ?? cfg.apiBase,
                     params?.apiKey ?? cfg.apiKey,
                   );
-          return { models };
+          // 生图后端（尤其 OpenAI 兼容的聚合服务）会把对话 / 语音模型也列出来，
+          // 只留生图模型；一个都认不出时保留全量并标记 relaxed。
+          const picked = filterModelIds(models, MODEL_CATEGORY_SETS.image, { relax: true });
+          return { models: picked.ids, relaxed: picked.relaxed };
         } catch (e) {
           return { models: [], error: e instanceof Error ? e.message : String(e) };
         }
@@ -3613,13 +3714,13 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return Knowledge.testEmbedding({ base, apiKey, model });
       },
       kbEmbeddingModels: async (params) => {
-        return { models: await Knowledge.suggestEmbeddingModels(params ?? undefined) };
+        return Knowledge.suggestEmbeddingModels(params ?? undefined);
       },
       kbTestRerank: async ({ base, apiKey, model }) => {
         return Knowledge.testRerank({ base, apiKey, model });
       },
       kbRerankModels: async (params) => {
-        return { models: await Knowledge.suggestRerankModels(params ?? undefined) };
+        return Knowledge.suggestRerankModels(params ?? undefined);
       },
       kbEvents: async (params) => {
         const kbId = params?.kbId;
@@ -3793,6 +3894,9 @@ export function broadcastCurrentStatus(win: BrowserWindowWithRPC) {
     win.webview.rpc?.send.serverStatusChanged({ status: ServerManager.getStatus() });
   } catch {}
   try {
+    win.webview.rpc?.send.servedModelsChanged(Served.getServedModels());
+  } catch {}
+  try {
     win.webview.rpc?.send.gatewayStatusChanged({ status: Gateway.getGatewayStatus().status });
   } catch {}
 }
@@ -3806,6 +3910,17 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
   ServerManager.onStatusChange((status) => {
     try {
       win.webview.rpc?.send.serverStatusChanged({ status });
+    } catch {}
+  });
+  // 已启动模型注册表：列表快照 + 每个实例的日志增量（控制台 / 选择器用）。
+  Served.onServedModelsChange((snapshot) => {
+    try {
+      win.webview.rpc?.send.servedModelsChanged(snapshot);
+    } catch {}
+  });
+  Served.onServedModelLog((id, text) => {
+    try {
+      win.webview.rpc?.send.servedModelLog({ id, text });
     } catch {}
   });
   Chat.onChatChunk((payload) => {

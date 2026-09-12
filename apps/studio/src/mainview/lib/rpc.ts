@@ -3,6 +3,7 @@ import type { AppRPC } from "../../bun/rpc";
 import { queryClient } from "../components/providers";
 import { useUpdateStore } from "./update-store";
 import { useServerStore } from "../stores/server";
+import { useServedStore } from "../stores/served";
 import { useChatStore } from "../stores/chat";
 import { useAgentStore } from "../stores/agent";
 import { useVoiceCallStore } from "../stores/voice-call";
@@ -57,6 +58,14 @@ const rpc = Electroview.defineRPC<AppRPC>({
       },
       serverStatusChanged: ({ status }) => {
         useServerStore.getState().setStatus(status);
+      },
+      servedModelsChanged: (snapshot) => {
+        useServedStore.getState().setSnapshot(snapshot);
+        // 对话模型选择器只列已启动实例：启停 / 就绪后要立刻反映到下拉框。
+        queryClient.invalidateQueries({ queryKey: ["chat-models"] });
+      },
+      servedModelLog: ({ id, text }) => {
+        useServedStore.getState().appendLog(id, text);
       },
       chatChunk: ({ conversationId, messageId, delta, kind }) => {
         useChatStore.getState().appendChunk(conversationId, messageId, delta, kind ?? "content");

@@ -45,7 +45,7 @@ import { BackupTab } from "./backup-tab";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import { DashboardScreen } from "../dashboard-screen";
-import { ServerLogsScreen } from "./server-logs";
+import { ConsoleScreen } from "./console-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { ModelsScreen } from "../models-screen";
 import { LocalModelsScreen } from "../local-models-screen";
@@ -150,7 +150,7 @@ const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
   gateway: { icon: <WaypointsIcon className="size-4" />, labelKey: "settings.gateway" },
   performance: { icon: <GaugeIcon className="size-4" />, labelKey: "settings.performance" },
   integrations: { icon: <BlocksIcon className="size-4" />, labelKey: "settings.integrations" },
-  logs: { icon: <TerminalSquareIcon className="size-4" />, labelKey: "settings.logs" },
+  logs: { icon: <TerminalSquareIcon className="size-4" />, labelKey: "console.title" },
   stats: { icon: <LayoutDashboardIcon className="size-4" />, labelKey: "settings.dashboard" },
   websearch: { icon: <GlobeIcon className="size-4" />, labelKey: "settings.webSearch.title" },
   memory: { icon: <BrainIcon className="size-4" />, labelKey: "settings.memory.title" },
@@ -612,7 +612,7 @@ export function SettingsScreen() {
         </div>
       ) : activeTab === "logs" ? (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <ServerLogsScreen />
+          <ConsoleScreen />
         </div>
       ) : (
         <ScrollArea className="min-h-0 flex-1">

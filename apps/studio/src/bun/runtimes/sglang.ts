@@ -7,6 +7,7 @@ import type {
   BinaryCheckResult,
   LogListener,
   Runtime,
+  RuntimeOverrides,
   ServerStatus,
   StartResult,
   StatusListener,
@@ -19,6 +20,8 @@ const DOWNLOAD_PATTERN = /downloading|fetching|(\d+(\.\d+)?)\s*%|progress/i;
 export class SglangRuntime implements Runtime {
   readonly id = "sglang";
   readonly label = "SGLang";
+
+  constructor(private readonly overrides: RuntimeOverrides = {}) {}
 
   private serverProcess: Subprocess | null = null;
   private serverStatus: ServerStatus = "stopped";
@@ -96,6 +99,11 @@ export class SglangRuntime implements Runtime {
   }
 
   private resolveModel(): { model: string; servedName?: string } {
+    // 显式覆盖（已启动模型注册表）优先：同引擎多实例时不能读「当前活动模型」。
+    if (this.overrides.model) {
+      return { model: this.overrides.model, servedName: this.overrides.servedName };
+    }
+
     const localPath = getSetting("LOCAL_MODEL_PATH");
     if (localPath) {
       const localName = getSetting("LOCAL_MODEL_NAME");
@@ -121,7 +129,7 @@ export class SglangRuntime implements Runtime {
   }
 
   private buildArgs(model: string, servedName?: string): string[] {
-    const port = getServerPort(this.id);
+    const port = this.overrides.port ?? getServerPort(this.id);
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
     const contextLength = getSetting("SGLANG_CONTEXT_LENGTH") || "8192";
     const tpSize = getSetting("SGLANG_TP_SIZE") || "1";
@@ -218,7 +226,7 @@ export class SglangRuntime implements Runtime {
           self.setStatus("error");
         });
 
-      const port = getServerPort(this.id);
+      const port = this.overrides.port ?? getServerPort(this.id);
       const healthUrl = `http://localhost:${port}/health`;
       const maxIdleAttempts = 180;
       let idleCount = 0;

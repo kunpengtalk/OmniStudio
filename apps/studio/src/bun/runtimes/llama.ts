@@ -11,6 +11,7 @@ import type {
   BinaryCheckResult,
   LogListener,
   Runtime,
+  RuntimeOverrides,
   ServerStatus,
   StartResult,
   StatusListener,
@@ -53,6 +54,8 @@ const DEFAULT_CUSTOM_SERVER_ARGS: ServerArgs = {
 export class LlamaRuntime implements Runtime {
   readonly id = "llama.cpp";
   readonly label = "llama-server";
+
+  constructor(private readonly overrides: RuntimeOverrides = {}) {}
 
   private serverProcess: Subprocess | null = null;
   private serverStatus: ServerStatus = "stopped";
@@ -124,10 +127,23 @@ export class LlamaRuntime implements Runtime {
   }
 
   /**
-   * Resolve the active model for the local runtime.
-   * Priority: locally installed GGUF path → HF model reference (CUSTOM_HF_MODEL → profile).
+   * Resolve the model this instance serves.
+   * Priority: explicit override (served-model registry) → locally installed GGUF path
+   * → HF model reference (CUSTOM_HF_MODEL → profile).
    */
   private resolveModel(): { kind: "local"; path: string; alias: string } | { kind: "hf"; ref: string } {
+    const target = this.overrides.model;
+    if (target) {
+      if (existsSync(target)) {
+        return {
+          kind: "local",
+          path: target,
+          alias: this.overrides.servedName ?? slugModelFileName(modelNameForPath(target)),
+        };
+      }
+      return { kind: "hf", ref: target };
+    }
+
     const localPath = getSetting("LOCAL_MODEL_PATH");
     if (localPath) {
       const name = getSetting("LOCAL_MODEL_NAME");
@@ -172,7 +188,8 @@ export class LlamaRuntime implements Runtime {
     | { kind: "local"; path: string; alias: string }
     | { kind: "hf"; ref: string },
     serverArgs: ServerArgs): string[] {
-    const port = getSetting("SERVER_PORT");
+    // llama.cpp 的端口设置键就是 SERVER_PORT（见 shared/engines.ts）。
+    const port = this.overrides.port ?? (getSetting("SERVER_PORT") || "8080");
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
     const ctxSize = getSetting("SERVER_CTX_SIZE") || String(serverArgs.ctxSize);
     const imageMaxTokens = getSetting("SERVER_IMAGE_MAX_TOKENS") || String(serverArgs.imageMaxTokens);
@@ -289,7 +306,7 @@ export class LlamaRuntime implements Runtime {
           self.setStatus("error");
         });
 
-      const port = getSetting("SERVER_PORT");
+      const port = this.overrides.port ?? (getSetting("SERVER_PORT") || "8080");
       const healthUrl = `http://localhost:${port}/health`;
       const maxIdleAttempts = 120;
       let idleCount = 0;

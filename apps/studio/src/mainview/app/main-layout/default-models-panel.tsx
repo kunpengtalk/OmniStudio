@@ -50,18 +50,22 @@ function ModelCard({
   value: string;
   settingsKey: string;
   /** 点击「获取列表」时拉取候选模型（不传则显示 children 自定义控件）。 */
-  fetchModels?: () => Promise<{ models: string[]; error?: string }>;
+  fetchModels?: () => Promise<{ models: string[]; relaxed?: boolean; error?: string }>;
   children?: ReactNode;
 }) {
   const t = useT();
   const queryClient = useQueryClient();
   const [options, setOptions] = useState<string[]>([]);
+  const [relaxed, setRelaxed] = useState(false);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
 
   const fetchMutation = useMutation({
     mutationFn: () => fetchModels!(),
-    onSuccess: (res) => setOptions(res.models ?? []),
+    onSuccess: (res) => {
+      setOptions(res.models ?? []);
+      setRelaxed(res.relaxed === true);
+    },
   });
 
   const saveMutation = useMutation({
@@ -141,6 +145,12 @@ function ModelCard({
               {options.length > 0 && shown.length === 0 && (
                 <div className="px-2 py-3 text-center text-xs text-muted-foreground">
                   {t("chat.modelNoMatch")}
+                </div>
+              )}
+              {/* 服务端清单里没认出该场景的模型，列的是全量：说明一句，避免误以为都能用。 */}
+              {relaxed && shown.length > 0 && (
+                <div className="border-t px-2 py-2 text-[11px] leading-4 text-muted-foreground">
+                  {t("models.filter.relaxed")}
                 </div>
               )}
             </SelectContent>
@@ -288,6 +298,11 @@ function ChatModelCard() {
                     <span className="truncate">{o.label}</span>
                   </span>
                   <span className="flex shrink-0 items-center gap-1.5">
+                    {o.state === "stopped" && (
+                      <span className="rounded-full bg-muted px-1.5 text-[9px] leading-4 text-muted-foreground">
+                        {t("models.notStarted")}
+                      </span>
+                    )}
                     {o.engine && (
                       <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
                         {ENGINE_SHORT_NAMES[o.engine]}
@@ -397,6 +412,7 @@ export function DefaultModelsPanel() {
             rpcClient.listProviderModels({
               base: s?.TTS_PROVIDER_BASE,
               apiKey: s?.TTS_PROVIDER_API_KEY,
+              kind: "tts",
             })
           }
         />
@@ -411,6 +427,7 @@ export function DefaultModelsPanel() {
             rpcClient.listProviderModels({
               base: s?.ASR_PROVIDER_BASE,
               apiKey: s?.ASR_PROVIDER_API_KEY,
+              kind: "asr",
             })
           }
         />

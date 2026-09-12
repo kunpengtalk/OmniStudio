@@ -18,7 +18,7 @@ import { db } from "./db";
 import { agentEvents, conversations, messages } from "./db/schema";
 import { getSetting } from "./db/settings";
 import { getChatBaseUrl, getHistory, ensureServerReady } from "./chat";
-import { getChatModelName, getChatRequestModelId } from "./chat-model";
+import { getChatModelLabel, getChatRequestModelId } from "./chat-model";
 import { recordUsage } from "./stats";
 import { buildAgentTools, buildReadOnlyTools } from "./agent-tools";
 import { buildMediaGenTools, buildMediaReadTools } from "./media-tools";
@@ -218,7 +218,7 @@ function buildModel(): Model<"openai-completions"> {
   const contextWindow = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
   return {
     id,
-    name: getChatModelName() || id,
+    name: getChatModelLabel() || id,
     api: "openai-completions",
     provider: "omni-studio",
     baseUrl,
@@ -405,7 +405,7 @@ function historyAsAgentMessages(conversationId: number): AgentMessage[] {
             content: [{ type: "text" as const, text: m.content }],
             api: "openai-completions",
             provider: "omni-studio",
-            model: getChatModelName(),
+            model: getChatModelLabel(),
             usage: {
               input: 0,
               output: 0,
@@ -524,7 +524,7 @@ export async function runAgentTurn(opts: {
   if (!conv) return { ok: false, error: "Conversation not found" };
   if (!content.trim()) return { ok: false, error: "Empty message" };
 
-  const modelName = getChatModelName();
+  const modelName = getChatModelLabel();
   if (!modelName) {
     emitDone({ conversationId, messageId: Date.now(), content: "", error: "No model configured" });
     return { ok: false, error: "No model configured" };

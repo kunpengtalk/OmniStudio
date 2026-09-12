@@ -66,8 +66,19 @@ export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
   const activePath = settings?.LOCAL_MODEL_PATH ?? "";
   const engineKey = isGoogle ? "google" : "model";
 
-  const options = modelsQuery.data?.models ?? [];
-  const current = mode === "remote" ? apiModel || chatModel || "" : activePath || chatModel || "";
+  const allOptions = modelsQuery.data?.models ?? [];
+  // 本地只给已启动的实例（与对话一致）：翻译要的是一个正在跑的本地服务，
+  // 没启动的模型选进来只会报「没模型在跑」。
+  const localOptions = allOptions.filter(
+    (o) =>
+      o.type === "local" &&
+      (o.state === "running" || o.state === "starting" || o.state === "downloading"),
+  );
+  const apiOptions = allOptions.filter((o) => o.type === "api");
+  const current =
+    mode === "remote"
+      ? apiOptions.find((o) => o.isActive)?.value ?? apiModel ?? chatModel ?? ""
+      : localOptions.find((o) => o.isActive)?.value ?? "";
 
   const switchEngine = useMutation({
     mutationFn: (engine: "model" | "google") =>
@@ -94,7 +105,7 @@ export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
   });
 
   const pickModel = (value: string) => {
-    const option = options.find((o) => o.value === value);
+    const option = [...localOptions, ...apiOptions].find((o) => o.value === value);
     if (!option || option.value === current) return;
     setPendingType(option.type);
     selectMutation.mutate({ type: option.type, value: option.value });
@@ -157,12 +168,10 @@ export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
               <SelectValue placeholder={t("chat.modelEmpty")} />
             </SelectTrigger>
             <SelectContent className="max-w-80">
-              {options.filter((o) => o.type === "local").length > 0 && (
+              {localOptions.length > 0 && (
                 <SelectGroup>
-                  <SelectLabel>{t("chat.modelLocal")}</SelectLabel>
-                  {options
-                    .filter((o) => o.type === "local")
-                    .map((o) => (
+                  <SelectLabel>{t("chat.modelLocalRunning")}</SelectLabel>
+                  {localOptions.map((o) => (
                       <SelectItem key={`local-${o.value}`} value={o.value}>
                         <span className="truncate">{o.label}</span>
                         <span className="flex min-w-0 items-center gap-1">
@@ -181,12 +190,10 @@ export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
                     ))}
                 </SelectGroup>
               )}
-              {options.filter((o) => o.type === "api").length > 0 && (
+              {apiOptions.length > 0 && (
                 <SelectGroup>
                   <SelectLabel>{t("chat.modelApi")}</SelectLabel>
-                  {options
-                    .filter((o) => o.type === "api")
-                    .map((o) => (
+                  {apiOptions.map((o) => (
                       <SelectItem key={`api-${o.value}`} value={o.value}>
                         <span className="truncate">{o.label}</span>
                         {o.detail && (
@@ -198,7 +205,7 @@ export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
                     ))}
                 </SelectGroup>
               )}
-              {options.length === 0 && (
+              {localOptions.length === 0 && apiOptions.length === 0 && (
                 <div className="px-2 py-3 text-center text-xs text-muted-foreground">
                   {t("chat.modelEmpty")}
                 </div>

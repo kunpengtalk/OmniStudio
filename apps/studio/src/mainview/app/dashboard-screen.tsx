@@ -14,18 +14,22 @@ import {
   RefreshCwIcon,
   ServerIcon,
   SquareIcon,
+  TerminalSquareIcon,
   TimerIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { ServedModelsPanel } from "@components/served-models-panel";
+import { useRouter } from "@stores/router";
 import { Badge } from "@ui/badge";
 import { Button } from "@ui/button";
 import { Spinner } from "@ui/spinner";
 import { useT } from "@stores/ui-lang";
+import { useServedStore } from "@stores/served";
 import { useServerStore } from "@stores/server";
 import type { ServerStatus } from "../../bun/server-manager";
 import type { ServerStats } from "../../bun/stats";
-import { ENGINE_PORT_KEYS, type InferenceEngine } from "@/shared/modelscope";
+import { ENGINE_PORT_KEYS, modelNameFromRef, type InferenceEngine } from "@/shared/modelscope";
 import { cn } from "@/mainview/lib/utils";
 
 function formatTokens(n: number): string {
@@ -148,6 +152,7 @@ type DashboardData = {
 };
 
 export function DashboardScreen() {
+  const setRoute = useRouter((s) => s.setRoute);
   const t = useT();
   const queryClient = useQueryClient();
   const pushedStatus = useServerStore((s) => s.status);
@@ -167,8 +172,16 @@ export function DashboardScreen() {
 
   // Push channel only fires on transitions (no initial sync), so it is only
   // trusted when it reports a non-stopped state; polling is the source of truth.
-  const status: ServerStatus =
-    pushedStatus !== "stopped" ? pushedStatus : (data?.status ?? "stopped");
+  // 多实例下「有模型在跑」以注册表为准：活动实例之外还跑着别的模型时，
+  // 旧逻辑会显示"已停止"，跟下面的运行中列表自相矛盾。
+  const servedModels = useServedStore((s) => s.models);
+  const anyServedRunning = servedModels.some((m) => m.status === "running");
+  const activeServed = servedModels.find((m) => m.isActive);
+  const status: ServerStatus = anyServedRunning
+    ? "running"
+    : pushedStatus !== "stopped"
+      ? pushedStatus
+      : (data?.status ?? "stopped");
 
   const running = status === "running";
 
@@ -209,7 +222,8 @@ export function DashboardScreen() {
   const { stats, settings } = data;
   const engine = (settings.INFERENCE_ENGINE as InferenceEngine) || "llama.cpp";
   const host = settings.SERVER_HOST || "127.0.0.1";
-  const port = settings[ENGINE_PORT_KEYS[engine]] || "8080";
+  // 活动实例的端口才是实际服务地址（可能不是引擎的设置端口，见 model-servers）。
+  const port = activeServed ? String(activeServed.port) : settings[ENGINE_PORT_KEYS[engine]] || "8080";
   const endpoint = `http://${host}:${port}`;
   const uptime = stats.serverStartedAt ? Date.now() - stats.serverStartedAt : 0;
   const busy = action.isPending;
@@ -258,7 +272,14 @@ export function DashboardScreen() {
 
   const cfg: Array<[string, string]> = [
     [t("dashboard.config.engine"), engine],
-    [t("dashboard.config.model"), settings.VLLM_MODEL_NAME || "—"],
+    [
+      t("dashboard.config.model"),
+      // 老数据 / MLX 的请求 id 都可能是绝对路径：展示前一律收敛成模型名。
+      modelNameFromRef(
+        settings.LOCAL_MODEL_NAME || settings.VLLM_MODEL_NAME || settings.CHAT_MODEL || "",
+        "—",
+      ),
+    ],
     [t("dashboard.config.host"), host],
     [t("dashboard.config.port"), port],
     [t("dashboard.config.ctx"), settings.SERVER_CTX_SIZE || "—"],
@@ -369,6 +390,27 @@ export function DashboardScreen() {
             </div>
             <Sparkline series={series} active={running} />
           </div>
+        </div>
+
+        {/* Running models：一个模型一个进程，这里列全（不只当前引擎那一个） */}
+        <div>
+          <div className="mb-2 flex items-center gap-2">
+            <h3 className="flex items-center gap-1.5 text-sm font-medium">
+              <CpuIcon className="size-4 text-muted-foreground" />
+              {t("console.sectionTitle")}
+            </h3>
+            <div className="flex-1" />
+            <Button
+              variant="ghost"
+              size="xs"
+              className="text-xs text-muted-foreground"
+              onClick={() => setRoute({ path: "settings", tab: "logs" })}
+            >
+              <TerminalSquareIcon data-icon="inline-start" />
+              {t("console.open")}
+            </Button>
+          </div>
+          <ServedModelsPanel compact />
         </div>
 
         {/* Hardware usage */}

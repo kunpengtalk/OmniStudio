@@ -469,10 +469,10 @@ async function cmdChat(args: string[], ctx: Ctx) {
   }
   if (!modelName) fail("没有可用的对话模型：先 \`omni model set <模型>\`，或在设置里配置 VLLM_MODEL_NAME。");
 
-  // 本地模式：确保推理服务器已就绪（自动拉起）。
+  // 本地模式：确保推理服务器已就绪（CLI 没有控制台，按设置后台拉起）。
   const base = backend.chat.getChatBaseUrl();
   if (mode === "local") {
-    const ready = await backend.chat.ensureServerReady();
+    const ready = await backend.chat.ensureServerReady({ autoStart: true });
     if (!ready.ok) {
       // 应用自身的推理服务器可能已占用同一端口（此时再拉起必然失败），
       // 探测到端口上有活着的 OpenAI 兼容服务就直接复用。
@@ -729,7 +729,7 @@ async function cmdServe(args: string[], ctx: Ctx) {
   if (mode === "local") {
     console.log("正在确保本地推理服务器就绪…");
     const base = backend.chat.getChatBaseUrl();
-    const ready = await backend.chat.ensureServerReady();
+    const ready = await backend.chat.ensureServerReady({ autoStart: true });
     if (!ready.ok && !(await probeServer(base))) {
       fail(`推理服务器未就绪: ${ready.error}`);
     }

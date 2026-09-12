@@ -31,20 +31,10 @@ import {
   type InstalledModel,
 } from "@/shared/modelscope";
 import { cn } from "@/mainview/lib/utils";
-
-const CAT_BADGE_CLASSES: Record<ModelCategory, string> = {
-  chat: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400",
-  tts: "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-400",
-  asr: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
-  image: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
-  other: "bg-muted text-muted-foreground",
-};
-
-const FORMAT_BADGE_CLASSES: Record<string, string> = {
-  gguf: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400",
-  safetensors: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
-  other: "bg-muted text-muted-foreground",
-};
+import {
+  ModelCategoryBadge,
+  ModelFormatBadge,
+} from "@/mainview/components/model-category-badge";
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "—";
@@ -87,14 +77,7 @@ function PresetRow({
               {t("models.recBadge")}
             </span>
           )}
-          <span
-            className={cn(
-              "inline-flex h-5 shrink-0 items-center rounded-full px-1.5 text-[10px] font-medium",
-              CAT_BADGE_CLASSES[preset.app],
-            )}
-          >
-            {t(`models.cat.${preset.app}`)}
-          </span>
+          <ModelCategoryBadge category={preset.app} label={t(`models.cat.${preset.app}`)} />
           {preset.engine && preset.engine !== "all" && (
             <span className="inline-flex h-5 shrink-0 items-center rounded-full bg-muted px-1.5 text-[10px] font-medium text-muted-foreground">
               {t(`settings.engine.${preset.engine}`)}
@@ -209,26 +192,20 @@ function MyModelRow({
                 <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
               )}
               <span className="truncate text-sm font-medium">{model.fileName}</span>
-              <span
-                className={cn(
-                  "inline-flex h-5 shrink-0 items-center rounded-full px-1.5 text-[10px] font-medium",
-                  CAT_BADGE_CLASSES[model.category ?? "other"],
-                )}
-              >
-                {t(`models.cat.${model.category ?? "other"}`)}
-              </span>
-              <span
-                className={cn(
-                  "inline-flex h-5 shrink-0 items-center rounded-full px-1.5 text-[10px] font-medium",
-                  FORMAT_BADGE_CLASSES[kind],
-                )}
-              >
-                {kind === "gguf"
-                  ? t("models.format.gguf")
-                  : kind === "safetensors"
-                    ? t("models.format.safetensors")
-                    : t("models.format.other")}
-              </span>
+              <ModelCategoryBadge
+                category={model.category ?? "other"}
+                label={t(`models.cat.${model.category ?? "other"}`)}
+              />
+              <ModelFormatBadge
+                kind={kind}
+                label={
+                  kind === "gguf"
+                    ? t("models.format.gguf")
+                    : kind === "safetensors"
+                      ? t("models.format.safetensors")
+                      : t("models.format.other")
+                }
+              />
               {!compatible && (
                 <span className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full bg-amber-100 px-1.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
                   <AlertTriangleIcon className="size-3" />
@@ -387,6 +364,11 @@ export function ModelsScreen({
             {presets.map((preset) => (
               <PresetRow key={preset.repo} preset={preset} onOpenDetail={onOpenDetail} />
             ))}
+            {presets.length === 0 && (
+              <p className="rounded-lg border border-dashed px-3 py-6 text-center text-xs text-muted-foreground">
+                {t("models.noPresetInCat")}
+              </p>
+            )}
           </div>
         </div>
 

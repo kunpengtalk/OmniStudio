@@ -14,6 +14,7 @@ import { createMenu } from "./menu";
 import { broadcastUpdateStatus, checkForUpdate } from "./updates";
 import { isConfigured, getSetting } from "./db/settings";
 import * as ServerManager from "./server-manager";
+import { stopAllServed } from "./model-servers";
 import * as Gateway from "./gateway";
 import { stopAsr } from "./asr";
 import { stopPpOcr } from "./ppocr";
@@ -152,7 +153,8 @@ void Promise.resolve()
 
 // Handle window close
 mainWindow.on("close", async () => {
-  await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
+  // 停掉**全部**已启动模型：推理进程是 detached 的，漏一个就留下占显存的孤儿。
+  await Promise.all([stopAllServed(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
   shutdownSkills();
   stopControlServer();
   Utils.quit();
@@ -160,7 +162,7 @@ mainWindow.on("close", async () => {
 
 // Cleanup on quit
 Electrobun.events.on("before-quit", async () => {
-  await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
+  await Promise.all([stopAllServed(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
   shutdownSkills();
   stopControlServer();
 });

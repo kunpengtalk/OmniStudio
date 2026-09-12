@@ -10,6 +10,7 @@ import type {
   BinaryCheckResult,
   LogListener,
   Runtime,
+  RuntimeOverrides,
   ServerStatus,
   StartResult,
   StatusListener,
@@ -22,6 +23,8 @@ const DOWNLOAD_PATTERN = /downloading|fetching|(\d+(\.\d+)?)\s*%|progress/i;
 export class VllmRuntime implements Runtime {
   readonly id = "vllm";
   readonly label = "vLLM";
+
+  constructor(private readonly overrides: RuntimeOverrides = {}) {}
 
   private serverProcess: Subprocess | null = null;
   private serverStatus: ServerStatus = "stopped";
@@ -103,6 +106,15 @@ export class VllmRuntime implements Runtime {
   }
 
   private resolveModel(): { model: string; servedName?: string } {
+    // 显式覆盖（已启动模型注册表）优先：同引擎多实例时不能读「当前活动模型」。
+    if (this.overrides.model) {
+      const target = this.overrides.model;
+      const fallbackName = existsSync(target)
+        ? slugModelFileName(modelNameForPath(target))
+        : undefined;
+      return { model: target, servedName: this.overrides.servedName ?? fallbackName };
+    }
+
     const localPath = getSetting("LOCAL_MODEL_PATH");
     if (localPath) {
       const localName = getSetting("LOCAL_MODEL_NAME");
@@ -151,7 +163,7 @@ export class VllmRuntime implements Runtime {
   }
 
   private buildArgs(model: string, servedName?: string): string[] {
-    const port = getServerPort(this.id);
+    const port = this.overrides.port ?? getServerPort(this.id);
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
     const maxModelLen = getSetting("VLLM_MAX_MODEL_LEN") || "8192";
     const tensorParallel = getSetting("VLLM_TENSOR_PARALLEL_SIZE") || "1";
@@ -236,7 +248,7 @@ export class VllmRuntime implements Runtime {
           self.setStatus("error");
         });
 
-      const port = getServerPort(this.id);
+      const port = this.overrides.port ?? getServerPort(this.id);
       const healthUrl = `http://localhost:${port}/health`;
       const maxIdleAttempts = 180; // vLLM may take longer to load
       let idleCount = 0;

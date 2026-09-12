@@ -76,20 +76,17 @@ export type ModelSourceMeta = {
   label: string;
   /** 检索 / 下载实际使用的域名，明确告诉用户"这是从哪儿下的"。 */
   host: string;
-  /** 结果行、详情页、下载任务上的来源标签样式。 */
-  badgeClass: string;
 };
 
+// 来源标签不再按平台配色（`MODEL_TAG_CLASS` 一套中性样式），平台差异靠文字 + 域名 tooltip。
 export const MODEL_SOURCE_META: Record<ModelSource, ModelSourceMeta> = {
   modelscope: {
     label: "ModelScope",
     host: "modelscope.cn",
-    badgeClass: "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300",
   },
   huggingface: {
     label: "Hugging Face",
     host: "hf-mirror.com",
-    badgeClass: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
   },
 };
 
@@ -158,6 +155,26 @@ export function safeRepoId(repo: string): string {
 export function modelDisplayName(dirName: string): string {
   const parts = dirName.split(/[/\\]+|__+/).filter(Boolean);
   return parts.length > 0 ? parts[parts.length - 1]! : dirName;
+}
+
+/** 路径型模型引用（绝对路径 / home 简写 / Windows 盘符）。 */
+const MODEL_REF_PATH_RE = /^(?:[/~]|[A-Za-z]:[\\/])/;
+
+/**
+ * 模型引用 → 界面展示名。
+ *
+ * 引用可能是路径（LM Studio 目录、MLX 的绝对路径、自己下载的 GGUF 文件），
+ * 也可能是 HF repo id / 服务名。**路径一律只取最后一段**——界面上（下拉、会话记录、
+ * 统计、日志）不该出现 `/Users/…` 这种路径，用户下载的模型叫什么名字就显示什么名字。
+ */
+export function modelNameFromRef(ref: string, fallback = ""): string {
+  const value = (ref ?? "").trim();
+  if (!value) return fallback;
+  // repo id（`org/model`）里的斜杠是名字的一部分，原样保留；路径才算路径。
+  if (!MODEL_REF_PATH_RE.test(value)) return value;
+  const tail = modelDisplayName(value);
+  const stripped = tail.replace(/\.(gguf|safetensors|bin|pt|pth|ckpt|onnx|ggml)$/i, "");
+  return stripped || tail || fallback;
 }
 
 /**
@@ -266,16 +283,282 @@ export type InstalledModel = {
   files?: string[];
 };
 
-export type ModelCategory = "chat" | "tts" | "asr" | "image" | "other";
+/**
+ * 模型分类（唯一真源）：本地已安装模型、市场检索结果、服务商 /v1/models 返回的
+ * 模型 id 全部按这套分类打标。
+ *
+ * `other` 是"没认出来"，不是"其它模型"：按分类筛选时它跟着 `keepOther` 走 ——
+ * 认不出来的宁可多给（聊天选择器保留它），不能因为分类器不认识就把可用的模型藏掉。
+ */
+export type ModelCategory =
+  | "chat"
+  | "embedding"
+  | "rerank"
+  | "tts"
+  | "asr"
+  | "image"
+  | "video"
+  | "other";
 
 export const MODEL_CATEGORIES: { value: ModelCategory | "all"; labelKey: string }[] = [
   { value: "all", labelKey: "models.cat.all" },
   { value: "chat", labelKey: "models.cat.chat" },
+  { value: "embedding", labelKey: "models.cat.embedding" },
+  { value: "rerank", labelKey: "models.cat.rerank" },
   { value: "tts", labelKey: "models.cat.tts" },
   { value: "asr", labelKey: "models.cat.asr" },
   { value: "image", labelKey: "models.cat.image" },
+  { value: "video", labelKey: "models.cat.video" },
   { value: "other", labelKey: "models.cat.other" },
 ];
+
+/** 需要模型的服务场景 —— 每个场景只认自己那几类模型。 */
+export type ModelCategorySet =
+  | "chat"
+  | "embedding"
+  | "rerank"
+  | "tts"
+  | "asr"
+  | "image"
+  | "video";
+
+export const MODEL_CATEGORY_SETS: Record<ModelCategorySet, readonly ModelCategory[]> = {
+  chat: ["chat"],
+  embedding: ["embedding"],
+  rerank: ["rerank"],
+  tts: ["tts"],
+  asr: ["asr"],
+  image: ["image"],
+  video: ["video"],
+};
+
+/**
+ * 这个分类能不能当对话 / 文本生成模型用（`other` = 没认出来，按能用处理）。
+ * 排序、基准测速、外部 agent 这些"要个 LLM"的地方统一用它判。
+ */
+export function isChatModelCategory(category: ModelCategory): boolean {
+  return MODEL_CATEGORY_SETS.chat.includes(category) || category === "other";
+}
+
+/**
+ * 按名字（文件名 / 仓库名 / API 模型 id）判断模型分类。
+ *
+ * 只认明确的命名特征，认不出来回 `other`：非聊天类的判定必须收紧，
+ * 否则会把聊天模型误判成 TTS/生图，从对话选择器里消失。
+ * 判定顺序 = 从最专有到最宽泛，先命中先返回。
+ */
+export function classifyModelName(rawName: string): ModelCategory {
+  const name = rawName.toLowerCase();
+  // 去掉标点后连写（`text-embedding-3` / `text_embedding_3` → `textembedding3`），
+  // 便于用「关键词紧跟数字/版本」这类形态匹配。
+  const flat = name.replace(/[^a-z0-9]+/g, "");
+  const tokens = new Set(name.split(/[^a-z0-9]+/).filter(Boolean));
+  const has = (...keys: string[]) => keys.some((k) => tokens.has(k));
+  const hasWord = (...keys: string[]) => keys.some((k) => name.includes(k));
+
+  // 重排：必须在嵌入之前判 —— `bge-reranker-v2-m3` 也含 `bge`。
+  if (
+    hasWord("rerank", "reranker", "cross-encoder", "crossencoder", "reranking") ||
+    has("ranker")
+  ) {
+    return "rerank";
+  }
+
+  // 嵌入：向量化模型（OpenAI text-embedding、BGE / GTE / M3E / E5 / Jina 等）。
+  if (
+    hasWord("embedding", "embed-", "-embed", "_embed", "sentence-transformers", "text2vec", "minilm") ||
+    has("embed", "embeddings", "bge", "gte", "m3e", "e5", "voyage", "bce", "acge", "piccolo") ||
+    /(^|\/)(intfloat|dunzhang)\//.test(name)
+  ) {
+    return "embedding";
+  }
+
+  // 语音合成 TTS。
+  if (
+    hasWord(
+      "tts",
+      "text-to-speech",
+      "cosyvoice",
+      "sovits",
+      "fish-speech",
+      "fishaudio",
+      "indextts",
+      "index-tts",
+      "mega-tts",
+      "vocoder",
+      "voice-clone",
+      "voiceclone",
+      "chatterbox",
+      "speecht5",
+      "outetts",
+      "zonos",
+      "xtts",
+      "kokoro",
+      "sambert",
+      "higgs-audio",
+      "f5-tts",
+      "dia-tts",
+    ) ||
+    has("tts") ||
+    // MiniMax 的 speech-01 / speech-2.5 是 TTS，`speech-` 后面必须跟版本号才算。
+    /(^|[/_-])speech[-_]?\d/.test(name)
+  ) {
+    return "tts";
+  }
+
+  // 语音识别 / 转录 ASR。
+  if (
+    hasWord(
+      "whisper",
+      "sensevoice",
+      "paraformer",
+      "funasr",
+      "transcribe",
+      "transcription",
+      "speech-to-text",
+      "speech-recognition",
+      "vosk",
+      "wav2vec",
+      "moonshine",
+      "whisperx",
+      "scribe",
+      "seaco",
+      "dolphin",
+    ) ||
+    has("asr")
+  ) {
+    return "asr";
+  }
+
+  // 文生视频：`t2v` / `i2v` 这类任务后缀最可靠，其次是厂商型号名。
+  if (
+    hasWord(
+      "t2v",
+      "i2v",
+      "v2v",
+      "text-to-video",
+      "image-to-video",
+      "seedance",
+      "hailuo",
+      "kling",
+      "veo",
+      "sora",
+      "cogvideo",
+      "hunyuanvideo",
+      "ltx-video",
+      "mochi",
+      "pika",
+      "runway",
+      "luma",
+    ) ||
+    has("video", "videos")
+  ) {
+    return "video";
+  }
+
+  // 文生图。
+  if (
+    hasWord(
+      "stable-diffusion",
+      "sdxl",
+      "sd3",
+      "sd-turbo",
+      "sd15",
+      "flux",
+      "kolors",
+      "dall-e",
+      "dall·e",
+      "dalle",
+      "imagen",
+      "gpt-image",
+      "seedream",
+      "seededit",
+      "wanx",
+      "qwen-image",
+      "hunyuan-image",
+      "cogview",
+      "midjourney",
+      "ideogram",
+      "recraft",
+      "playground",
+      "schnell",
+      "text-to-image",
+      "image-generation",
+      "imagegen",
+    ) ||
+    has("image", "images")
+  ) {
+    return "image";
+  }
+
+  // 文本对话 / VLM：最后判断，作为"看起来像对话模型"的兜底。
+  if (
+    hasWord(
+      "chat",
+      "instruct",
+      "text-generation",
+      "conversational",
+      "gpt",
+      "claude",
+      "gemini",
+      "qwen",
+      "llama",
+      "mistral",
+      "mixtral",
+      "deepseek",
+      "chatglm",
+      "glm",
+      "moonshot",
+      "kimi",
+      "doubao",
+      "ernie",
+      "hunyuan",
+      "baichuan",
+      "command-r",
+      "gemma",
+      "phi-",
+      "olmo",
+      "falcon",
+      "vicuna",
+      "hermes",
+      "sonnet",
+      "opus",
+      "haiku",
+      "grok",
+      "reasoner",
+      "omni",
+      "vision",
+      "cogvlm",
+    ) ||
+    has("llm", "vl", "chat", "instruct")
+  ) {
+    return "chat";
+  }
+
+  return "other";
+}
+
+/**
+ * 按场景挑选远端模型 id（服务商 /v1/models 返回的清单）。
+ *
+ * - `keepOther`：认不出分类的 id 一并保留（聊天选择器用：宁可多给，不能漏掉可用模型）；
+ * - `relax`：一个都没命中时回退成全量并标记 `relaxed`，让界面提示"没能识别出该场景的模型"，
+ *   避免服务商用了不常见的命名时选择器直接空掉。
+ */
+export function filterModelIds(
+  ids: readonly string[],
+  want: readonly ModelCategory[],
+  opts: { keepOther?: boolean; relax?: boolean } = {},
+): { ids: string[]; relaxed: boolean } {
+  const matched = ids.filter((id) => {
+    const category = classifyModelName(id);
+    return want.includes(category) || (opts.keepOther === true && category === "other");
+  });
+  if (matched.length === 0 && opts.relax === true && ids.length > 0) {
+    return { ids: [...ids], relaxed: true };
+  }
+  return { ids: matched, relaxed: false };
+}
 
 export type ChatPreset = {
   app: ModelCategory;
@@ -606,49 +889,23 @@ export function classifyModel(model: MarketModel): ModelCategory {
   const hasTag = (...names: string[]) =>
     names.some((n) => tags.includes(n) || tags.includes(`task:${n}`) || tags.includes(`custom_tag:${n}`));
 
-  if (
-    hasTag("text-to-speech", "audio-generation", "text-to-audio") ||
-    id.includes("cosyvoice") ||
-    id.includes("sovits") ||
-    id.includes("tts")
-  ) {
-    return "tts";
-  }
-
-  if (
-    hasTag("auto-speech-recognition", "automatic-speech-recognition", "audio-classification") ||
-    id.includes("whisper") ||
-    id.includes("sensevoice") ||
-    id.includes("paraformer") ||
-    id.includes("funasr")
-  ) {
+  // 平台声明的任务类型最准，先按标签定；标签缺失时再退回按名字判断。
+  if (hasTag("reranking", "text-ranking", "cross-encoder")) return "rerank";
+  if (hasTag("feature-extraction", "sentence-similarity", "text-embedding")) return "embedding";
+  if (hasTag("text-to-speech", "audio-generation", "text-to-audio")) return "tts";
+  if (hasTag("auto-speech-recognition", "automatic-speech-recognition", "audio-classification")) {
     return "asr";
   }
+  if (hasTag("text-to-video", "image-to-video", "video-generation")) return "video";
+  if (hasTag("text-to-image-synthesis", "text-to-image", "image-to-image")) return "image";
+  if (hasTag("text-generation", "image-text-to-text", "chat", "conversational")) return "chat";
 
-  if (
-    hasTag("text-to-image-synthesis", "text-to-image", "image-to-image") ||
-    id.includes("stable-diffusion") ||
-    id.includes("kolors") ||
-    id.includes("flux") ||
-    joined.includes("text to image")
-  ) {
-    return "image";
-  }
+  const byName = classifyModelName(id);
+  if (byName !== "other") return byName;
 
-  if (
-    hasTag("text-generation", "image-text-to-text", "chat", "conversational") ||
-    id.includes("llama") ||
-    id.includes("qwen") ||
-    id.includes("chat") ||
-    id.includes("instruct") ||
-    id.includes("cogvlm") ||
-    id.includes("deepseek") ||
-    id.includes("glm") ||
-    id.includes("mistral")
-  ) {
-    return "chat";
-  }
-
+  // 名字里没有命名特征、标签也没说清 —— 再看一眼简介里的口语化描述。
+  if (joined.includes("text to image") || joined.includes("文生图")) return "image";
+  if (joined.includes("text to video") || joined.includes("文生视频")) return "video";
   return "other";
 }
 
