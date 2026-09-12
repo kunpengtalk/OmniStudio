@@ -536,6 +536,7 @@ function createKnowledgeSearch(): BuiltTool {
           targets.map((k) => k.id),
           params.query,
           params.top_k,
+          { actor: "agent" },
         );
         if (hits.length === 0) {
           return textResult("没有检索到相关内容。");

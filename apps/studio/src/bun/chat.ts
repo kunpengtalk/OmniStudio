@@ -880,7 +880,7 @@ async function buildPayloadMessages(
   let citations: KbCitation[] = [];
   const kbIds = (opts.kbIds ?? []).filter((id) => typeof id === "number");
   if (kbIds.length > 0 && latestQuery.trim()) {
-    const ctx = await buildChatContext(kbIds, latestQuery);
+    const ctx = await buildChatContext(kbIds, latestQuery, { actor: "chat" });
     if (ctx.system) payloadMessages.unshift({ role: "system", content: ctx.system });
     citations = ctx.citations;
   }
@@ -943,7 +943,7 @@ export async function regenerateMessage(
   const payloadMessages = buildOpenAiMessages(context);
   let citations: KbCitation[] = [];
   if (lastUser?.kbIds?.length && lastUser.content.trim()) {
-    const ctx = await buildChatContext(lastUser.kbIds, lastUser.content);
+    const ctx = await buildChatContext(lastUser.kbIds, lastUser.content, { actor: "chat" });
     if (ctx.system) payloadMessages.unshift({ role: "system", content: ctx.system });
     citations = ctx.citations;
   }

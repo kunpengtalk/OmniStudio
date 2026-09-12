@@ -49,6 +49,20 @@ export function tokenContainment(a: Set<string>, b: Set<string>): number {
   return inter / small.size;
 }
 
+/**
+ * Jaccard 相似度：|A∩B| / |A∪B|，0..1。
+ * 与包含度相反，它双向要求覆盖：两段大体相同、只在少数词上分岔的文本相似度会显著下降。
+ * 召回去冗要用它而不是包含度 —— 否则「同一个模板套不同实体」的分块会被误判成重复
+ * （模板占九成时包含度接近 1，丢掉的恰恰是有区别的那一成）。
+ */
+export function tokenJaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+  for (const tk of small) if (large.has(tk)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
 // ---------------------------------------------------------------------------
 // BM25（内存索引，写路径统一失效重算）
 // ---------------------------------------------------------------------------

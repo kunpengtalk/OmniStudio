@@ -20,6 +20,7 @@ import { stopPpOcr } from "./ppocr";
 import { startControlServer, stopControlServer } from "./control-server";
 import { getAgentWorkspace } from "./agent";
 import { runMemoryMaintenance } from "./memory";
+import { runKbMaintenance } from "./knowledge";
 
 // Check if Vite dev server is running for HMR
 async function getMainViewUrl(): Promise<string> {
@@ -136,10 +137,16 @@ if (Gateway.isGatewayEnabled()) {
 }
 
 // 记忆库维护（启动后台跑一次）：补内容哈希、归档过期/长期未用的低价值记忆、补向量。
-// 不阻塞窗口显示，也不影响首屏；失败只记日志。
+// 知识库维护：恢复上次进程遗留的摄取作业、对账分块计数、修剪审计流水。
+// 都不阻塞窗口显示，也不影响首屏；失败只记日志。
 void runMemoryMaintenance().catch((e) => {
   console.error("Memory maintenance failed:", e instanceof Error ? e.message : String(e));
 });
+void Promise.resolve()
+  .then(() => runKbMaintenance())
+  .catch((e) => {
+    console.error("Knowledge base maintenance failed:", e instanceof Error ? e.message : String(e));
+  });
 
 // Handle window close
 mainWindow.on("close", async () => {

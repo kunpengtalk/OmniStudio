@@ -446,6 +446,12 @@ export const knowledgeBases = sqliteTable("knowledge_bases", {
   chunkOverlap: int("chunk_overlap").notNull().default(120),
   /** 单库召回条数（聊天里多库合并后再截断）。 */
   topK: int("top_k").notNull().default(6),
+  /** 召回分数下限（0-1，0 = 不过滤）：低于它的命中直接丢弃，抑制"沾边"噪声进上下文。 */
+  minScore: real("min_score").notNull().default(0),
+  /** 命中相邻分块时合并（1 = 开）：检索粒度与送进上下文的粒度解耦，块小则准、合并则全。 */
+  expandNeighbors: int("expand_neighbors").notNull().default(1),
+  /** 是否允许经网关 / MCP 对外检索（0 = 只有本机界面、聊天、Agent 能用）。 */
+  mcpExposed: int("mcp_exposed").notNull().default(1),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
   updatedAt: int("updated_at")
     .$defaultFn(() => Date.now())
@@ -474,6 +480,12 @@ export const knowledgeDocs = sqliteTable("knowledge_docs", {
     .$defaultFn(() => "pending")
     .notNull(),
   error: text("error"),
+  /** 提取正文的 SHA-256：源文件内容没变时跳过重建索引。 */
+  contentHash: text("content_hash"),
+  /** 源文件修改时间（毫秒）：配合 sizeBytes 做重复导入的廉价判定。 */
+  sourceMtime: int("source_mtime"),
+  /** 最近一次索引完成时间。 */
+  indexedAt: int("indexed_at"),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
   updatedAt: int("updated_at")
     .$defaultFn(() => Date.now())
@@ -481,6 +493,8 @@ export const knowledgeDocs = sqliteTable("knowledge_docs", {
 }, (t) => ({
   // 文档列表 / 统计按 kb_id 过滤。
   kbIdx: index("knowledge_docs_kb_id_idx").on(t.kbId),
+  // 重复导入判定按来源路径查已有文档。
+  pathIdx: index("knowledge_docs_source_path_idx").on(t.kbId, t.sourcePath),
 }));
 
 export const knowledgeChunks = sqliteTable("knowledge_chunks", {
@@ -491,6 +505,13 @@ export const knowledgeChunks = sqliteTable("knowledge_chunks", {
   seq: int("seq").notNull(),
   content: text("content").notNull(),
   charCount: int("char_count").notNull(),
+  /** 标题路径（"退款政策 > 部分退款"）：参与检索加权与上下文增强。 */
+  headingPath: text("heading_path"),
+  /** 在来源正文中的字符偏移（UTF-16 code unit），引用可精确回位。 */
+  charStart: int("char_start"),
+  charEnd: int("char_end"),
+  /** 正文 SHA-256：文档重新索引时未变化的分块直接复用旧向量，不重复调嵌入服务。 */
+  contentHash: text("content_hash"),
   /** Float32Array 的 base64；NULL = 未向量化。 */
   embedding: text("embedding"),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
@@ -503,6 +524,67 @@ export const knowledgeChunks = sqliteTable("knowledge_chunks", {
 export type KnowledgeBaseRow = typeof knowledgeBases.$inferSelect;
 export type KnowledgeDocRow = typeof knowledgeDocs.$inferSelect;
 export type KnowledgeChunkRow = typeof knowledgeChunks.$inferSelect;
+
+// ---------------------------------------------------------------------------
+// 知识库摄取队列：把「导入 → 抽取 → 切片 → 向量化」从 fire-and-forget
+// 改成持久化作业。崩溃/退出后重启能接着跑，失败按指数退避重试，
+// 并发受控（本地推理服务扛不住一次目录导入几百个并发请求）。
+// ---------------------------------------------------------------------------
+
+export const kbIngestJobs = sqliteTable(
+  "kb_ingest_jobs",
+  {
+    id: int().primaryKey({ autoIncrement: true }),
+    kbId: int("kb_id").notNull(),
+    docId: int("doc_id").notNull(),
+    /** ingest = 抽取+切片+向量化；embed = 只补缺失向量（不重跑 OCR/切片）。 */
+    kind: text("kind").$type<"ingest" | "embed">().notNull().default("ingest"),
+    /** queued | running | done | failed | canceled */
+    state: text("state").$type<"queued" | "running" | "done" | "failed" | "canceled">().notNull().default("queued"),
+    /** 已尝试次数（含当前这次）。 */
+    attempts: int("attempts").notNull().default(0),
+    maxAttempts: int("max_attempts").notNull().default(3),
+    /** 下次可执行的毫秒时间戳（退避用）。 */
+    nextRunAt: int("next_run_at").notNull().default(0),
+    lastError: text("last_error"),
+    /** 认领时间：用于识别进程被杀后遗留的 running 作业。 */
+    lockedAt: int("locked_at"),
+    createdAt: int("created_at").$defaultFn(() => Date.now()),
+    updatedAt: int("updated_at")
+      .$defaultFn(() => Date.now())
+      .$onUpdateFn(() => Date.now()),
+  },
+  (t) => ({
+    docIdx: index("kb_ingest_jobs_doc_id_idx").on(t.docId),
+    // 取「到期可执行」的队首是唯一的热查询路径。
+    stateIdx: index("kb_ingest_jobs_state_next_run_at_idx").on(t.state, t.nextRunAt),
+  }),
+);
+
+export type KbIngestJobRow = typeof kbIngestJobs.$inferSelect;
+
+/** 知识库审计流水：写入/删除/配置变更/检索都留痕（合规与排障）。 */
+export const kbEvents = sqliteTable(
+  "kb_events",
+  {
+    id: int().primaryKey({ autoIncrement: true }),
+    kbId: int("kb_id"),
+    docId: int("doc_id"),
+    /** kb_created | kb_deleted | kb_config | doc_added | doc_ingested | doc_skipped | doc_failed | doc_deleted | doc_reingested | recall | export | import | maintenance */
+    action: text("action").notNull(),
+    /** 事件细节（JSON）：文件名、切片数、查询词、耗时等。 */
+    detail: text("detail"),
+    /** 来源：ui / chat / agent / cli / rest / mcp。 */
+    actor: text("actor").notNull().default("ui"),
+    createdAt: int("created_at").$defaultFn(() => Date.now()),
+  },
+  (t) => ({
+    kbIdx: index("kb_events_kb_id_idx").on(t.kbId),
+    actionIdx: index("kb_events_action_idx").on(t.action),
+  }),
+);
+
+export type KbEventRow = typeof kbEvents.$inferSelect;
 
 
 // ---------------------------------------------------------------------------

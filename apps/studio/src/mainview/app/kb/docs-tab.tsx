@@ -9,6 +9,7 @@ import {
   Loader2Icon,
   NotebookPenIcon,
   PlusIcon,
+  PlayIcon,
   RefreshCwIcon,
   SparklesIcon,
   Trash2Icon,
@@ -113,6 +114,11 @@ function ChunksDialog({ doc, onClose }: { doc: KbDocView | null; onClose: () => 
                       {c.embedded ? t("kb.chunks.embedded") : t("kb.chunks.notEmbedded")}
                     </span>
                   </div>
+                  {c.headingPath && (
+                    <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={c.headingPath}>
+                      {c.headingPath}
+                    </p>
+                  )}
                   <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-5">{c.content}</p>
                 </div>
               ))}
@@ -130,6 +136,7 @@ function DocRow({
   embeddingEnabled,
   onChunks,
   onReingest,
+  onRetry,
   onDelete,
   busy,
 }: {
@@ -137,6 +144,7 @@ function DocRow({
   embeddingEnabled: boolean;
   onChunks: () => void;
   onReingest: () => void;
+  onRetry: () => void;
   onDelete: () => void;
   busy: boolean;
 }) {
@@ -188,6 +196,14 @@ function DocRow({
             {doc.error}
           </p>
         )}
+        {doc.job?.state === "queued" && doc.job.attempts > 0 && (
+          <p className="mt-1.5 text-[10px] leading-4 text-amber-600 dark:text-amber-400">
+            {t("kb.docs.retryHint", { n: String(doc.job.attempts), max: String(doc.job.maxAttempts) })}
+          </p>
+        )}
+        {doc.job?.state === "failed" && (
+          <p className="mt-1.5 text-[10px] leading-4 text-muted-foreground">{t("kb.docs.retryExhausted")}</p>
+        )}
       </div>
       <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover/doc:opacity-100">
         <Button
@@ -200,6 +216,18 @@ function DocRow({
         >
           <ListIcon className="size-3.5" />
         </Button>
+        {doc.status === "failed" && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="size-6 text-muted-foreground/80 hover:text-foreground"
+            tooltip={t("kb.docs.retry")}
+            onClick={onRetry}
+            disabled={busy}
+          >
+            <PlayIcon className="size-3.5" />
+          </Button>
+        )}
         <Button
           variant="ghost"
           size="icon-sm"
@@ -337,6 +365,11 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
     onSuccess: invalidate,
   });
 
+  const retryMutation = useMutation({
+    mutationFn: (id: number) => rpcClient.kbDocRetry({ id }),
+    onSuccess: invalidate,
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (id: number) => rpcClient.kbDocDelete({ id }),
     onSuccess: () => {
@@ -463,6 +496,7 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
                 busy={reingestMutation.isPending}
                 onChunks={() => setChunksDoc(d)}
                 onReingest={() => reingestMutation.mutate(d.id)}
+                onRetry={() => retryMutation.mutate(d.id)}
                 onDelete={() => setConfirmDelete(d)}
               />
             ))}

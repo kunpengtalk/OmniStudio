@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type KbTab = "docs" | "recall" | "settings" | "access";
+export type KbTab = "docs" | "recall" | "settings" | "governance" | "access";
 
 type KbState = {
   selectedKbId: number | null;

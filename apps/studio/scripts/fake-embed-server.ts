@@ -3,8 +3,14 @@
  * - POST /v1/embeddings：按 token 哈希生成 32 维确定性向量（相同词 → 相同方向，
  *   语义近似靠共享 token 重叠近似，足够验证余弦排序逻辑）；
  * - GET /v1/models：返回 fake-embed。
+ * - GET /stats、/stats/reset：调用计数，供冒烟脚本断言「未变化的分块复用了向量」
+ *   （即嵌入输入数远少于分块总数）。
  */
 const PORT = Number(process.env.FAKE_EMBED_PORT ?? 18777);
+
+/** 嵌入调用计数（/stats 读出、/stats/reset 清零）。 */
+let embedCalls = 0;
+let embedInputs = 0;
 
 function hashToken(token: string): number {
   let h = 2166136261;
@@ -37,9 +43,19 @@ const server = Bun.serve({
     if (url.pathname === "/v1/models") {
       return Response.json({ data: [{ id: "fake-embed" }] });
     }
+    if (url.pathname === "/stats") {
+      return Response.json({ embedCalls, embedInputs });
+    }
+    if (url.pathname === "/stats/reset") {
+      embedCalls = 0;
+      embedInputs = 0;
+      return Response.json({ ok: true });
+    }
     if (url.pathname === "/v1/embeddings" && req.method === "POST") {
       const body = (await req.json()) as { input?: string | string[] };
       const input = Array.isArray(body.input) ? body.input : [body.input ?? ""];
+      embedCalls++;
+      embedInputs += input.length;
       return Response.json({
         data: input.map((text, index) => ({ index, embedding: embed(text) })),
       });

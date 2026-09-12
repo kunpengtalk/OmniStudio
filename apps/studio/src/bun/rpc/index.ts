@@ -94,7 +94,7 @@ import type { BackupStatus as SkillsBackupStatus } from "../skills/git-backup";
 import type { SkillUpdateStatus as SkillUpdateStatusView } from "../skills/installer";
 import type { CentralInfo as SkillsCentralInfo } from "../skills/central-repo";
 import * as Knowledge from "../knowledge";
-import type { KbCitation, KbHit } from "../../shared/knowledge";
+import type { KbCitation, KbEventEntry, KbHit, KbIndexStats } from "../../shared/knowledge";
 
 export type GitPreviewItem = { relPath: string; name: string; description: string | null };
 
@@ -1521,6 +1521,41 @@ export type AppRPC = {
       kbRerankModels: {
         params: { base?: string; apiKey?: string } | undefined;
         response: { models: string[] };
+      };
+      /** 审计流水（谁在什么时候导入/删除/检索了什么）+ 各动作计数。 */
+      kbEvents: {
+        params: { kbId?: number; limit?: number } | undefined;
+        response: { events: KbEventEntry[]; counts: Record<string, number> };
+      };
+      /** 摄取队列概览：排队 / 执行中 / 已失败。 */
+      kbQueueStats: {
+        params: undefined;
+        response: { queued: number; running: number; failed: number };
+      };
+      /** 已加载检索索引的规模与内存占用（治理页展示）。 */
+      kbIndexStats: {
+        params: undefined;
+        response: { indexes: KbIndexStats[] };
+      };
+      /** 整库导出到数据目录 kb-exports/（可选带向量）。 */
+      kbExport: {
+        params: { kbId: number; includeEmbeddings?: boolean };
+        response: { path: string; bytes: number; docs: number; chunks: number };
+      };
+      /** 从导出 JSON 导入为新库（不覆盖既有数据）。 */
+      kbImport: {
+        params: { json: string; name?: string };
+        response: { kb: Knowledge.KbView; docs: number; chunks: number; embedded: number };
+      };
+      /** 失败文档重新入队（沿用原作业，不清零重试次数）。 */
+      kbDocRetry: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      /** 在系统文件管理器中打开导出目录。 */
+      kbOpenExportDir: {
+        params: undefined;
+        response: { ok: boolean; path: string };
       };
     };
     messages: {};
@@ -3341,6 +3376,45 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
       kbRerankModels: async (params) => {
         return { models: await Knowledge.suggestRerankModels(params ?? undefined) };
+      },
+      kbEvents: async (params) => {
+        const kbId = params?.kbId;
+        return {
+          events: Knowledge.kbEvents({ kbId, limit: params?.limit ?? 100 }),
+          counts: Knowledge.kbAuditSummary(kbId),
+        };
+      },
+      kbQueueStats: async () => {
+        return Knowledge.kbQueueStats();
+      },
+      kbIndexStats: async () => {
+        return { indexes: Knowledge.kbIndexStatsAll() };
+      },
+      kbExport: async ({ kbId, includeEmbeddings }) => {
+        return Knowledge.exportKbToFile(kbId, { includeEmbeddings });
+      },
+      kbImport: async ({ json, name }) => {
+        let payload: unknown;
+        try {
+          payload = JSON.parse(json);
+        } catch {
+          throw new Error("导入内容不是合法 JSON");
+        }
+        return Knowledge.importKb(payload, { name });
+      },
+      kbDocRetry: async ({ id }) => {
+        Knowledge.retryDoc(id);
+        return { ok: true };
+      },
+      kbOpenExportDir: async () => {
+        const dir = Knowledge.kbExportDir();
+        try {
+          const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
+          Bun.spawn([opener, dir]);
+          return { ok: true, path: dir };
+        } catch {
+          return { ok: false, path: dir };
+        }
       },
     },
     messages: {},

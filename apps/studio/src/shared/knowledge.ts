@@ -44,4 +44,43 @@ export type KbHit = {
   /** 经过重排模型二次打分时为 true，rerankScore 为其相关性得分（0-1）。 */
   reranked?: boolean;
   rerankScore?: number | null;
+  /** 分块所在标题路径（摄取时记录），引用与调试用。 */
+  headingPath?: string | null;
+  /** 在来源正文中的字符偏移（开启相邻分块合并时覆盖整段范围）。 */
+  charStart?: number | null;
+  charEnd?: number | null;
+  /** 合并了相邻分块时，被并入的分块序号（含自身）。 */
+  mergedSeqs?: number[];
+};
+
+/** 摄取队列中的一条作业（文档列表据此展示「排队中 / 第 2 次重试」）。 */
+export type KbIngestJobView = {
+  docId: number;
+  state: "queued" | "running" | "done" | "failed" | "canceled";
+  attempts: number;
+  maxAttempts: number;
+  nextRunAt: number;
+  lastError: string | null;
+};
+
+/** 检索索引的运行时占用（治理页展示，帮助判断内存与规模）。 */
+export type KbIndexStats = {
+  kbId: number;
+  chunks: number;
+  vectors: number;
+  dimensions: number;
+  terms: number;
+  bytes: number;
+  builtAt: number;
+};
+
+/** 审计流水条目：谁在什么时候导入/删除/检索了什么。 */
+export type KbEventEntry = {
+  id: number;
+  kbId: number | null;
+  docId: number | null;
+  action: string;
+  detail: unknown;
+  actor: string;
+  createdAt: number | null;
 };

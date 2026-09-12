@@ -5,6 +5,7 @@ import {
   CheckCircle2Icon,
   Loader2Icon,
   SaveIcon,
+  ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
   Trash2Icon,
@@ -23,6 +24,7 @@ import {
 } from "@ui/dialog";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
+import { Switch } from "@ui/switch";
 import { useKbStore } from "@stores/kb";
 import { useT } from "@stores/ui-lang";
 import type { KbView } from "@/bun/knowledge";
@@ -39,6 +41,9 @@ type FormState = {
   chunkSize: string;
   chunkOverlap: string;
   topK: string;
+  minScore: string;
+  expandNeighbors: boolean;
+  mcpExposed: boolean;
 };
 
 function formFromKb(kb: KbView): FormState {
@@ -54,6 +59,9 @@ function formFromKb(kb: KbView): FormState {
     chunkSize: String(kb.chunkSize),
     chunkOverlap: String(kb.chunkOverlap),
     topK: String(kb.topK),
+    minScore: String(kb.minScore),
+    expandNeighbors: kb.expandNeighbors,
+    mcpExposed: kb.mcpExposed,
   };
 }
 
@@ -168,6 +176,9 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
           chunkSize: Number(form.chunkSize) || 800,
           chunkOverlap: Number(form.chunkOverlap) || 120,
           topK: Number(form.topK) || 6,
+          minScore: Number(form.minScore) || 0,
+          expandNeighbors: form.expandNeighbors,
+          mcpExposed: form.mcpExposed,
         },
       }),
     onSuccess: (data) => {
@@ -398,6 +409,34 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
             </FormRow>
           </div>
           <p className="text-[10px] leading-4 text-muted-foreground/80">{t("kb.settings.reingestNote")}</p>
+        </Section>
+
+        <Section icon={<ShieldCheckIcon className="size-3.5 text-muted-foreground" />} title={t("kb.settings.retrieval")}>
+          <FormRow label={t("kb.settings.minScore")} hint={t("kb.settings.minScoreHint")}>
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              value={form.minScore}
+              onChange={(e) => set("minScore", e.target.value)}
+              className="h-8 w-28 text-xs"
+            />
+          </FormRow>
+          <FormRow label={t("kb.settings.expandNeighbors")} hint={t("kb.settings.expandNeighborsHint")}>
+            <Switch
+              size="sm"
+              checked={form.expandNeighbors}
+              onCheckedChange={(v) => setForm((prev) => ({ ...prev, expandNeighbors: v }))}
+            />
+          </FormRow>
+          <FormRow label={t("kb.settings.mcpExposed")} hint={t("kb.settings.mcpExposedHint")}>
+            <Switch
+              size="sm"
+              checked={form.mcpExposed}
+              onCheckedChange={(v) => setForm((prev) => ({ ...prev, mcpExposed: v }))}
+            />
+          </FormRow>
         </Section>
 
         {resetNotice && (

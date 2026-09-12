@@ -37,6 +37,7 @@ import type { KbView } from "@/bun/knowledge";
 import { KbDocsTab } from "./docs-tab";
 import { KbRecallTab } from "./recall-tab";
 import { KbSettingsTab } from "./settings-tab";
+import { KbGovernanceTab } from "./governance-tab";
 import { KbAccessTab } from "./access-tab";
 
 /** 知识库列表（侧栏 / 主页 / 聊天选择器共用）。 */
@@ -205,6 +206,7 @@ const TABS: { key: KbTab; labelKey: string }[] = [
   { key: "docs", labelKey: "kb.tab.docs" },
   { key: "recall", labelKey: "kb.tab.recall" },
   { key: "settings", labelKey: "kb.tab.settings" },
+  { key: "governance", labelKey: "kb.tab.governance" },
   { key: "access", labelKey: "kb.tab.access" },
 ];
 
@@ -357,6 +359,7 @@ export function KbScreen() {
         {tab === "docs" && <KbDocsTab kb={selected} />}
         {tab === "recall" && <KbRecallTab kb={selected} />}
         {tab === "settings" && <KbSettingsTab kb={selected} />}
+        {tab === "governance" && <KbGovernanceTab kb={selected} />}
         {tab === "access" && <KbAccessTab kb={selected} />}
       </div>
       <KbCreateDialog />

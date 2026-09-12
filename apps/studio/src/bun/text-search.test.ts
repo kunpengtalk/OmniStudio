@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
-import { bm25Rank, buildBm25Index, normalizeText, tokenContainment, tokenSet, tokenize } from "./text-search";
+import {
+  bm25Rank,
+  buildBm25Index,
+  normalizeText,
+  tokenContainment,
+  tokenJaccard,
+  tokenSet,
+  tokenize,
+} from "./text-search";
 
 describe("tokenize", () => {
   test("拉丁与数字按词元切分并小写", () => {
@@ -42,6 +50,29 @@ describe("tokenContainment", () => {
 
   test("空集合不判重（返回 0）", () => {
     expect(tokenContainment(new Set(), tokenSet("任意"))).toBe(0);
+  });
+});
+
+describe("tokenJaccard", () => {
+  test("完全相同的集合为 1", () => {
+    expect(tokenJaccard(tokenSet("退款政策说明"), tokenSet("退款政策说明"))).toBe(1);
+  });
+
+  test("子集关系的相似度明显低于包含度", () => {
+    const short = tokenSet("退款");
+    const long = tokenSet("退款政策说明与流程");
+    expect(tokenContainment(short, long)).toBe(1);
+    expect(tokenJaccard(short, long)).toBeLessThan(0.4);
+  });
+
+  test("模板一致、只差一个实体的两块不算重复", () => {
+    const step = (n: number) =>
+      tokenSet(`第一步 打开设置面板 第二步 填写第 ${n} 项参数 第三步 保存并重启服务 补充说明文字`);
+    expect(tokenJaccard(step(1), step(2))).toBeLessThan(0.95);
+  });
+
+  test("空集合返回 0", () => {
+    expect(tokenJaccard(new Set(), tokenSet("任意"))).toBe(0);
   });
 });
 

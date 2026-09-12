@@ -70,9 +70,10 @@ async function toolSearch(args: Record<string, unknown>): Promise<string> {
   if (!query) return "错误：query 不能为空。";
   const topK = Number(args.top_k) > 0 ? Math.min(30, Math.floor(Number(args.top_k))) : undefined;
 
-  const kbs = listKnowledgeBases();
+  // 只有标记为可对外暴露的库参与 MCP 检索：私人资料库不该因为网关开着就漏出去
+  const kbs = listKnowledgeBases().filter((k) => k.mcpExposed);
   if (kbs.length === 0) {
-    return "用户还没有创建任何知识库。请提示用户在 OmniStudio 的知识库页导入资料。";
+    return "没有可经 MCP 访问的知识库（库的「MCP 可见」开关都是关闭的，或尚未创建）。";
   }
 
   let targets = kbs;
@@ -92,6 +93,7 @@ async function toolSearch(args: Record<string, unknown>): Promise<string> {
     targets.map((k) => k.id),
     query,
     topK,
+    { actor: "mcp" },
   );
   if (hits.length === 0) {
     return "没有检索到相关内容。可以换个问法，或提示用户补充资料。";
@@ -108,10 +110,10 @@ async function toolSearch(args: Record<string, unknown>): Promise<string> {
 
 /** kb_list 工具实现。 */
 function toolList(): string {
-  const kbs = listKnowledgeBases();
-  if (kbs.length === 0) return "用户还没有创建任何知识库。";
+  const kbs = listKnowledgeBases().filter((k) => k.mcpExposed);
+  if (kbs.length === 0) return "没有可经 MCP 访问的知识库。";
   return (
-    `共 ${kbs.length} 个知识库：\n` +
+    `共 ${kbs.length} 个可用知识库：\n` +
     kbs
       .map(
         (k) =>

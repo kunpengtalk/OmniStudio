@@ -161,18 +161,38 @@ apps/
 
 ### 4.5 知识库与记忆
 
-**知识库**是一条完整的本地 RAG，但刻意不引外部依赖：
+**知识库**是一条完整的本地 RAG，但刻意不引外部依赖（没有向量库、没有 FTS 扩展）。五个模块各管一段：
 
 ```
-摄取 → 解析 → Markdown 感知切片 → 可选向量化 → 混合检索 → 可选重排
-        │         │                  │              │
-        │         │                  │              └ BM25 + 余弦，RRF 融合
-        │         │                  └ OpenAI 兼容 /v1/embeddings，Float32 base64 存分块行
-        │         └ 标题分节 + 段落贪心打包 + 超长硬切带重叠
-        └ 文本直读 / PDF·图片走 VLM OCR / 网页走 cheerio
+kb-ingest  持久化摄取队列（解析 / 切片 / 向量化）
+    │     作业落库 → 并发上限 2 → 指数退避重试 → 重启恢复；分块写入放进一个事务
+    │     文本直读 / PDF·图片走 VLM OCR / 网页走 cheerio
+    ▼
+kb-chunk   Markdown 感知切片 + 溯源
+    │     空行分段、标题起新段（标题跟内容走）、代码围栏不拆、超长硬切带重叠
+    │     每块带标题路径与原文字符偏移
+    ▼
+kb-index   检索内核：term → postings 倒排表（平行数组 + 墓碑压缩）
+    │     向量侧：归一化 Float32 常驻 + 槽位 swap-remove，按库 LRU（4 个）
+    ▼
+knowledge  召回编排：BM25 与余弦各自排序 → RRF 融合 → 可选重排
+    │     → 相邻分块合并 → 同文档去冗 → 分数下限 → topK
+    ▼
+kb-events  审计流水：导入 / 删除 / 重新处理 / 配置变更 / 检索全部留痕
 ```
 
-BM25 索引是内存里的惰性缓存，向量检索是纯 JS 余弦 —— 没有向量库、没有 FTS 扩展。表注释明确这是个人规模下的取舍。消费方有三处：聊天挂载知识库时注入编号参考资料并要求 `[n]` 引用（引用随消息落库）、Agent 的 `knowledge_search` 工具、网关 MCP。
+几处刻意的工程取舍：
+
+- **嵌入与索引都用上下文增强文本**（`文档名 › 标题路径 + 正文`），展示仍用正文原样 —— 把孤立分块放回它
+  所在语境，减少「分块本身没说清主语」的漏召回。
+- **增量而非重建**：任何一次写入都不再让整库索引作废；重新索引按分块内容哈希复用旧向量，只把变化的
+  分块送去嵌入（改一段不必为整篇重新付费）。
+- **检索粒度与上下文档位解耦**：小块召回准，命中后与相邻块合并成一条再进上下文。
+- **可见性开关**：库可标记为「不对 MCP 暴露」，网关 `/mcp` 的 `kb_search` / `kb_list` 只看得见打开的库。
+- **整库导出 / 导入**（`kb-exports/*.json`，可选带向量），用于归档与换机迁移。
+
+消费方有三处：聊天挂载知识库时注入编号参考资料并要求 `[n]` 引用（引用随消息落库）、Agent 的
+`knowledge_search` 工具、网关 MCP。
 
 **记忆**是单表 + 生命周期字段（重要度 / 状态 / 作用域 / 取代链 / 内容哈希 / 可选向量），落在同一个 SQLite 上：
 
@@ -268,7 +288,7 @@ omi <cmd>
 
 ## 8. 数据层
 
-单份 SQLite 库（WAL、`busy_timeout=5000`、`synchronous=NORMAL` —— 这组参数是为了支撑 `omi memory` 和 MCP 桥在应用之外并发读写同一个库）。27 张表按域分组：
+单份 SQLite 库（WAL、`busy_timeout=5000`、`synchronous=NORMAL` —— 这组参数是为了支撑 `omi memory` 和 MCP 桥在应用之外并发读写同一个库）。33 张表按域分组：
 
 | 域 | 表 |
 | --- | --- |
@@ -278,9 +298,10 @@ omi <cmd>
 | Skills | `skills`、`skill_targets`、`skill_presets`、`preset_skills`、`preset_skill_tools`、`skill_projects`、`skillssh_cache`、`skill_audit_log` |
 | 配置 | `settings`（全局 key/value）、`cloud_providers`、`mcp_servers`、`knowledge_bases` |
 | 知识库 | `knowledge_docs`、`knowledge_chunks`（+ 可选 Float32 base64 向量） |
-| 记忆 | `memories` |
+| 知识库运维 | `kb_ingest_jobs`（摄取队列）、`kb_events`（审计流水） |
+| 记忆 | `memories`、`memory_events`、`memory_metrics` |
 
-迁移在 `src/bun/db/migrations/`（0000–0021）。**加了新迁移要留意 drizzle 的 `when` 排序** —— 曾出现过新迁移的 `when` 小于前一条，导致老库升级时被整条跳过。
+迁移在 `src/bun/db/migrations/`（0000–0023）。**加了新迁移要留意 drizzle 的 `when` 排序** —— 曾出现过新迁移的 `when` 小于前一条，导致老库升级时被整条跳过。
 
 **数据目录布局**（`<userData>`，macOS 上是 `~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>`）：
 
