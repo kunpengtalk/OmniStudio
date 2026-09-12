@@ -1,6 +1,7 @@
 import type { ElectrobunConfig } from "electrobun";
 import { existsSync } from "node:fs";
 import pkg from "../../package.json";
+import { nativePackagesFor } from "./src/shared/native-packages";
 
 // CI builds without a signing certificate (secrets unset) must still package.
 // ElectroBun skips codesign/notarization when codesign is false; local
@@ -9,24 +10,23 @@ const signForDistribution = process.env.ELECTROBUN_NO_SIGN !== "1";
 
 // Electrobun builds for the host platform only, so the native runtime
 // packages (sharp / @napi-rs/canvas) must match the machine doing the build
-// — e.g. the CI runner — not the developer's Mac.
-const nativePackages =
-  process.platform === "darwin"
-    ? process.arch === "arm64"
-      ? ["@img/sharp-darwin-arm64", "@img/sharp-libvips-darwin-arm64", "@napi-rs/canvas-darwin-arm64"]
-      : ["@img/sharp-darwin-x64", "@img/sharp-libvips-darwin-x64", "@napi-rs/canvas-darwin-x64"]
-    : process.platform === "win32"
-      ? ["@img/sharp-win32-x64", "@img/sharp-libvips-win32-x64", "@napi-rs/canvas-win32-x64-msvc"]
-      : process.arch === "x64"
-        ? ["@img/sharp-linux-x64", "@img/sharp-libvips-linux-x64", "@napi-rs/canvas-linux-x64-gnu"]
-        : ["@img/sharp-linux-arm64", "@img/sharp-libvips-linux-arm64", "@napi-rs/canvas-linux-arm64-gnu"];
+// — e.g. the CI runner — not the developer's Mac. 清单与它依赖的
+// package.json optionalDependencies 声明见 src/shared/native-packages.ts。
+const nativePackages = nativePackagesFor(process.platform, process.arch);
 
 const nativeCopy: Record<string, string> = {};
 for (const name of nativePackages) {
   if (existsSync(`node_modules/${name}`)) {
     nativeCopy[`node_modules/${name}`] = `bun/node_modules/${name}`;
   } else {
-    console.warn(`[electrobun.config] missing native package: ${name}`);
+    // 这里只 warn 的话，会安安静静产出一个缺 binding 的载荷：包装得上、装完一启动就崩
+    // （issue #4 —— Windows/Linux 载荷里没有 sharp 的 win32-x64 binding）。宁可让构建
+    // 直接失败，也不要再发一个跑不起来的包。
+    throw new Error(
+      `[electrobun.config] 缺少平台原生包 ${name}（构建机 ${process.platform}-${process.arch}）。` +
+        `它需要在 apps/studio/package.json 的 optionalDependencies 里声明并在构建机上 bun install 过，` +
+        `否则载荷不会带上 sharp / @napi-rs/canvas 的原生 binding。`,
+    );
   }
 }
 
