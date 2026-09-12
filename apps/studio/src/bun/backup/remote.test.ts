@@ -183,7 +183,11 @@ describe("S3 兼容存储端到端（假服务端）", () => {
           // 签名里用的 payload 哈希必须与实际收到的字节一致
           const hash = createHash("sha256").update(body).digest("hex");
           expect(req.headers.get("x-amz-content-sha256")).toBe(hash);
-          expect(Number(req.headers.get("content-length"))).toBe(body.length);
+          // content-length 由运行时决定：部分 Bun 版本对流式 body 改用 chunked 而不发
+          // 这个头（CI 用的 1.3.9 就是如此）。请求体完整性已由上面的 payload 哈希保证，
+          // 所以这里只在头部存在时校验一致性。
+          const declared = req.headers.get("content-length");
+          if (declared !== null) expect(Number(declared)).toBe(body.length);
           store.set(key, { bytes: body, hash });
           return new Response("", { status: 200 });
         }
@@ -258,7 +262,11 @@ describe("S3 兼容存储端到端（假服务端）", () => {
   test("服务端报错时给出可读信息（凭据 / 权限）", async () => {
     const server = Bun.serve({
       port: 0,
-      fetch() {
+      async fetch(req) {
+        // 必须把请求体读完：Bun 1.3.9（CI 用的版本）在 handler 不消费 body 时，
+        // 残留的 chunked 数据会被当成下一个请求的开头，同连接上的后续请求会收到
+        // 400 —— 表现成「列取失败：HTTP 400」而不是这里的 403。
+        await req.arrayBuffer().catch(() => {});
         return new Response("<Error><Code>SignatureDoesNotMatch</Code></Error>", { status: 403 });
       },
     });
