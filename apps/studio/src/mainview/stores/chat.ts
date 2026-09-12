@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { Conversation, ChatMessage, ChatStats } from "../../bun/chat";
+import type { KbCitation } from "../../shared/knowledge";
 
 interface ChatState {
   conversations: Conversation[];
@@ -27,6 +28,7 @@ interface ChatState {
     messageId: number,
     content: string,
     reasoning?: string,
+    citations?: KbCitation[],
   ) => void;
   /** 删除单条消息（并清理它的统计）。 */
   removeMessage: (conversationId: number, messageId: number) => void;
@@ -94,14 +96,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
-  finalizeMessage: (conversationId, messageId, content, reasoning) => {
+  finalizeMessage: (conversationId, messageId, content, reasoning, citations) => {
     if (conversationId !== get().activeConversationId) return;
     set((state) => {
       const exists = state.activeMessages.some((m) => m.id === messageId);
       const messages = exists
         ? state.activeMessages.map((m) =>
             m.id === messageId
-              ? { ...m, content, reasoning: reasoning || m.reasoning || undefined }
+              ? {
+                  ...m,
+                  content,
+                  reasoning: reasoning || m.reasoning || undefined,
+                  citations: citations && citations.length > 0 ? citations : m.citations,
+                }
               : m,
           )
         : [
@@ -112,6 +119,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               role: "assistant" as const,
               content,
               reasoning: reasoning || undefined,
+              citations: citations && citations.length > 0 ? citations : undefined,
               createdAt: Date.now(),
             },
           ];

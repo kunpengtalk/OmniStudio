@@ -12,6 +12,7 @@ import { cmdLaunch } from "./commands/launch";
 import { cmdServe } from "./commands/serve";
 import { cmdInstall } from "./commands/install";
 import { cmdUpdate, cmdVersion } from "./commands/meta";
+import { cmdMemory } from "./commands/memory";
 
 type Handler = (parsed: ReturnType<typeof parseArgs>) => Promise<void>;
 
@@ -21,6 +22,7 @@ const COMMANDS: Record<string, Handler> = {
   restart: cmdRestart,
   serve: cmdServe,
   launch: cmdLaunch,
+  memory: cmdMemory,
   model: cmdModel,
   cloud: cmdCloud,
   models: cmdModels,

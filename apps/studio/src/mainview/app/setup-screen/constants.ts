@@ -1,4 +1,5 @@
 import { MODEL_PROFILES } from "@/shared/model-profiles";
+import { CLOUD_PRESETS } from "@/shared/cloud-providers";
 
 export const REMOTE_PROFILES = [
   ...MODEL_PROFILES,
@@ -6,7 +7,8 @@ export const REMOTE_PROFILES = [
 ];
 
 /**
- * 国内主流的 OpenAI 兼容大模型服务商（引导界面“URL 模式”用）。
+ * 引导界面「URL 模式」的服务商列表：单一数据源在 shared/cloud-providers.ts
+ * （与「模型云服务」页共用），末尾追加「自定义」占位项。
  * 选择服务商后只需填入 API Key，Base URL 自动带出（仍可手动修改）；
  * 列表末尾的“自定义”才需要手动输入完整 URL。
  */
@@ -25,112 +27,14 @@ export type RemoteProvider = {
 };
 
 export const REMOTE_PROVIDERS: readonly RemoteProvider[] = [
-  {
-    id: "omnilabs",
-    label: "OmniLabs",
-    vendor: "OmniLabs 多模态平台",
-    baseUrl: "https://omnilabs.vibeadmin.cn/v1",
-    models: [],
-    note: "统一接入 TTS / ASR / LLM / OCR，32+ 开源模型、44 个免费大模型",
-  },
-  {
-    id: "deepseek",
-    label: "DeepSeek",
-    vendor: "深度求索",
-    baseUrl: "https://api.deepseek.com/v1",
-    models: ["deepseek-chat", "deepseek-reasoner"],
-    note: "deepseek-chat 指向最新版，官方 API 性价比高",
-  },
-  {
-    id: "qwen-dashscope",
-    label: "通义千问 (Qwen)",
-    vendor: "阿里云百炼",
-    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    models: ["qwen-max", "qwen-plus", "qwen-turbo", "qwen-long", "qwen-flash"],
-    note: "阿里云百炼，qwen-plus/turbo 有免费额度",
-  },
-  {
-    id: "zhipu",
-    label: "智谱 GLM",
-    vendor: "智谱 AI",
-    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    models: ["glm-4.5", "glm-4-plus", "glm-4-flash", "glm-4-air"],
-    note: "注册送 tokens，GLM-4-Flash 免费",
-  },
-  {
-    id: "moonshot",
-    label: "Kimi",
-    vendor: "月之暗面",
-    baseUrl: "https://api.moonshot.cn/v1",
-    models: ["kimi-latest", "moonshot-v1-128k", "moonshot-v1-32k", "moonshot-v1-8k"],
-  },
-  {
-    id: "doubao",
-    label: "豆包 (Doubao)",
-    vendor: "字节跳动火山引擎",
-    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-    models: ["doubao-seed-1-6-250618", "doubao-1-5-pro-32k-250115", "doubao-1-5-lite-32k-250115"],
-    note: "需在火山方舟开通并创建接入点，填 Endpoint ID 后缀",
-  },
-  {
-    id: "baidu",
-    label: "文心一言",
-    vendor: "百度千帆",
-    baseUrl: "https://qianfan.baidubce.com/v2",
-    models: ["ernie-4.5-turbo-128k", "ernie-4.5-8k", "ernie-3.5-8k", "ernie-speed-8k"],
-  },
-  {
-    id: "hunyuan",
-    label: "腾讯混元",
-    vendor: "腾讯云",
-    baseUrl: "https://api.hunyuan.cloud.tencent.com/v1",
-    models: ["hunyuan-turbos-latest", "hunyuan-turbo-latest", "hunyuan-pro", "hunyuan-lite"],
-  },
-  {
-    id: "minimax",
-    label: "MiniMax",
-    vendor: "MiniMax 稀宇科技",
-    baseUrl: "https://api.minimax.chat/v1",
-    models: ["MiniMax-M1", "MiniMax-Text-01"],
-  },
-  {
-    id: "spark",
-    label: "讯飞星火",
-    vendor: "科大讯飞",
-    baseUrl: "https://spark-api-open.xf-yun.com/v1",
-    models: ["4.0Ultra", "generalv3.5", "generalv3", "lite"],
-    note: "需开通开放平台并启用对应服务",
-  },
-  {
-    id: "lingyiwanwu",
-    label: "零一万物",
-    vendor: "01.AI",
-    baseUrl: "https://api.lingyiwanwu.com/v1",
-    models: ["yi-large", "yi-lightning"],
-  },
-  {
-    id: "stepfun",
-    label: "阶跃星辰",
-    vendor: "StepFun",
-    baseUrl: "https://api.stepfun.com/v1",
-    models: ["step-1-8k", "step-1-flash"],
-  },
-  {
-    id: "siliconflow",
-    label: "硅基流动",
-    vendor: "SiliconFlow",
-    baseUrl: "https://api.siliconflow.cn/v1",
-    models: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen3-235B-A22B-Instruct", "deepseek-ai/DeepSeek-R1"],
-    note: "聚合多家开源模型，很多免费/低价",
-  },
-  {
-    id: "openrouter",
-    label: "OpenRouter",
-    vendor: "第三方聚合",
-    baseUrl: "https://openrouter.ai/api/v1",
-    models: ["openai/gpt-5", "anthropic/claude-sonnet-4", "google/gemini-2.5-pro"],
-    note: "汇聚主流模型，需充值/绑卡",
-  },
+  ...CLOUD_PRESETS.map((p) => ({
+    id: p.id,
+    label: p.name,
+    vendor: p.vendor,
+    baseUrl: p.baseUrl,
+    models: [...p.models],
+    note: p.note,
+  })),
   {
     id: "custom",
     label: "自定义",
@@ -140,15 +44,6 @@ export const REMOTE_PROVIDERS: readonly RemoteProvider[] = [
     note: "手动填写完整 Base URL（含 /v1）",
   },
 ];
-
-/**
- * 「模型云服务」页展示的厂商：只列原厂官方接口，不含聚合/中介服务商。
- */
-const AGGREGATOR_PROVIDER_IDS = new Set(["siliconflow", "openrouter"]);
-
-export const CLOUD_PROVIDERS: readonly RemoteProvider[] = REMOTE_PROVIDERS.filter(
-  (p) => !AGGREGATOR_PROVIDER_IDS.has(p.id),
-);
 
 export type Quant = { name: string; size: number };
 

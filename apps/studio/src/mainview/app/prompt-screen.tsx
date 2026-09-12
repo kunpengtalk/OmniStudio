@@ -40,6 +40,7 @@ import { usePromptStore } from "@stores/prompt";
 import { useAppStore } from "@stores/app";
 import { useChatStore } from "@stores/chat";
 import { useImageStore } from "@stores/image";
+import { useVideoStore } from "@stores/video";
 import type { PromptKind, PromptRow } from "../../bun/prompt-library";
 import type { UserPromptView } from "../../bun/user-prompt";
 import { cn } from "@/mainview/lib/utils";
@@ -108,11 +109,13 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   );
 }
 
-/** 「去试试」：生图提示词 → 图片应用；大模型提示词 → 对话；视频提示词 → 仅复制。 */
+/** 「去试试」：生图提示词 → 图片应用；视频提示词 → 视频应用；大模型提示词 → 对话。 */
 function usePromptNow(item: PromptRow) {
   const prompt = item.prompt || "";
   if (item.kind === "video") {
-    void navigator.clipboard.writeText(prompt);
+    useVideoStore.getState().setView("generate");
+    useVideoStore.getState().setPendingPrompt(prompt);
+    useAppStore.getState().setActiveApp("video");
     return;
   }
   if (item.kind === "image") {

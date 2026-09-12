@@ -28,13 +28,14 @@ import { useT } from "@stores/ui-lang";
 import { useTranslateStore } from "@stores/translate";
 import { cn } from "@/mainview/lib/utils";
 import type { TranslationRecordRow } from "../../bun/translate";
+import { LiveTranslateTab } from "./live-translate";
 import {
   TRANSLATION_LANGUAGES,
   TRANSLATION_SOURCE_AUTO,
 } from "../../shared/translate";
 
 /** 翻译引擎：model = 当前对话模型；google = 谷歌浏览器同款免费接口。 */
-function useTranslationEngine(): "model" | "google" {
+export function useTranslationEngine(): "model" | "google" {
   const { data: settingsData } = useQuery({
     queryKey: ["settings"],
     queryFn: () => rpcClient.getSettings(undefined),
@@ -43,7 +44,7 @@ function useTranslationEngine(): "model" | "google" {
 }
 
 /** 翻译引擎选择（与生图页后端切换同款样式）：模型翻译 / Google 免费引擎 + 模型下拉。 */
-function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
+export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
   const t = useT();
   const queryClient = useQueryClient();
   const [pendingType, setPendingType] = useState<"local" | "api" | null>(null);
@@ -247,7 +248,7 @@ function CopyTextButton({ text }: { text: string }) {
   );
 }
 
-export function TranslateScreen() {
+function TextTranslateTab() {
   const t = useT();
   const queryClient = useQueryClient();
   const [sourceLang, setSourceLang] = useState(TRANSLATION_SOURCE_AUTO);
@@ -466,4 +467,13 @@ export function TranslateScreen() {
       </main>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// 应用入口：左侧栏工具入口切换（文本翻译 / 同传翻译）
+// ---------------------------------------------------------------------------
+
+export function TranslateScreen() {
+  const tool = useTranslateStore((s) => s.tool);
+  return tool === "live" ? <LiveTranslateTab /> : <TextTranslateTab />;
 }

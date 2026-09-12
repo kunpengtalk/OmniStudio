@@ -22,6 +22,7 @@ export type SettingsKey =
   | "AUTO_START_SERVER"
   | "MODEL_DIRS"
   | "UPDATE_CHANNEL"
+  | "AUTO_UPDATE"
   | "FAVORITE_MODELS"
   | "LAUNCHER_CLAUDE_MODE"
   | "LAUNCHER_CLAUDE_OPUS"
@@ -48,6 +49,7 @@ export type SettingsKey =
   | "LOCAL_MODEL_NAME"
   | "CHAT_MODEL"
   | "UI_LANG"
+  | "UI_THEME"
   | "MAX_VLLM_RETRIES"
   | "MAX_VLLM_FAILURE_RETRIES"
   | "PAGE_CONCURRENCY"
@@ -95,6 +97,18 @@ export type SettingsKey =
   | "IMG_API_KEY"
   | "IMG_MODEL"
   | "IMG_COMFY_BASE"
+  // AI 视频生成（video-gen.ts）
+  | "VIDEO_BACKEND"
+  | "VIDEO_MINIMAX_BASE"
+  | "VIDEO_MINIMAX_API_KEY"
+  | "VIDEO_MINIMAX_MODEL"
+  | "VIDEO_SEEDANCE_BASE"
+  | "VIDEO_SEEDANCE_API_KEY"
+  | "VIDEO_SEEDANCE_MODEL"
+  | "VIDEO_COMFY_BASE"
+  | "VIDEO_COMFY_CKPT"
+  | "VIDEO_COMFY_CLIP"
+  | "VIDEO_COMFY_VAE"
   | "MODEL_DOWNLOADS"
   | "GATEWAY_ENABLED"
   | "GATEWAY_HOST"
@@ -104,6 +118,8 @@ export type SettingsKey =
   | "WEB_SEARCH_PROVIDER"
   | "WEB_SEARCH_API_KEY"
   | "WEB_SEARCH_MAX_RESULTS"
+  /** 记忆总开关：Agent 获得记忆工具，置顶记忆注入系统提示。 */
+  | "MEMORY_ENABLED"
   | "TRANSLATION_ENGINE"
   | "AGENT_WORKSPACE"
   | "AGENT_WORKSPACES"
@@ -114,7 +130,21 @@ export type SettingsKey =
   | "VOICE_CALL_REALTIME_API_KEY"
   | "VOICE_CALL_REALTIME_BASE_URL"
   | "VOICE_CALL_REALTIME_MODEL"
-  | "VOICE_CALL_REALTIME_VOICE";
+  | "VOICE_CALL_REALTIME_VOICE"
+  // Skills 管理（参照 skills-manager 移植）
+  | "SKILLS_CENTRAL_PATH"
+  | "SKILLS_SYNC_MODE"
+  | "SKILLS_TOOLS_DISABLED"
+  | "SKILLS_TOOL_PATH_OVERRIDES"
+  | "SKILLS_CUSTOM_TOOLS"
+  | "SKILLS_ACTIVE_PRESET"
+  | "SKILLS_AUTO_BACKUP"
+  | "SKILLS_GIT_REMOTE"
+  | "SKILLS_GIT_PAT"
+  // 模型云服务（cloud_providers 表的兼容槽位：激活行写回，网关 / CLI 消费）
+  | "CLOUD_PROVIDER"
+  | "CLOUD_MODELS"
+  | "CUSTOM_PROVIDERS";
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
@@ -133,6 +163,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   AUTO_START_SERVER: "1",
   MODEL_DIRS: "",
   UPDATE_CHANNEL: "stable",
+  // 启动时自动检查并下载新 release（"0" 关闭，仅手动检查）。
+  AUTO_UPDATE: "1",
   FAVORITE_MODELS: "[]",
   LAUNCHER_CLAUDE_MODE: "local",
   LAUNCHER_CLAUDE_OPUS: "",
@@ -159,6 +191,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   LOCAL_MODEL_NAME: "",
   CHAT_MODEL: "",
   UI_LANG: "zh",
+  /** 界面主题：system / light / dark，前端据此切换 <html> 的 .dark 类。 */
+  UI_THEME: "system",
   MAX_VLLM_RETRIES: "6",
   MAX_VLLM_FAILURE_RETRIES: "0",
   PAGE_CONCURRENCY: "3",
@@ -208,6 +242,19 @@ const DEFAULTS: Record<SettingsKey, string> = {
   IMG_API_KEY: "",
   IMG_MODEL: "",
   IMG_COMFY_BASE: "",
+  // MiniMax（H3）默认走官方 API；自部署的 MiniMax 兼容服务改 Base 即可（参照 OmniLabs）。
+  VIDEO_BACKEND: "minimax",
+  VIDEO_MINIMAX_BASE: "https://api.minimaxi.com",
+  VIDEO_MINIMAX_API_KEY: "",
+  VIDEO_MINIMAX_MODEL: "MiniMax-H3",
+  // Seedance 走火山方舟内容生成任务 API（Bearer ARK_API_KEY）。
+  VIDEO_SEEDANCE_BASE: "https://ark.cn-beijing.volces.com/api/v3",
+  VIDEO_SEEDANCE_API_KEY: "",
+  VIDEO_SEEDANCE_MODEL: "doubao-seedance-1-0-lite-t2v-250428",
+  VIDEO_COMFY_BASE: "",
+  VIDEO_COMFY_CKPT: "",
+  VIDEO_COMFY_CLIP: "",
+  VIDEO_COMFY_VAE: "",
   MODEL_DOWNLOADS: "[]",
   GATEWAY_ENABLED: "1",
   GATEWAY_HOST: "127.0.0.1",
@@ -217,6 +264,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   WEB_SEARCH_PROVIDER: "bing",
   WEB_SEARCH_API_KEY: "",
   WEB_SEARCH_MAX_RESULTS: "5",
+  MEMORY_ENABLED: "1",
   TRANSLATION_ENGINE: "model",
   AGENT_WORKSPACE: "",
   /** 最近使用的工作区列表（JSON 数组），供输入框上方的工作区选择面板展示。 */
@@ -231,6 +279,19 @@ const DEFAULTS: Record<SettingsKey, string> = {
   VOICE_CALL_REALTIME_BASE_URL: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
   VOICE_CALL_REALTIME_MODEL: "qwen-audio-3.0-realtime-plus",
   VOICE_CALL_REALTIME_VOICE: "longanqian",
+  // Skills 管理默认值
+  SKILLS_CENTRAL_PATH: "",
+  SKILLS_SYNC_MODE: "symlink",
+  SKILLS_TOOLS_DISABLED: "[]",
+  SKILLS_TOOL_PATH_OVERRIDES: "{}",
+  SKILLS_CUSTOM_TOOLS: "[]",
+  SKILLS_ACTIVE_PRESET: "",
+  SKILLS_AUTO_BACKUP: "1",
+  SKILLS_GIT_REMOTE: "",
+  SKILLS_GIT_PAT: "",
+  CLOUD_PROVIDER: "",
+  CLOUD_MODELS: "[]",
+  CUSTOM_PROVIDERS: "[]",
 };
 
 export function getSetting(key: SettingsKey): string {

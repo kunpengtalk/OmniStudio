@@ -5,6 +5,9 @@ import * as TTSLocal from "./tts-local";
 import * as Asr from "./asr";
 import { getTTSProviderConfig, listProviderModels, runTTSEdge } from "./voice";
 import { listInstalledModels, slugModelFileName } from "./model-store";
+import * as Memory from "./memory";
+import type { MemoryCategory } from "../shared/memory";
+import { handleMcpRequest } from "./kb-mcp";
 
 /**
  * 本地 API 网关。
@@ -1568,6 +1571,53 @@ function openApiSpec(): Record<string, unknown> {
           responses: { "200": { description: "模型列表" } },
         },
       },
+      "/v1/memories": {
+        get: {
+          summary: "检索共享记忆",
+          description: "按关键词检索（`q`，命中累计热度）或按分类列出（`category`）。所有 Agent（OmniStudio 内置 / CLI / MCP 接入方）共享同一份记忆库。",
+          parameters: [
+            { name: "q", in: "query", schema: { type: "string" }, description: "关键词（与 category 二选一）" },
+            { name: "category", in: "query", schema: { type: "string", enum: ["fact", "preference", "experience", "skill", "other"] } },
+            { name: "limit", in: "query", schema: { type: "integer", default: 20 } },
+          ],
+          responses: { "200": { description: "记忆列表" } },
+        },
+        post: {
+          summary: "写入一条记忆",
+          description: "写入共享记忆库（source 标记为 agent；重复内容自动合并）。供外部程序写回记忆的主通道。",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["content"],
+                  properties: {
+                    content: { type: "string", description: "记忆内容，一句话" },
+                    category: { type: "string", enum: ["fact", "preference", "experience", "skill", "other"] },
+                    tags: { type: "array", items: { type: "string" } },
+                  },
+                },
+              },
+            },
+          },
+          responses: { "201": { description: "已创建" } },
+        },
+      },
+      "/v1/memories/{id}": {
+        delete: {
+          summary: "删除一条记忆",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "integer" } }],
+          responses: { "200": { description: "已删除" } },
+        },
+      },
+      "/mcp": {
+        post: {
+          summary: "OmniStudio MCP 端点（Streamable HTTP）",
+          description: "JSON-RPC 2.0：initialize / tools/list / tools/call。工具：kb_search / kb_list（知识库检索）+ memory_search / memory_save / memory_list（共享记忆读写）。任何 MCP 客户端把本端点配置为远程（type=http）服务器即可使用；浏览器直接打开（GET）为调试工作台。",
+          responses: { "200": { description: "JSON-RPC 响应" } },
+        },
+      },
       "/v1/chat/completions": {
         post: {
           summary: "对话补全（OpenAI Chat Completions）",
@@ -1814,6 +1864,40 @@ function htmlResponse(html: string): Response {
 // 路由
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// 记忆 REST / MCP 端点：任何程序经网关即可读写共享记忆（REST 服务开发者，
+// MCP 服务 Agent —— 与 OpenMemory/Mem0 的对外形式一致）。
+// ---------------------------------------------------------------------------
+
+function handleMemoryList(url: URL): Response {
+  const q = url.searchParams.get("q") ?? url.searchParams.get("query") ?? "";
+  const category = (url.searchParams.get("category") ?? undefined) as MemoryCategory | undefined;
+  const limit = Number(url.searchParams.get("limit") ?? 0) || undefined;
+  let memories = q
+    ? Memory.searchMemories(q, limit ?? 20)
+    : Memory.listMemories(category ? { category } : undefined);
+  if (limit && memories.length > limit) memories = memories.slice(0, limit);
+  return json({ memories, count: memories.length });
+}
+
+async function handleMemoryCreate(req: Request): Promise<Response> {
+  let body: { content?: unknown; category?: unknown; tags?: unknown };
+  try {
+    body = await req.json();
+  } catch {
+    return apiError(400, "请求体必须是 JSON", "invalid_request_error");
+  }
+  const content = typeof body.content === "string" ? body.content.trim() : "";
+  if (!content) return apiError(400, "content is required", "invalid_request_error");
+  const memory = Memory.saveAgentMemory(
+    content,
+    typeof body.category === "string" ? (body.category as MemoryCategory) : undefined,
+    Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+  );
+  return json({ memory }, 201);
+}
+
 async function route(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS });
@@ -1822,8 +1906,10 @@ async function route(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
 
-  // API Key 鉴权：仅 /v1/* 端点需要（元信息端点保持开放）。
-  if (path.startsWith("/v1/") && !authOk(req)) {
+  // API Key 鉴权：/v1/* 与 /mcp 端点需要（元信息端点保持开放）。
+  // 例外：浏览器 GET /mcp 返回静态调试工作台（无秘密，页面里的调用仍需 Key）。
+  const mcpPlaygroundGet = req.method === "GET" && path === "/mcp";
+  if ((path.startsWith("/v1/") || (path === "/mcp" && !mcpPlaygroundGet)) && !authOk(req)) {
     return unauthorized();
   }
 
@@ -1845,6 +1931,7 @@ async function route(req: Request): Promise<Response> {
           "POST /v1/audio/speech",
           "POST /v1/audio/transcriptions",
           "POST /v1/images/generations",
+          "POST /mcp (knowledge base MCP server)",
           "GET  /health",
         ],
       });
@@ -1883,8 +1970,24 @@ async function route(req: Request): Promise<Response> {
       return handleTranscriptions(req);
     case "/v1/images/generations":
       return apiError(501, "文本生图后端尚未接入", "not_implemented");
-    default:
+    // 共享记忆 REST（Mem0 风格）：任何程序经网关读写记忆库。
+    case "/v1/memories":
+      if (req.method === "GET") return handleMemoryList(url);
+      if (req.method === "POST") return handleMemoryCreate(req);
+      return apiError(405, "Method Not Allowed");
+    // OmniStudio MCP 服务（Streamable HTTP）：知识库检索 + 共享记忆读写。
+    case "/mcp":
+      return handleMcpRequest(req);
+    default: {
+      // /v1/memories/{id} DELETE
+      const memMatch = path.match(/^\/v1\/memories\/(\d+)$/);
+      if (memMatch) {
+        if (req.method !== "DELETE") return apiError(405, "Method Not Allowed");
+        Memory.deleteMemory(Number(memMatch[1]));
+        return json({ ok: true });
+      }
       return apiError(404, `未知路径 ${path}`, "not_found");
+    }
   }
 }
 

@@ -6,6 +6,7 @@ import * as Gateway from "./gateway";
 import { getSetting, updateSettings, getAllSettings } from "./db/settings";
 import { listInstalledModels, setActiveModel, getActiveModelPath, slugModelFileName } from "./model-store";
 import { updateState } from "./updates";
+import * as Memory from "./memory";
 
 /**
  * `omi` CLI 与应用的本地控制通道（Unix domain socket）。
@@ -134,6 +135,25 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
 
     case "gatewayStatus":
       return { ok: true, data: { ...Gateway.getGatewayStatus(), apiKey: Gateway.getGatewayApiKey() } };
+
+    // 记忆写回通道：omi memory add / omi-memory MCP 桥接在应用运行时走这里，
+    // 与应用内 Agent 工具写的是同一个库。
+    case "memoryAdd": {
+      const content = typeof payload.content === "string" ? payload.content : "";
+      if (!content.trim()) return { ok: false, error: "content is required" };
+      const category = typeof payload.category === "string" ? payload.category : undefined;
+      const tags = Array.isArray(payload.tags) ? payload.tags.map(String) : undefined;
+      const memory = Memory.saveAgentMemory(content, category as never, tags);
+      return { ok: true, data: { memory } };
+    }
+    case "memorySearch": {
+      const query = typeof payload.query === "string" ? payload.query : "";
+      const limit = typeof payload.limit === "number" ? payload.limit : 8;
+      return { ok: true, data: { memories: Memory.searchMemories(query, limit) } };
+    }
+    case "memoryList": {
+      return { ok: true, data: { memories: Memory.listMemories() } };
+    }
 
     case "models": {
       const activePath = getActiveModelPath();

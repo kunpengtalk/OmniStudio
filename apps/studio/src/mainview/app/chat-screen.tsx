@@ -2,19 +2,20 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpIcon,
+  BookOpenIcon,
   BotIcon,
   BrainIcon,
+  CheckIcon,
   ChevronDownIcon,
   Loader2Icon,
   ImagePlusIcon,
+  LibraryIcon,
   PaperclipIcon,
   GlobeIcon,
   FileTextIcon,
   XIcon,
-  RefreshCwIcon,
   AlertTriangleIcon,
   CopyIcon,
-  CheckIcon,
   RotateCcwIcon,
   LanguagesIcon,
   Trash2Icon,
@@ -24,6 +25,7 @@ import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
 import { Textarea } from "@ui/textarea";
 import type { ChatMessage } from "../../bun/chat";
+import type { KbCitation } from "../../shared/knowledge";
 import { useChatStore } from "@stores/chat";
 import { useAppStore } from "@stores/app";
 import { useT } from "@stores/ui-lang";
@@ -33,6 +35,15 @@ import { ModelPicker } from "@components/model-picker";
 import { persistedErrorMessage, serverErrorHint } from "@/mainview/lib/server-error";
 import { cn } from "@/mainview/lib/utils";
 import { chatImageUrl } from "../../shared/server-info";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@ui/dialog";
+import { useKbListQuery } from "./kb";
 
 function MessageImages({ images }: { images: string[] }) {
   if (images.length === 0) return null;
@@ -251,6 +262,31 @@ function ReasoningBlock({ reasoning, streaming }: { reasoning: string; streaming
   );
 }
 
+/** 助手消息底部的知识库引用溯源：编号 + 来源文档，悬浮显示片段预览。 */
+function CitationBar({ citations }: { citations: KbCitation[] }) {
+  const t = useT();
+  if (citations.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1 pt-0.5">
+      <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
+        <BookOpenIcon className="size-3" />
+        {t("chat.citations")}
+      </span>
+      {citations.map((c) => (
+        <span
+          key={`${c.docId}-${c.seq}-${c.n}`}
+          title={c.snippet}
+          className="inline-flex max-w-56 items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+        >
+          <span className="font-mono text-primary/80">[{c.n}]</span>
+          <span className="truncate">{c.docName}</span>
+          <span className="shrink-0 font-mono text-muted-foreground/60">#{c.seq}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function MessageBubble({
   message,
   isStreamingMessage,
@@ -259,7 +295,7 @@ function MessageBubble({
   isStreamingMessage: boolean;
 }) {
   const t = useT();
-  const { role, content, images, reasoning } = message;
+  const { role, content, images, reasoning, citations } = message;
   // 后端把启动失败持久化为 "⚠️ <raw error>"，这里补一行本地化的可操作提示。
   const rawError = role === "assistant" ? persistedErrorMessage(content) : null;
   const errorHint = rawError !== null ? serverErrorHint(t, rawError) : null;
@@ -301,6 +337,9 @@ function MessageBubble({
               </p>
             )}
             </div>
+            {!isStreamingMessage && citations && citations.length > 0 && (
+              <CitationBar citations={citations} />
+            )}
           </div>
         </div>
       )}
@@ -312,6 +351,100 @@ function MessageBubble({
 type Attachment = { ref: string; url: string };
 type FileAttachment = { name: string; content: string };
 
+/** 知识库选择弹窗：多选，随消息发送做检索注入 + 引用溯源。 */
+function KbPickerDialog({
+  open,
+  onOpenChange,
+  selected,
+  onChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  selected: number[];
+  onChange: (ids: number[]) => void;
+}) {
+  const t = useT();
+  const listQuery = useKbListQuery();
+  const kbs = listQuery.data?.kbs ?? [];
+
+  const toggle = (id: number) => {
+    onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{t("chat.kbPicker.title")}</DialogTitle>
+          <DialogDescription>{t("chat.kbPicker.desc")}</DialogDescription>
+        </DialogHeader>
+        <div className="-mx-1 max-h-72 overflow-y-auto px-1">
+          {listQuery.isLoading ? (
+            <div className="flex justify-center py-8">
+              <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : kbs.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 py-8 text-center">
+              <LibraryIcon className="size-6 text-muted-foreground/60" />
+              <p className="text-xs text-muted-foreground">{t("chat.kbPicker.empty")}</p>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {kbs.map((kb) => {
+                const active = selected.includes(kb.id);
+                return (
+                  <button
+                    key={kb.id}
+                    type="button"
+                    onClick={() => toggle(kb.id)}
+                    className={cn(
+                      "flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors",
+                      active
+                        ? "border-primary/40 bg-primary/5"
+                        : "hover:bg-muted/60",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "flex size-4 shrink-0 items-center justify-center rounded border",
+                        active ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/40",
+                      )}
+                    >
+                      {active && <CheckIcon className="size-3" />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-xs font-medium">{kb.name}</span>
+                      <span className="block text-[10px] text-muted-foreground">
+                        {t("kb.header.docs", { count: String(kb.docCount) })} ·{" "}
+                        {kb.embeddingModel || t("kb.header.keywordOnly")}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          {selected.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mr-auto text-xs text-muted-foreground"
+              onClick={() => onChange([])}
+            >
+              {t("chat.kbPicker.clear")}
+            </Button>
+          )}
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
+            {t("common.done")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function ChatMessages({ conversationId }: { conversationId: number }) {
   const queryClient = useQueryClient();
   const t = useT();
@@ -322,6 +455,8 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
   const [webSearch, setWebSearch] = useState(false);
+  const [kbIds, setKbIds] = useState<number[]>([]);
+  const [kbPickerOpen, setKbPickerOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -372,11 +507,13 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
       images,
       files,
       search,
+      kbIds,
     }: {
       content: string;
       images?: string[];
       files?: FileAttachment[];
       search?: boolean;
+      kbIds?: number[];
     }) =>
       rpcClient.sendChatMessage({
         conversationId,
@@ -384,6 +521,7 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
         images,
         webSearch: search,
         files,
+        kbIds,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
@@ -473,7 +611,7 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
       },
     ]);
     useChatStore.getState().setStreaming(true);
-    sendMutation.mutate({ content, images, files, search: webSearch });
+    sendMutation.mutate({ content, images, files, search: webSearch, kbIds });
   };
 
   const hasMessages = activeMessages.length > 0;
@@ -644,6 +782,24 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
               >
                 <GlobeIcon className="size-4" />
               </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-pressed={kbIds.length > 0}
+                className={cn(
+                  kbIds.length > 0
+                    ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
+                    : "text-muted-foreground",
+                )}
+                tooltip={t("chat.kb")}
+                onClick={() => setKbPickerOpen(true)}
+                disabled={streaming}
+              >
+                <BookOpenIcon className="size-4" />
+                {kbIds.length > 0 && (
+                  <span className="ml-0.5 font-mono text-[10px] tabular-nums">{kbIds.length}</span>
+                )}
+              </Button>
 
               <div className="ml-auto flex min-w-0 items-center gap-1.5">
                 <ModelPicker disabled={streaming} />
@@ -664,6 +820,13 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
               </div>
             </div>
           </div>
+
+          <KbPickerDialog
+            open={kbPickerOpen}
+            onOpenChange={setKbPickerOpen}
+            selected={kbIds}
+            onChange={setKbIds}
+          />
         </div>
       </div>
     </div>

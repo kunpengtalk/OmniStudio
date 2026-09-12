@@ -21,6 +21,8 @@ import { getChatBaseUrl, getHistory, ensureServerReady } from "./chat";
 import { getChatModelName } from "./chat-model";
 import { recordUsage } from "./stats";
 import { buildAgentTools, buildReadOnlyTools } from "./agent-tools";
+import { buildMcpAgentTools } from "./mcp";
+import { buildMemoryAgentTools, memoryEnabled, memoryPromptSection } from "./memory";
 import * as Chat from "./chat";
 
 /** Agent 的三种工作模式（对齐 PI-Desktop 的 Agent / Plan / Goal）。 */
@@ -292,7 +294,7 @@ const MODE_INSTRUCTION: Record<AgentMode, string> = {
 };
 
 function buildSystemPrompt(mode: AgentMode, workspace: string): string {
-  return [
+  const sections = [
     "你是 OmniStudio 内置的 Pi Agent —— 一个在用户本机工作区里执行任务的 AI 智能体。",
     currentTimeLine(),
     `工作区根目录：${workspace}`,
@@ -303,19 +305,31 @@ function buildSystemPrompt(mode: AgentMode, workspace: string): string {
     "2. 一次只调用当下最需要的工具，拿到结果再决定下一步，不要成批猜测。",
     "3. 修改既有代码前先读取相关片段，保证 old_str 精确匹配。",
     "4. 最终回答用简洁的中文总结：做了什么、改了哪些文件、如何验证。",
-    "",
-    MODE_INSTRUCTION[mode],
-  ].join("\n");
+  ];
+  // 常驻记忆（启用且有内容时）：置顶/高热记忆作为核心上下文注入。
+  const memorySection = memoryPromptSection();
+  if (memorySection) sections.push("", memorySection);
+  sections.push("", MODE_INSTRUCTION[mode]);
+  return sections.join("\n");
 }
 
-function toolsForMode(mode: AgentMode, workspace: string): AgentTool<any>[] {
+/**
+ * 工具集 = 内置工具 + 记忆工具 + 已启用 MCP 服务器的工具（连接失败的服务器自动跳过）。
+ * Plan 模式只保留内置只读工具，记忆 / MCP 工具可能有副作用，不参与"先出方案"阶段。
+ */
+async function toolsForMode(mode: AgentMode, workspace: string): Promise<AgentTool<any>[]> {
   const allowShell = getSetting("AGENT_ALLOW_SHELL") !== "0";
   const ctx = { workspace, allowShell: allowShell && mode !== "plan" };
-  return mode === "plan" ? buildReadOnlyTools(ctx) : buildAgentTools(ctx);
+  const base = mode === "plan" ? buildReadOnlyTools(ctx) : buildAgentTools(ctx);
+  if (mode === "plan") return base;
+  const extras = memoryEnabled() ? buildMemoryAgentTools() : [];
+  const mcpTools = await buildMcpAgentTools();
+  return [...base, ...extras, ...mcpTools];
 }
 
-export function listAgentTools(mode: AgentMode = getAgentMode()): AgentToolInfo[] {
-  return toolsForMode(mode, getAgentWorkspace()).map((t) => ({
+export async function listAgentTools(mode: AgentMode = getAgentMode()): Promise<AgentToolInfo[]> {
+  const tools = await toolsForMode(mode, getAgentWorkspace());
+  return tools.map((t) => ({
     name: t.name,
     label: t.label,
     description: t.description ?? "",
@@ -382,7 +396,7 @@ function historyAsAgentMessages(conversationId: number): AgentMessage[] {
     );
 }
 
-function getOrCreateSession(conversationId: number, mode: AgentMode, workspace: string): Session {
+async function getOrCreateSession(conversationId: number, mode: AgentMode, workspace: string): Promise<Session> {
   const existing = sessions.get(conversationId);
   if (existing && existing.mode === mode && existing.workspace === workspace) return existing;
   if (existing) resetAgentSession(conversationId);
@@ -393,7 +407,7 @@ function getOrCreateSession(conversationId: number, mode: AgentMode, workspace: 
     initialState: {
       systemPrompt: buildSystemPrompt(mode, workspace),
       model,
-      tools: toolsForMode(mode, workspace),
+      tools: await toolsForMode(mode, workspace),
       messages: historyAsAgentMessages(conversationId),
     },
   });
@@ -538,7 +552,7 @@ export async function runAgentTurn(opts: {
     .get();
   const assistantId = assistant.id;
 
-  const session = getOrCreateSession(conversationId, mode, workspace);
+  const session = await getOrCreateSession(conversationId, mode, workspace);
   const { agent } = session;
 
   let fullText = "";

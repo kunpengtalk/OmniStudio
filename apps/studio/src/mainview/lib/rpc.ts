@@ -14,6 +14,7 @@ import { useMlxModelRunStore } from "../stores/mlx-model-run";
 import { usePpOcrInstallStore } from "../stores/ppocr-install";
 import { usePpOcrDownloadStore } from "../stores/ppocr-download";
 import { useTessInstallStore } from "../stores/tess-install";
+import { useSkillsStore } from "../stores/skills";
 import { useRouter } from "../stores/router";
 
 const knownCompletedIds = new Set<string>();
@@ -40,12 +41,13 @@ const rpc = Electroview.defineRPC<AppRPC>({
       chatChunk: ({ conversationId, messageId, delta, kind }) => {
         useChatStore.getState().appendChunk(conversationId, messageId, delta, kind ?? "content");
       },
-      chatDone: ({ conversationId, messageId, content, reasoning, error }) => {
+      chatDone: ({ conversationId, messageId, content, reasoning, error, citations }) => {
         useChatStore.getState().finalizeMessage(
           conversationId,
           messageId,
           content || (error ? `⚠️ ${error}` : ""),
           reasoning,
+          citations,
         );
         // Agent 的文本流也走这个通道：收尾时一并解除运行态。
         useAgentStore.getState().setRunning(false);
@@ -113,6 +115,8 @@ const rpc = Electroview.defineRPC<AppRPC>({
       },
       gatewayStatusChanged: ({ status }) => {
         useGatewayStore.getState().setStatus(status);
+        // 网关启停会改变 MCP 端点可用性，知识库接入页据此刷新。
+        queryClient.invalidateQueries({ queryKey: ["gateway-status"] });
       },
       mlxInstallLog: ({ text }) => {
         useMlxInstallStore.getState().appendLog(text);
@@ -151,7 +155,7 @@ const rpc = Electroview.defineRPC<AppRPC>({
           queryClient.invalidateQueries({ queryKey: ["ocr-status"] });
         }
       },
-      ppOcrPhase: ({ phase, message }) => {
+      ppOcrPhase: ({ phase }) => {
         // 阶段进入终态（就绪 / 空闲 / 出错）时刷新引擎状态查询。
         if (phase === "ready" || phase === "idle" || phase === "error") {
           queryClient.invalidateQueries({ queryKey: ["ppocr-status"] });
@@ -163,6 +167,28 @@ const rpc = Electroview.defineRPC<AppRPC>({
         if (progress.percent === 100 || progress.percent === null) {
           queryClient.invalidateQueries({ queryKey: ["ppocr-status"] });
         }
+      },
+      skillsInstallProgress: (p) => {
+        useSkillsStore.getState().setProgress(p);
+        // 安装进入终态后刷新技能列表 / 市场已装标记。
+        if (p.phase === "done" || p.phase === "error" || p.phase === "canceled") {
+          queryClient.invalidateQueries({ queryKey: ["skills"] });
+          queryClient.invalidateQueries({ queryKey: ["skills-presets"] });
+        }
+      },
+      skillsChanged: () => {
+        // 中央库被外部修改（编辑 / git pull / 同步完成）→ 刷新 Skills 相关查询。
+        queryClient.invalidateQueries({ queryKey: ["skills"] });
+        queryClient.invalidateQueries({ queryKey: ["skills-central"] });
+        queryClient.invalidateQueries({ queryKey: ["skills-tools"] });
+        queryClient.invalidateQueries({ queryKey: ["skills-presets"] });
+        queryClient.invalidateQueries({ queryKey: ["skills-projects"] });
+      },
+      knowledgeChanged: ({ kbId }) => {
+        // 知识库摄取进度 / 删除 / 向量补齐 → 刷新库列表与文档列表（分块弹窗随文档列表一并失效）。
+        queryClient.invalidateQueries({ queryKey: ["kb-list"] });
+        if (kbId != null) queryClient.invalidateQueries({ queryKey: ["kb-docs", kbId] });
+        queryClient.invalidateQueries({ queryKey: ["kb-chunks"] });
       },
       navigate: ({ path }) => {
         // 前端导航没有 URL 路由，全靠 router store；CLI 跳转只用到无参数路径。

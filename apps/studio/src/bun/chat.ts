@@ -9,6 +9,8 @@ import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { recordUsage } from "./stats";
 import { webSearch } from "./web-search";
 import { getStatus, getLastError, startServer } from "./server-manager";
+import { buildChatContext } from "./knowledge";
+import type { KbCitation } from "../shared/knowledge";
 
 export type ChatMessage = {
   id: number;
@@ -19,6 +21,10 @@ export type ChatMessage = {
   reasoning?: string | null;
   images?: string[];
   tokens?: number | null;
+  /** user 消息：发送时挂载的知识库 id（重新生成时复用检索）。 */
+  kbIds?: number[] | null;
+  /** assistant 消息：知识库引用溯源。 */
+  citations?: KbCitation[] | null;
   createdAt: number;
 };
 
@@ -56,6 +62,8 @@ type DoneListener = (payload: {
   content: string;
   reasoning?: string;
   error?: string;
+  /** 知识库引用溯源（挂了知识库的回答才有）。 */
+  citations?: KbCitation[];
 }) => void;
 
 const chunkListeners = new Set<ChunkListener>();
@@ -120,6 +128,26 @@ function parseImages(row: { images: string | null }): string[] {
     return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
   } catch {
     return [];
+  }
+}
+
+function parseJsonNumbers(row: { kbIds: string | null }): number[] | null {
+  if (!row.kbIds) return null;
+  try {
+    const parsed = JSON.parse(row.kbIds);
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "number") ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseCitations(row: { citations: string | null }): KbCitation[] | null {
+  if (!row.citations) return null;
+  try {
+    const parsed = JSON.parse(row.citations);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
   }
 }
 
@@ -211,7 +239,12 @@ export function getConversation(id: number): {
     .where(eq(messages.conversationId, id))
     .orderBy(messages.createdAt)
     .all()
-    .map((m) => ({ ...m, images: parseImages(m) }));
+    .map((m) => ({
+      ...m,
+      images: parseImages(m),
+      kbIds: parseJsonNumbers(m),
+      citations: parseCitations(m),
+    }));
   return { conversation: conv as Conversation, messages: msgs as ChatMessage[] };
 }
 
@@ -270,7 +303,12 @@ export function getHistory(conversationId: number): ChatMessage[] {
     .where(eq(messages.conversationId, conversationId))
     .orderBy(messages.createdAt)
     .all()
-    .map((m) => ({ ...m, images: parseImages(m) })) as ChatMessage[];
+    .map((m) => ({
+      ...m,
+      images: parseImages(m),
+      kbIds: parseJsonNumbers(m),
+      citations: parseCitations(m),
+    })) as ChatMessage[];
 }
 
 /** Resolve the OpenAI-compatible base URL (without the /v1 suffix). */
@@ -358,6 +396,8 @@ async function streamAssistantReply(opts: {
   extraSystem?: string;
   /** 关闭模型思考模式（llama.cpp Qwen3 等支持），用于要求直接回答的场景。 */
   disableThinking?: boolean;
+  /** 知识库引用溯源：随最终结果写库并推给前端。 */
+  citations?: KbCitation[];
 }): Promise<{ ok: boolean; error?: string; content: string }> {
   const { conversationId, assistantId, payloadMessages } = opts;
 
@@ -501,14 +541,20 @@ async function streamAssistantReply(opts: {
     // 被外部中断（语音通话抢话打断）：保留已生成的部分内容，不当作错误处理。
     if (opts.signal?.aborted) {
       db.update(messages)
-        .set({ content: full, reasoning: reasoning || null })
+        .set({ content: full, reasoning: reasoning || null, citations: opts.citations ? JSON.stringify(opts.citations) : null })
         .where(eq(messages.id, assistantId))
         .run();
       db.update(conversations)
         .set({ updatedAt: Date.now() })
         .where(eq(conversations.id, conversationId))
         .run();
-      emitDone({ conversationId, messageId: assistantId, content: full, reasoning: reasoning || undefined });
+      emitDone({
+        conversationId,
+        messageId: assistantId,
+        content: full,
+        reasoning: reasoning || undefined,
+        citations: opts.citations,
+      });
       return { ok: true, content: full };
     }
     // 把失败原因持久化到助手消息，避免刷新会话后错误反馈被清空。
@@ -529,7 +575,12 @@ async function streamAssistantReply(opts: {
   const tokensPerSec = Math.round((tokens / (elapsedMs / 1000)) * 10) / 10;
 
   db.update(messages)
-    .set({ content: full, reasoning: reasoning || null, tokens })
+    .set({
+      content: full,
+      reasoning: reasoning || null,
+      tokens,
+      citations: opts.citations ? JSON.stringify(opts.citations) : null,
+    })
     .where(eq(messages.id, assistantId))
     .run();
   db.update(conversations)
@@ -538,7 +589,13 @@ async function streamAssistantReply(opts: {
     .run();
 
   emitChatStats({ conversationId, messageId: assistantId, tokens, tokensPerSec, elapsedMs });
-  emitDone({ conversationId, messageId: assistantId, content: full, reasoning: reasoning || undefined });
+  emitDone({
+    conversationId,
+    messageId: assistantId,
+    content: full,
+    reasoning: reasoning || undefined,
+    citations: opts.citations,
+  });
   return { ok: true, content: full };
 }
 
@@ -546,7 +603,7 @@ export async function sendMessage(
   conversationId: number,
   content: string,
   images: string[] = [],
-  opts: { webSearch?: boolean; files?: { name: string; content: string }[] } = {},
+  opts: { webSearch?: boolean; files?: { name: string; content: string }[]; kbIds?: number[] } = {},
 ): Promise<{ ok: boolean; error?: string }> {
   const conv = db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
   if (!conv) return { ok: false, error: "Conversation not found" };
@@ -576,6 +633,7 @@ export async function sendMessage(
       role: "user",
       content,
       images: images.length ? JSON.stringify(images) : undefined,
+      kbIds: opts.kbIds?.length ? JSON.stringify(opts.kbIds) : undefined,
     })
     .run();
 
@@ -593,10 +651,16 @@ export async function sendMessage(
     .returning({ id: messages.id })
     .get();
 
+  const { messages: payloadMessages, citations } = await buildPayloadMessages(
+    conversationId,
+    content,
+    opts,
+  );
   const result = await streamAssistantReply({
     conversationId,
     assistantId: assistant.id,
-    payloadMessages: await buildPayloadMessages(conversationId, content, opts),
+    payloadMessages,
+    citations: citations.length > 0 ? citations : undefined,
   });
   return { ok: result.ok, error: result.error };
 }
@@ -645,10 +709,11 @@ export async function streamChatTurn(opts: {
     .returning({ id: messages.id })
     .get();
 
+  const { messages: payloadMessages } = await buildPayloadMessages(conversationId, content, {});
   const result = await streamAssistantReply({
     conversationId,
     assistantId: assistant.id,
-    payloadMessages: await buildPayloadMessages(conversationId, content, {}),
+    payloadMessages,
     signal: opts.signal,
     onDelta: opts.onDelta,
     extraSystem: opts.extraSystem,
@@ -725,13 +790,14 @@ async function rewriteSearchQuery(latestQuery: string): Promise<string> {
  * 组装发给模型的完整 payload：
  * - 历史消息转 OpenAI 格式；
  * - 附件文件内容以 text part 追加到最后一条 user 消息（仅注入上下文，不落库）；
- * - 开启联网检索时，先改写查询词再搜索用户最新提问，把结果作为 system 消息注入（不落库）。
+ * - 开启联网检索时，先改写查询词再搜索用户最新提问，把结果作为 system 消息注入（不落库）；
+ * - 挂载知识库时检索相关分块，注入为带编号的参考资料，并返回引用列表（随助手消息落库）。
  */
 async function buildPayloadMessages(
   conversationId: number,
   latestQuery: string,
-  opts: { webSearch?: boolean; files?: { name: string; content: string }[] },
-): Promise<{ role: string; content: unknown }[]> {
+  opts: { webSearch?: boolean; files?: { name: string; content: string }[]; kbIds?: number[] },
+): Promise<{ messages: { role: string; content: unknown }[]; citations: KbCitation[] }> {
   const payloadMessages = buildOpenAiMessages(getHistory(conversationId));
 
   const files = (opts.files ?? []).filter((f) => f.name && f.content?.trim());
@@ -773,7 +839,15 @@ async function buildPayloadMessages(
     }
   }
 
-  return payloadMessages;
+  let citations: KbCitation[] = [];
+  const kbIds = (opts.kbIds ?? []).filter((id) => typeof id === "number");
+  if (kbIds.length > 0 && latestQuery.trim()) {
+    const ctx = await buildChatContext(kbIds, latestQuery);
+    if (ctx.system) payloadMessages.unshift({ role: "system", content: ctx.system });
+    citations = ctx.citations;
+  }
+
+  return { messages: payloadMessages, citations };
 }
 
 /** 删除单条消息（连同其附件图片文件）。 */
@@ -818,10 +892,21 @@ export async function regenerateMessage(
     .returning({ id: messages.id })
     .get();
 
+  // 重新生成时沿用原提问挂载的知识库，重跑检索注入（引用随新消息落库）。
+  const lastUser = [...context].reverse().find((m) => m.role === "user");
+  const payloadMessages = buildOpenAiMessages(context);
+  let citations: KbCitation[] = [];
+  if (lastUser?.kbIds?.length && lastUser.content.trim()) {
+    const ctx = await buildChatContext(lastUser.kbIds, lastUser.content);
+    if (ctx.system) payloadMessages.unshift({ role: "system", content: ctx.system });
+    citations = ctx.citations;
+  }
+
   const result = await streamAssistantReply({
     conversationId,
     assistantId: assistant.id,
-    payloadMessages: buildOpenAiMessages(context),
+    payloadMessages,
+    citations: citations.length > 0 ? citations : undefined,
   });
   return { ok: result.ok, error: result.error };
 }

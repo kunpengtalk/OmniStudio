@@ -34,9 +34,18 @@ if (isDev && !process.env.OMNI_DB_PATH && !process.env.OMNI_DATA_DIR) {
 }
 
 const sqlite = new Database(dbPath, { create: true });
+// WAL + busy timeout：记忆桥接（omi memory mcp / omi memory add）会在应用之外
+// 直连这份库写回数据，WAL 允许多进程并发读写，busy timeout 吸收偶发锁竞争。
+sqlite.exec("PRAGMA journal_mode = WAL;");
+sqlite.exec("PRAGMA busy_timeout = 5000;");
+sqlite.exec("PRAGMA synchronous = NORMAL;");
 export const db = drizzle({ client: sqlite, schema: schema });
 
 // 连接建立即迁移：gateway/rpc 等模块在 import 阶段就会读表，
 // 若等 bun/index.ts 的顶层代码再 migrate，空库首次启动会先崩在 settings 表缺失上。
-// 打包后所有模块合并进 app/bun/index.js，import.meta.dir 即 app/bun，故路径需带 db/ 前缀。
-migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
+// 打包后所有模块合并进 app/bun/index.js，import.meta.dir 即 app/bun，路径带 db/ 前缀；
+// 从源码直接运行（bun src/bun/xxx.ts）时 import.meta.dir 是 src/bun/db，前缀去掉。
+const migrationsFolder = existsSync(join(import.meta.dir, "db", "migrations"))
+  ? join(import.meta.dir, "db", "migrations")
+  : join(import.meta.dir, "migrations");
+migrate(db, { migrationsFolder });

@@ -3,11 +3,12 @@ import "./user-data";
 import "./canvas-polyfill";
 import Electrobun, { Utils } from "electrobun/bun";
 import { BrowserWindow, Updater } from "electrobun/bun";
-import { db } from "./db";
+import "./db";
 import { startImageServer } from "./image-server";
 import { setWindowRef } from "./window";
-import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initPpOcrBroadcast, initTessInstallBroadcast } from "./rpc";
+import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast } from "./rpc";
 import { seedIfNeeded } from "./prompt-library";
+import { initSkills, shutdownSkills } from "./skills";
 import { APP_NAME } from "./config";
 import { createMenu } from "./menu";
 import { broadcastUpdateStatus, checkForUpdate } from "./updates";
@@ -41,6 +42,15 @@ seedIfNeeded();
 
 // 确保 Agent 的默认工作区存在（~/.omnistudio/workspace），用当前用户权限创建。
 getAgentWorkspace();
+
+// Skills 中央库（默认 ~/.agents/skills）：建目录、清安装残留、收编已有技能、启动监听。
+initSkills();
+
+// MCP 服务器预热：后台连接已启用的服务器，首次 Agent 对话不用现场握手。
+// 失败静默（设置页与 Agent 运行时会按需重连并展示错误）。
+void import("./mcp")
+  .then((m) => m.connectEnabledServers())
+  .catch(() => {});
 
 // serve extracted images over HTTP for the webview
 try {
@@ -81,6 +91,7 @@ initMlxInstallBroadcast(mainWindow);
 initMlxModelDownloadBroadcast(mainWindow);
 initPpOcrBroadcast(mainWindow);
 initTessInstallBroadcast(mainWindow);
+initSkillsBroadcast(mainWindow);
 
 mainWindow.webview.on("dom-ready", () => {
   broadcastUpdateStatus();
@@ -89,8 +100,10 @@ mainWindow.webview.on("dom-ready", () => {
 // CLI 控制通道（Unix socket），供 `omi` 命令唤醒/导航/管理。
 void startControlServer();
 
-// Check for updates on startup
-checkForUpdate();
+// Check for updates on startup（"关于我们 → 自动更新" 开关可关闭，仅手动检查）
+if (getSetting("AUTO_UPDATE") !== "0") {
+  checkForUpdate();
+}
 
 // Auto-start local server if configured and enabled
 if (
@@ -122,6 +135,7 @@ if (Gateway.isGatewayEnabled()) {
 // Handle window close
 mainWindow.on("close", async () => {
   await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
+  shutdownSkills();
   stopControlServer();
   Utils.quit();
 });
@@ -129,6 +143,7 @@ mainWindow.on("close", async () => {
 // Cleanup on quit
 Electrobun.events.on("before-quit", async () => {
   await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
+  shutdownSkills();
   stopControlServer();
 });
 

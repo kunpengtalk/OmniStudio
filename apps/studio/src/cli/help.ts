@@ -56,6 +56,18 @@ export const CMD_HELP: Record<string, string> = {
   --engine <e>  推理引擎：llama.cpp | vllm | sglang
   --model <p>   模型文件路径（同时写为活动模型）
   --api-key <k> 设置网关 API key`,
+  memory: `记忆的命令行入口，也是外部 Agent 写回共享记忆的通道。
+
+用法：omi memory <子命令>
+
+子命令：
+  add <内容> [--category fact|preference|experience|skill|other] [--tags a,b]
+              写入一条记忆
+  search <关键词> [--limit 8]
+              检索记忆
+  list         列出全部记忆
+  mcp          作为 stdio MCP 服务器运行（omni-memory，供 Claude Code /
+               Codex / OpenCode 等以 MCP 工具读写同一份记忆库）`,
   launch: `启动编码工具并接入当前模型的 OpenAI/Anthropic 兼容接口。
 
 用法：omi launch <tool> [options] [-- 工具参数...]
