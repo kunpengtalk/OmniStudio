@@ -11,10 +11,20 @@
  * 种子的类别配额制，同一套件同一题数的前后两次评测面对同一批题，
  * 结果可以直接对比。
  */
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { getDataDir } from "./paths";
 
-export type EvalSuiteId = "mmlu" | "cmmlu" | "gsm8k" | "mmlu_pro";
+export type EvalSuiteId =
+  | "mmlu"
+  | "cmmlu"
+  | "gsm8k"
+  | "mmlu_pro"
+  | "humaneval"
+  | "mbpp"
+  | "ifeval"
+  | "longctx";
 
 export type EvalCategoryRow = {
   category: string;
@@ -32,15 +42,24 @@ export type EvalSuiteInfo = {
   quickSize: number;
   /** 全量题数（展示用常量）。 */
   totalQuestions: number;
+  /** 套件垂类（代码 / 写作 / 长文 / …），前端据此显示附加说明。 */
+  kind: "knowledge" | "math" | "code" | "writing" | "long-context";
 };
 
+/** 社区维护的 HuggingFace 数据集 JSONL 打包镜像（通用源）。 */
 const DATA_MIRRORS = [
   "https://cdn.jsdelivr.net/gh/jundot/omlx@main/omlx/eval/data/",
   "https://raw.githubusercontent.com/jundot/omlx/main/omlx/eval/data/",
 ];
+/** IFEval 官方数据文件走 HF 原站 + 国内镜像。 */
+const HF_IFEVAL_MIRRORS = [
+  "https://huggingface.co/datasets/google/IFEval/resolve/main/",
+  "https://hf-mirror.com/datasets/google/IFEval/resolve/main/",
+];
 
 // 各文件的期望字节数，下载完成后逐一核对，防止截断文件混进题库。
-const SUITE_FILES: Record<EvalSuiteId, { name: string; sizeBytes: number }[]> = {
+// mirrors 缺省用 DATA_MIRRORS。
+const SUITE_FILES: Record<EvalSuiteId, { name: string; sizeBytes: number; mirrors?: string[] }[]> = {
   mmlu: [
     { name: "mmlu_test.jsonl", sizeBytes: 7_510_640 },
     { name: "mmlu_dev.jsonl", sizeBytes: 136_428 },
@@ -51,22 +70,33 @@ const SUITE_FILES: Record<EvalSuiteId, { name: string; sizeBytes: number }[]> = 
   ],
   gsm8k: [{ name: "gsm8k_test.jsonl", sizeBytes: 748_933 }],
   mmlu_pro: [{ name: "mmlu_pro_test.jsonl", sizeBytes: 9_574_914 }],
+  humaneval: [{ name: "humaneval.jsonl", sizeBytes: 179_055 }],
+  mbpp: [{ name: "mbpp.jsonl", sizeBytes: 175_257 }],
+  ifeval: [{ name: "ifeval_input_data.jsonl", sizeBytes: 207_111, mirrors: HF_IFEVAL_MIRRORS }],
+  // 长文多针检索在本地合成，无题库文件。
+  longctx: [],
 };
 
 export const EVAL_SUITES: Record<EvalSuiteId, {
   /** 前端「快速模式」的默认抽样题数。 */
   defaultSample: number;
-  /** 单题作答的输出 token 上限（数学/高难题需要更长）。 */
+  /** 单题作答的输出 token 上限（代码 / 长文需要更长）。 */
   maxTokens: number;
-  /** 是否按科目统计得分。 */
+  /** 是否按科目（或自定义维度）统计得分。 */
   bySubject: boolean;
   /** 全量题数（展示用）。 */
   totalQuestions: number;
+  /** 套件的一句话定位（前端徽章用）。 */
+  kind: "knowledge" | "math" | "code" | "writing" | "long-context";
 }> = {
-  mmlu: { defaultSample: 300, maxTokens: 128, bySubject: true, totalQuestions: 14_042 },
-  cmmlu: { defaultSample: 300, maxTokens: 128, bySubject: true, totalQuestions: 11_528 },
-  gsm8k: { defaultSample: 100, maxTokens: 512, bySubject: false, totalQuestions: 1_319 },
-  mmlu_pro: { defaultSample: 300, maxTokens: 2048, bySubject: true, totalQuestions: 12_032 },
+  mmlu: { defaultSample: 300, maxTokens: 128, bySubject: true, totalQuestions: 14_042, kind: "knowledge" },
+  cmmlu: { defaultSample: 300, maxTokens: 128, bySubject: true, totalQuestions: 11_528, kind: "knowledge" },
+  gsm8k: { defaultSample: 100, maxTokens: 512, bySubject: false, totalQuestions: 1_319, kind: "math" },
+  mmlu_pro: { defaultSample: 300, maxTokens: 2048, bySubject: true, totalQuestions: 12_032, kind: "knowledge" },
+  humaneval: { defaultSample: 80, maxTokens: 2048, bySubject: false, totalQuestions: 164, kind: "code" },
+  mbpp: { defaultSample: 150, maxTokens: 2048, bySubject: false, totalQuestions: 500, kind: "code" },
+  ifeval: { defaultSample: 150, maxTokens: 1024, bySubject: false, totalQuestions: 540, kind: "writing" },
+  longctx: { defaultSample: 10, maxTokens: 64, bySubject: true, totalQuestions: 30, kind: "long-context" },
 };
 
 // ---------------------------------------------------------------------------
@@ -94,21 +124,22 @@ export function listEvalSuites(): EvalSuiteInfo[] {
       totalSizeBytes: files.reduce((s, f) => s + f.sizeBytes, 0),
       quickSize: EVAL_SUITES[id].defaultSample,
       totalQuestions: EVAL_SUITES[id].totalQuestions,
+      kind: EVAL_SUITES[id].kind,
     };
   });
 }
 
-/** 补齐缺失的题库文件：镜像轮询，流式落盘（.tmp 原子改名），大小不符即重试下一源。 */
+/** 补齐缺失的题库文件：镜像轮询（文件可指定专属源），流式落盘（.tmp 原子改名），大小不符即重试下一源。 */
 export async function ensureEvalData(
   suite: EvalSuiteId,
   onProgress: (received: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   mkdirSync(getDataDir("eval-data"), { recursive: true });
-  for (const { name, sizeBytes } of SUITE_FILES[suite]) {
+  for (const { name, sizeBytes, mirrors } of SUITE_FILES[suite]) {
     if (isFileReady(name, sizeBytes)) continue;
     let lastError: unknown = null;
-    for (const mirror of DATA_MIRRORS) {
+    for (const mirror of mirrors ?? DATA_MIRRORS) {
       try {
         const res = await fetch(mirror + name, { signal });
         if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
@@ -304,6 +335,8 @@ type EvalItem = {
   labels: string[];
   answer: string;
   subject: string;
+  /** 套件专属判分数据：代码测试脚本 / 指令校验参数 / 长文针值等。 */
+  meta?: Record<string, unknown>;
 };
 
 const ABCD = ["A", "B", "C", "D"] as const;
@@ -435,7 +468,135 @@ export function loadEvalSuite(suite: EvalSuiteId, sampleSize: number): {
         datasetTotal: all.length,
       };
     }
+    case "humaneval": {
+      const all: EvalItem[] = readJsonl("humaneval.jsonl").map((raw) => ({
+        question: String(raw.prompt ?? ""),
+        choices: [],
+        labels: [],
+        answer: "",
+        subject: "code",
+        meta: { test: String(raw.test ?? ""), entryPoint: String(raw.entry_point ?? "") },
+      }));
+      return {
+        items: sampleSize > 0 ? sampleFlat(all, sampleSize) : all,
+        fewShot: new Map(),
+        datasetTotal: all.length,
+      };
+    }
+    case "mbpp": {
+      const all: EvalItem[] = readJsonl("mbpp.jsonl")
+        .filter((raw) => Array.isArray(raw.test_list) && (raw.test_list as unknown[]).length > 0)
+        .map((raw) => ({
+          question: String(raw.prompt ?? ""),
+          choices: [],
+          labels: [],
+          answer: "",
+          subject: "code",
+          meta: {
+            testList: (raw.test_list as unknown[]).map(String),
+            setupCode: String(raw.test_setup_code ?? ""),
+          },
+        }));
+      return {
+        items: sampleSize > 0 ? sampleFlat(all, sampleSize) : all,
+        fewShot: new Map(),
+        datasetTotal: all.length,
+      };
+    }
+    case "ifeval": {
+      const all: EvalItem[] = readJsonl("ifeval_input_data.jsonl").map((raw) => ({
+        question: String(raw.prompt ?? ""),
+        choices: [],
+        labels: [],
+        answer: "",
+        subject: "writing",
+        meta: {
+          instructionIds: Array.isArray(raw.instruction_id_list) ? (raw.instruction_id_list as unknown[]).map(String) : [],
+          kwargsList: Array.isArray(raw.kwargs) ? (raw.kwargs as unknown[]) : [],
+        },
+      }));
+      return {
+        items: sampleSize > 0 ? sampleFlat(all, sampleSize) : all,
+        fewShot: new Map(),
+        datasetTotal: all.length,
+      };
+    }
+    case "longctx": {
+      const all = synthesizeLongContext(Math.min(sampleSize > 0 ? sampleSize : 30, 30));
+      return { items: all, fewShot: new Map(), datasetTotal: 30 };
+    }
   }
+}
+
+// ---------------------------------------------------------------------------
+// 长文多针检索（本地合成）：把若干「关键词 → 魔数」的针句埋进长噪声文
+// 的不同深度，提问其中一支。能测的是上下文中段的信息保真（lost in the
+// middle），按针深度分档统计得分。
+// ---------------------------------------------------------------------------
+
+const LONGCTX_TARGET_CHARS = 32_768; // ≈ 8k tokens，多数本地模型的默认窗口内
+const LONGCTX_MAX_ITEMS = 30;
+const LONGCTX_KEYS = [
+  "blue orchid", "crimson kite", "silver lantern", "amber river", "jade compass",
+  "ivory bell", "copper meadow", "cobalt ferry", "walnut bridge", "pearl canyon",
+];
+const LONGCTX_FILLER = [
+  "The valley archive records another quiet season of measured rainfall and slow sediment.",
+  "Committees reviewed the ledger twice before sealing the annual wool and timber accounts.",
+  "A traveling surveyor sketched the aqueduct, noting repairs deferred until autumn.",
+  "The night watch logged three lantern signals and a slow barge passing the eastern weir.",
+  "Gardeners rotated the clover beds while apprentices repainted the greenhouse frames.",
+  "The harbor master filed tide tables alongside complaints about drifting marker buoys.",
+  "An old almanac marginal note disputed the dating of a comet seen two winters past.",
+  "Merchants haggled politely over saffron lots as the afternoon bell rang nine times.",
+];
+
+/** 每题埋 5 针（深度 0.1–0.9 均布），问其中 1 支；答案为 8 位十六进制魔数。 */
+function synthesizeLongContext(count: number): EvalItem[] {
+  const rng = seededRandom(42);
+  const blockCount = 40;
+  const items: EvalItem[] = [];
+  for (let i = 0; i < Math.min(count, LONGCTX_MAX_ITEMS); i++) {
+    const keys = pickReproducible(rng, LONGCTX_KEYS, 5);
+    const needles = keys.map((key, idx) => ({
+      key,
+      value: Array.from({ length: 8 }, () => "0123456789abcdef"[Math.floor(rng() * 16)]!).join(""),
+      slot: Math.round((0.1 + idx * 0.2) * blockCount),
+    }));
+    // 针槽冲突时顺延，保证 5 针互不覆盖。
+    const needleAtSlot = new Map<number, (typeof needles)[number]>();
+    for (const n of needles) {
+      let slot = n.slot;
+      while (needleAtSlot.has(slot)) slot += 1;
+      needleAtSlot.set(slot, n);
+    }
+
+    const parts: string[] = [];
+    let chars = 0;
+    for (let block = 0; block < blockCount && chars < LONGCTX_TARGET_CHARS; block++) {
+      for (let s = 0; s < 3; s++) {
+        const sentence = LONGCTX_FILLER[Math.floor(rng() * LONGCTX_FILLER.length)]!;
+        parts.push(sentence);
+        chars += sentence.length;
+      }
+      const needle = needleAtSlot.get(block + 1);
+      if (needle) {
+        parts.push(`One of the special magic numbers for ${needle.key} is: ${needle.value}.`);
+      }
+    }
+
+    const asked = needles[Math.floor(rng() * needles.length)]!;
+    const depthBucket = asked.slot / blockCount <= 0.3 ? "≤30%" : asked.slot / blockCount <= 0.6 ? "31–60%" : "≥61%";
+    items.push({
+      question: parts.join(" "),
+      choices: [],
+      labels: [],
+      answer: asked.value,
+      subject: depthBucket,
+      meta: { askedKey: asked.key },
+    });
+  }
+  return items;
 }
 
 /** 单题题面（一条 user 消息）。指令要求直接给选项字母 / #### 数字，判分才稳。 */
@@ -470,6 +631,36 @@ export function formatEvalPrompt(suite: EvalSuiteId, item: EvalItem, fewShot: Ma
     blocks.push(`Question: ${item.question}`, "Answer:");
     return blocks.join("\n");
   }
+  if (suite === "humaneval") {
+    return [
+      "Complete the Python function below. Output the full implementation only — no prose, no markdown fences.",
+      "",
+      item.question,
+    ].join("\n");
+  }
+  if (suite === "mbpp") {
+    const tests = ((item.meta?.testList as string[]) ?? []).slice(0, 3).join("\n");
+    return [
+      "Implement a Python function for the problem below. Output the complete function only — no prose, no markdown fences.",
+      "",
+      `Problem: ${item.question}`,
+      "",
+      "Expected behavior (for reference):",
+      tests,
+    ].join("\n");
+  }
+  if (suite === "ifeval") {
+    // 题面自带约束指令（"写 300 词以上、禁用逗号…"），原样下发即可。
+    return item.question;
+  }
+  if (suite === "longctx") {
+    const askedKey = String(item.meta?.askedKey ?? "");
+    return [
+      item.question,
+      "",
+      `Question: What is the special magic number for ${askedKey} mentioned in the passage above? Reply with the number only.`,
+    ].join("\n");
+  }
   // mmlu_pro：十选一直接作答，选项字母沿用题库 labels。
   const blocks = ["Answer the question below with the option letter only.\n", `Question: ${item.question}\n`];
   item.choices.forEach((choice, i) => blocks.push(`${item.labels[i]}. ${choice}`));
@@ -488,6 +679,283 @@ export function checkEvalAnswer(suite: EvalSuiteId, predicted: string, item: Eva
   if (!predicted) return false;
   if (suite === "gsm8k") return normalizeNumber(predicted) === normalizeNumber(item.answer);
   return predicted === item.answer;
+}
+
+// ---------------------------------------------------------------------------
+// 代码类判分：提取生成代码 → 本机 python3 沙箱执行（超时 + 临时文件即删）。
+// 单用户本地场景、被测代码来自用户自己的模型；Bun.spawn 无 rlimit 能力，
+// 以 15 秒墙钟超时兜底。若本机无 python3，任务以错误结束并提示。
+// ---------------------------------------------------------------------------
+
+const CODE_EXEC_TIMEOUT_MS = 15_000;
+
+/** 提取回复中的 Python 代码：```python 围栏 → 任意围栏 → 从 def/class/import 行起收集 → 原文。 */
+export function extractPythonCode(response: string): string {
+  const fenced = [...response.matchAll(/```python\s*\n([\s\S]*?)```/g)].map((m) => m[1]!.trim());
+  if (fenced.length > 0) return fenced[fenced.length - 1]!;
+  const generic = [...response.matchAll(/```\s*\n([\s\S]*?)```/g)].map((m) => m[1]!.trim());
+  if (generic.length > 0) return generic[generic.length - 1]!;
+  const lines: string[] = [];
+  let inCode = false;
+  for (const line of response.split("\n")) {
+    if (!inCode && /^(def |class |import |from |@)/.test(line)) inCode = true;
+    if (inCode) lines.push(line);
+  }
+  return lines.length > 0 ? lines.join("\n") : response.trim();
+}
+
+/** 函数补全形态的修复：只回了函数体时拼回原签名；缺 import 时从题面补。 */
+function assembleHumanevalSolution(code: string, item: EvalItem): string {
+  const prompt = item.question;
+  let out = code;
+  if (!/\bdef\s+\w/.test(out)) out = `${prompt}\n${out}`;
+  if (!/^\s*(import|from)\s/m.test(out)) {
+    const imports = prompt
+      .split("\n")
+      .filter((l) => /^(import|from)\s/.test(l))
+      .join("\n");
+    if (imports) out = `${imports}\n${out}`;
+  }
+  return out;
+}
+
+let pythonAvailable: boolean | null = null;
+
+async function hasPython3(): Promise<boolean> {
+  if (pythonAvailable !== null) return pythonAvailable;
+  try {
+    const proc = Bun.spawn(["python3", "--version"], { stdout: "ignore", stderr: "ignore" });
+    pythonAvailable = (await proc.exited) === 0;
+  } catch {
+    pythonAvailable = false;
+  }
+  return pythonAvailable;
+}
+
+/** 临时脚本落盘 → python3 执行 → 退出码 0 判过。 */
+export async function runPythonForTest(script: string): Promise<boolean> {
+  if (!(await hasPython3())) {
+    throw new Error("本机未找到 python3，代码类评测无法执行判分");
+  }
+  const dir = mkdtempSync(join(tmpdir(), "omni-eval-code-"));
+  const file = join(dir, "solution.py");
+  writeFileSync(file, script);
+  try {
+    const proc = Bun.spawn(["python3", file], {
+      stdout: "ignore",
+      stderr: "ignore",
+      signal: AbortSignal.timeout(CODE_EXEC_TIMEOUT_MS),
+    });
+    return (await proc.exited) === 0;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// IFEval 校验器：每条指令一个纯函数校验。判分口径为 strict（全部指令通过
+// 才算对）；词数 / 句数用空白与标点切分的近似计数（非 nltk 分词）。
+// ---------------------------------------------------------------------------
+
+type IfevalKwargs = Record<string, unknown>;
+
+const num = (v: unknown, fallback = 0) => (typeof v === "number" ? v : Number(v) || fallback);
+const strList = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
+
+function countWords(text: string): number {
+  return (text.match(/\S+/g) ?? []).length;
+}
+
+function countSentences(text: string): number {
+  return (text.match(/[.!?]+(?=\s|$)/g) ?? []).length;
+}
+
+function countParagraphs(text: string): number {
+  return text.split(/\n\s*\n/).filter((p) => p.trim().length > 0).length;
+}
+
+function splitOnStars(text: string): string[] {
+  return text.split(/\*{3,}/).filter((p) => p.trim().length > 0);
+}
+
+function relationOk(actual: number, relation: string, target: number): boolean {
+  return relation === "less than" ? actual < target : actual >= target;
+}
+
+/** 响应语言粗判：按主要文字系统占比。覆盖常见目标语言，识别不了判不过。 */
+function detectLanguage(text: string): string {
+  const counts = { latin: 0, cjk: 0, kana: 0, hangul: 0, cyrillic: 0, arabic: 0, devanagari: 0 };
+  for (const ch of text) {
+    const c = ch.codePointAt(0)!;
+    if ((c >= 0x41 && c <= 0x7a) || (c >= 0xc0 && c <= 0x24f)) counts.latin++;
+    else if (c >= 0x4e00 && c <= 0x9fff) counts.cjk++;
+    else if (c >= 0x3040 && c <= 0x30ff) counts.kana++;
+    else if (c >= 0xac00 && c <= 0xd7af) counts.hangul++;
+    else if (c >= 0x400 && c <= 0x4ff) counts.cyrillic++;
+    else if (c >= 0x600 && c <= 0x6ff) counts.arabic++;
+    else if (c >= 0x900 && c <= 0x97f) counts.devanagari++;
+  }
+  const letters = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (letters === 0) return "en";
+  const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0]![0];
+  const map: Record<string, string> = {
+    latin: "en",
+    cjk: "zh",
+    kana: "ja",
+    hangul: "ko",
+    cyrillic: "ru",
+    arabic: "ar",
+    devanagari: "hi",
+  };
+  // 中文题面里常夹少量拉丁词，按占比校正。
+  if (dominant === "latin" && counts.cjk / letters > 0.2) return "zh";
+  return map[dominant] ?? "en";
+}
+
+function verifyInstruction(id: string, kw: IfevalKwargs, response: string, prompt: string): boolean {
+  switch (id) {
+    case "punctuation:no_comma":
+      return !response.includes(",");
+    case "length_constraints:number_words":
+      return relationOk(countWords(response), String(kw.relation ?? ""), num(kw.num_words));
+    case "length_constraints:number_sentences":
+      return relationOk(countSentences(response), String(kw.relation ?? ""), num(kw.num_sentences));
+    case "length_constraints:number_paragraphs":
+      return relationOk(countParagraphs(response), String(kw.relation ?? ""), num(kw.num_paragraphs));
+    case "length_constraints:nth_paragraph_first_word": {
+      const paras = splitOnStars(response);
+      const nth = num(kw.nth_paragraph, 1);
+      const para = paras[nth - 1];
+      if (!para) return false;
+      const first = (para.match(/\S+/) ?? [])[0]?.replace(/[^\w']/g, "") ?? "";
+      return first.toLowerCase() === String(kw.first_word ?? "").toLowerCase();
+    }
+    case "keywords:existence":
+      return strList(kw.keywords).every((k) =>
+        new RegExp(`(^|[^a-zA-Z])${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-zA-Z]|$)`, "i").test(response),
+      );
+    case "keywords:frequency": {
+      const target = String(kw.keyword ?? "");
+      const occurrences = (response.match(new RegExp(target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi")) ?? []).length;
+      return relationOk(occurrences, String(kw.relation ?? ""), num(kw.frequency, num(kw.num)));
+    }
+    case "keywords:forbidden_words":
+      return strList(kw.keywords).every(
+        (k) => !new RegExp(`(^|[^a-zA-Z])${k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-zA-Z]|$)`, "i").test(response),
+      );
+    case "keywords:letter_frequency": {
+      const letter = String(kw.letter ?? "");
+      let occurrences = 0;
+      for (const ch of response.toLowerCase()) if (ch === letter.toLowerCase()) occurrences++;
+      return relationOk(occurrences, String(kw.relation ?? ""), num(kw.let_frequency, num(kw.num)));
+    }
+    case "language:response_language":
+      return detectLanguage(response) === String(kw.language ?? "en");
+    case "startend:quotation": {
+      const s = response.trim();
+      const quotes = ['"', "'", "“", "”", "‘", "’"];
+      return s.length >= 2 && quotes.includes(s[0]!) && quotes.includes(s[s.length - 1]!);
+    }
+    case "startend:end_checker":
+      return response.trim().toLowerCase().endsWith(String(kw.end_phrase ?? "").toLowerCase());
+    case "change_case:english_lowercase":
+      return response === response.toLowerCase();
+    case "change_case:english_capital":
+      return response === response.toUpperCase();
+    case "change_case:capital_word_frequency": {
+      const words = response.match(/[A-Za-z]+/g) ?? [];
+      const caps = words.filter((w) => w === w.toUpperCase()).length;
+      return relationOk(caps, String(kw.relation ?? ""), num(kw.capital_frequency, num(kw.capital_word_frequency)));
+    }
+    case "detectable_content:number_placeholders": {
+      const placeholders = response.match(/\[[^\[\]]+\]/g) ?? [];
+      return placeholders.length >= num(kw.num_placeholders);
+    }
+    case "detectable_content:postscript": {
+      const marker = String(kw.postscript_marker ?? "P.S.");
+      return new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\./g, "."), "i").test(response);
+    }
+    case "detectable_format:number_bullet_lists":
+      return (response.match(/^\s*(?:\*|-)\s+/gm) ?? []).length >= num(kw.num_bullets);
+    case "detectable_format:constrained_response": {
+      const options = [
+        "My answer is yes.",
+        "My answer is no.",
+        "My answer is maybe.",
+      ];
+      const cleaned = response.trim().toLowerCase().replace(/[.。!！?？]/g, "");
+      return options.some((o) => cleaned === o.toLowerCase().replace(/\./g, ""));
+    }
+    case "detectable_format:number_highlighted_sections":
+      return (response.match(/\*[^*\n]+\*/g) ?? []).length >= num(kw.num_highlights);
+    case "detectable_format:multiple_sections":
+      return (response.match(/Section\s+\d+/g) ?? []).length >= num(kw.num_sections);
+    case "detectable_format:json_format": {
+      const stripped = response.trim().replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/, "");
+      try {
+        JSON.parse(stripped);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    case "combination:two_responses": {
+      const parts = splitOnStars(response);
+      return parts.length === 2;
+    }
+    case "combination:repeat_prompt": {
+      const toRepeat = String(kw.prompt_to_repeat ?? prompt);
+      return response.includes(toRepeat);
+    }
+    default:
+      // 未知指令类型按未通过处理，避免虚高分数。
+      return false;
+  }
+}
+
+function gradeIfevalItem(item: EvalItem, response: string): boolean {
+  const ids = (item.meta?.instructionIds as string[]) ?? [];
+  const kwargsList = (item.meta?.kwargsList as IfevalKwargs[]) ?? [];
+  return ids.every((id, i) => verifyInstruction(id, kwargsList[i] ?? {}, response, item.question));
+}
+
+/** 供 smoke / 调试直接校验一组 IFEval 指令。 */
+export function verifyIfevalInstructions(
+  ids: string[],
+  kwargsList: IfevalKwargs[],
+  response: string,
+  prompt = "",
+): boolean {
+  return ids.every((id, i) => verifyInstruction(id, kwargsList[i] ?? {}, response, prompt));
+}
+
+/**
+ * 统一判分入口。选择 / 数字类是纯函数；代码类需要沙箱执行（异步）；
+ * IFEval 跑指令校验器；长文检索做子串匹配。
+ */
+export async function gradeEvalAnswer(suite: EvalSuiteId, response: string, item: EvalItem): Promise<boolean> {
+  switch (suite) {
+    case "humaneval": {
+      const test = String(item.meta?.test ?? "");
+      const entryPoint = String(item.meta?.entryPoint ?? "");
+      if (!test || !entryPoint) return false;
+      const code = assembleHumanevalSolution(extractPythonCode(response), item);
+      return runPythonForTest(`${code}\n${test}\ncheck(${entryPoint})\n`);
+    }
+    case "mbpp": {
+      const testList = (item.meta?.testList as string[]) ?? [];
+      const setupCode = String(item.meta?.setupCode ?? "");
+      if (testList.length === 0) return false;
+      const code = extractPythonCode(response);
+      return runPythonForTest(`${setupCode}\n${code}\n${testList.join("\n")}\n`);
+    }
+    case "ifeval":
+      return gradeIfevalItem(item, response);
+    case "longctx":
+      return response.toLowerCase().includes(item.answer.toLowerCase());
+    default:
+      return checkEvalAnswer(suite, extractEvalAnswer(suite, response, item), item);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +985,10 @@ export async function runEvalQuestions(opts: {
   const { suite, items, fewShot, cancel } = opts;
   const maxTokens = EVAL_SUITES[suite].maxTokens;
   const bySubject = EVAL_SUITES[suite].bySubject;
+  // 代码套件依赖本机 python3 执行判分，缺环境时直接失败整个任务（错误透出到 UI）。
+  if ((suite === "humaneval" || suite === "mbpp") && !(await hasPython3())) {
+    throw new Error("本机未找到 python3，代码类评测无法执行判分（请安装 Python 3 后重试）");
+  }
   let done = 0;
   let correct = 0;
   let failures = 0;
@@ -534,7 +1006,7 @@ export async function runEvalQuestions(opts: {
       const reply = await opts.ask(formatEvalPrompt(suite, item, fewShot), maxTokens);
       if (reply === null) {
         failures += 1;
-      } else if (checkEvalAnswer(suite, extractEvalAnswer(suite, reply, item), item)) {
+      } else if (await gradeEvalAnswer(suite, reply, item)) {
         correct += 1;
         if (bucket) bucket.correct += 1;
       }

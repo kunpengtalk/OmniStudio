@@ -23,14 +23,20 @@ const check = (name: string, cond: boolean, detail?: unknown) => {
   }
 };
 
-// fake 问答服务器：数学题回固定数字，选择题回固定字母 C。
+// fake 问答服务器：数学题回固定数字，选择题回固定字母 C，代码题回可执行的正确实现。
 const server = Bun.serve({
   port: 0,
   async fetch(req) {
     const body = (await req.json()) as { messages?: { content?: string }[] };
     const prompt = body.messages?.[0]?.content ?? "";
-    const isMath = prompt.includes("math problem");
-    const content = isMath ? "Let me think... #### 18" : "The answer is C";
+    let content: string;
+    if (prompt.includes("math problem")) {
+      content = "Let me think... #### 18";
+    } else if (prompt.includes("Complete the Python function below")) {
+      content = "```python\ndef add(a, b):\n    return a + b\n```";
+    } else {
+      content = "The answer is C";
+    }
     return Response.json({
       choices: [{ message: { content } }],
       usage: { prompt_tokens: 10, completion_tokens: 5 },
@@ -122,6 +128,64 @@ try {
   } else {
     check("gsm8k start", false, gsmStarted);
   }
+
+  // ---- 6. IFEval 校验器单元断言 ----
+  check(
+    "ifeval 校验集合（no_comma / 字数 / 存在词）",
+    evalMod.verifyIfevalInstructions(
+      ["punctuation:no_comma", "length_constraints:number_words", "keywords:existence"],
+      [{}, { relation: "at least", num_words: 3 }, { keywords: ["alpha"] }],
+      "alpha beta gamma delta",
+    ) === true,
+  );
+  check(
+    "ifeval no_comma 拒绝逗号",
+    evalMod.verifyIfevalInstructions(["punctuation:no_comma"], [{}], "a, b") === false,
+  );
+  check(
+    "ifeval json_format",
+    evalMod.verifyIfevalInstructions(["detectable_format:json_format"], [{}], '{"k": 1}') === true,
+  );
+  check(
+    "ifeval two_responses",
+    evalMod.verifyIfevalInstructions(["combination:two_responses"], [{}], "first part\n***\nsecond part") === true,
+  );
+
+  // ---- 7. 代码沙箱判分（伪造 HumanEval 题，fake 回正确实现）----
+  evalMod.writeEvalDataFileForTest(
+    "humaneval.jsonl",
+    [
+      JSON.stringify({
+        task_id: "HumanEval/999",
+        prompt: "def add(a, b):\n    \"\"\"Return the sum.\"\"\"\n",
+        test: "def check(candidate):\n    assert candidate(1, 2) == 3\n    assert candidate(-1, 1) == 0\n",
+        entry_point: "add",
+      }),
+    ].join("\n"),
+  );
+  const heStarted = bench.startBenchmark({ model: "fake-model", mode: "eval", suite: "humaneval", sampleSize: 0, concurrency: 1 });
+  if ("runId" in heStarted) {
+    let heRun = bench.getBenchmarkRun(heStarted.runId);
+    for (let i = 0; i < 100 && heRun?.status === "running"; i++) {
+      await Bun.sleep(80);
+      heRun = bench.getBenchmarkRun(heStarted.runId);
+    }
+    check("humaneval 沙箱执行 pass@1 = 100%", heRun?.eval?.accuracy === 100, heRun?.eval ?? heRun?.error);
+  } else {
+    check("humaneval start", false, heStarted);
+  }
+
+  // ---- 8. 长文多针合成与判分 ----
+  const lc = evalMod.loadEvalSuite("longctx", 5);
+  check("longctx 合成 5 题", lc.items.length === 5, lc.items.length);
+  const sample = lc.items[0]!;
+  check("longctx 题面含针问句", sample.question.includes("special magic numbers for") && sample.question.length > 10_000, {
+    len: sample.question.length,
+  });
+  check("longctx 正确答案命中", (await evalMod.gradeEvalAnswer("longctx", `The number is ${sample.answer}.`, sample)) === true);
+  check("longctx 错误答案不命中", (await evalMod.gradeEvalAnswer("longctx", "deadbeef", sample)) === false);
+  const depths = new Set(lc.items.map((i) => i.subject));
+  check("longctx 深度分档有效", depths.size >= 2, [...depths]);
 } catch (e) {
   failed = true;
   console.error("smoke crashed:", e);

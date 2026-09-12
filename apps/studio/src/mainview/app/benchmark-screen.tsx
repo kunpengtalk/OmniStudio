@@ -146,6 +146,8 @@ export function BenchmarkScreen() {
   const providerIncomplete = !selectedProvider || !selectedProvider.baseUrl.trim();
   const providerKeyMissing = !!selectedProvider && !selectedProvider.apiKey.trim();
 
+  const selectedSuiteInfo: EvalSuiteInfo | undefined = evalSuitesQuery.data?.suites.find((s) => s.id === suite);
+
   const startRun = async () => {
     setStartError(null);
     const res = await rpcClient.startBenchmark({
@@ -489,6 +491,16 @@ export function BenchmarkScreen() {
                     count: (evalSuitesQuery.data?.suites.find((s) => s.id === suite)?.totalQuestions ?? 0).toLocaleString(),
                   })}
                 </p>
+                {selectedSuiteInfo?.kind === "code" && (
+                  <p className="mt-1 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400">
+                    {t("benchmark.eval.codeExecNote")}
+                  </p>
+                )}
+                {selectedSuiteInfo?.kind === "long-context" && (
+                  <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                    {t("benchmark.eval.longctxNote")}
+                  </p>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
