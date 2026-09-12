@@ -45,6 +45,13 @@ export function useKbListQuery() {
   return useQuery({ queryKey: ["kb-list"], queryFn: () => rpcClient.kbList(undefined) });
 }
 
+/**
+ * 「不使用」在状态里是空字符串，但 Radix 的 SelectItem 不接受空字符串 value
+ * （它会直接抛错：Select 关闭时 children 也会渲染进游离 DocumentFragment 收集
+ * 候选项文本，所以一打开弹窗就炸），这里用哨兵值代替再映射回空串。
+ */
+const NO_MODEL = "__none__";
+
 /** 新建知识库弹窗（侧栏「新建」与主页空状态共用，开关在 kb store）。
  *  嵌入/重排模型可创建时就选（默认「不使用」），高级配置（地址/密钥）在设置页。 */
 export function KbCreateDialog() {
@@ -93,12 +100,12 @@ export function KbCreateDialog() {
     models: string[],
     loading: boolean,
   ) => (
-    <Select value={value} onValueChange={onChange}>
+    <Select value={value || NO_MODEL} onValueChange={(v) => onChange(v === NO_MODEL ? "" : v)}>
       <SelectTrigger id={id} className="h-8 w-full text-xs">
         <SelectValue placeholder={t("kb.create.notUse")} />
       </SelectTrigger>
       <SelectContent position="popper" sideOffset={6} className="max-h-64 max-w-72">
-        <SelectItem value="" className="text-xs">
+        <SelectItem value={NO_MODEL} className="text-xs">
           {t("kb.create.notUse")}
         </SelectItem>
         {loading && (
