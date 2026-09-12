@@ -79,6 +79,8 @@ const SETTINGS: Record<string, string> = {
 
 mock.module("./db/settings", () => ({
   getSetting: (key: string) => SETTINGS[key] ?? "",
+  // kb-mcp → knowledge.ts → vllm/vllm.ts 会读重试次数等数值设置。
+  getNumericSetting: (key: string) => Number(SETTINGS[key] ?? 0) || 0,
   updateSettings: (values: Record<string, string>) => Object.assign(SETTINGS, values),
   getAllSettings: () => ({ ...SETTINGS }),
   getActiveServerPort: () => SETTINGS.SERVER_PORT || String(LOCAL_PORT),

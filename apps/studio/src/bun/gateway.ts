@@ -10,6 +10,7 @@ import { listInstalledModels, slugModelFileName } from "./model-store";
 import * as Memory from "./memory";
 import type { MemoryCategory } from "../shared/memory";
 import { handleMcpRequest } from "./kb-mcp";
+import * as Img from "./gateway-images";
 
 /**
  * 本地 API 网关。
@@ -2112,7 +2113,8 @@ async function route(req: Request): Promise<Response> {
       if (req.method !== "POST") return apiError(405, "Method Not Allowed");
       return handleTranscriptions(req);
     case "/v1/images/generations":
-      return apiError(501, "文本生图后端尚未接入", "not_implemented");
+      if (req.method !== "POST") return apiError(405, "Method Not Allowed");
+      return handleImageGeneration(req);
     // 共享记忆 REST（Mem0 风格）：任何程序经网关读写记忆库。
     case "/v1/memories":
       if (req.method === "GET") return handleMemoryList(url);

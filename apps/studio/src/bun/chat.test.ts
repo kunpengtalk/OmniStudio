@@ -19,19 +19,24 @@ const db = drizzle({ client: sqlite });
 migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
 
 mock.module("./db", () => ({ db }));
-mock.module("./db/settings", () => ({
-  getSetting: (key: string) =>
+mock.module("./db/settings", () => {
+  const getSetting = (key: string) =>
     key === "SERVER_MODE"
       ? "remote"
       : key === "VLLM_API_BASE"
         ? "http://fake:8000"
         : key === "CHAT_MODEL"
           ? "test-model"
-          : "",
-  updateSettings: () => {},
-  getAllSettings: () => ({}),
-  getActiveServerPort: () => "18080",
-}));
+          : "";
+  return {
+    getSetting,
+    // knowledge.ts → vllm/vllm.ts 会读重试次数等数值设置。
+    getNumericSetting: (key: string) => Number(getSetting(key)),
+    updateSettings: () => {},
+    getAllSettings: () => ({}),
+    getActiveServerPort: () => "18080",
+  };
+});
 mock.module("./chat-model", () => ({ getChatModelName: () => "test-model" }));
 mock.module("./image-server", () => ({
   chatImageDir: () => "/tmp",
