@@ -232,6 +232,37 @@ export const CLI_SECTIONS: CliSection[] = [
     ],
   },
   {
+    id: "benchmark",
+    titleZh: "基准测速",
+    titleEn: "Benchmark",
+    descZh: "给当前模型（或云端服务商的模型）跑吞吐测速，结果写进应用里的「基准测试」记录。",
+    descEn: "Run a throughput benchmark for the active model (or a cloud provider model); results land in the app's benchmark history.",
+    entries: [
+      {
+        cmd: "omi benchmark [model] [--contexts 1024,4096] [--gen 128] [--batch 1]",
+        zh: "跑基准测速：默认测当前活动模型，给个模型名 / 服务名换目标；--contexts 选要测的上下文档位，--gen / --batch 调生成长度与并发。应用没运行时在本进程直接跑（结果写同一份库），Ctrl+C 取消本次测试。",
+        en: "Run a benchmark: the active model by default, or the given model / served name; --contexts picks the context sizes, --gen / --batch tune generation length and concurrency. Runs in-process when the app isn't running (same database); Ctrl+C cancels the current run.",
+        examples: [
+          {
+            cmd: "omi benchmark --contexts 1024,4096,8192 --gen 128",
+            zh: "只测 1K / 4K / 8K 三档，每次生成 128 token。",
+            en: "Benchmark 1K / 4K / 8K only, generating 128 tokens per request.",
+          },
+        ],
+      },
+      {
+        cmd: "omi benchmark --cloud [provider]",
+        zh: "直接测云端服务商（不带值就用当前配置的那个），用来和本地引擎对比吞吐；配 --json 输出结构化结果，--open 跑完在应用里打开基准测试页。",
+        en: "Benchmark a cloud provider directly (defaults to the configured one) to compare throughput with local engines; add --json for structured output, --open to jump to the in-app benchmark page afterwards.",
+      },
+      {
+        cmd: "omi benchmark --list",
+        zh: "列出最近 20 条测速记录（ID / 时间 / 模型 / 平均 TPS / 耗时）；应用里的「基准测试」页有完整历史与图表。",
+        en: "List the 20 most recent speed records (id, time, model, average TPS, duration); the in-app Benchmark page has the full history and charts.",
+      },
+    ],
+  },
+  {
     id: "memory",
     titleZh: "记忆：写入、检索、接入",
     titleEn: "Memory: save, search, connect",

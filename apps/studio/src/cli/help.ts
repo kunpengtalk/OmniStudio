@@ -181,6 +181,24 @@ export const CMD_HELP: Record<string, string> = {
 用法：omi status
 
 说明：应用未运行时改为探测推理端口（可能报告外部实例）与打印设置里的地址。`,
+  benchmark: `跑基准测速（本地引擎 / 云端 API），结果写进应用里的基准测试记录。
+
+用法：omi benchmark [model] [options]
+
+参数：
+  [model]       要测的模型名 / 服务名（默认当前活动模型）；--cloud 时是服务商模型 ID
+
+选项：
+  --list             列出最近的基准记录（最多 20 条）后退出
+  --cloud [provider] 直接测云端服务商（不带值则用当前配置的服务商）
+  --gen <n>          每次请求生成多少 token
+  --batch <n>        并发批大小
+  --contexts <a,b>   要测的上下文档位，逗号分隔（如 1024,4096,8192）
+  --json             以 JSON 输出结果
+  --open             跑完后在应用里打开基准测试页
+
+说明：应用未运行时在本进程内直接执行（结果写同一份数据库）；
+Ctrl+C 取消本次测试（已跑完的档位会保留）。`,
   server: `管理推理服务器。
 
 用法：omi server <action> [name]
