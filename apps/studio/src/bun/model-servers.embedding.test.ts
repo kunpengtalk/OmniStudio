@@ -187,7 +187,9 @@ beforeEach(() => {
   SETTINGS.INFERENCE_ENGINE = "llama.cpp";
   SETTINGS.SERVER_PORT = "18400";
   SETTINGS.VLLM_PORT = "18401";
-  SETTINGS.EMBEDDING_PORT = "18190";
+  // 夹具用 18990 而非默认 18190:测试做真实端口探测,默认段会被正在运行的应用
+  // (比如用户起着的嵌入实例)占住,导致分配器顺延、精确断言变 flaky。
+  SETTINGS.EMBEDDING_PORT = "18990";
   PORT_OVERRIDE = null;
   created = [];
   setInstalled();
@@ -214,7 +216,7 @@ describe("嵌入实例的活动状态隔离", () => {
     const emb = await Registry.startServedModel({ model: modelE1 });
     expect(emb.ok).toBe(true);
     expect(emb.model?.purpose).toBe("embedding");
-    expect(emb.model?.port).toBe(18190);
+    expect(emb.model?.port).toBe(18990);
     expect(emb.model?.usesDefaultPort).toBe(true);
     expect(SETTINGS.SERVED_ACTIVE_ID).toBe(chat.model!.id);
     expect(SETTINGS.CHAT_MODEL).toBe("a");
@@ -222,8 +224,8 @@ describe("嵌入实例的活动状态隔离", () => {
     expect(PORT_OVERRIDE).toBe("18400");
     expect(Registry.getActiveServedId()).toBe(chat.model!.id);
     expect(Registry.getRequestTargetServedModel()?.id).toBe(chat.model!.id);
-    expect(Registry.getActiveEmbeddingPort()).toBe(18190);
-    expect(Registry.resolveEmbeddingBackend()).toBe("http://127.0.0.1:18190");
+    expect(Registry.getActiveEmbeddingPort()).toBe(18990);
+    expect(Registry.resolveEmbeddingBackend()).toBe("http://127.0.0.1:18990");
     const embRuntime = created.find((r) => r.overrides.model === modelE1);
     expect(embRuntime?.overrides.purpose).toBe("embedding");
     const chatRuntime = created.find((r) => r.overrides.model === modelA);
@@ -238,26 +240,26 @@ describe("嵌入实例的活动状态隔离", () => {
     expect(Registry.getActiveServedId()).toBeNull();
     // 只剩嵌入实例在跑：聊天请求目标必须是 undefined（不是 promote 嵌入实例）。
     expect(Registry.getRequestTargetServedModel()).toBeUndefined();
-    expect(Registry.getActiveEmbeddingPort()).toBe(18190);
-    expect(Registry.resolveEmbeddingBackend()).toBe("http://127.0.0.1:18190");
+    expect(Registry.getActiveEmbeddingPort()).toBe(18990);
+    expect(Registry.resolveEmbeddingBackend()).toBe("http://127.0.0.1:18990");
   });
 
   test("多嵌入实例最近启动胜：新实例接管嵌入后端，停掉后回落旧实例", async () => {
     const e1 = await Registry.startServedModel({ model: modelE1 });
-    expect(e1.model?.port).toBe(18190);
-    expect(Registry.getActiveEmbeddingPort()).toBe(18190);
-    expect(Registry.resolveEmbeddingBackend()).toBe("http://127.0.0.1:18190");
+    expect(e1.model?.port).toBe(18990);
+    expect(Registry.getActiveEmbeddingPort()).toBe(18990);
+    expect(Registry.resolveEmbeddingBackend()).toBe("http://127.0.0.1:18990");
 
     const e2 = await Registry.startServedModel({ model: modelE2 });
-    expect(e2.model?.port).toBe(18191);
-    expect(Registry.getActiveEmbeddingPort()).toBe(18191);
-    expect(Registry.resolveEmbeddingBackend()).toBe("http://127.0.0.1:18191");
+    expect(e2.model?.port).toBe(18991);
+    expect(Registry.getActiveEmbeddingPort()).toBe(18991);
+    expect(Registry.resolveEmbeddingBackend()).toBe("http://127.0.0.1:18991");
     // 没有聊天实例：聊天端口覆盖保持空。
     expect(PORT_OVERRIDE).toBeNull();
 
     await Registry.stopServedModel(e2.model!.id);
-    expect(Registry.getActiveEmbeddingPort()).toBe(18190);
-    expect(Registry.resolveEmbeddingBackend()).toBe("http://127.0.0.1:18190");
+    expect(Registry.getActiveEmbeddingPort()).toBe(18990);
+    expect(Registry.resolveEmbeddingBackend()).toBe("http://127.0.0.1:18990");
   });
 
   test("setActiveServedId 拒绝嵌入实例，不写任何聊天设置", async () => {
@@ -298,7 +300,7 @@ describe("resolveEmbeddingBase 四层链（③-A3）", () => {
     SETTINGS.SERVER_MODE = "remote";
     SETTINGS.VLLM_API_BASE = "https://cloud.example/v1";
     await Registry.startServedModel({ model: modelE1 });
-    expect(resolveEmbeddingBase({ embeddingBase: "" })).toBe("http://127.0.0.1:18190");
+    expect(resolveEmbeddingBase({ embeddingBase: "" })).toBe("http://127.0.0.1:18990");
   });
 
   test("无实例 + SERVER_MODE=remote → VLLM_API_BASE（剥 /v1）", async () => {
