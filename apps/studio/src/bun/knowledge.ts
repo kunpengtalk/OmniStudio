@@ -15,7 +15,13 @@ import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "./db";
 import { kbIngestJobs, knowledgeBases, knowledgeChunks, knowledgeDocs } from "./db/schema";
 import type { KnowledgeBaseRow, KnowledgeDocRow } from "./db/schema";
-import { callEmbeddings, embeddingHeaders, resolveEmbeddingBase, type EmbeddingConfig } from "./embeddings";
+import {
+  callEmbeddings,
+  embeddingHeaders,
+  globalEmbeddingDefaults,
+  resolveEmbeddingBase,
+  type EmbeddingConfig,
+} from "./embeddings";
 import { resolveEmbeddingBackend } from "./model-servers";
 import { getKbIndex, invalidateKbIndex, kbIndexStats, peekKbIndex, type KbSearchIndex } from "./kb-index";
 import {
@@ -239,20 +245,25 @@ export function getKb(id: number): KnowledgeBaseRow | null {
 export function createKb(input: {
   name: string;
   description?: string;
-  /** 嵌入模型（空 = 纯关键词检索）。 */
+  /** 嵌入模型（空 = 纯关键词检索，除非全局默认非空）。 */
   embeddingModel?: string;
   /** 重排模型（空 = 不重排）。 */
   rerankModel?: string;
   actor?: string;
 }): KbView {
   const name = input.name.trim() || "未命名知识库";
+  // 全局默认（设置 → 默认模型 → 向量嵌入）在**建库时**快照进 KB 行：此后这个库纯行驱动，
+  // 改全局默认不会再动它（既有 KB 的端点与维度零漂移）。显式传入的模型优先，缺省才用快照。
+  const defaults = globalEmbeddingDefaults();
   const row = db
     .insert(knowledgeBases)
     .values({
       name,
       description: input.description?.trim() || null,
-      embeddingModel: input.embeddingModel?.trim() ?? "",
-      rerankModel: input.rerankModel?.trim() ?? "",
+      embeddingModel: input.embeddingModel?.trim() || defaults.model,
+      embeddingBase: defaults.base,
+      embeddingApiKey: defaults.apiKey,
+      rerankModel: input.rerankModel?.trim() || "",
     })
     .returning()
     .get();
@@ -1305,8 +1316,11 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
   const kbId = kb.id;
   db.update(knowledgeBases)
     .set({
-      embeddingModel: src.embeddingModel ?? "",
-      embeddingBase: src.embeddingBase ?? "",
+      // createKb 已按全局默认快照预填了 model/base/key（导入也是「建库」）。这里只在导出
+      // 文件**带了**嵌入配置时覆盖：显式导入参数优先，缺省（老导出文件 / 关键词库）保留
+      // 快照 —— 否则刚预填的默认会被 `?? ""` 抹成空，与新建 KB 的行为分叉。
+      embeddingModel: src.embeddingModel || kb.embeddingModel,
+      embeddingBase: src.embeddingBase || kb.embeddingBase,
       embeddingDim: src.embeddingDim ?? null,
       rerankModel: src.rerankModel ?? "",
       chunkSize: src.chunkSize ?? 800,

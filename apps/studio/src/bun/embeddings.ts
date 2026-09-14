@@ -15,6 +15,24 @@ export type EmbeddingConfig = {
   embeddingDim: number | null;
 };
 
+/**
+ * 全局默认嵌入配置（`EMBEDDING_MODEL` / `EMBEDDING_BASE` / `EMBEDDING_API_KEY`）的
+ * **唯一 bun 侧读取点**。
+ *
+ * 它只在两个「写入时」被消费：新建知识库（knowledge.createKb 把三字段快照进 KB 行）
+ * 与 KB 设置页的「启用向量检索」按钮；共享记忆则在解析时读它作为显式值的兜底
+ * （见 memory.memoryEmbeddingConfig）。**不**参与 resolveEmbeddingBase 的层级 ——
+ * 全局默认对既有 KB 没有追溯效果，既有 KB 的端点与维度不会被悄悄改道
+ * （维度漂移只会在检索时才以「向量维度不一致」暴露）。
+ */
+export function globalEmbeddingDefaults(): { model: string; base: string; apiKey: string } {
+  return {
+    model: getSetting("EMBEDDING_MODEL").trim(),
+    base: getSetting("EMBEDDING_BASE").trim(),
+    apiKey: getSetting("EMBEDDING_API_KEY").trim(),
+  };
+}
+
 /** 解析嵌入请求的 base（不带 /v1）：显式配置 > 运行中嵌入实例 > 云端 remote > 聊天活动端口。 */
 export function resolveEmbeddingBase(cfg: Pick<EmbeddingConfig, "embeddingBase">): string {
   const trimBase = (v: string) => v.trim().replace(/\/+$/, "").replace(/\/v1$/, "");

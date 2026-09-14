@@ -6,7 +6,7 @@ import { db } from "./db";
 import { memories, memoryEvents, memoryMetrics, type MemoryRow } from "./db/schema";
 import type { BuiltTool } from "./agent-tools";
 import { getSetting } from "./db/settings";
-import { callEmbeddings, cosine, decodeEmbedding, encodeEmbedding, type EmbeddingConfig } from "./embeddings";
+import { callEmbeddings, cosine, decodeEmbedding, encodeEmbedding, globalEmbeddingDefaults, type EmbeddingConfig } from "./embeddings";
 import { bm25Rank, buildBm25Index, normalizeText, tokenContainment, tokenSet, type Bm25Index } from "./text-search";
 import {
   MEMORY_LIMITS,
@@ -94,14 +94,29 @@ export function memoryReviewMode(): boolean {
   return getSetting("MEMORY_REVIEW_MODE") === "1";
 }
 
-/** 记忆向量化配置（空 = 不做向量检索，退化为纯关键词）。 */
+/** 记忆嵌入模型的禁用哨兵：显式关掉向量检索（全局默认已设时也能退回关键词）。 */
+const MEMORY_EMBEDDING_OFF = new Set(["none", "off"]);
+
+/**
+ * 记忆向量化配置（空 = 不做向量检索，退化为纯关键词）。
+ *
+ * 优先级：禁用哨兵（`none` / `off`，大小写不敏感）> 显式值 > 全局默认
+ * （设置 → 默认模型 → 向量嵌入，经 globalEmbeddingDefaults 取值）。
+ * 记忆是全局单例、没有「对象行」，所以它是唯一在**解析时**读全局默认的消费方。
+ *
+ * 哨兵只作用于 model：base / key 的语义就是「显式值 || 全局」，没有「关闭」含义，
+ * 字面值 `none` 会被当作普通地址（会显式报连接失败，不会静默改变行为）。
+ */
 export function memoryEmbeddingConfig(): EmbeddingConfig | null {
-  const model = getSetting("MEMORY_EMBEDDING_MODEL").trim();
+  const explicitModel = getSetting("MEMORY_EMBEDDING_MODEL").trim();
+  if (MEMORY_EMBEDDING_OFF.has(explicitModel.toLowerCase())) return null;
+  const defaults = globalEmbeddingDefaults();
+  const model = explicitModel || defaults.model;
   if (!model) return null;
   return {
     embeddingModel: model,
-    embeddingBase: getSetting("MEMORY_EMBEDDING_BASE"),
-    embeddingApiKey: getSetting("MEMORY_EMBEDDING_API_KEY"),
+    embeddingBase: getSetting("MEMORY_EMBEDDING_BASE").trim() || defaults.base,
+    embeddingApiKey: getSetting("MEMORY_EMBEDDING_API_KEY").trim() || defaults.apiKey,
     embeddingDim: null,
   };
 }

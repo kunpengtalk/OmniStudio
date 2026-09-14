@@ -10,10 +10,14 @@ import {
   PhoneCallIcon,
   RefreshCwIcon,
   ScanTextIcon,
+  SparklesIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { CloudModelSelect } from "@components/cloud-model-select";
+import { useServedModelsSync } from "@components/served-models-panel";
+import { useServedStore } from "@stores/served";
+import { KbModelSelect, useKbModelCandidates } from "@/mainview/app/kb/model-select";
 import { ENGINE_SHORT_NAMES } from "@/shared/engines";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
@@ -428,6 +432,174 @@ function CloudModelCard({
   );
 }
 
+/**
+ * 从「选中的模型」算出要写入的设置补丁 —— 含**空 base 陷阱防护**（步骤 9b）。
+ *
+ * 模型候选来自运行中的嵌入实例、而服务地址为空时，把该实例地址一起写进 `EMBEDDING_BASE`。
+ * 否则快照进 KB 行的 base 会是空 —— 实例一停，`resolveEmbeddingBase` 就落回**聊天**活动
+ * 端口，那里没有嵌入服务，该库的检索会以维度 / 连接错误失败且不易定位。
+ * host 固定 127.0.0.1：served 快照里的 endpoint 主机名来自 SERVER_HOST，可能是 0.0.0.0。
+ *
+ * 抽成纯函数是为了让这条规则可以被直接断言（组件里只有这一处判断）。
+ */
+export function embeddingDefaultsPatch(input: {
+  model: string;
+  /** 当前已填的服务地址（已保存值或用户正在编辑的值）。 */
+  base: string;
+  /** 该模型是不是运行中嵌入实例提供的（候选列表的本地组）。 */
+  fromRunningInstance: boolean;
+  /** 运行中最后一个嵌入实例的端口（与 getActiveEmbeddingPort 同源）。 */
+  instancePort?: number;
+}): Record<string, string> {
+  const patch: Record<string, string> = { EMBEDDING_MODEL: input.model };
+  if (input.model && input.fromRunningInstance && !input.base.trim() && input.instancePort) {
+    patch.EMBEDDING_BASE = `http://127.0.0.1:${input.instancePort}/v1`;
+  }
+  return patch;
+}
+
+/**
+ * 全局默认嵌入模型卡片（②-1）：写入 `EMBEDDING_MODEL` / `EMBEDDING_BASE` / `EMBEDDING_API_KEY`。
+ *
+ * 三键由 bun 侧唯一读取点 `globalEmbeddingDefaults()` 消费，且只在**写入时**快照进知识库行
+ * （新建 KB 预填、KB 设置页「启用向量检索」），对既有 KB 没有追溯效果；共享记忆在解析时
+ * 读它作为显式值的兜底。文案必须讲清这两点，否则用户会以为既有 KB 已经切换了。
+ *
+ * 模型候选复用知识库那套 `kbEmbeddingModels`（只列运行中嵌入实例提供的模型 + 云端候选，
+ * 并按来源标注），地址 / 密钥可选；空态引导与 KB 选择器同源。
+ */
+export function EmbeddingModelCard() {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const { data } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => rpcClient.getSettings(undefined),
+  });
+  const s = data?.settings;
+  const savedModel = s?.EMBEDDING_MODEL ?? "";
+  const savedBase = s?.EMBEDDING_BASE ?? "";
+  const savedKey = s?.EMBEDDING_API_KEY ?? "";
+
+  const [base, setBase] = useState(savedBase);
+  const [apiKey, setApiKey] = useState(savedKey);
+  useEffect(() => setBase(savedBase), [savedBase]);
+  useEffect(() => setApiKey(savedKey), [savedKey]);
+
+  // 运行中的嵌入实例（served 快照，推送 + 轮询兜底）：既决定候选从哪来，
+  // 也决定「从实例选模型时要不要把实例地址预填进服务地址」。
+  useServedModelsSync();
+  const served = useServedStore((st) => st.models);
+  const runningEmbed = served.filter((m) => m.purpose === "embedding" && m.status === "running");
+  // 最后一个运行中的实例胜出：与主进程 getActiveEmbeddingPort() 的选取规则同源。
+  const lastEmbed = runningEmbed[runningEmbed.length - 1];
+
+  const candidates = useKbModelCandidates("embedding", base, apiKey);
+
+  const save = useMutation({
+    mutationFn: (next: Record<string, string>) => rpcClient.updateSettings({ settings: next }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
+  });
+
+  /** 选模型即保存；来自运行实例且还没填地址时，顺带把实例地址快照进去（9b）。 */
+  const pickModel = (model: string) => {
+    const fromRunningInstance =
+      candidates.data?.service.kind === "local" && (candidates.data?.local ?? []).includes(model);
+    save.mutate(
+      embeddingDefaultsPatch({
+        model,
+        base,
+        fromRunningInstance,
+        instancePort: lastEmbed?.port,
+      }),
+    );
+  };
+
+  /** 地址 / 密钥失焦保存：与既有「即时保存」的卡片一致，值没变就不发请求。 */
+  const saveOnBlur = (key: "EMBEDDING_BASE" | "EMBEDDING_API_KEY") => {
+    const value = (key === "EMBEDDING_BASE" ? base : apiKey).trim();
+    const saved = key === "EMBEDDING_BASE" ? savedBase.trim() : savedKey.trim();
+    if (value === saved) return;
+    save.mutate({ [key]: value });
+  };
+
+  const hasBackend = runningEmbed.length > 0 || Boolean(base.trim());
+  const emptyHint =
+    !hasBackend && candidates.isSuccess ? t("kb.settings.noEmbeddingServer") : null;
+
+  return (
+    <div className="flex flex-col gap-2.5 rounded-xl border bg-card p-4 shadow-sm">
+      <div className="flex items-start gap-2.5">
+        <span className="mt-0.5 text-muted-foreground">
+          <SparklesIcon className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">{t("defaults.embedding")}</p>
+          <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">
+            {t("defaults.embeddingDesc")}
+          </p>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <KbModelSelect
+          ariaLabel={t("defaults.embedding")}
+          value={savedModel}
+          onChange={pickModel}
+          candidates={candidates.data}
+          loading={candidates.isLoading}
+          className="flex-1"
+        />
+        <Button
+          variant="outline"
+          size="icon-sm"
+          className="size-8 shrink-0"
+          tooltip={t("defaults.fetch")}
+          disabled={candidates.isFetching}
+          onClick={() => candidates.refetch()}
+        >
+          {candidates.isFetching ? (
+            <Spinner className="size-3.5" />
+          ) : (
+            <RefreshCwIcon className="size-3.5" />
+          )}
+        </Button>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <Input
+          value={base}
+          onChange={(e) => setBase(e.target.value)}
+          onBlur={() => saveOnBlur("EMBEDDING_BASE")}
+          aria-label={t("defaults.embeddingBase")}
+          placeholder={t("kb.settings.embeddingBasePlaceholder")}
+          className="h-8 font-mono text-xs"
+        />
+        <Input
+          type="password"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          onBlur={() => saveOnBlur("EMBEDDING_API_KEY")}
+          aria-label={t("defaults.embeddingKey")}
+          placeholder={t("kb.settings.keyPlaceholder")}
+          className="h-8 font-mono text-xs"
+        />
+      </div>
+
+      <p className="text-[10px] leading-snug text-muted-foreground/80">{t("defaults.embeddingNote")}</p>
+      <p className="text-[10px] leading-snug text-muted-foreground/80">
+        {t("defaults.embeddingExistingKb")}
+      </p>
+      {emptyHint && <p className="text-[10px] leading-snug text-muted-foreground">{emptyHint}</p>}
+      {save.isError && <p className="text-[11px] text-destructive">{String(save.error)}</p>}
+      {save.isSuccess && (
+        <p className="flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400">
+          {t("common.saved")}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function DefaultModelsPanel() {
   const t = useT();
   const queryClient = useQueryClient();
@@ -457,6 +629,8 @@ export function DefaultModelsPanel() {
 
       <div className="grid gap-3 lg:grid-cols-2">
         <ChatModelCard />
+
+        <EmbeddingModelCard />
 
         <ModelCard
           title={t("defaults.voiceCall")}

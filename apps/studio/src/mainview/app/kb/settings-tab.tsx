@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDownWideNarrowIcon,
   CheckCircle2Icon,
@@ -31,7 +31,9 @@ import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { Switch } from "@ui/switch";
 import { useKbStore } from "@stores/kb";
+import { useServedStore } from "@stores/served";
 import { useT } from "@stores/ui-lang";
+import { useServedModelsSync } from "@components/served-models-panel";
 import { cn } from "@/mainview/lib/utils";
 import type { KbView } from "@/bun/knowledge";
 import { KbModelSelect, serviceLabelKey, useKbModelCandidates, type KbServiceKind } from "./model-select";
@@ -207,6 +209,105 @@ function AdvancedService({
       </CollapsibleTrigger>
       <CollapsibleContent className="flex flex-col gap-4">{children}</CollapsibleContent>
     </Collapsible>
+  );
+}
+
+/**
+ * 「启用向量检索」（②-4）：把「设置 → 默认模型 → 向量嵌入」的全局默认**快照**进这个 KB 行，
+ * 并真的按入重嵌 —— 写入行 + `kbEmbedMissing`，不是只清空旧向量。
+ *
+ * 只在空配置（纯关键词）的库上出现；判据全部取自 webview 已有数据，零新 RPC：
+ *   1. 设置里有全局默认模型 —— 否则没有可写入的 model；
+ *   2. 后端可解析 —— 有运行中的嵌入实例（served 快照），或全局服务地址非空。
+ * `resolveEmbeddingBase` 是 bun 侧且永远有返回值（兜底落到聊天活动端口），
+ * 所以「它非空」不能当判据，这里也不引入可达性探针。
+ */
+function EnableEmbeddingButton({ kb }: { kb: KbView }) {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useServedModelsSync();
+  const served = useServedStore((s) => s.models);
+  const { data } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => rpcClient.getSettings(undefined),
+  });
+  const settings = data?.settings;
+  const globalModel = (settings?.EMBEDDING_MODEL ?? "").trim();
+  const globalBase = (settings?.EMBEDDING_BASE ?? "").trim();
+  const runningEmbed = served.some((m) => m.purpose === "embedding" && m.status === "running");
+
+  const enableMutation = useMutation({
+    mutationFn: async () => {
+      // 先写行再重嵌：embedMissing 读的是库行里的配置（模型/地址/密钥三字段一起落库）。
+      await rpcClient.kbUpdate({
+        id: kb.id,
+        patch: {
+          embeddingModel: globalModel,
+          embeddingBase: globalBase,
+          embeddingApiKey: settings?.EMBEDDING_API_KEY ?? "",
+        },
+      });
+      return rpcClient.kbEmbedMissing({ kbId: kb.id });
+    },
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["kb-list"] });
+      setResult(
+        res.ok
+          ? { ok: true, text: t("kb.settings.enableEmbeddingDone", { count: String(res.embedded ?? 0) }) }
+          : { ok: false, text: t("kb.settings.enableEmbeddingFailed", { error: res.error ?? "" }) },
+      );
+    },
+    onError: (e: unknown) =>
+      setResult({ ok: false, text: t("kb.settings.enableEmbeddingFailed", { error: String(e) }) }),
+  });
+
+  // 缺什么说什么：没有全局默认 → 指路默认模型面板；有默认但后端不可解析 → 指路启动模型 / 填地址。
+  const blocked = !globalModel
+    ? t("kb.settings.enableEmbeddingNoGlobal")
+    : !runningEmbed && !globalBase
+      ? t("kb.settings.enableEmbeddingNoBackend")
+      : null;
+
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg border border-foreground/10 bg-muted/40 px-2.5 py-2">
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 shrink-0 gap-1.5 text-xs"
+          disabled={blocked !== null || enableMutation.isPending}
+          onClick={() => {
+            setResult(null);
+            enableMutation.mutate();
+          }}
+        >
+          {enableMutation.isPending ? (
+            <Loader2Icon className="size-3.5 animate-spin" />
+          ) : (
+            <RefreshCwIcon className="size-3.5" />
+          )}
+          {enableMutation.isPending
+            ? t("kb.settings.enableEmbeddingBusy")
+            : t("kb.settings.enableEmbedding")}
+        </Button>
+        <span className="min-w-0 text-[10px] leading-4 text-muted-foreground">
+          {t("kb.settings.enableEmbeddingDesc")}
+        </span>
+      </div>
+      {blocked && <p className="text-[10px] leading-4 text-muted-foreground/80">{blocked}</p>}
+      {result && (
+        <p
+          className={cn(
+            "text-[10px] leading-4",
+            result.ok ? "text-emerald-600 dark:text-emerald-400" : "text-destructive",
+          )}
+        >
+          {result.text}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -416,6 +517,9 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
               {t("kb.settings.keywordOnlyNote")}
             </p>
           )}
+          {/* 空配置的库最常见的诉求就是「用全局默认把它打开」：给一个按钮，一键写入 + 重嵌。
+              已有模型的库用上面的表单即可，不重复出这个入口。 */}
+          {!kb.embeddingModel && <EnableEmbeddingButton kb={kb} />}
         </Section>
 
         <Section icon={<ArrowDownWideNarrowIcon className="size-3.5 text-muted-foreground" />} title={t("kb.settings.rerank")}>

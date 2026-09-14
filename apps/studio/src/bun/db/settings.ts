@@ -192,7 +192,13 @@ export type SettingsKey =
   // 嵌入服务（llama.cpp `--embeddings`）的端口段基址与池化方式；嵌入实例不占聊天端口段，
   // 也不参与聊天活动状态（见 shared/engines.ts 的 EMBEDDING_PORT_BASE）。
   | "EMBEDDING_PORT"
-  | "EMBEDDING_POOLING";
+  | "EMBEDDING_POOLING"
+  // 全局默认嵌入配置（设置 → 默认模型 → 向量嵌入）。**只在写入时快照**：
+  // 新建 KB 预填进 KB 行、KB 设置页「启用向量检索」按入重嵌，共享记忆在解析时兜底。
+  // 唯一读取点见 bun/embeddings.ts 的 globalEmbeddingDefaults()。
+  | "EMBEDDING_MODEL"
+  | "EMBEDDING_BASE"
+  | "EMBEDDING_API_KEY";
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
@@ -394,6 +400,11 @@ const DEFAULTS: Record<SettingsKey, string> = {
   // （set 时校验枚举 last|mean|none|cls，非法值直接拒，见 updateSettings）。
   EMBEDDING_PORT: String(EMBEDDING_PORT_BASE),
   EMBEDDING_POOLING: "last",
+  // 全局默认嵌入配置：留空 = 不设默认（新建 KB 仍为空配置的纯关键词库，
+  // 记忆也保持关键词检索）。地址与密钥可选；地址留空时解析按既有四层链走。
+  EMBEDDING_MODEL: "",
+  EMBEDDING_BASE: "",
+  EMBEDDING_API_KEY: "",
 };
 
 /**
