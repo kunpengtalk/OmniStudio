@@ -1062,6 +1062,17 @@ const zh: Record<string, string> = {
     "当前为纯关键词检索：口语化问法命中率有限。配置嵌入模型后需重新向量化。",
   "kb.settings.embeddingServeHint":
     "嵌入模型需先在模型页以「嵌入 Embedding」类别启动；本地嵌入服务未运行时，可展开「自定义接口与密钥」改用云端 / 自定义地址。",
+  // 空配置库的「启用向量检索」：把「设置 → 默认模型 → 向量嵌入」里的全局默认
+  // 快照进本库，并真的重新嵌入全部文档（不是只清空向量）。
+  "kb.settings.enableEmbedding": "启用向量检索",
+  "kb.settings.enableEmbeddingDesc":
+    "把「默认模型」里的全局嵌入配置写入本库，并重新嵌入全部文档 —— 文档多时耗时较长，期间会占用推理服务。",
+  "kb.settings.enableEmbeddingNoGlobal": "先到「设置 → 默认模型」选定嵌入模型",
+  "kb.settings.enableEmbeddingNoBackend":
+    "先启动嵌入模型（模型页把类别改为「嵌入」）或在默认模型里填写服务地址",
+  "kb.settings.enableEmbeddingBusy": "正在重新嵌入…",
+  "kb.settings.enableEmbeddingDone": "已启用，本轮补齐 {count} 个分块",
+  "kb.settings.enableEmbeddingFailed": "启用失败：{error}",
 
   "kb.settings.rerank": "重排模型",
   "kb.settings.rerankHint":
@@ -1709,6 +1720,17 @@ const zh: Record<string, string> = {
   "defaults.notSet": "未设置",
   "defaults.switching": "切换中…",
   "defaults.hint": "各场景的服务商地址与密钥在对应工具页或「模型云服务」页配置。",
+  // 全局默认嵌入模型：只在「写入时」生效（新建 KB 预填、KB 设置页点启用），
+  // 对既有 KB 没有追溯效果 —— 文案必须讲清楚，否则用户以为已经生效。
+  "defaults.embedding": "向量嵌入",
+  "defaults.embeddingDesc":
+    "全局默认嵌入模型：新建知识库会预填它，共享记忆按它做向量检索。",
+  "defaults.embeddingBase": "服务地址",
+  "defaults.embeddingKey": "API Key",
+  "defaults.embeddingNote":
+    "设置后共享记忆开始向量检索（既有记忆在后续写入或「整理记忆」时补向量）；只想用关键词检索时，把记忆嵌入模型设为 none。",
+  "defaults.embeddingExistingKb":
+    "既有知识库不会被自动切换：到该库的设置页点「启用向量检索」才生效。",
 
   "settings.modelPicker": "模型",
   "settings.customHf": "自定义 HuggingFace 模型",
@@ -1793,6 +1815,11 @@ const zh: Record<string, string> = {
   "settings.gateway.endpoints.hint": "端点仅监听本机（127.0.0.1），不暴露公网；在浏览器打开 /docs 可查看 Swagger UI 文档。",
   "settings.gateway.endpoints.responses": "对话补全（OpenAI Responses）",
   "settings.gateway.endpoints.messages": "对话补全（Anthropic Messages）",
+  "settings.gateway.endpoints.embeddings": "向量嵌入（Embeddings）",
+  "settings.gateway.endpoints.embeddingsDirect": "直连嵌入实例",
+  "settings.gateway.endpoints.embeddingsOffline": "未运行",
+  "settings.gateway.endpoints.embeddingsHint":
+    "直连地址指向本机正在运行的嵌入实例，与网关无关；在模型页以「嵌入 Embedding」类别启动模型后即可复制使用。",
   "settings.gateway.protocol.hint": "三套协议同一网关：OpenAI Chat Completions（/v1/chat/completions）、OpenAI Responses（/v1/responses）、Anthropic Messages（/v1/messages）。本地与云端模型按模型 ID 自动路由，/v1/models 统一列出全部可用模型。",
   "settings.gateway.apiKey.title": "API Key（鉴权）",
   "settings.gateway.apiKey.desc": "设置后，所有 /v1/* 端点需要携带 Authorization: Bearer <key> 或 x-api-key: <key> 才能访问；留空则开放访问。",
@@ -3311,6 +3338,17 @@ const en: Record<string, string> = {
     "Currently keyword-only: conversational queries may miss. Pick an embedding model and re-embed.",
   "kb.settings.embeddingServeHint":
     "Start an embedding model in Models with the “Embedding” category first; when no local embedding server is running, expand “Custom endpoint & key” to use a cloud / custom endpoint.",
+  // "Enable vector search" on keyword-only KBs: snapshots the global default from
+  // Settings → Default models → Embeddings into this KB and actually re-embeds every doc.
+  "kb.settings.enableEmbedding": "Enable vector search",
+  "kb.settings.enableEmbeddingDesc":
+    "Writes the global embedding config from Default models into this KB and re-embeds every document — slow on large libraries, and it occupies the inference server meanwhile.",
+  "kb.settings.enableEmbeddingNoGlobal": "Pick an embedding model in Settings → Default models first",
+  "kb.settings.enableEmbeddingNoBackend":
+    "Start an embedding model first (set its category to Embedding in Models), or fill in a service URL in Default models",
+  "kb.settings.enableEmbeddingBusy": "Re-embedding…",
+  "kb.settings.enableEmbeddingDone": "Enabled; embedded {count} chunks in this pass",
+  "kb.settings.enableEmbeddingFailed": "Failed to enable: {error}",
 
   "kb.settings.rerank": "Rerank model",
   "kb.settings.rerankHint":
@@ -3963,6 +4001,17 @@ const en: Record<string, string> = {
   "defaults.notSet": "Not set",
   "defaults.switching": "Switching…",
   "defaults.hint": "Provider URLs and keys for each scenario live on their tool page or in Model Cloud Services.",
+  // Global default embedding model: applies only at write time (new KB prefill, the KB
+  // "Enable vector search" button). Existing KBs are never touched — say so explicitly.
+  "defaults.embedding": "Embeddings",
+  "defaults.embeddingDesc":
+    "Global default embedding model: new knowledge bases are prefilled with it, and shared memory uses it for vector search.",
+  "defaults.embeddingBase": "Service URL",
+  "defaults.embeddingKey": "API Key",
+  "defaults.embeddingNote":
+    "Shared memory will start vector search (existing memories get vectors on later writes or a memory tidy-up); set the memory embedding model to none to keep keywords only.",
+  "defaults.embeddingExistingKb":
+    "Existing knowledge bases are never switched automatically: open that KB's settings and click “Enable vector search”.",
 
   "settings.modelPicker": "Model",
   "settings.customHf": "Custom HuggingFace model",
@@ -4054,6 +4103,11 @@ const en: Record<string, string> = {
   "settings.gateway.endpoints.hint": "Endpoints listen on 127.0.0.1 only (not exposed publicly). Open /docs in your browser for the Swagger UI.",
   "settings.gateway.endpoints.responses": "Chat (OpenAI Responses API)",
   "settings.gateway.endpoints.messages": "Chat (Anthropic Messages API)",
+  "settings.gateway.endpoints.embeddings": "Embeddings",
+  "settings.gateway.endpoints.embeddingsDirect": "Direct embedding instance",
+  "settings.gateway.endpoints.embeddingsOffline": "Not running",
+  "settings.gateway.endpoints.embeddingsHint":
+    "The direct address points at a locally running embedding instance (not the gateway). Start a model with the Embedding category in Models to use it.",
   "settings.gateway.protocol.hint": "Three protocols on one gateway: OpenAI Chat Completions (/v1/chat/completions), OpenAI Responses (/v1/responses), Anthropic Messages (/v1/messages). Local and cloud models are routed by model ID; /v1/models lists everything.",
   "settings.gateway.apiKey.title": "API Key (auth)",
   "settings.gateway.apiKey.desc": "When set, all /v1/* endpoints require Authorization: Bearer <key> or x-api-key: <key>. Leave empty for open access.",

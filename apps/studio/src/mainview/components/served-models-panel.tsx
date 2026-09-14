@@ -43,8 +43,8 @@ import { cn } from "@/mainview/lib/utils";
  * （webview 刷新 / HMR 后 store 会重置，推送只在变化时发）。
  */
 
-/** 轮询 + 推送合并写入 store。 */
-function useServedModelsSync() {
+/** 轮询 + 推送合并写入 store（网关页等其它页面也要读 served 快照，故对外导出）。 */
+export function useServedModelsSync() {
   const setSnapshot = useServedStore((s) => s.setSnapshot);
   const { data } = useQuery({
     queryKey: ["served-models"],

@@ -19,8 +19,11 @@ import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { ScrollArea } from "@ui/scroll-area";
+import { useServedModelsSync } from "@components/served-models-panel";
 import { useGatewayStore } from "@stores/gateway";
+import { useServedStore } from "@stores/served";
 import { useT } from "@stores/ui-lang";
+import type { ServedModelInfo } from "@/shared/served-models";
 import { cn } from "@/mainview/lib/utils";
 
 const STATUS_CLS: Record<string, string> = {
@@ -34,21 +37,32 @@ function EndpointRow({
   label,
   url,
   onCopy,
+  disabled = false,
 }: {
   label: ReactNode;
   url: string;
   onCopy: (text: string) => void;
+  /** 禁用复制：嵌入实例未运行时这一行显示的是占位文案，不是可复制的地址。 */
+  disabled?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="flex items-center gap-2 rounded-lg border px-3 py-2">
       <span className="w-40 shrink-0 truncate text-[11px] text-muted-foreground">{label}</span>
-      <code className="min-w-0 flex-1 truncate font-mono text-[11px]">{url}</code>
+      <code
+        className={cn(
+          "min-w-0 flex-1 truncate font-mono text-[11px]",
+          disabled && "text-muted-foreground/70",
+        )}
+      >
+        {url}
+      </code>
       <Button
         variant="ghost"
         size="icon-sm"
         tooltip="Copy"
         className="shrink-0"
+        disabled={disabled}
         onClick={() => {
           onCopy(url);
           setCopied(true);
@@ -92,6 +106,11 @@ export function GatewayScreen() {
   const t = useT();
   const queryClient = useQueryClient();
   const liveStatus = useGatewayStore((s) => s.status);
+
+  // 嵌入实例快照：与「已启动模型」面板同一条同步链路（推送 + 4s 轮询兜底冷加载）。
+  // 零新 RPC —— 直连地址需要的数据这里已经全有。
+  useServedModelsSync();
+  const servedModels = useServedStore((s) => s.models);
 
   const [staged, setStaged] = useState<GatewayConfig>(DEFAULT_CONFIG);
   const [saved, setSaved] = useState<GatewayConfig>(DEFAULT_CONFIG);
@@ -173,6 +192,22 @@ export function GatewayScreen() {
   ];
 
   const busy = toggleMutation.isPending || saveMutation.isPending;
+
+  /**
+   * 直连嵌入实例：取最后一个「运行中」的嵌入实例，与主进程 `getActiveEmbeddingPort()`
+   * 同源（注册表按插入序迭代，最后一个 running 胜出）—— 所以这里是循环覆盖而不是
+   * 找第一个命中。
+   *
+   * host 固定写 127.0.0.1，不用实例 `endpoint` 里的主机名 —— 它来自 SERVER_HOST，
+   * 可能是 0.0.0.0，复制出去连不上。
+   */
+  let embeddingInstance: ServedModelInfo | undefined;
+  for (const model of servedModels) {
+    if (model.purpose === "embedding" && model.status === "running") embeddingInstance = model;
+  }
+  const embeddingUrl = embeddingInstance
+    ? `http://127.0.0.1:${embeddingInstance.port}/v1/embeddings`
+    : "";
 
   return (
     <ScrollArea className="h-full">
@@ -349,6 +384,29 @@ export function GatewayScreen() {
               <EndpointRow key={e.path} label={t(e.labelKey)} url={`${url}${e.path}`} onCopy={copy} />
             ))}
           </div>
+
+          {/*
+            嵌入服务单独成块：上面每一行都以网关地址打头，而直连行指向的是本机推理
+            实例（地址前缀不同），混在同一列表里容易被当成又一个网关端点。
+          */}
+          <div className="mt-3 flex flex-col gap-1.5 border-t pt-3">
+            <EndpointRow
+              label={t("settings.gateway.endpoints.embeddings")}
+              url={`${url}/v1/embeddings`}
+              onCopy={copy}
+            />
+            {/* 无实例时就地显示「未运行」并禁用复制（不隐藏该行 —— 空态本身要让用户看见） */}
+            <EndpointRow
+              label={t("settings.gateway.endpoints.embeddingsDirect")}
+              url={embeddingUrl || t("settings.gateway.endpoints.embeddingsOffline")}
+              onCopy={copy}
+              disabled={!embeddingUrl}
+            />
+            <p className="text-[11px] text-muted-foreground/70">
+              {t("settings.gateway.endpoints.embeddingsHint")}
+            </p>
+          </div>
+
           <p className="mt-2 text-[11px] text-muted-foreground/70">{t("settings.gateway.protocol.hint")}</p>
           <p className="mt-1 text-[11px] text-muted-foreground/70">{t("settings.gateway.endpoints.hint")}</p>
         </div>
