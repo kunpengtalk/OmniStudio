@@ -2,7 +2,7 @@ import { existsSync, statSync } from "fs";
 import { createServer } from "node:net";
 
 import * as Settings from "./db/settings";
-import { ENGINE_PORT_KEYS } from "../shared/engines";
+import { EMBEDDING_PORT_BASE, ENGINE_PORT_KEYS, engineSupportsEmbeddings } from "../shared/engines";
 import { getModelProfile } from "../shared/model-profiles";
 import { dirModelKind, modelNameForPath, resolveRuntimeTarget } from "./model-scan";
 import { listInstalledModels, servedNameForModelPath, slugModelFileName } from "./model-store";
@@ -16,7 +16,7 @@ import {
   resolveEngineForModel,
   type ModelFileKind,
 } from "../shared/modelscope";
-import type { ServedModelInfo, ServedModelsSnapshot } from "../shared/served-models";
+import type { ModelPurpose, ServedModelInfo, ServedModelsSnapshot } from "../shared/served-models";
 import { logEvent } from "./app-log";
 
 export type { ServedModelInfo, ServedModelsSnapshot } from "../shared/served-models";
@@ -74,10 +74,30 @@ const logListeners = new Set<(id: string, text: string) => void>();
 const CHANGE_THROTTLE_MS = 100;
 let changeTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** 活动实例的端口写回 db/settings 的运行期覆盖：对话 / 嵌入 / OCR / 统计等既有消费者自动跟随。 */
+/**
+ * 嵌入侧活动端口（内存，镜像 settings.ts 的 activePortOverride 形态）：
+ * 最近启动的运行中嵌入实例是嵌入后端；不落库、不写任何聊天设置。
+ */
+let activeEmbeddingPort: number | null = null;
+
+/** 活动实例的端口写回 db/settings 的运行期覆盖：对话 / OCR / 统计等既有消费者自动跟随。 */
 function syncActivePort() {
   const active = getActiveServedModel();
   setPortOverride(active ? String(active.port) : null);
+  // 按 purpose 分流：聊天端口覆盖只跟活动 chat 实例走（语义不变）；嵌入侧单独跟踪
+  // 运行中的嵌入实例 —— 注册表按插入序迭代，最后一个 running 胜出（注意：重启不重排
+  // 插入序，先启动后重启的实例不会因此排到后面，与「最近启动」在重启场景有措辞级差异，
+  // 但选中的仍是合法嵌入后端，不影响正确性）。
+  let latest: ServedModelInfo | undefined;
+  for (const entry of entries.values()) {
+    if (entry.info.purpose === "embedding" && entry.info.status === "running") latest = entry.info;
+  }
+  activeEmbeddingPort = latest?.port ?? null;
+}
+
+/** 嵌入后端端口：最近启动的运行中嵌入实例；没有则 null。 */
+export function getActiveEmbeddingPort(): number | null {
+  return activeEmbeddingPort;
 }
 
 function emitChangeNow() {
@@ -205,13 +225,15 @@ function takenPorts(): Set<number> {
 
 /**
  * 分配端口：优先该引擎的设置端口（第一个启动的模型占住它，`omi` / 外部集成 /
- * 网关都默认连这里），被占就顺延找空闲端口。
+ * 网关都默认连这里），被占就顺延找空闲端口。嵌入实例传嵌入端口段基址
+ * （EMBEDDING_PORT / 18190），与聊天段互不重叠。
  */
 async function allocatePort(
   engine: InferenceEngine,
   host: string,
+  preferredPort?: string,
 ): Promise<{ ok: true; port: number } | { ok: false; error: string }> {
-  const preferred = Number(enginePort(engine)) || 8080;
+  const preferred = Number(preferredPort || enginePort(engine)) || 8080;
   const taken = takenPorts();
   for (let port = preferred; port < preferred + 100 && port < 65536; port++) {
     if (taken.has(port)) continue;
@@ -236,6 +258,8 @@ function buildInfo(params: {
   engine: InferenceEngine;
   port: number;
   servedName: string;
+  /** 用途（chat / embedding）：决定端口段与是否参与聊天活动状态。 */
+  purpose: ModelPurpose;
   isDir: boolean;
   repo?: string;
   sizeBytes?: number;
@@ -250,6 +274,7 @@ function buildInfo(params: {
     port: params.port,
     endpoint: `http://${host}:${params.port}/v1`,
     servedName: params.servedName,
+    purpose: params.purpose,
     status: "stopped",
     usesDefaultPort: params.usesDefaultPort,
     isActive: Settings.getSetting("SERVED_ACTIVE_ID") === params.id,
@@ -293,7 +318,9 @@ export function getActiveServedModel(): ServedModelInfo | undefined {
 export function getRequestTargetServedModel(): ServedModelInfo | undefined {
   const active = getActiveServedModel();
   if (active) return active;
-  const models = listServedModels();
+  // 嵌入实例不参与聊天 auto-promotion：只跑着一个嵌入模型时，聊天请求绝不能落到它上
+  // （llama-server 嵌入模式只认 /v1/embeddings，聊天端点不可用）。
+  const models = listServedModels().filter((m) => m.purpose !== "embedding");
   const only = models.length === 1 ? models[0] : undefined;
   if (!only) return undefined;
   setActiveServedId(only.id);
@@ -307,6 +334,11 @@ export function getRequestTargetServedModel(): ServedModelInfo | undefined {
 export function setActiveServedId(id: string): { ok: boolean; error?: string } {
   const entry = entries.get(id);
   if (!entry) return { ok: false, error: "Model server not found" };
+
+  // 嵌入实例永不接管聊天活动模型：它只服务 /v1/embeddings，把聊天请求指向它是错的。
+  if (entry.info.purpose === "embedding") {
+    return { ok: false, error: "Embedding instance cannot be the active chat model" };
+  }
 
   const { info } = entry;
   const updates: Record<string, string> = {
@@ -416,7 +448,8 @@ export async function startServedModel(params: StartParams): Promise<StartServed
   const existing = entries.get(id);
   if (existing) {
     if (existing.info.status === "running") {
-      if (params.makeActive) setActiveServedId(id);
+      // 嵌入实例永不接管聊天活动状态（即使调用方显式 makeActive）。
+      if (params.makeActive && existing.info.purpose !== "embedding") setActiveServedId(id);
       return { ok: true, model: getServedModel(id) };
     }
     if (existing.info.status === "starting" || existing.info.status === "downloading") {
@@ -433,14 +466,30 @@ export async function startServedModel(params: StartParams): Promise<StartServed
   }
 
   const host = Settings.getSetting("SERVER_HOST") || "127.0.0.1";
-  const allocation = await allocatePort(engine, host);
+  // 模型库 meta 的 category 决定用途：embedding 类别 → 嵌入模式（专属端口段 + --embeddings，
+  // 且永不接管聊天活动状态）；其余按 chat 处理（行为与今日完全一致）。
+  const installed = listInstalledModels().find(
+    (m) => m.runtimeTarget === target || m.path === target,
+  );
+  const purpose: ModelPurpose = installed?.category === "embedding" ? "embedding" : "chat";
+  // 引擎能力守卫：当前只有 llama.cpp 用 --embeddings 支持嵌入服务。放行其他引擎的
+  // embedding 类别模型会在嵌入端口段起一个「没有 /v1/embeddings 的实例」—— KB 选择器
+  // 与网关又将呈现「列得出、调不通」，正是本次要消灭的陷阱在别家引擎上的复刻。
+  if (purpose === "embedding" && !engineSupportsEmbeddings(engine)) {
+    return {
+      ok: false,
+      error: `${engine} 引擎暂不支持嵌入服务（当前仅 llama.cpp 支持）；请把模型类别改回 chat，或换用 llama.cpp 引擎`,
+    };
+  }
+
+  // 嵌入实例从嵌入端口段分配（EMBEDDING_PORT 基址 18190 顺延），与聊天 18080 段互不重叠。
+  const allocation = await allocatePort(engine, host, purpose === "embedding"
+    ? (Settings.getSetting("EMBEDDING_PORT") || String(EMBEDDING_PORT_BASE))
+    : undefined);
   if (!allocation.ok) return { ok: false, error: allocation.error };
   const port = allocation.port;
 
   const servedName = servedNameFor(target, engine);
-  const installed = listInstalledModels().find(
-    (m) => m.runtimeTarget === target || m.path === target,
-  );
   const info = buildInfo({
     id,
     modelRef: target,
@@ -449,16 +498,20 @@ export async function startServedModel(params: StartParams): Promise<StartServed
     engine,
     port,
     servedName,
+    purpose,
     isDir,
     repo: installed?.repo,
     sizeBytes: modelSizeOf(target),
-    usesDefaultPort: String(port) === enginePort(engine),
+    usesDefaultPort: String(port) === (purpose === "embedding"
+      ? (Settings.getSetting("EMBEDDING_PORT") || String(EMBEDDING_PORT_BASE))
+      : enginePort(engine)),
   });
 
   const runtime = createRuntime(engine, {
     model: target,
     port: String(port),
     servedName,
+    purpose,
   });
   const entry: Entry = {
     info,
@@ -505,7 +558,8 @@ export async function startServedModel(params: StartParams): Promise<StartServed
   info.status = runtime.getStatus();
   info.pid = runtime.getPid();
   if (info.status === "running") info.startedAt = info.startedAt ?? Date.now();
-  if (params.makeActive !== false) setActiveServedId(id);
+  // makeActive 默认 true，但嵌入实例例外：永不写 SERVED_ACTIVE_ID / CHAT_MODEL 等聊天设置。
+  if (params.makeActive !== false && info.purpose !== "embedding") setActiveServedId(id);
   emitChangeNow();
   return { ok: true, model: getServedModel(id) };
 }
@@ -574,6 +628,18 @@ export function forceKillAllServed(): void {
   reservedPorts.clear();
   Settings.updateSettings({ SERVED_ACTIVE_ID: "" });
   emitChangeNow();
+}
+
+/**
+ * 运行中的嵌入服务后端（网关 / KB / 嵌入客户端消费）。
+ *
+ * 返回最近启动的运行中嵌入实例的 base（不带 /v1）；没有运行中的嵌入实例则 null。
+ * 网关拿到 null 时返回 503 引导，KB 拿到 null 时走各自的回退链。
+ */
+export function resolveEmbeddingBackend(): string | null {
+  if (activeEmbeddingPort == null) return null;
+  const host = Settings.getSetting("SERVER_HOST") || "127.0.0.1";
+  return `http://${host}:${activeEmbeddingPort}`;
 }
 
 export function getServedModelLogs(id: string): string {

@@ -34,6 +34,8 @@ export type EngineSpec = {
   searchFormat: SearchFormat;
   /** 仅 macOS（Apple Silicon）提供，非 mac 平台不展示也不检测。 */
   macOnly?: boolean;
+  /** 引擎是否支持嵌入服务（llama.cpp 经 `--embeddings` 支持；其余引擎留待后续）。 */
+  embeddings?: boolean;
   /** 缺失时的安装提示（omi install）。 */
   installHint: string;
 };
@@ -46,6 +48,7 @@ export const ENGINE_SPECS: Record<InferenceEngine, EngineSpec> = {
     extraArgsKey: "SERVER_EXTRA_ARGS",
     supports: ["gguf", "other"],
     searchFormat: "gguf",
+    embeddings: true,
     installHint: "brew install llama.cpp",
   },
   vllm: {
@@ -105,6 +108,20 @@ export const ENGINE_PORT_KEYS: Record<InferenceEngine, string> = Object.fromEntr
 export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, string> = Object.fromEntries(
   ENGINE_IDS.map((id) => [id, ENGINE_SPECS[id].extraArgsKey]),
 ) as Record<InferenceEngine, string>;
+
+/**
+ * 嵌入服务（llama.cpp `--embeddings`）的端口段基址。
+ *
+ * 嵌入实例**不占**聊天默认端点（18080 段），从 18190 起 +100 顺延分配 ——
+ * 两个段位完全不重叠，聊天端口扫描 / 默认端点语义不受影响。
+ */
+/** 嵌入端口段基址（= EMBEDDING_PORT 的默认值；段宽与聊天一致，见 allocatePort 的 +100 顺延）。 */
+export const EMBEDDING_PORT_BASE = 18190;
+
+/** 该引擎是否支持嵌入服务（当前只有 llama.cpp 经 `--embeddings` 支持）。 */
+export function engineSupportsEmbeddings(engine: InferenceEngine): boolean {
+  return ENGINE_SPECS[engine].embeddings === true;
+}
 
 /**
  * 引擎短名（品牌名，不翻译）。选择器里的徽标用这个，不要用 `settings.engine.*`：

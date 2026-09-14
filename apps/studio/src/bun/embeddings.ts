@@ -1,10 +1,12 @@
 /**
  * OpenAI 兼容嵌入客户端（知识库与记忆库共用）。
  *
- * 零主进程依赖：只用 fetch + 设置表，`omi` CLI 在应用未运行时也能直接调用
- * （本地推理服务在跑就有向量，不在跑就由调用方退化为关键词检索）。
+ * 依赖只有 fetch + 设置表 + 已启动模型注册表（只读），`omi` CLI 在应用未运行时
+ * 也能直接调用 —— 应用不在跑时注册表为空，resolveEmbeddingBackend() 恒为 null，
+ * 自然回落到原有链路（本地推理服务在跑就有向量，不在跑就由调用方退化为关键词检索）。
  */
 import { getSetting, getActiveServerPort } from "./db/settings";
+import { resolveEmbeddingBackend } from "./model-servers";
 
 export type EmbeddingConfig = {
   embeddingModel: string;
@@ -13,10 +15,14 @@ export type EmbeddingConfig = {
   embeddingDim: number | null;
 };
 
-/** 解析嵌入请求的 base（不带 /v1）：显式配置 > 云服务商槽位 > 本地推理服务。 */
+/** 解析嵌入请求的 base（不带 /v1）：显式配置 > 运行中嵌入实例 > 云端 remote > 聊天活动端口。 */
 export function resolveEmbeddingBase(cfg: Pick<EmbeddingConfig, "embeddingBase">): string {
   const trimBase = (v: string) => v.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
   if (cfg.embeddingBase.trim()) return trimBase(cfg.embeddingBase);
+  // 用户显式启动的本地嵌入实例是最强意图信号，排在 remote 之上：remote 模式下
+  // KB 嵌入今天指向云端 chat provider 本就是坏的，本地嵌入实例才是能真出向量的后端。
+  const backend = resolveEmbeddingBackend();
+  if (backend) return trimBase(backend);
   if (getSetting("SERVER_MODE") === "remote") return trimBase(getSetting("VLLM_API_BASE"));
   const host = getSetting("SERVER_HOST") || "127.0.0.1";
   return `http://${host}:${getActiveServerPort()}`;

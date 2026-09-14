@@ -21,6 +21,11 @@ export type RuntimeOverrides = {
   port?: string;
   /** 服务名（llama.cpp --alias / vLLM、SGLang --served-model-name）；不传则按模型名生成。 */
   servedName?: string;
+  /**
+   * 用途：embedding 实例追加 `--embeddings --pooling`、裁剪聊天采样参数、端口
+   * 回落到嵌入端口段（EMBEDDING_PORT）；不传即 chat，命令行与旧行为完全一致。
+   */
+  purpose?: "chat" | "embedding";
 };
 
 export interface Runtime {

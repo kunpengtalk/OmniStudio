@@ -4,6 +4,13 @@ import type { InferenceEngine } from "./engines";
 export type ServedModelStatus = "stopped" | "starting" | "downloading" | "running" | "error";
 
 /**
+ * 实例用途：chat = 对话 / 补全（默认端点的语义）；embedding = 向量化（llama.cpp
+ * `--embeddings`）。嵌入实例走独立的端口段、**永不**接管聊天活动状态
+ * （SERVED_ACTIVE_ID / CHAT_MODEL / 活动端口都只跟 chat 实例走）。
+ */
+export type ModelPurpose = "chat" | "embedding";
+
+/**
  * 一个已启动的本地模型服务实例。
  *
  * 一个实例 = 一个推理服务器进程（各自端口）；同一引擎可以同时驻留多个模型。
@@ -22,6 +29,8 @@ export type ServedModelInfo = {
   endpoint: string;
   /** 请求里该填的 model id（llama.cpp / vLLM / SGLang 是 slug，MLX 是绝对路径）。 */
   servedName: string;
+  /** 用途（chat / embedding），决定端口段与是否参与聊天活动状态。 */
+  purpose: ModelPurpose;
   status: ServedModelStatus;
   pid?: number;
   error?: string;
