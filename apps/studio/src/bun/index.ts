@@ -16,6 +16,7 @@ import { broadcastUpdateStatus, checkForUpdate, updateState } from "./updates";
 import { isConfigured, getSetting } from "./db/settings";
 import * as ServerManager from "./server-manager";
 import { stopAllServed } from "./model-servers";
+import { healDriftedChatConfig } from "./model-store";
 import * as Gateway from "./gateway";
 import { stopAsr } from "./asr";
 import { stopPpOcr } from "./ppocr";
@@ -154,6 +155,19 @@ void startControlServer();
 // Check for updates on startup（"关于我们 → 自动更新" 开关可关闭，仅手动检查）
 if (getSetting("AUTO_UPDATE") !== "0") {
   checkForUpdate();
+}
+
+// 自愈被老版本写脏的聊天活动状态（老版本启动嵌入模型曾把 LOCAL_MODEL_PATH /
+// CHAT_MODEL 写成嵌入模型）：三把键是 auto-start 找目标的依据，不清理的话会只
+// 拉起嵌入实例、聊天没有模型可用。必须在 auto-start 之前跑。
+const healed = healDriftedChatConfig();
+if (healed.healed) {
+  log.warn({
+    source: "server",
+    event: "chat_config.heal_drifted",
+    message: `检测到聊天配置指向嵌入模型，已重置聊天模型配置：${healed.path ?? ""}`,
+    detail: { path: healed.path },
+  });
 }
 
 // Auto-start local server if configured and enabled

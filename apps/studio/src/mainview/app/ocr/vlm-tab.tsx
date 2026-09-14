@@ -109,6 +109,8 @@ export function VlmTab({
   const installedModels = (installedData?.models ?? [])
     // 目录条目（整个仓库）文件名没有扩展名，格式按目录内容判定。
     .filter((m) => engineSupports(engine, m.kind ?? fileKind(m.fileName)))
+    // VLM 选的是对话模型：嵌入 / 重排类别会被 setActiveModel 拒掉，别让它们进下拉框。
+    .filter((m) => m.category !== "embedding" && m.category !== "rerank")
     .sort((a, b) => Number(b.isActive) - Number(a.isActive));
 
   useEffect(() => {

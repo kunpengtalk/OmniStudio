@@ -122,6 +122,16 @@ function MyModelRow({
 
   const startMutation = useMutation({
     mutationFn: async () => {
+      // 嵌入模型不写聊天活动状态（LOCAL_MODEL_PATH / CHAT_MODEL 只跟聊天模型走），
+      // 也不走 startServer / restartServer（那是按设置里的聊天模型起停的）：
+      // 直接按路径启动嵌入实例，startServedModel 按类别自己落到嵌入端口段。
+      if (model.category === "embedding") {
+        const served = await rpcClient.startServedModel({
+          path: model.runtimeTarget || model.path,
+        });
+        if (!served.ok) throw new Error(served.error || "Failed to start server");
+        return served;
+      }
       if (!model.isActive) {
         const act = await rpcClient.setActiveModel({ path: model.path });
         if (!act.ok) throw new Error(act.error || "Failed to activate model");

@@ -306,7 +306,14 @@ function ServerParamsPanel({ engine }: { engine: InferenceEngine }) {
  * 只列出当前引擎能加载的模型，避免在 MLX 下选到 GGUF 等不兼容文件。 */
 function LaunchBar({ installedModels, engine }: { installedModels: InstalledModel[]; engine: InferenceEngine }) {
   // 目录条目（HF 缓存里的整仓库）按它自己的格式判断兼容性，文件名没有扩展名。
-  const compatibleModels = installedModels.filter((m) => engineSupports(engine, m.kind));
+  // 启动条是聊天模型的启动器：嵌入 / 重排模型不能设为当前聊天模型（后端直接拒），
+  // 别把它们列进下拉框 —— 选了也设不上，还挤占聊天模型的列表。
+  const compatibleModels = installedModels.filter(
+    (m) =>
+      engineSupports(engine, m.kind) &&
+      m.category !== "embedding" &&
+      m.category !== "rerank",
+  );
   const t = useT();
   const queryClient = useQueryClient();
   const setRoute = useRouter((s) => s.setRoute);
@@ -518,7 +525,9 @@ function InstalledModelRow({
   );
   const startMutation = useMutation({
     mutationFn: async () => {
-      if (!model.isActive) {
+      // 嵌入模型不写聊天活动状态（LOCAL_MODEL_PATH / CHAT_MODEL 只跟聊天模型走），
+      // 跳过 setActiveModel 前置步骤，直接按路径启动 / 重启嵌入实例。
+      if (!model.isActive && model.category !== "embedding") {
         const act = await rpcClient.setActiveModel({ path: model.path });
         if (!act.ok) throw new Error(act.error || "Failed to activate model");
       }
@@ -657,20 +666,23 @@ function InstalledModelRow({
           )}
           {serverStatus === "running" ? t("models.restart") : t("models.run")}
         </Button>
-        <Button
-          variant={model.isActive ? "default" : "outline"}
-          size="sm"
-          className="h-7 text-xs"
-          disabled={model.isActive || setActiveMutation.isPending}
-          onClick={() => setActiveMutation.mutate()}
-        >
-          {setActiveMutation.isPending ? (
-            <Loader2Icon data-icon="inline-start" className="animate-spin" />
-          ) : (
-            <CheckCircle2Icon data-icon="inline-start" />
-          )}
-          {model.isActive ? t("models.inUse") : t("models.activate")}
-        </Button>
+        {/* 嵌入模型不能设为当前聊天模型（后端会拒），按钮藏掉别给死入口。 */}
+        {model.category !== "embedding" && (
+          <Button
+            variant={model.isActive ? "default" : "outline"}
+            size="sm"
+            className="h-7 text-xs"
+            disabled={model.isActive || setActiveMutation.isPending}
+            onClick={() => setActiveMutation.mutate()}
+          >
+            {setActiveMutation.isPending ? (
+              <Loader2Icon data-icon="inline-start" className="animate-spin" />
+            ) : (
+              <CheckCircle2Icon data-icon="inline-start" />
+            )}
+            {model.isActive ? t("models.inUse") : t("models.activate")}
+          </Button>
+        )}
         <Button
           variant="ghost"
           size="icon-sm"

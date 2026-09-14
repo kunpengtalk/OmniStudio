@@ -237,11 +237,27 @@ export function servedNameForModelPath(modelPath: string): string {
 }
 
 /**
- * 设为当前模型。
+ * 解析目标路径的模型类别：优先查安装列表（`.vllm-meta.json` 的持久化分类），列表里
+ * 找不到（外部路径 / 文件已删）就退回按文件名分类 —— 与列表徽标同一套判定。
+ */
+function categoryOfModelPath(pathToModel: string): ModelCategory {
+  const target = resolveRuntimeTarget(pathToModel);
+  const installed = listInstalledModels().find(
+    (m) => m.path === pathToModel || m.runtimeTarget === target,
+  );
+  if (installed) return installed.category;
+  return classifyModelName(path.basename(pathToModel));
+}
+
+/**
+ * 设为当前聊天模型。
  *
  * 存放的是**运行时加载目标**而不是列表里那个文件：仓库目录（含 config.json）交给
  * vLLM / SGLang / MLX 整目录加载，GGUF 这类单文件模型仍然指向文件本身。
  * 这也是"非标准目录结构也能启动"的关键 —— 分片 safetensors 单拿一个文件是加载不了的。
+ *
+ * 嵌入 / 重排模型不是对话模型：写进 LOCAL_MODEL_PATH / CHAT_MODEL 会顶掉真正的
+ * 聊天模型（CLI 的 ● 活动 标记、冷启动 auto-start 都按这三把键找目标），所以直接拒。
  */
 export function setActiveModel(pathToModel: string): { ok: boolean; error?: string } {
   if (!existsSync(pathToModel)) return { ok: false, error: "模型路径不存在" };
@@ -251,6 +267,11 @@ export function setActiveModel(pathToModel: string): { ok: boolean; error?: stri
     isDir = statSync(target).isDirectory();
   } catch {
     return { ok: false, error: "模型路径不可读" };
+  }
+  const category = categoryOfModelPath(pathToModel);
+  if (category === "embedding" || category === "rerank") {
+    const label = category === "embedding" ? "嵌入" : "重排";
+    return { ok: false, error: `${label}模型不能设为当前聊天模型` };
   }
   // 目录条目按目录内容判定格式（HF 缓存里的模型目录），单文件按扩展名。
   const kind: ModelFileKind = isDir ? dirModelKind(target) : fileKind(path.basename(pathToModel));
@@ -267,6 +288,20 @@ export function setActiveModel(pathToModel: string): { ok: boolean; error?: stri
       : {}),
   });
   return { ok: true };
+}
+
+/**
+ * 自愈被老版本写脏的聊天活动状态：老版本启动嵌入模型时也走 setActiveModel，会把
+ * LOCAL_MODEL_PATH / LOCAL_MODEL_NAME / CHAT_MODEL 三把键写成嵌入模型；冷启动
+ * auto-start 只认这三把键 —— 不清理的话会只拉起嵌入实例、聊天没有模型可用。
+ * 保守起见只自愈嵌入（重排类别历史上没有入口会写成活动聊天模型）。
+ */
+export function healDriftedChatConfig(): { healed: boolean; path?: string } {
+  const drifted = getSetting("LOCAL_MODEL_PATH");
+  if (!drifted) return { healed: false };
+  if (categoryOfModelPath(drifted) !== "embedding") return { healed: false };
+  updateSettings({ LOCAL_MODEL_PATH: "", LOCAL_MODEL_NAME: "", CHAT_MODEL: "" });
+  return { healed: true, path: drifted };
 }
 
 /** 目录占用（删除 HF 缓存条目时用来告诉用户释放了多少空间）。 */
