@@ -94,6 +94,193 @@ export async function callEmbeddings(cfg: EmbeddingConfig, texts: string[]): Pro
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// 多模态直嵌（图片 / 语音 / 视频，知识库媒体单元专用）。与 callEmbeddings 并列，
+// 复用同一套 base 解析 / 鉴权 / 超时 / 响应校验，callEmbeddings 本体零改动。
+// ---------------------------------------------------------------------------
+
+/** 一个多模态嵌入输入 = 一个媒体单元（一图 / 一音 / 一视频）+ 可选联合文本。 */
+export type EmbeddingInput = {
+  imageB64?: string;
+  audioB64?: string;
+  audioFormat?: string;
+  videoB64?: string;
+  videoFormat?: string;
+  text?: string;
+};
+
+/** 某个 base 协商出的胜出请求形态（llama.cpp 形态要记 marker：每进程随机）。 */
+type MultimodalFormat = { kind: "llamacpp"; marker: string } | { kind: "content" };
+
+/**
+ * 形态自适应（spike 终局协议，三轮迭代后落定）：llama.cpp 的 /v1/embeddings 只认
+ * `{prompt_string, multimodal_data}` 形态，且 prompt_string 必须内嵌**该进程的
+ * media marker**（GET /props 读，每进程随机——硬编码必报「media markers 数不匹配」）；
+ * 远程 OpenAI / vLLM 只认 content 数组；**data-URI 字符串形态已证伪删除**（llama.cpp
+ * 把整串 base64 当纯文本编码，token 数随 b64 长度线性——假成功、真错误向量）。
+ * key = resolveEmbeddingBase 结果；marker 失效（服务重启换随机串，表现为 4xx/5xx
+ * 且正文含 "media markers"）时重取刷新一次。
+ */
+const multimodalFormatCache = new Map<string, MultimodalFormat>();
+
+/** content 数组形态的 input：媒体 part + 可选文本 part（联合成单向量）。 */
+function multimodalContentParts(input: EmbeddingInput): unknown[] {
+  const parts: unknown[] = [];
+  if (input.imageB64) parts.push({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${input.imageB64}` } });
+  if (input.audioB64) parts.push({ type: "input_audio", input_audio: { data: input.audioB64, format: input.audioFormat ?? "wav" } });
+  if (input.videoB64) parts.push({ type: "input_video", input_video: { data: input.videoB64, format: input.videoFormat ?? "mp4" } });
+  if (input.text) parts.push({ type: "text", text: input.text });
+  return parts;
+}
+
+/**
+ * llama.cpp 形态的 input：prompt_string 内嵌「每个媒体一个 marker」（+可选空格+文本
+ * = 图文联合单向量，spike 实测 329 tok 形态；纯媒体退化 = 仅 marker），multimodal_data
+ * 是**裸 base64**（无 data: 前缀），顺序与 marker 出现顺序一一对应。
+ */
+function multimodalLlamacppInput(
+  input: EmbeddingInput,
+  marker: string,
+): { prompt_string: string; multimodal_data: string[] } {
+  const b64s = multimodalMediaB64s(input);
+  const prompt = [...b64s.map(() => marker), ...(input.text ? [input.text] : [])].join(" ");
+  return { prompt_string: prompt, multimodal_data: b64s };
+}
+
+/** 读 llama.cpp 服务参数：media_marker 每进程随机，必须现取。探不到（404 / 超时 / 非 JSON / 非法超长）→ 普通远程。 */
+async function fetchMediaMarker(base: string, headers: Record<string, string>): Promise<string | null> {
+  try {
+    const res = await fetch(`${base}/props`, { method: "GET", headers, signal: AbortSignal.timeout(3_000) });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { media_marker?: unknown };
+    const marker = typeof json.media_marker === "string" ? json.media_marker.trim() : "";
+    // 长度护栏：超长 marker 会被缓存进每个请求体（恶意 / 异常服务的请求放大面），弃用
+    return marker && marker.length <= 256 ? marker : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 输入里的媒体裸 b64 列表（image → audio → video 稳定序；实际一个媒体单元只含一个媒体）。 */
+function multimodalMediaB64s(input: EmbeddingInput): string[] {
+  return [input.imageB64, input.audioB64, input.videoB64].filter((v): v is string => !!v);
+}
+
+function postEmbeddingRequest(base: string, headers: Record<string, string>, model: string, input: unknown): Promise<Response> {
+  return fetch(`${base}/v1/embeddings`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ model, input }),
+    signal: AbortSignal.timeout(120_000),
+  });
+}
+
+/** 单 input 响应解析 + 校验，语义照 callEmbeddings：允许且仅允许单元素。 */
+async function multimodalVectorFrom(cfg: EmbeddingConfig, res: Response): Promise<Float32Array> {
+  const json = (await res.json()) as { data?: { embedding?: number[]; index?: number }[] };
+  const data = json.data ?? [];
+  if (data.length !== 1) throw new Error("嵌入服务返回数量与输入不一致");
+  const first = data[0];
+  if (!first || !Array.isArray(first.embedding)) throw new Error("嵌入服务返回格式异常");
+  const arr = new Float32Array(first.embedding);
+  if (cfg.embeddingDim != null && arr.length !== cfg.embeddingDim) {
+    throw new Error(`向量维度不一致（${arr.length} ≠ ${cfg.embeddingDim}），请检查嵌入模型`);
+  }
+  return arr;
+}
+
+/**
+ * 多模态嵌入：逐条发送（每请求 1 个 input，一个媒体单元一个向量）。首次对某
+ * resolved base 先 GET /props 读 media_marker 定形态——拿到 → llama.cpp 形态
+ * （被拒再换 content 数组重试一次）；拿不到（404 / 超时，普通 OpenAI 兼容远程）→
+ * content 数组形态（llama.cpp 形态无法构造，失败即报）。胜出形态按 base 缓存；
+ * 缓存的 marker 失效（4xx/5xx 且正文含 "media markers"）→ 重取刷新再试一次。
+ * 纯媒体（无 text）只发媒体部分（退化路径）。两种形态都被拒 → 抛错（含「嵌入
+ * 服务拒绝了多模态输入」+ 各形态 HTTP 状态 + 正文前 200 字，供上层拼接
+ * 「检查模态勾选 / 嵌入模型」指引）。
+ */
+export async function callEmbeddingsMultimodal(cfg: EmbeddingConfig, inputs: EmbeddingInput[]): Promise<Float32Array[]> {
+  const model = cfg.embeddingModel.trim();
+  if (!model) throw new Error("未配置嵌入模型");
+  const base = resolveEmbeddingBase(cfg);
+  if (!base) throw new Error("未配置嵌入服务地址");
+  const headers = embeddingHeaders(cfg.embeddingApiKey);
+
+  const out: Float32Array[] = [];
+  for (const input of inputs) {
+    out.push(await embedMediaUnit(cfg, base, headers, model, input));
+  }
+  return out;
+}
+
+// 单个媒体单元:形态协商 / 缓存 / marker 失效刷新都在这一层。
+async function embedMediaUnit(
+  cfg: EmbeddingConfig,
+  base: string,
+  headers: Record<string, string>,
+  model: string,
+  input: EmbeddingInput,
+): Promise<Float32Array> {
+  const httpFail = (prefix: string, status: number, body: string): Error =>
+    new Error(`${prefix}（HTTP ${status}）${body.slice(0, 200)}`);
+  const cached = multimodalFormatCache.get(base);
+
+  // 缓存命中 content 形态:直用(远程形态无 marker 可失效)
+  if (cached?.kind === "content") {
+    const res = await postEmbeddingRequest(base, headers, model, multimodalContentParts(input));
+    if (!res.ok) throw httpFail("嵌入请求失败", res.status, await res.text().catch(() => ""));
+    return multimodalVectorFrom(cfg, res);
+  }
+
+  // 缓存命中 llama.cpp 形态:直用;正文含 "media markers" 说明 marker 已失效
+  // (服务重启换随机串)→ 重取刷新再试一次
+  if (cached?.kind === "llamacpp") {
+    const res = await postEmbeddingRequest(base, headers, model, [multimodalLlamacppInput(input, cached.marker)]);
+    if (res.ok) return multimodalVectorFrom(cfg, res);
+    const body = await res.text().catch(() => "");
+    if (!/media markers/i.test(body)) throw httpFail("嵌入请求失败", res.status, body);
+    const fresh = await fetchMediaMarker(base, headers);
+    if (!fresh) {
+      // 重取也拿不到(服务下线 / 已换形态):清缓存,下次调用走全新协商,不背死 marker
+      multimodalFormatCache.delete(base);
+      throw httpFail("嵌入请求失败", res.status, body);
+    }
+    const retry = await postEmbeddingRequest(base, headers, model, [multimodalLlamacppInput(input, fresh)]);
+    if (!retry.ok) throw httpFail("嵌入请求失败", retry.status, await retry.text().catch(() => ""));
+    const vec = await multimodalVectorFrom(cfg, retry);
+    multimodalFormatCache.set(base, { kind: "llamacpp", marker: fresh });
+    return vec;
+  }
+
+  // 该 base 还没协商过:GET /props 定形态
+  const marker = await fetchMediaMarker(base, headers);
+  if (marker) {
+    const res = await postEmbeddingRequest(base, headers, model, [multimodalLlamacppInput(input, marker)]);
+    if (res.ok) {
+      const vec = await multimodalVectorFrom(cfg, res);
+      multimodalFormatCache.set(base, { kind: "llamacpp", marker });
+      return vec;
+    }
+    // 有 props 却拒 prompt_string 形态:换 content 数组形态重试一次
+    const st = res.status;
+    const alt = await postEmbeddingRequest(base, headers, model, multimodalContentParts(input));
+    if (!alt.ok) {
+      const body = await alt.text().catch(() => "");
+      throw new Error(`嵌入服务拒绝了多模态输入（prompt_string 形态 HTTP ${st}、content 数组形态 HTTP ${alt.status}）${body.slice(0, 200)}`);
+    }
+    const vec = await multimodalVectorFrom(cfg, alt);
+    multimodalFormatCache.set(base, { kind: "content" });
+    return vec;
+  }
+
+  // 探不到 props(404 / 超时)= 普通 OpenAI 兼容远程:只能 content 数组,失败即报
+  const res = await postEmbeddingRequest(base, headers, model, multimodalContentParts(input));
+  if (!res.ok) throw httpFail("嵌入服务拒绝了多模态输入", res.status, await res.text().catch(() => ""));
+  const vec = await multimodalVectorFrom(cfg, res);
+  multimodalFormatCache.set(base, { kind: "content" });
+  return vec;
+}
+
 export function encodeEmbedding(vec: Float32Array): string {
   return Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength).toString("base64");
 }

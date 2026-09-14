@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
-import { existsSync, mkdtempSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -55,6 +55,21 @@ const chatModel = join(tmpDir, "e2e-chat.gguf");
 const embedModel = join(tmpDir, "wemm-emb.gguf");
 writeFileSync(chatModel, "gguf");
 writeFileSync(embedModel, "gguf");
+
+/**
+ * mmproj 注入场景目录：每个目录自包含（模型 + 不同投影文件组合），
+ * 验证嵌入实例的自动配对与选择规则（多文件优先 f16）。
+ */
+function scenarioDir(name: string, files: string[]): string {
+  const dir = join(tmpDir, name);
+  mkdirSync(dir, { recursive: true });
+  for (const f of files) writeFileSync(join(dir, f), "gguf");
+  return dir;
+}
+
+const mmprojBothDir = scenarioDir("mmproj-both", ["model.gguf", "mmproj-f16.gguf", "mmproj-bf16.gguf"]);
+const mmprojBf16OnlyDir = scenarioDir("mmproj-bf16-only", ["model.gguf", "mmproj-bf16.gguf"]);
+const mmprojNoneDir = scenarioDir("mmproj-none", ["model.gguf"]);
 
 /** 与实现同一规则的二进制解析（快照断言需要完整命令行）。 */
 const bin =
@@ -166,5 +181,52 @@ describe("buildCommandLine / embedding", () => {
     expect(cmd).toContain("--port 18405");
     expect(cmd).toContain("--temp 0.1");
     expect(cmd).not.toContain("--embeddings");
+  });
+});
+
+describe("buildArgs / mmproj 注入", () => {
+  /** 嵌入实例命令行：模型与投影文件同目录的场景。 */
+  function embedCmd(modelPath: string): string {
+    setChatSettings();
+    return new LlamaRuntime({
+      model: modelPath,
+      port: "18500",
+      purpose: "embedding",
+    }).buildCommandLine();
+  }
+
+  test("同目录有 f16 + bf16 → 注入一个 --mmproj 且选 f16", () => {
+    const cmd = embedCmd(join(mmprojBothDir, "model.gguf"));
+    expect(cmd).toContain(`--mmproj ${join(mmprojBothDir, "mmproj-f16.gguf")}`);
+    expect(cmd.split("--mmproj").length).toBe(2);
+  });
+
+  test("只有 bf16 → 选它（f16 缺席时字典序首个兜底）", () => {
+    const cmd = embedCmd(join(mmprojBf16OnlyDir, "model.gguf"));
+    expect(cmd).toContain(`--mmproj ${join(mmprojBf16OnlyDir, "mmproj-bf16.gguf")}`);
+  });
+
+  test("同目录无 mmproj → 不注入（行为与旧版一致）", () => {
+    const cmd = embedCmd(join(mmprojNoneDir, "model.gguf"));
+    expect(cmd).not.toContain("--mmproj");
+  });
+
+  test("聊天实例永不注入：同目录有投影文件也不传 --mmproj", () => {
+    setChatSettings();
+    const rt = new LlamaRuntime({ model: join(mmprojBothDir, "model.gguf"), port: "18406" });
+    const cmd = rt.buildCommandLine();
+    expect(cmd).not.toContain("--mmproj");
+  });
+
+  test("hf ref 嵌入模型（-hf 自管缓存）不注入 mmproj（Non-Goal）", () => {
+    setChatSettings();
+    const rt = new LlamaRuntime({
+      model: "unsloth/gme-Qwen2-VL-2B-GGUF",
+      port: "18500",
+      purpose: "embedding",
+    });
+    const cmd = rt.buildCommandLine();
+    expect(cmd).toContain("-hf unsloth/gme-Qwen2-VL-2B-GGUF");
+    expect(cmd).not.toContain("--mmproj");
   });
 });

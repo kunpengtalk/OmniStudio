@@ -1,6 +1,14 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { FlaskConicalIcon, Loader2Icon, SearchIcon } from "lucide-react";
+import {
+  AudioLinesIcon,
+  FileIcon,
+  FlaskConicalIcon,
+  ImageIcon,
+  Loader2Icon,
+  SearchIcon,
+  VideoIcon,
+} from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { Badge } from "@ui/badge";
@@ -8,13 +16,34 @@ import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { useT } from "@stores/ui-lang";
 import type { KbView } from "@/bun/knowledge";
-import type { KbHit } from "@/shared/knowledge";
+import type { KbHit, KbModality } from "@/shared/knowledge";
 
 function MethodBadge({ method }: { method: KbHit["method"] }) {
   const t = useT();
   return (
     <Badge variant="secondary" className="h-5 px-1.5 text-[10px] text-muted-foreground">
       {t(`kb.recall.method.${method}`)}
+    </Badge>
+  );
+}
+
+/** 媒体直嵌块标识（与分块视图同语言：类型图标 + 模态标签；文件名即左侧的 docName）。 */
+const MEDIA_META: Record<KbModality, { icon: typeof ImageIcon; labelKey: string }> = {
+  image: { icon: ImageIcon, labelKey: "kb.docs.mediaChunk.image" },
+  audio: { icon: AudioLinesIcon, labelKey: "kb.docs.mediaChunk.audio" },
+  video: { icon: VideoIcon, labelKey: "kb.docs.mediaChunk.video" },
+};
+
+/** 恶意/损坏数据里 modality 是未知串时的通用回退（防 undefined 解构崩 React 树）。 */
+const MEDIA_FALLBACK = { icon: FileIcon, labelKey: "kb.docs.mediaChunk.unknown" };
+
+function MediaBadge({ modality }: { modality: KbModality }) {
+  const t = useT();
+  const { icon: Icon, labelKey } = MEDIA_META[modality as KbModality] ?? MEDIA_FALLBACK;
+  return (
+    <Badge variant="secondary" className="h-5 gap-1 px-1.5 text-[10px] text-muted-foreground">
+      <Icon className="size-3" />
+      {t(labelKey)}
     </Badge>
   );
 }
@@ -110,6 +139,7 @@ export function KbRecallTab({ kb }: { kb: KbView }) {
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <span className="font-mono text-[10px] text-muted-foreground">#{i + 1}</span>
                   <span className="truncate text-xs font-medium">{h.docName}</span>
+                  {h.modality && <MediaBadge modality={h.modality} />}
                   <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
                     {t("kb.recall.chunkSeq", { seq: String(h.seq) })}
                   </span>
@@ -127,9 +157,12 @@ export function KbRecallTab({ kb }: { kb: KbView }) {
                     </span>
                   </span>
                 </div>
-                <p className="mt-1.5 line-clamp-4 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">
-                  {h.content}
-                </p>
+                {/* 媒体直嵌块正文可为空（纯媒体块合法），空串不渲染空段落。 */}
+                {h.content && (
+                  <p className="mt-1.5 line-clamp-4 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">
+                    {h.content}
+                  </p>
+                )}
               </div>
             ))}
           </div>

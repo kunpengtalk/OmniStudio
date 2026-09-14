@@ -204,6 +204,13 @@
       "when": 1790095000002,
       "tag": "0028_omniscient_elektra",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1789399122175,
+      "tag": "0029_tired_vanisher",
+      "breakpoints": true
     }
   ]
 }

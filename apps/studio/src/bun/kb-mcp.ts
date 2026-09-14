@@ -15,6 +15,7 @@
  * 这是 Streamable HTTP 规范允许的模式，主流客户端均可连接。
  */
 import { listKnowledgeBases, recall } from "./knowledge";
+import type { KbHit } from "../shared/knowledge";
 import { mcpPlaygroundHtml } from "./mcp-playground";
 import { MEMORY_MCP_TOOLS, handleMemoryMcpCall, isMemoryMcpTool } from "./memory-api";
 import { MEDIA_MCP_TOOLS, handleMediaMcpCall, isMediaMcpTool } from "./media-api";
@@ -63,6 +64,12 @@ function truncate(text: string, max = 700): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+/** 媒体命中标记（[图片]/[音频]/[视频] + 文件名）：防空正文在输出里呈现为空行。 */
+function mediaHitTag(modality: KbHit["modality"], docName: string): string {
+  const label = modality === "image" ? "图片" : modality === "audio" ? "音频" : "视频";
+  return `[${label}] ${docName}`;
+}
+
 /** kb_search 工具实现：解析目标库 → 混合检索 → 排版为可读文本。 */
 async function toolSearch(args: Record<string, unknown>): Promise<string> {
   const query = String(args.query ?? "").trim();
@@ -101,7 +108,9 @@ async function toolSearch(args: Record<string, unknown>): Promise<string> {
   const lines = hits.map(
     (h, i) =>
       `[${i + 1}] 《${h.docName}》分块 ${h.seq} · ${h.kbName} · 相关度 ${h.score.toFixed(2)}\n` +
-      truncate(h.content),
+      (h.modality
+        ? `${mediaHitTag(h.modality, h.docName)}${h.content ? `\n${truncate(h.content)}` : ""}`
+        : truncate(h.content)),
   );
   const header = `在 ${targets.map((t) => t.name).join("、")} 中找到 ${hits.length} 条相关片段：\n\n`;
   return header + lines.join("\n\n") + (notes.length ? `\n\n注意：${notes.join("；")}` : "");

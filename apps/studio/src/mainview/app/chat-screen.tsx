@@ -20,13 +20,16 @@ import {
   LanguagesIcon,
   SquareTerminalIcon,
   Trash2Icon,
+  ImageIcon,
+  AudioLinesIcon,
+  VideoIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
 import { Textarea } from "@ui/textarea";
 import type { ChatMessage } from "../../bun/chat";
-import type { KbCitation } from "../../shared/knowledge";
+import type { KbCitation, KbModality } from "../../shared/knowledge";
 import { useChatStore } from "@stores/chat";
 import { useAppStore } from "@stores/app";
 import { useT } from "@stores/ui-lang";
@@ -265,6 +268,13 @@ function ReasoningBlock({ reasoning, streaming }: { reasoning: string; streaming
   );
 }
 
+/** 媒体直嵌块引用的模态图标（与 docs/recall 的 MEDIA_META 同语言；模块级避免每次渲染重建）。 */
+const MODALITY_ICONS: Record<KbModality, typeof ImageIcon> = {
+  image: ImageIcon,
+  audio: AudioLinesIcon,
+  video: VideoIcon,
+};
+
 /** 助手消息底部的知识库引用溯源：编号 + 来源文档，悬浮显示片段预览。 */
 function CitationBar({ citations }: { citations: KbCitation[] }) {
   const t = useT();
@@ -275,17 +285,21 @@ function CitationBar({ citations }: { citations: KbCitation[] }) {
         <BookOpenIcon className="size-3" />
         {t("chat.citations")}
       </span>
-      {citations.map((c) => (
-        <span
-          key={`${c.docId}-${c.seq}-${c.n}`}
-          title={c.snippet}
-          className="inline-flex max-w-56 items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
-        >
-          <span className="font-mono text-primary/80">[{c.n}]</span>
-          <span className="truncate">{c.docName}</span>
-          <span className="shrink-0 font-mono text-muted-foreground/60">#{c.seq}</span>
-        </span>
-      ))}
+      {citations.map((c) => {
+        const MediaIcon = c.modality ? MODALITY_ICONS[c.modality] : null;
+        return (
+          <span
+            key={`${c.docId}-${c.seq}-${c.n}`}
+            title={c.snippet}
+            className="inline-flex max-w-56 items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+          >
+            {MediaIcon && <MediaIcon className="size-3 shrink-0" />}
+            <span className="font-mono text-primary/80">[{c.n}]</span>
+            <span className="truncate">{c.docName}</span>
+            <span className="shrink-0 font-mono text-muted-foreground/60">#{c.seq}</span>
+          </span>
+        );
+      })}
     </div>
   );
 }

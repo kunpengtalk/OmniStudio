@@ -151,6 +151,9 @@ function kbFixture(overrides: Partial<KbFixture> = {}): KbFixture {
     minScore: 0,
     expandNeighbors: true,
     mcpExposed: false,
+    embedImage: false,
+    embedAudio: false,
+    embedVideo: false,
     docCount: 1,
     chunkCount: 50,
     embeddedCount: 50,
@@ -272,6 +275,41 @@ test("改名称后保存把补丁发给 kbUpdate", async () => {
   // 没填自定义地址 → 地址/key 保持空，走本地推理服务
   expect(updates[0]!.patch.embeddingBase).toBe("");
   expect(updates[0]!.patch.embeddingModel).toBe("BAAI/bge-m3");
+  await view.unmount();
+});
+
+// ---------------------------------------------------------------------------
+// 模态能力三布尔（KbView 快照进表单；保存透传 kbUpdate patch）
+// ---------------------------------------------------------------------------
+
+test("模态能力勾选：初始值来自库行，保存透传进 kbUpdate patch", async () => {
+  updates.length = 0;
+  // 页面上唯一的 checkbox input 就是三个模态复选框（Switch 是 button[role=switch]）
+  const view = await renderSettings(kbFixture({ embedAudio: true }));
+  expect(view.errors).toEqual([]);
+  const boxes = view.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+  expect(boxes.length).toBe(3);
+  const [image, audio, video] = boxes;
+  expect(image!.checked).toBe(false);
+  expect(audio!.checked).toBe(true);
+  expect(video!.checked).toBe(false);
+
+  // 勾上「图片」再保存 → patch 带三布尔（未动的保持库行值）
+  await act(async () => {
+    image!.click();
+  });
+  const save = [...view.container.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes(zh("common.save")),
+  );
+  expect(save).toBeDefined();
+  await act(async () => {
+    save!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(updates.length).toBe(1);
+  expect(updates[0]!.patch.embedImage).toBe(true);
+  expect(updates[0]!.patch.embedAudio).toBe(true);
+  expect(updates[0]!.patch.embedVideo).toBe(false);
   await view.unmount();
 });
 

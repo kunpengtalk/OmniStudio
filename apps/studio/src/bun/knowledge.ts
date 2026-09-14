@@ -10,7 +10,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "fs";
 import path from "path";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 
 import { db } from "./db";
 import { kbIngestJobs, knowledgeBases, knowledgeChunks, knowledgeDocs } from "./db/schema";
@@ -46,6 +46,13 @@ import type {
   KbHit,
   KbIndexStats,
   KbIngestJobView,
+  KbModality,
+} from "../shared/knowledge";
+import {
+  KB_AUDIO_EXT,
+  KB_IMAGE_EXT,
+  KB_TEXT_EXT,
+  KB_VIDEO_EXT,
 } from "../shared/knowledge";
 import {
   filterModelIds,
@@ -77,6 +84,10 @@ export type KbView = {
   minScore: number;
   expandNeighbors: boolean;
   mcpExposed: boolean;
+  /** 模态能力声明：勾选后该模态媒体文件走「媒体+OCR 文本联合嵌入」。 */
+  embedImage: boolean;
+  embedAudio: boolean;
+  embedVideo: boolean;
   docCount: number;
   chunkCount: number;
   embeddedCount: number;
@@ -116,6 +127,10 @@ export type KbChunkView = {
   /** 在来源正文中的字符偏移（引用可精确回位）。 */
   charStart: number | null;
   charEnd: number | null;
+  /** 媒体直嵌块：模态与原文件路径/单元序号（文本块为 null）。 */
+  modality: KbModality | null;
+  mediaPath: string | null;
+  mediaIndex: number | null;
 };
 
 export type KbUpdatePatch = Partial<{
@@ -133,11 +148,20 @@ export type KbUpdatePatch = Partial<{
   minScore: number;
   expandNeighbors: boolean;
   mcpExposed: boolean;
+  /** 模态能力声明（模态勾选变更不触发向量重置；已入库媒体需重新导入才走新路径）。 */
+  embedImage: boolean;
+  embedAudio: boolean;
+  embedVideo: boolean;
 }>;
 
-/** 目录导入时接受的扩展名（文本 + PDF/图片）。 */
-const KB_FOLDER_FILE_RE =
-  /\.(txt|md|markdown|json|csv|tsv|log|xml|yml|yaml|html?|htm|pdf|png|jpg|jpeg|webp|tiff|bmp|heic|heif)$/i;
+/**
+ * 目录导入白名单：文本 + PDF/图片 + 音视频（扩展名单一来源 shared/knowledge.ts，
+ * 与文件选择器 accept 一致）。
+ */
+const KB_FOLDER_FILE_RE = new RegExp(
+  `\\.(?:${[...KB_TEXT_EXT, ...KB_IMAGE_EXT, ...KB_AUDIO_EXT, ...KB_VIDEO_EXT].join("|")})$`,
+  "i",
+);
 const KB_FOLDER_IGNORED_DIRS = new Set([
   "node_modules",
   ".git",
@@ -225,6 +249,9 @@ function kbToView(row: KnowledgeBaseRow): KbView {
     ...row,
     expandNeighbors: row.expandNeighbors !== 0,
     mcpExposed: row.mcpExposed !== 0,
+    embedImage: row.embedImage !== 0,
+    embedAudio: row.embedAudio !== 0,
+    embedVideo: row.embedVideo !== 0,
     ...kbAgg(row.id),
   };
 }
@@ -249,6 +276,10 @@ export function createKb(input: {
   embeddingModel?: string;
   /** 重排模型（空 = 不重排）。 */
   rerankModel?: string;
+  /** 模态能力声明（显式传入，缺省 false；不从全局默认继承）。 */
+  embedImage?: boolean;
+  embedAudio?: boolean;
+  embedVideo?: boolean;
   actor?: string;
 }): KbView {
   const name = input.name.trim() || "未命名知识库";
@@ -264,6 +295,9 @@ export function createKb(input: {
       embeddingBase: defaults.base,
       embeddingApiKey: defaults.apiKey,
       rerankModel: input.rerankModel?.trim() || "",
+      embedImage: input.embedImage ? 1 : 0,
+      embedAudio: input.embedAudio ? 1 : 0,
+      embedVideo: input.embedVideo ? 1 : 0,
     })
     .returning()
     .get();
@@ -294,6 +328,10 @@ export function updateKb(id: number, patch: KbUpdatePatch): { kb: KbView; embedd
   if (patch.minScore !== undefined) set.minScore = clamp01(patch.minScore, 0);
   if (patch.expandNeighbors !== undefined) set.expandNeighbors = patch.expandNeighbors ? 1 : 0;
   if (patch.mcpExposed !== undefined) set.mcpExposed = patch.mcpExposed ? 1 : 0;
+  // 模态勾选不是嵌入模型：改勾选不动向量（已入库媒体需手动重导入才走新路径）
+  if (patch.embedImage !== undefined) set.embedImage = patch.embedImage ? 1 : 0;
+  if (patch.embedAudio !== undefined) set.embedAudio = patch.embedAudio ? 1 : 0;
+  if (patch.embedVideo !== undefined) set.embedVideo = patch.embedVideo ? 1 : 0;
 
   const embeddingChanged =
     (patch.embeddingModel !== undefined && patch.embeddingModel.trim() !== kb.embeddingModel) ||
@@ -442,7 +480,7 @@ export function addFolderDocs(kbId: number, dirPath: string): { docs: KbDocView[
   walk(dirPath, 0);
 
   if (files.length === 0) {
-    throw new Error("目录里没有可导入的文件（支持文本 / Markdown / PDF / 图片）");
+    throw new Error("目录里没有可导入的文件（支持文本 / Markdown / PDF / 图片 / 音频 / 视频）");
   }
   const before = files.length;
   const docs = addFileDocs(kbId, files);
@@ -548,6 +586,9 @@ export function listChunks(docId: number): KbChunkView[] {
       headingPath: knowledgeChunks.headingPath,
       charStart: knowledgeChunks.charStart,
       charEnd: knowledgeChunks.charEnd,
+      modality: knowledgeChunks.modality,
+      mediaPath: knowledgeChunks.mediaPath,
+      mediaIndex: knowledgeChunks.mediaIndex,
     })
     .from(knowledgeChunks)
     .where(eq(knowledgeChunks.docId, docId))
@@ -561,6 +602,9 @@ export function listChunks(docId: number): KbChunkView[] {
       headingPath: r.headingPath,
       charStart: r.charStart,
       charEnd: r.charEnd,
+      modality: r.modality,
+      mediaPath: r.mediaPath,
+      mediaIndex: r.mediaIndex,
     }));
 }
 
@@ -905,6 +949,8 @@ function mergeNeighbors(hits: KbHit[], budgetChars: number): KbHit[] {
   const groups: Group[] = [];
   for (const hit of hits) {
     const target = groups.find((g) => {
+      // 媒体块单块成组：一图/一音视频就是一条命中，不与相邻文本块拼接正文
+      if (g.head.modality || hit.modality) return false;
       if (g.head.docId !== hit.docId) return false;
       const seqs = g.parts.map((p) => p.seq);
       const adjacent = seqs.includes(hit.seq - 1) || seqs.includes(hit.seq + 1);
@@ -1035,6 +1081,7 @@ async function recallKb(
       headingPath: row.headingPath,
       charStart: row.charStart,
       charEnd: row.charEnd,
+      modality: row.modality,
     });
   }
 
@@ -1044,7 +1091,7 @@ async function recallKb(
   return { hits: thresholded.slice(0, kb.topK), notes };
 }
 
-/** 按 chunkId 批量取正文与溯源字段。 */
+/** 按 chunkId 批量取正文与溯源字段（含媒体直嵌块的模态标记）。 */
 function chunkRows(ids: number[]): Map<
   number,
   {
@@ -1053,6 +1100,7 @@ function chunkRows(ids: number[]): Map<
     headingPath: string | null;
     charStart: number | null;
     charEnd: number | null;
+    modality: KbModality | null;
   }
 > {
   if (ids.length === 0) return new Map();
@@ -1065,13 +1113,14 @@ function chunkRows(ids: number[]): Map<
         headingPath: knowledgeChunks.headingPath,
         charStart: knowledgeChunks.charStart,
         charEnd: knowledgeChunks.charEnd,
+        modality: knowledgeChunks.modality,
       })
       .from(knowledgeChunks)
       .where(inArray(knowledgeChunks.id, ids))
       .all()
       .map((r) => [
         r.id,
-        { content: r.content, charCount: r.charCount, headingPath: r.headingPath, charStart: r.charStart, charEnd: r.charEnd },
+        { content: r.content, charCount: r.charCount, headingPath: r.headingPath, charStart: r.charStart, charEnd: r.charEnd, modality: r.modality },
       ]),
   );
 }
@@ -1134,12 +1183,17 @@ export async function buildChatContext(
     docId: h.docId,
     docName: h.docName,
     seq: h.seq,
+    chunkId: h.chunkId,
+    modality: h.modality ?? null,
     snippet: h.content.replace(/\s+/g, " ").slice(0, 120),
   }));
   const body = hits
     .map((h, i) => {
       const loc = h.headingPath ? `${h.docName} › ${h.headingPath}` : h.docName;
-      return `[${i + 1}] 来源：${loc}（分块 ${h.seq}）\n${h.content}`;
+      // 纯媒体块（content 为空）不注入正文：保留编号引用行即可 —— 媒体内容已参与
+      // 向量化，模型经由 [n] 编号感知该资料，空正文不灌进上下文。
+      const text = h.content ? `\n${h.content}` : "";
+      return `[${i + 1}] 来源：${loc}（分块 ${h.seq}）${text}`;
     })
     .join("\n\n");
   const system =
@@ -1174,7 +1228,7 @@ export function kbIndexStatsAll(): KbIndexStats[] {
 
 /** 导出载荷版本：字段演进时按 version 决定兼容策略。 */
 export const KB_EXPORT_FORMAT = "omnistudio.kb";
-export const KB_EXPORT_VERSION = 1;
+export const KB_EXPORT_VERSION = 2;
 
 export type KbExportPayload = {
   format: string;
@@ -1192,6 +1246,10 @@ export type KbExportPayload = {
     topK: number;
     minScore: number;
     expandNeighbors: boolean;
+    /** 模态能力声明（v2 载荷；旧载荷缺省按 false）。 */
+    embedImage?: boolean;
+    embedAudio?: boolean;
+    embedVideo?: boolean;
   };
   docs: {
     name: string;
@@ -1212,6 +1270,10 @@ export type KbExportPayload = {
     headingPath: string | null;
     charStart: number | null;
     charEnd: number | null;
+    /** 媒体直嵌块三列（v2 载荷；旧载荷缺省按 null）。 */
+    modality?: KbModality | null;
+    mediaPath?: string | null;
+    mediaIndex?: number | null;
     contentHash: string | null;
     /** 向量（Float32 base64），includeEmbeddings 时才有。 */
     embedding?: string;
@@ -1253,6 +1315,9 @@ export function exportKb(kbId: number, opts: { includeEmbeddings?: boolean } = {
       topK: kb.topK,
       minScore: kb.minScore,
       expandNeighbors: kb.expandNeighbors !== 0,
+      embedImage: kb.embedImage !== 0,
+      embedAudio: kb.embedAudio !== 0,
+      embedVideo: kb.embedVideo !== 0,
     },
     docs: docs.map((d) => ({
       name: d.name,
@@ -1272,6 +1337,9 @@ export function exportKb(kbId: number, opts: { includeEmbeddings?: boolean } = {
       headingPath: c.headingPath,
       charStart: c.charStart,
       charEnd: c.charEnd,
+      modality: c.modality ?? null,
+      mediaPath: c.mediaPath ?? null,
+      mediaIndex: c.mediaIndex ?? null,
       contentHash: c.contentHash,
       ...(opts.includeEmbeddings && c.embedding ? { embedding: c.embedding } : {}),
     })),
@@ -1335,8 +1403,11 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
       // createKb 已按全局默认快照预填了 model/base/key（导入也是「建库」）。这里只在导出
       // 文件**带了**嵌入配置时覆盖：显式导入参数优先，缺省（老导出文件 / 关键词库）保留
       // 快照 —— 否则刚预填的默认会被 `?? ""` 抹成空，与新建 KB 的行为分叉。
+      // 唯 embeddingApiKey 反其道置空：导出文件不携带密钥，若继承全局 key，配上载荷里
+      // 攻击者指定的 embeddingBase 等于把凭据送到第三方 —— 导入一律要求重新填 key。
       embeddingModel: src.embeddingModel || kb.embeddingModel,
       embeddingBase: src.embeddingBase || kb.embeddingBase,
+      embeddingApiKey: "",
       embeddingDim: src.embeddingDim ?? null,
       rerankModel: src.rerankModel ?? "",
       chunkSize: src.chunkSize ?? 800,
@@ -1344,6 +1415,9 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
       topK: src.topK ?? 6,
       minScore: src.minScore ?? 0,
       expandNeighbors: src.expandNeighbors === false ? 0 : 1,
+      embedImage: src.embedImage === true ? 1 : 0,
+      embedAudio: src.embedAudio === true ? 1 : 0,
+      embedVideo: src.embedVideo === true ? 1 : 0,
     })
     .where(eq(knowledgeBases.id, kbId))
     .run();
@@ -1392,6 +1466,10 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
         headingPath: c.headingPath ?? null,
         charStart: c.charStart ?? null,
         charEnd: c.charEnd ?? null,
+        // modality 白名单：恶意/损坏载荷的乱值落 null（按文本块处理），防下游 UI 崩
+        modality: c.modality === "image" || c.modality === "audio" || c.modality === "video" ? c.modality : null,
+        mediaPath: c.mediaPath ?? null,
+        mediaIndex: c.mediaIndex ?? null,
         contentHash: c.contentHash ?? null,
         embedding: typeof c.embedding === "string" ? c.embedding : null,
       }));
@@ -1407,7 +1485,11 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
       .run();
   }
 
-  // 没有随导出带向量的文档，排队重新向量化（有嵌入模型时）
+  // 没有随导出带向量的文档，排队重新向量化（有嵌入模型时）。
+  // 安全契约：含缺向量媒体块的 doc **一律不自动入队** —— 恶意导出文件可让 mediaPath 指向
+  // 受害者本机任意文件，自动补向量会把该文件原始字节发到载荷指定的 embeddingBase。
+  // 三列照常落库（往返无损），由用户在设置页手动「补齐向量」；届时媒体文件缺失会在
+  // 嵌入阶段可见失败，导入路径不再预检文件存在性。
   for (const docId of docIds) {
     const row = db
       .select({ chunkCount: knowledgeDocs.chunkCount, embeddedCount: knowledgeDocs.embeddedCount })
@@ -1416,6 +1498,27 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
       .get();
     if (!row) continue;
     if (row.chunkCount > 0 && row.embeddedCount === row.chunkCount) continue;
+
+    const hasPendingMedia = db
+      .select({ c: sql<number>`count(*)` })
+      .from(knowledgeChunks)
+      .where(
+        and(
+          eq(knowledgeChunks.docId, docId),
+          isNotNull(knowledgeChunks.modality),
+          isNull(knowledgeChunks.embedding),
+        ),
+      )
+      .get();
+    if (Number(hasPendingMedia?.c ?? 0) > 0) {
+      // 温和提示落 doc.error（status 保持 ready）：导入的媒体块不自动重嵌，等用户手动触发
+      db.update(knowledgeDocs)
+        .set({ error: "导入的媒体块需在设置页手动补齐向量" })
+        .where(eq(knowledgeDocs.id, docId))
+        .run();
+      continue;
+    }
+
     enqueueDoc(docId, { kind: row.chunkCount > 0 ? "embed" : "ingest" });
   }
 

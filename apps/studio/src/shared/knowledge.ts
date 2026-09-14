@@ -12,6 +12,31 @@ export type KbDocStatus = "pending" | "parsing" | "chunking" | "embedding" | "re
 /** 单条命中来源（关键词 / 向量 / 两者都命中）。 */
 export type KbHitMethod = "keyword" | "vector" | "both";
 
+/** 媒体直嵌块的模态。 */
+export type KbModality = "image" | "audio" | "video";
+
+/**
+ * 知识库可导入文件的扩展名单（UI accept 与 bun 目录导入白名单、摄取模态路由共用单一来源）。
+ * 图片含 pdf —— PDF 在摄取里走「转图 + 逐页」路径，与图片同一分支。
+ */
+export const KB_TEXT_EXT = ["txt", "md", "markdown", "json", "csv", "tsv", "log", "xml", "yml", "yaml", "html", "htm"] as const;
+export const KB_IMAGE_EXT = ["pdf", "png", "jpg", "jpeg", "webp", "tiff", "bmp", "heic", "heif"] as const;
+export const KB_AUDIO_EXT = ["mp3", "wav", "flac", "m4a", "ogg", "opus", "aac"] as const;
+export const KB_VIDEO_EXT = ["mp4", "mov", "mkv", "webm", "avi", "m4v"] as const;
+
+/**
+ * 按文件名判断模态：图片=pdf+常见位图，音频/视频见扩展名常量，其余一律按 text。
+ * UI（文件选择器 accept）与 bun（目录导入白名单 / 摄取路由）共用，别处不要再写死名单。
+ */
+export function kbFileModality(fileName: string): "text" | "image" | "audio" | "video" {
+  const dot = fileName.lastIndexOf(".");
+  const ext = dot >= 0 ? fileName.slice(dot + 1).toLowerCase() : "";
+  if ((KB_IMAGE_EXT as readonly string[]).includes(ext)) return "image";
+  if ((KB_AUDIO_EXT as readonly string[]).includes(ext)) return "audio";
+  if ((KB_VIDEO_EXT as readonly string[]).includes(ext)) return "video";
+  return "text";
+}
+
 /** 聊天回答里的引用溯源（存在 assistant 消息行上）。 */
 export type KbCitation = {
   /** 注入上下文里的编号，正文以 [n] 标注。 */
@@ -22,6 +47,10 @@ export type KbCitation = {
   docName: string;
   /** 文档内分块序号（1 起）。 */
   seq: number;
+  /** 命中分块 id：引用回位到分块，媒体引用可据此取缩略图。 */
+  chunkId?: number;
+  /** 媒体直嵌块的模态（文本引用为 null）。 */
+  modality?: KbModality | null;
   /** 内容开头预览，悬浮提示用。 */
   snippet: string;
 };
@@ -51,6 +80,8 @@ export type KbHit = {
   charEnd?: number | null;
   /** 合并了相邻分块时，被并入的分块序号（含自身）。 */
   mergedSeqs?: number[];
+  /** 媒体直嵌块的模态（文本块为 null）。 */
+  modality?: KbModality | null;
 };
 
 /** 摄取队列中的一条作业（文档列表据此展示「排队中 / 第 2 次重试」）。 */

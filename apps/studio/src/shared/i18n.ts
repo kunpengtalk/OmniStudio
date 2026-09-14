@@ -983,6 +983,11 @@ const zh: Record<string, string> = {
   "kb.create.rerank": "重排模型",
   "kb.create.rerankHint": "可选。检索结果经重排模型二次打分，精度更高但每次检索多一次请求。",
   "kb.create.submit": "新建知识库",
+  // 模态能力勾选（建库弹窗与 KB 设置页共用文案）；语音/视频直嵌本地 llama.cpp 暂不支持。
+  "kb.create.embedImage": "图片",
+  "kb.create.embedAudio": "语音",
+  "kb.create.embedVideo": "视频",
+  "kb.create.embedLocalOnlyHint": "本地 llama.cpp 暂不支持语音/视频直嵌，勾选需配置远程嵌入服务。",
 
   "kb.docs.addFile": "添加文件",
   "kb.docs.addNote": "添加笔记",
@@ -1015,6 +1020,15 @@ const zh: Record<string, string> = {
   "kb.chunks.chars": "字",
   "kb.chunks.embedded": "已向量化",
   "kb.chunks.notEmbedded": "未向量化",
+
+  // 媒体直嵌块标识（分块列表 / 召回测试 / 聊天引用共用）。
+  "kb.docs.mediaChunk.image": "图片",
+  "kb.docs.mediaChunk.audio": "音频",
+  "kb.docs.mediaChunk.video": "视频",
+  // 恶意/损坏数据里 modality 是未知串时的通用回退标签（UI 防崩树）。
+  "kb.docs.mediaChunk.unknown": "媒体",
+  "kb.docs.mediaChunk.openOriginal": "点击打开原文件",
+  "kb.docs.mediaChunk.loadFailed": "缩略图加载失败",
 
   "kb.status.pending": "等待中",
   "kb.status.parsing": "解析中",
@@ -1074,6 +1088,12 @@ const zh: Record<string, string> = {
   "kb.settings.enableEmbeddingBusy": "正在重新嵌入…",
   "kb.settings.enableEmbeddingDone": "已启用，本轮补齐 {count} 个分块",
   "kb.settings.enableEmbeddingFailed": "启用失败：{error}",
+  // 模态能力声明：三布尔随库行快照；变更不触发向量重置，但已入库媒体需重导。
+  "kb.settings.embedModalities": "模态能力",
+  "kb.settings.embedModalitiesHint":
+    "勾选后，对应模态的媒体文件导入时走「媒体 + OCR 文本联合嵌入」；未勾选的库添加媒体文件仍走 OCR 转文本。",
+  "kb.settings.embedModalitiesChangeNote":
+    "模态能力变更后，已导入的媒体文件需重新导入才会按新能力重建向量。",
 
   "kb.settings.rerank": "重排模型",
   "kb.settings.rerankHint":
@@ -3257,6 +3277,12 @@ const en: Record<string, string> = {
   "kb.create.rerankHint":
     "Optional. Candidates get a second-stage relevance pass for better precision (one extra request per search).",
   "kb.create.submit": "Create",
+  // Modality capability checkboxes (shared copy between create dialog and KB settings).
+  "kb.create.embedImage": "Image",
+  "kb.create.embedAudio": "Voice",
+  "kb.create.embedVideo": "Video",
+  "kb.create.embedLocalOnlyHint":
+    "Local llama.cpp can't embed audio/video directly yet — configure a remote embedding service.",
 
   "kb.docs.addFile": "Add files",
   "kb.docs.addNote": "Add note",
@@ -3290,6 +3316,15 @@ const en: Record<string, string> = {
   "kb.chunks.chars": "chars",
   "kb.chunks.embedded": "Embedded",
   "kb.chunks.notEmbedded": "Not embedded",
+
+  // Media chunk markers (shared by chunk list / recall test / chat citations).
+  "kb.docs.mediaChunk.image": "Image",
+  "kb.docs.mediaChunk.audio": "Audio",
+  "kb.docs.mediaChunk.video": "Video",
+  // Generic fallback label for an unknown modality string in corrupted data (UI crash guard).
+  "kb.docs.mediaChunk.unknown": "Media",
+  "kb.docs.mediaChunk.openOriginal": "Click to open the original file",
+  "kb.docs.mediaChunk.loadFailed": "Failed to load thumbnail",
 
   "kb.status.pending": "Pending",
   "kb.status.parsing": "Parsing",
@@ -3352,6 +3387,14 @@ const en: Record<string, string> = {
   "kb.settings.enableEmbeddingBusy": "Re-embedding…",
   "kb.settings.enableEmbeddingDone": "Enabled; embedded {count} chunks in this pass",
   "kb.settings.enableEmbeddingFailed": "Failed to enable: {error}",
+  // Modality capability declaration: snapshotted into the KB row; changes don't reset
+  // vectors, but already imported media files must be re-imported to rebuild under the
+  // new capability.
+  "kb.settings.embedModalities": "Modalities",
+  "kb.settings.embedModalitiesHint":
+    "Checked modality: media files import with joint media + OCR text embedding. Unchecked: media files still go through OCR-to-text.",
+  "kb.settings.embedModalitiesChangeNote":
+    "After changing modality settings, already imported media files must be re-imported to rebuild vectors under the new capability.",
 
   "kb.settings.rerank": "Rerank model",
   "kb.settings.rerankHint":

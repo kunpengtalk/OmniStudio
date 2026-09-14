@@ -65,7 +65,14 @@ for (const key of DOM_GLOBALS) {
 // RPC 层依赖 Electrobun webview，测试里换成固定实现。
 const calls = { embedding: 0, rerank: 0, probe: 0, create: 0 };
 /** kbCreate 收到的入参（快照断言用）。 */
-const createCalls: Array<{ name: string; embeddingModel?: string; rerankModel?: string }> = [];
+const createCalls: Array<{
+  name: string;
+  embeddingModel?: string;
+  rerankModel?: string;
+  embedImage?: boolean;
+  embedAudio?: boolean;
+  embedVideo?: boolean;
+}> = [];
 /** 当前用例的探活桩：null = 挂起（resolve 存进 pendingProbeResolve，供「结论后到」时序用例）。 */
 let probeStub: (() => unknown) | null = null;
 /** 最近一次挂起探活的 resolve。 */
@@ -445,5 +452,65 @@ test("⑦探活 pending：渲染不崩、值为空", async () => {
   expect(fx.errors).toEqual([]);
   expect(fx.embedTriggerText()).toContain(zh("kb.create.notUse"));
   expect(fx.text()).not.toContain("已配置默认嵌入模型");
+  await fx.unmount();
+});
+
+// ---------------------------------------------------------------------------
+// 模态能力三勾选（图片/语音/视频）：默认 false、提交透传、hint 常驻、重开重置
+// ---------------------------------------------------------------------------
+
+test("模态三勾选默认 false，勾选后提交原样透传 kbCreate", async () => {
+  probeStub = () => ({ configured: false });
+  const fx = await mountDialog();
+  await fx.open();
+  const boxes = () => [...document.querySelectorAll('input[type="checkbox"]')] as HTMLInputElement[];
+  expect(boxes().length).toBe(3);
+  expect(boxes().every((b) => !b.checked)).toBe(true);
+
+  // 勾「图片」「视频」（语音保持 false）→ 提交 → 三布尔原样带出
+  await act(async () => {
+    boxes()[0]!.click();
+    boxes()[2]!.click();
+  });
+  const nameInput = document.querySelector("#kb-name") as HTMLInputElement;
+  const setValue = Object.getOwnPropertyDescriptor(dom.HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setValue.call(nameInput, "多模态库");
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const submit = [...document.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes(zh("kb.create.submit")),
+  );
+  expect(submit).toBeDefined();
+  await act(async () => {
+    submit!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await flush();
+
+  expect(calls.create).toBe(1);
+  expect(createCalls[0]).toMatchObject({
+    name: "多模态库",
+    embedImage: true,
+    embedAudio: false,
+    embedVideo: true,
+  });
+  await fx.unmount();
+});
+
+test("语音/视频静态 hint 常驻可见；重开弹窗三勾选重置为 false", async () => {
+  probeStub = () => ({ configured: false });
+  const fx = await mountDialog();
+  await fx.open();
+  expect(fx.text()).toContain(zh("kb.create.embedLocalOnlyHint"));
+
+  // 勾选后关闭 → 重开：reset-on-open 把三值归零（与模型字段同一 useEffect）
+  await act(async () => {
+    (document.querySelector('input[type="checkbox"]') as HTMLInputElement).click();
+  });
+  await fx.close();
+  await fx.open();
+  const boxes = [...document.querySelectorAll('input[type="checkbox"]')] as HTMLInputElement[];
+  expect(boxes.length).toBe(3);
+  expect(boxes.every((b) => !b.checked)).toBe(true);
   await fx.unmount();
 });

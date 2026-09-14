@@ -189,7 +189,8 @@ import type { BackupStatus as SkillsBackupStatus } from "../skills/git-backup";
 import type { SkillUpdateStatus as SkillUpdateStatusView } from "../skills/installer";
 import type { CentralInfo as SkillsCentralInfo } from "../skills/central-repo";
 import * as Knowledge from "../knowledge";
-import type { KbCitation, KbEventEntry, KbHit, KbIndexStats } from "../../shared/knowledge";
+import type { KbCitation, KbEventEntry, KbHit, KbIndexStats, KbModality } from "../../shared/knowledge";
+import { chunkMediaForRpc } from "./kb-media";
 import * as Backup from "../backup";
 import type {
   BackupCreateRequest,
@@ -1980,7 +1981,16 @@ export type AppRPC = {
         response: { kbs: Knowledge.KbView[] };
       };
       kbCreate: {
-        params: { name: string; description?: string; embeddingModel?: string; rerankModel?: string };
+        params: {
+          name: string;
+          description?: string;
+          embeddingModel?: string;
+          rerankModel?: string;
+          /** 模态能力声明：随建库快照（数据层缺省 false，不从全局继承）。 */
+          embedImage?: boolean;
+          embedAudio?: boolean;
+          embedVideo?: boolean;
+        };
         response: { kb: Knowledge.KbView };
       };
       kbUpdate: {
@@ -2088,6 +2098,11 @@ export type AppRPC = {
       kbOpenExportDir: {
         params: undefined;
         response: { ok: boolean; path: string };
+      };
+      /** 分块媒体表示：图片=缩略 dataUrl；音视频/文本/文件缺失 dataUrl=null（UI 图标兜底；打开原文件复用 openPath）。 */
+      kbChunkMedia: {
+        params: { chunkId: number };
+        response: { dataUrl: string | null; modality: KbModality | null; fileName: string };
       };
       /** 全局备份 / 恢复（设置 → 数据 → 备份与恢复）。 */
       backupList: {
@@ -4416,6 +4431,9 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
             description: params.description,
             embeddingModel: params.embeddingModel,
             rerankModel: params.rerankModel,
+            embedImage: params.embedImage,
+            embedAudio: params.embedAudio,
+            embedVideo: params.embedVideo,
           }),
         };
       },
@@ -4511,6 +4529,10 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         } catch {
           return { ok: false, path: dir };
         }
+      },
+
+      kbChunkMedia: async ({ chunkId }) => {
+        return chunkMediaForRpc(chunkId);
       },
 
       // ---------------------------------------------------------------------

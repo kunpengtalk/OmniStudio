@@ -692,7 +692,12 @@ function createKnowledgeSearch(): BuiltTool {
         const formatted = hits
           .map(
             (h, i) =>
-              `[${i + 1}] 《${h.docName}》分块 ${h.seq}（${h.kbName}，相关度 ${h.score.toFixed(2)}）\n${h.content}`,
+              `[${i + 1}] 《${h.docName}》分块 ${h.seq}（${h.kbName}，相关度 ${h.score.toFixed(2)}）\n` +
+              (h.modality
+                ? // 与 kb-mcp.ts 的 mediaHitTag 同款：防空正文媒体命中呈现为空行
+                  `[${h.modality === "image" ? "图片" : h.modality === "audio" ? "音频" : "视频"}] ${h.docName}` +
+                  (h.content ? `\n${h.content}` : "")
+                : h.content),
           )
           .join("\n\n");
         return textResult(`找到 ${hits.length} 条相关片段：\n\n${formatted}`);

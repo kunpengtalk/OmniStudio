@@ -50,6 +50,10 @@ export function KbCreateDialog() {
   const [description, setDescription] = useState("");
   const [embeddingModel, setEmbeddingModel] = useState("");
   const [rerankModel, setRerankModel] = useState("");
+  // 模态能力声明：勾选后该模态媒体文件走「媒体 + OCR 文本联合嵌入」入库。
+  const [embedImage, setEmbedImage] = useState(false);
+  const [embedAudio, setEmbedAudio] = useState(false);
+  const [embedVideo, setEmbedVideo] = useState(false);
 
   // 探活全局默认嵌入配置（开窗后异步进行，弹窗照常秒开）：
   // configured/reachable 分离 —— 未配置 = 与今天一致；已配置但不可达 = 留空 + hint。
@@ -70,6 +74,9 @@ export function KbCreateDialog() {
     if (open) {
       setEmbeddingModel("");
       setRerankModel("");
+      setEmbedImage(false);
+      setEmbedAudio(false);
+      setEmbedVideo(false);
       touchedRef.current = false;
     }
   }, [open]);
@@ -94,6 +101,9 @@ export function KbCreateDialog() {
         description,
         embeddingModel: embeddingModel || undefined,
         rerankModel: rerankModel || undefined,
+        embedImage,
+        embedAudio,
+        embedVideo,
       }),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["kb-list"] });
@@ -157,6 +167,43 @@ export function KbCreateDialog() {
                 {t("kb.create.embeddingDefaultUnreachable", { model: probe.data.model })}
               </p>
             )}
+          </div>
+          {/* 模态能力勾选：勾选后对应模态的媒体文件导入时走「媒体 + OCR 文本联合嵌入」
+              （声明式能力，首次导入失败即暴露；设置页可改）。语音/视频本地暂不支持，
+              勾选旁给静态 hint 指向远程嵌入服务，零逻辑。 */}
+          <div className="flex flex-col gap-1.5">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  className="size-3.5 accent-primary"
+                  checked={embedImage}
+                  onChange={(e) => setEmbedImage(e.target.checked)}
+                />
+                {t("kb.create.embedImage")}
+              </label>
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  className="size-3.5 accent-primary"
+                  checked={embedAudio}
+                  onChange={(e) => setEmbedAudio(e.target.checked)}
+                />
+                {t("kb.create.embedAudio")}
+              </label>
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  className="size-3.5 accent-primary"
+                  checked={embedVideo}
+                  onChange={(e) => setEmbedVideo(e.target.checked)}
+                />
+                {t("kb.create.embedVideo")}
+              </label>
+            </div>
+            <p className="text-[10px] leading-4 text-muted-foreground/80">
+              {t("kb.create.embedLocalOnlyHint")}
+            </p>
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="kb-rerank-select">{t("kb.create.rerank")}</Label>

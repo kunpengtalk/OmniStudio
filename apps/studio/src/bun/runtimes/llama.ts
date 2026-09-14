@@ -1,9 +1,10 @@
 import type { Subprocess } from "bun";
-import { existsSync } from "fs";
+import { existsSync, readdirSync } from "fs";
+import { dirname, join } from "path";
 import { EMBEDDING_PORT_BASE } from "../../shared/engines";
 import { getModelProfile, type ServerArgs } from "../../shared/model-profiles";
 import { getSetting } from "../db/settings";
-import { modelNameForPath } from "../model-scan";
+import { isMmprojFile, modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
@@ -221,6 +222,21 @@ export class LlamaRuntime implements Runtime {
 
     if (model.kind === "local") {
       args.push("-m", model.path, "--alias", model.alias);
+      // 多模态嵌入（mmproj）：嵌入实例 + 本地模型时，按模型同目录自动配对投影文件。
+      // spike（llama-server b9410）实证 `--embeddings --pooling last --mmproj` 共存可用；
+      // 聊天实例永不注入；hf ref 走 -hf 自管缓存拿不到本地路径，不注入（Non-Goal）。
+      if (embedding) {
+        const dir = dirname(model.path);
+        try {
+          const candidates = readdirSync(dir).filter(isMmprojFile).sort();
+          // 多文件优先 f16：bf16 的名字里也含 "f16" 子串，直接 includes 会选错
+          const f16 = candidates.find((n) => /(?:^|[^a-z])f16/i.test(n));
+          const picked = f16 ?? candidates[0];
+          if (picked) args.push("--mmproj", join(dir, picked));
+        } catch {
+          // 目录读不到（模型文件被移走等）就不注入，行为与「无投影文件」一致
+        }
+      }
     } else if (model.ref) {
       args.push("-hf", model.ref);
     }

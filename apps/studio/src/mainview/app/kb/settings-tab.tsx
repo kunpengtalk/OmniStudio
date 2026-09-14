@@ -53,6 +53,10 @@ type FormState = {
   minScore: string;
   expandNeighbors: boolean;
   mcpExposed: boolean;
+  /** 模态能力声明（KbView 三布尔原样进表单，保存时透传 kbUpdate patch）。 */
+  embedImage: boolean;
+  embedAudio: boolean;
+  embedVideo: boolean;
 };
 
 function formFromKb(kb: KbView): FormState {
@@ -71,6 +75,9 @@ function formFromKb(kb: KbView): FormState {
     minScore: String(kb.minScore),
     expandNeighbors: kb.expandNeighbors,
     mcpExposed: kb.mcpExposed,
+    embedImage: kb.embedImage,
+    embedAudio: kb.embedAudio,
+    embedVideo: kb.embedVideo,
   };
 }
 
@@ -376,6 +383,9 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
           minScore: Number(form.minScore) || 0,
           expandNeighbors: form.expandNeighbors,
           mcpExposed: form.mcpExposed,
+          embedImage: form.embedImage,
+          embedAudio: form.embedAudio,
+          embedVideo: form.embedVideo,
         },
       }),
     onSuccess: (data) => {
@@ -530,6 +540,50 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
           {/* 空配置的库最常见的诉求就是「用全局默认把它打开」：给一个按钮，一键写入 + 重嵌。
               已有模型的库用上面的表单即可，不重复出这个入口。 */}
           {!kb.embeddingModel && <EnableEmbeddingButton kb={kb} />}
+
+          {/* 模态能力声明：三布尔随库行快照，保存时透传 kbUpdate patch；变更不触发向量重置
+              （模型没换向量仍可比），但已入库媒体需重新导入才走新路径。 */}
+          <FormRow label={t("kb.settings.embedModalities")}>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  className="size-3.5 accent-primary"
+                  checked={form.embedImage}
+                  onChange={(e) => setForm((prev) => ({ ...prev, embedImage: e.target.checked }))}
+                />
+                {t("kb.create.embedImage")}
+              </label>
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  className="size-3.5 accent-primary"
+                  checked={form.embedAudio}
+                  onChange={(e) => setForm((prev) => ({ ...prev, embedAudio: e.target.checked }))}
+                />
+                {t("kb.create.embedAudio")}
+              </label>
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  className="size-3.5 accent-primary"
+                  checked={form.embedVideo}
+                  onChange={(e) => setForm((prev) => ({ ...prev, embedVideo: e.target.checked }))}
+                />
+                {t("kb.create.embedVideo")}
+              </label>
+            </div>
+            <p className="text-[10px] leading-4 text-muted-foreground/80">
+              {t("kb.settings.embedModalitiesHint")}
+            </p>
+            <p className="flex items-start gap-1.5 rounded-lg border border-foreground/10 bg-muted/40 px-2.5 py-1.5 text-[10px] leading-4 text-muted-foreground">
+              <TriangleAlertIcon className="mt-0.5 size-3 shrink-0" />
+              {t("kb.settings.embedModalitiesChangeNote")}
+            </p>
+            <p className="text-[10px] leading-4 text-muted-foreground/80">
+              {t("kb.create.embedLocalOnlyHint")}
+            </p>
+          </FormRow>
         </Section>
 
         <Section icon={<ArrowDownWideNarrowIcon className="size-3.5 text-muted-foreground" />} title={t("kb.settings.rerank")}>

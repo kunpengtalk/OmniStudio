@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AudioLinesIcon,
   FileIcon,
   FolderOpenIcon,
   GlobeIcon,
+  ImageIcon,
   LayersIcon,
   ListIcon,
   Loader2Icon,
@@ -13,6 +15,7 @@ import {
   RefreshCwIcon,
   SparklesIcon,
   Trash2Icon,
+  VideoIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -30,8 +33,10 @@ import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { Textarea } from "@ui/textarea";
 import { useT } from "@stores/ui-lang";
+import { KB_TEXT_EXT, KB_IMAGE_EXT, KB_AUDIO_EXT, KB_VIDEO_EXT } from "@/shared/knowledge";
 import { cn } from "@/mainview/lib/utils";
-import type { KbView, KbDocView } from "@/bun/knowledge";
+import type { KbView, KbDocView, KbChunkView } from "@/bun/knowledge";
+import type { KbModality } from "@/shared/knowledge";
 
 /** 数据源类型图标（配色统一 muted，与全局侧栏的图标语言一致）。 */
 const KIND_STYLES: Record<KbDocView["kind"], { icon: typeof FileIcon; cls: string }> = {
@@ -39,6 +44,16 @@ const KIND_STYLES: Record<KbDocView["kind"], { icon: typeof FileIcon; cls: strin
   note: { icon: NotebookPenIcon, cls: "bg-muted text-muted-foreground" },
   web: { icon: GlobeIcon, cls: "bg-muted text-muted-foreground" },
 };
+
+/** 媒体直嵌块标识（分块视图 / 召回页 / 聊天引用同语言）。 */
+const MEDIA_META: Record<KbModality, { icon: typeof FileIcon; labelKey: string }> = {
+  image: { icon: ImageIcon, labelKey: "kb.docs.mediaChunk.image" },
+  audio: { icon: AudioLinesIcon, labelKey: "kb.docs.mediaChunk.audio" },
+  video: { icon: VideoIcon, labelKey: "kb.docs.mediaChunk.video" },
+};
+
+/** 恶意/损坏数据里 modality 是未知串时的通用回退（防 undefined 解构崩 React 树）。 */
+const MEDIA_FALLBACK = { icon: FileIcon, labelKey: "kb.docs.mediaChunk.unknown" };
 
 const BUSY_STATUSES = new Set(["pending", "parsing", "chunking", "embedding"]);
 
@@ -71,6 +86,70 @@ function formatBytes(n: number | null): string | null {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * 媒体直嵌块展示：图片懒加载缩略图（kbChunkMedia 的 JPEG data URL，长 staleTime 缓存）；
+ * 音视频不调 RPC，直接类型图标 + 文件名。图片拉取失败 / 文件缺失回退同款图标。
+ * 点击用既有 openPath RPC 打开原文件。
+ */
+function MediaChunkBlock({ chunk, docName }: { chunk: KbChunkView; docName: string }) {
+  const t = useT();
+  const isImage = chunk.modality === "image";
+  const mediaQuery = useQuery({
+    // 缩略图基本不变（媒体文件不会被就地改写，重建时 chunk id 会换），缓存期拉长。
+    queryKey: ["kb-chunk-media", chunk.id],
+    queryFn: () => rpcClient.kbChunkMedia({ chunkId: chunk.id }),
+    // 只有图片块才发请求；音视频 dataUrl 恒为 null，图标+文件名零请求。
+    enabled: isImage,
+    staleTime: 10 * 60_000,
+  });
+  const meta = MEDIA_META[chunk.modality as KbModality] ?? MEDIA_FALLBACK;
+  const Icon = meta.icon;
+  // 只在「请求已落定但拿不到图」时才算失败：首载 pending 期间 data 还是 undefined，
+  // 不能把 loading 态误判成失败而闪「缩略图加载失败」。
+  const failed = isImage && (mediaQuery.isError || (mediaQuery.isSuccess && mediaQuery.data?.dataUrl == null));
+  const name = mediaQuery.data?.fileName || docName;
+  return (
+    <button
+      type="button"
+      className="mt-1.5 flex w-fit max-w-full items-center gap-2.5 rounded-lg border bg-muted/30 px-2 py-1.5 text-left transition-colors hover:border-primary/40"
+      title={t("kb.docs.mediaChunk.openOriginal")}
+      onClick={() => {
+        if (chunk.mediaPath) void rpcClient.openPath({ path: chunk.mediaPath! });
+      }}
+    >
+      {isImage ? (
+        mediaQuery.data?.dataUrl ? (
+          <img
+            src={mediaQuery.data.dataUrl}
+            alt={name}
+            loading="lazy"
+            className="size-14 rounded-md object-cover"
+          />
+        ) : (
+          <span className="flex size-14 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground">
+            {mediaQuery.isFetching ? (
+              <Loader2Icon className="size-4 animate-spin" />
+            ) : (
+              <ImageIcon className="size-5" />
+            )}
+          </span>
+        )
+      ) : (
+        <span className="flex size-14 items-center justify-center rounded-md border bg-muted/40 text-muted-foreground">
+          <Icon className="size-5" />
+        </span>
+      )}
+      <span className="min-w-0 flex flex-col">
+        <span className="truncate text-xs font-medium">{name}</span>
+        <span className="text-[10px] leading-4 text-muted-foreground">
+          {t(meta.labelKey)}
+          {failed ? ` · ${t("kb.docs.mediaChunk.loadFailed")}` : ""}
+        </span>
+      </span>
+    </button>
+  );
 }
 
 /** 分块查看弹窗：序号 / 字符数 / 是否已向量化 / 内容预览。 */
@@ -119,7 +198,17 @@ function ChunksDialog({ doc, onClose }: { doc: KbDocView | null; onClose: () => 
                       {c.headingPath}
                     </p>
                   )}
-                  <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-5">{c.content}</p>
+                  {/* 媒体直嵌块：缩略图/图标替代正文位；OCR 文本非空才补一行预览（纯媒体块合法为空）。 */}
+                  {c.modality ? (
+                    <>
+                      <MediaChunkBlock chunk={c} docName={doc?.name ?? ""} />
+                      {c.content && (
+                        <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-5">{c.content}</p>
+                      )}
+                    </>
+                  ) : (
+                    <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-5">{c.content}</p>
+                  )}
                 </div>
               ))}
             </div>
@@ -317,10 +406,9 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
 
   const addFilesMutation = useMutation({
     mutationFn: async () => {
-      const { paths } = await rpcClient.openFileDialog({
-        allowedFileTypes:
-          "txt,md,markdown,json,csv,tsv,log,xml,yml,yaml,html,htm,pdf,png,jpg,jpeg,webp,tiff,bmp,heic,heif",
-      });
+      // 与 bun 侧目录导入白名单（KB_FOLDER_FILE_RE）同一来源：shared/knowledge.ts 扩展名常量。
+      const accept = [...KB_TEXT_EXT, ...KB_IMAGE_EXT, ...KB_AUDIO_EXT, ...KB_VIDEO_EXT].join(",");
+      const { paths } = await rpcClient.openFileDialog({ allowedFileTypes: accept });
       if (paths.length === 0) return;
       await rpcClient.kbAddFiles({ kbId: kb.id, paths });
     },

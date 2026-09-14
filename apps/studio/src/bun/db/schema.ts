@@ -1,5 +1,5 @@
 import { sqliteTable, text, int, real, unique, primaryKey, index } from "drizzle-orm/sqlite-core";
-import type { KbDocKind, KbDocStatus } from "../../shared/knowledge";
+import type { KbDocKind, KbDocStatus, KbModality } from "../../shared/knowledge";
 import type { MemoryStatus } from "../../shared/memory";
 
 export type PromptKind = "image" | "llm" | "video";
@@ -474,6 +474,10 @@ export const knowledgeBases = sqliteTable("knowledge_bases", {
   expandNeighbors: int("expand_neighbors").notNull().default(1),
   /** 是否允许经网关 / MCP 对外检索（0 = 只有本机界面、聊天、Agent 能用）。 */
   mcpExposed: int("mcp_exposed").notNull().default(1),
+  /** 模态能力声明（建库时快照、设置页可改）：勾选后该模态媒体文件走「媒体+OCR 文本联合嵌入」。 */
+  embedImage: int("embed_image").notNull().default(0),
+  embedAudio: int("embed_audio").notNull().default(0),
+  embedVideo: int("embed_video").notNull().default(0),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
   updatedAt: int("updated_at")
     .$defaultFn(() => Date.now())
@@ -532,6 +536,12 @@ export const knowledgeChunks = sqliteTable("knowledge_chunks", {
   /** 在来源正文中的字符偏移（UTF-16 code unit），引用可精确回位。 */
   charStart: int("char_start"),
   charEnd: int("char_end"),
+  /** 媒体直嵌块：模态（image/audio/video），文本块为 null。 */
+  modality: text("modality").$type<KbModality>(),
+  /** 媒体文件路径（按引用不复制）；文本块为 null。 */
+  mediaPath: text("media_path"),
+  /** 媒体单元序号：图片文件 0 / PDF 页 0 起 / 音视频 0。 */
+  mediaIndex: int("media_index"),
   /** 正文 SHA-256：文档重新索引时未变化的分块直接复用旧向量，不重复调嵌入服务。 */
   contentHash: text("content_hash"),
   /** Float32Array 的 base64；NULL = 未向量化。 */

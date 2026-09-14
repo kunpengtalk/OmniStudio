@@ -140,6 +140,11 @@ export function firstSplitShardPath(filePath: string): string | null {
   return existsSync(first) ? first : null;
 }
 
+/** 多模态投影文件的命名(mmproj-f16.gguf 等),与分片命名一样是「目录内配置」不是独立模型。 */
+export function isMmprojFile(name: string): boolean {
+  return /^mmproj-[^/]*\.gguf$/i.test(name);
+}
+
 /**
  * 加载目标路径的展示名（服务名 slug 的来源）：分批 GGUF 指向第一个分片，
  * 名字不该带 `-00001-of-00009`；目录 / 普通文件就是自己的名字。
@@ -314,7 +319,10 @@ function walkModelTree(root: string): {
         seenReal.add(real);
         visit(full, depth + 1);
       } else if (isModelWeightExt(name)) {
-        files.push({ path: full, size: st.size });
+        // mmproj-*.gguf 是嵌入模型的投影配件（嵌入实例启动时按同目录自动配对注入，
+        // 见 runtimes/llama.ts），不是能单独加载的模型，不单列一条。
+        // 仓库目录走 walkWeights 聚合、不经过这里 —— 市场页「已下载」判定不受损。
+        if (!isMmprojFile(name)) files.push({ path: full, size: st.size });
       }
     }
   };

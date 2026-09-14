@@ -17,7 +17,7 @@
  * 本模块不 import knowledge.ts（避免环）：变化通知走 onKbDataChanged，
  * 索引增量维护走 kb-index 的 peekKbIndex。
  */
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 import path from "path";
 import { and, asc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import * as cheerio from "cheerio";
@@ -25,7 +25,14 @@ import * as cheerio from "cheerio";
 import { db } from "./db";
 import { kbIngestJobs, knowledgeBases, knowledgeChunks, knowledgeDocs } from "./db/schema";
 import type { KnowledgeBaseRow, KnowledgeDocRow } from "./db/schema";
-import { callEmbeddings, decodeEmbedding, encodeEmbedding, type EmbeddingConfig } from "./embeddings";
+import {
+  callEmbeddings,
+  callEmbeddingsMultimodal,
+  decodeEmbedding,
+  encodeEmbedding,
+  type EmbeddingConfig,
+  type EmbeddingInput,
+} from "./embeddings";
 import { chunkContentHash, contextText, splitIntoChunksWithMeta } from "./kb-chunk";
 import { peekKbIndex } from "./kb-index";
 import { recordKbEvent } from "./kb-events";
@@ -33,7 +40,7 @@ import { getSetting, getActiveServerPort } from "./db/settings";
 import * as CloudProviders from "./cloud-providers";
 import { convertFileToImages, generate, type ModelEndpoint } from "./vllm";
 import { getLocalModelName } from "./vllm/model";
-import type { KbIngestJobView } from "../shared/knowledge";
+import { kbFileModality, type KbIngestJobView, type KbModality } from "../shared/knowledge";
 
 // ---------------------------------------------------------------------------
 // 变化通知（knowledge.ts 订阅后转发到 webview / 失效缓存）
@@ -135,6 +142,126 @@ async function extractWebText(url: string): Promise<string> {
   return title ? `# ${title}\n\n${text}` : text;
 }
 
+// ---------------------------------------------------------------------------
+// 媒体直嵌（图片 / 语音 / 视频）：勾选对应模态的库，媒体 + OCR 文本联合嵌入，
+// 按「媒体单元」落块（一图 / 一 PDF 页 / 一音视频文件一块）。
+// ---------------------------------------------------------------------------
+
+/** 音视频直嵌单文件上限：base64 1.33× + JSON.stringify 峰值 ≈ 2.7×，更大的文件请求内存尖峰不可接受。 */
+const KB_AV_MAX_BYTES = 100 * 1024 * 1024;
+
+/**
+ * 嵌入用图片重编码质量（Sharp jpeg）。与召回页缩略图的 q80 故意不同：这份 jpeg 是
+ * 送进嵌入模型的原图代理，质量优先；缩略图只求屏幕可见、体积优先。
+ */
+const KB_EMBED_JPEG_QUALITY = 85;
+
+/** 一个媒体直嵌单元（一块 = 一图 / 一 PDF 页 / 一音视频文件）。 */
+type MediaUnit = {
+  modality: KbModality;
+  mediaPath: string;
+  /** 页序（0 起）：图片文件恒 0 / PDF 逐页递增 / 音视频恒 0。 */
+  mediaIndex: number;
+  /** OCR 文本（图片逐页识别；音视频恒空串）。空串合法：纯媒体嵌入仍可检索（验收 ②）。 */
+  text: string;
+};
+
+/**
+ * 媒体直嵌分流：file 文档按「源文件扩展名 + 库三布尔」路由。
+ * 返回 null = 走今天的文本路径（extractFileText 原样）；返回数组 = 媒体直嵌路径——
+ * 根本不调用 extractFileText、不经过「未提取到正文内容」判空（媒体块合法空正文）。
+ * - 音视频：对应模态未勾选 → 明确报错指引；勾选 → 单单元、不走 OCR；
+ * - 图片（含 PDF）：勾「图片」→ 转图逐页，单页 OCR 失败降级空文本（不阻断入库，验收 ②）；
+ *   未勾 → null，与今天完全一致（OCR 文本管线，块行无 modality，验收 ③）。
+ */
+async function extractMediaUnits(doc: KnowledgeDocRow, kb: KnowledgeBaseRow): Promise<MediaUnit[] | null> {
+  const filePath = doc.sourcePath!;
+  const modality = kbFileModality(filePath);
+  if (modality === "text") return null;
+  // 未勾「图片」：与今天完全一致 —— 走 extractFileText 的 OCR 文本管线（验收 ③）
+  if (modality === "image" && !kb.embedImage) return null;
+
+  if (modality === "audio" || modality === "video") {
+    const flagOn = modality === "audio" ? kb.embedAudio : kb.embedVideo;
+    if (!flagOn) {
+      throw new Error(`该库未启用${modality === "audio" ? "语音" : "视频"}直嵌（知识库设置 → 模态能力）`);
+    }
+    const file = Bun.file(filePath);
+    if (file.size > KB_AV_MAX_BYTES) {
+      throw new Error(`音视频文件过大（${(file.size / 1024 / 1024).toFixed(1)}MB，上限 100MB）`);
+    }
+    // 音视频不走 OCR，单文件单块。媒体字节不在这里读：嵌入阶段 mediaEmbeddingInput
+    // 按行现读文件，100MB 尖峰全链路只发生一次，断点续跑 / 导入重嵌也走同一条恢复路径。
+    return [{ modality, mediaPath: filePath, mediaIndex: 0, text: "" }];
+  }
+
+  // 图片：转图（PDF 逐页）+ 逐页 OCR —— 单页失败降级空文本，不阻断整图入库（验收 ②）
+  const images = await convertFileToImages(Bun.file(filePath));
+  if (images.length === 0) throw new Error("无法解析该文件");
+  const endpoint = ocrEndpoint();
+  const units: MediaUnit[] = [];
+  for (let i = 0; i < images.length; i++) {
+    let text = "";
+    try {
+      const results = await generate([images[i]!], {}, endpoint);
+      const r = results[0]!;
+      if (r.error) throw new Error(r.errorMessage ?? "OCR 识别失败");
+      text = r.markdown.trim();
+    } catch {
+      // 降级：该页空文本、纯媒体嵌入；OCR 不可用时整图仍可入库
+    }
+    units.push({ modality: "image", mediaPath: filePath, mediaIndex: i, text });
+  }
+  return units;
+}
+
+/**
+ * 媒体行 → 多模态嵌入输入：按 mediaPath 现读文件（kind=embed 断点续跑与导入重嵌
+ * 都没有内存中的 units，只能从行上恢复；图片按 mediaIndex 重取对应页重编码 jpeg）。
+ * 联合文本 = contextText(docName, null, content)，OCR 文本非空才带（纯媒体嵌入退化路径）。
+ */
+async function mediaEmbeddingInput(
+  docName: string,
+  row: {
+    modality: KbModality | null;
+    mediaPath: string | null;
+    mediaIndex: number | null;
+    content: string;
+  },
+): Promise<EmbeddingInput> {
+  const modality = row.modality;
+  if (!modality || !row.mediaPath || !existsSync(row.mediaPath)) {
+    throw new Error(`媒体文件缺失：${row.mediaPath ?? "?"}`);
+  }
+  const jointText = () => (row.content.trim() ? contextText(docName, null, row.content) : undefined);
+
+  if (modality === "image") {
+    // page_range 只渲染目标页：N 页 PDF 的 N 个媒体行各取一页，避免每行全量渲染整份
+    // PDF（O(N²)）；普通图片分支忽略该参数。目标页即返回数组的唯一元素。
+    const images = await convertFileToImages(Bun.file(row.mediaPath), {
+      page_range: String(row.mediaIndex ?? 0),
+    });
+    const page = images[0];
+    if (!page) {
+      throw new Error(`媒体单元定位失败：页 ${row.mediaIndex ?? 0} 不存在于该文件`);
+    }
+    // 嵌入客户端按 image/jpeg 拼 data 前缀（Wave 1 接口约定），源图统一重编码 jpeg
+    const jpeg = await page.jpeg({ quality: KB_EMBED_JPEG_QUALITY }).toBuffer();
+    return { imageB64: jpeg.toString("base64"), text: jointText() };
+  }
+
+  // 音视频：整文件单块透传，同款 100MB 上限（转码/抽帧是显式 Non-Goal）
+  const file = Bun.file(row.mediaPath);
+  if (file.size > KB_AV_MAX_BYTES) {
+    throw new Error(`音视频文件过大（${(file.size / 1024 / 1024).toFixed(1)}MB，上限 100MB）`);
+  }
+  const b64 = Buffer.from(await file.arrayBuffer()).toString("base64");
+  const format = path.extname(row.mediaPath).replace(".", "").toLowerCase();
+  return modality === "audio"
+    ? { audioB64: b64, audioFormat: format, text: jointText() }
+    : { videoB64: b64, videoFormat: format, text: jointText() };
+}
+
 /** 正文内容 SHA-256（判断源是否真的变了）。 */
 export function textContentHash(text: string): string {
   return new Bun.CryptoHasher("sha256").update(text).digest("hex");
@@ -197,73 +324,85 @@ async function processDoc(docId: number, kind: IngestKind): Promise<void> {
 
   if (kind === "ingest") {
     setStatus("parsing");
-    let text: string;
+
+    // 媒体直嵌分流：发生在 extractFileText 之前 —— 媒体块合法空正文，根本不调用
+    // extractFileText、不经过下方「未提取到正文内容」判空（文本路径逐字节保持原样）。
+    let mediaUnits: MediaUnit[] | null = null;
+    let text = "";
     if (doc.kind === "note") text = doc.content ?? "";
     else if (doc.kind === "web") text = await extractWebText(doc.url ?? "");
     else {
       if (!doc.sourcePath || !existsSync(doc.sourcePath)) {
         throw new Error("源文件不存在（可能已被移动或删除）");
       }
-      text = await extractFileText(doc.sourcePath);
+      mediaUnits = await extractMediaUnits(doc, kb);
+      if (!mediaUnits) text = await extractFileText(doc.sourcePath);
     }
-    if (!text.trim()) throw new Error("未提取到正文内容");
 
-    const textHash = textContentHash(text);
-    const existingChunks = countChunks(docId);
-    const fullyEmbedded = !kb.embeddingModel || existingChunks - countMissingVectors(docId) === existingChunks;
-    if (doc.contentHash === textHash && existingChunks > 0 && doc.status === "ready" && fullyEmbedded) {
-      recordKbEvent({
-        kbId: doc.kbId,
-        docId,
-        action: "doc_skipped",
-        detail: { name: doc.name, reason: "内容未变化" },
+    if (mediaUnits) {
+      // —— 媒体直嵌路径：一单元一块，空正文合法；doc 级 skip 判定在 writeMediaChunks 内 ——
+      if (!writeMediaChunks(doc, kb, docId, mediaUnits)) return;
+    } else {
+      // —— 文本路径（原样零改动）——
+      if (!text.trim()) throw new Error("未提取到正文内容");
+
+      const textHash = textContentHash(text);
+      const existingChunks = countChunks(docId);
+      const fullyEmbedded = !kb.embeddingModel || existingChunks - countMissingVectors(docId) === existingChunks;
+      if (doc.contentHash === textHash && existingChunks > 0 && doc.status === "ready" && fullyEmbedded) {
+        recordKbEvent({
+          kbId: doc.kbId,
+          docId,
+          action: "doc_skipped",
+          detail: { name: doc.name, reason: "内容未变化" },
+        });
+        return;
+      }
+
+      setStatus("chunking", { charCount: text.length, contentHash: textHash });
+      const pieces = splitIntoChunksWithMeta(text, kb.chunkSize, kb.chunkOverlap);
+      if (pieces.length === 0) throw new Error("切片结果为空");
+
+      // 未变化的分块直接沿用旧向量：改一个段落不必为整篇文档重新付费嵌入
+      const reusable = new Map<string, string>();
+      const oldRows = db
+        .select({ hash: knowledgeChunks.contentHash, embedding: knowledgeChunks.embedding })
+        .from(knowledgeChunks)
+        .where(and(eq(knowledgeChunks.docId, docId), isNotNull(knowledgeChunks.embedding)))
+        .all();
+      for (const row of oldRows) {
+        if (row.hash && row.embedding) reusable.set(row.hash, row.embedding);
+      }
+
+      const rows = pieces.map((piece, i) => {
+        const hash = chunkContentHash(piece.content);
+        return {
+          kbId: doc.kbId,
+          docId,
+          seq: i + 1,
+          content: piece.content,
+          charCount: piece.content.length,
+          headingPath: piece.headingPath,
+          charStart: piece.charStart,
+          charEnd: piece.charEnd,
+          contentHash: hash,
+          embedding: reusable.get(hash) ?? null,
+        };
       });
-      return;
+      const reused = rows.filter((r) => r.embedding).length;
+
+      // 先删后插放在一个事务里：中途失败回滚到旧分块，不会留下半截索引
+      db.transaction((tx) => {
+        tx.delete(knowledgeChunks).where(eq(knowledgeChunks.docId, docId)).run();
+        for (const row of rows) tx.insert(knowledgeChunks).values(row).run();
+      });
+      db.update(knowledgeDocs)
+        .set({ chunkCount: rows.length, embeddedCount: reused, indexedAt: Date.now() })
+        .where(eq(knowledgeDocs.id, docId))
+        .run();
+      syncDocIndex(doc);
+      emitKbDataChanged({ kbId: doc.kbId, docId, kind: "chunks" });
     }
-
-    setStatus("chunking", { charCount: text.length, contentHash: textHash });
-    const pieces = splitIntoChunksWithMeta(text, kb.chunkSize, kb.chunkOverlap);
-    if (pieces.length === 0) throw new Error("切片结果为空");
-
-    // 未变化的分块直接沿用旧向量：改一个段落不必为整篇文档重新付费嵌入
-    const reusable = new Map<string, string>();
-    const oldRows = db
-      .select({ hash: knowledgeChunks.contentHash, embedding: knowledgeChunks.embedding })
-      .from(knowledgeChunks)
-      .where(and(eq(knowledgeChunks.docId, docId), isNotNull(knowledgeChunks.embedding)))
-      .all();
-    for (const row of oldRows) {
-      if (row.hash && row.embedding) reusable.set(row.hash, row.embedding);
-    }
-
-    const rows = pieces.map((piece, i) => {
-      const hash = chunkContentHash(piece.content);
-      return {
-        kbId: doc.kbId,
-        docId,
-        seq: i + 1,
-        content: piece.content,
-        charCount: piece.content.length,
-        headingPath: piece.headingPath,
-        charStart: piece.charStart,
-        charEnd: piece.charEnd,
-        contentHash: hash,
-        embedding: reusable.get(hash) ?? null,
-      };
-    });
-    const reused = rows.filter((r) => r.embedding).length;
-
-    // 先删后插放在一个事务里：中途失败回滚到旧分块，不会留下半截索引
-    db.transaction((tx) => {
-      tx.delete(knowledgeChunks).where(eq(knowledgeChunks.docId, docId)).run();
-      for (const row of rows) tx.insert(knowledgeChunks).values(row).run();
-    });
-    db.update(knowledgeDocs)
-      .set({ chunkCount: rows.length, embeddedCount: reused, indexedAt: Date.now() })
-      .where(eq(knowledgeDocs.id, docId))
-      .run();
-    syncDocIndex(doc);
-    emitKbDataChanged({ kbId: doc.kbId, docId, kind: "chunks" });
   } else if (countChunks(docId) === 0) {
     throw new Error("分块为空，无法只补向量");
   }
@@ -283,6 +422,97 @@ async function processDoc(docId: number, kind: IngestKind): Promise<void> {
     action: "doc_ingested",
     detail: { name: doc.name, chunks: countChunks(docId), embedded },
   });
+}
+
+/**
+ * 媒体直嵌路径的落块：一媒体单元一行 chunk。返回 false = doc 级 skip（内容指纹 +
+ * sourceMtime + sizeBytes 全部一致），上层直接 return，不再向量化。
+ */
+function writeMediaChunks(
+  doc: KnowledgeDocRow,
+  kb: KnowledgeBaseRow,
+  docId: number,
+  units: MediaUnit[],
+): boolean {
+  const st = statSync(doc.sourcePath!);
+  const mtime = Math.floor(st.mtimeMs);
+  const size = Number(st.size) || null;
+  // doc 级指纹 = 各单元行（modality|path|index|text）+ 源文件 mtime/size。mtime/size
+  // 进指纹是 v2 必改（Arch-2）：addFileDocs 重导时会刷新行上的 sourceMtime，仅凭
+  // 文本指纹会在「文件字节被替换而 OCR 输出巧合不变」时错误跳过 —— 旧向量对应的
+  // 是旧图/旧音频，必须重建。
+  const docHash = textContentHash(
+    units.map((u) => `${u.modality}|${u.mediaPath}|${u.mediaIndex}|${u.text}`).join("\n") +
+      `\n${mtime}|${size}`,
+  );
+
+  // doc 级 skip：内容指纹 + sourceMtime + sizeBytes 全部一致才跳过
+  const existingChunks = countChunks(docId);
+  const fullyEmbedded = !kb.embeddingModel || existingChunks - countMissingVectors(docId) === existingChunks;
+  if (
+    doc.contentHash === docHash &&
+    doc.sourceMtime === mtime &&
+    doc.sizeBytes === size &&
+    doc.status === "ready" &&
+    fullyEmbedded
+  ) {
+    recordKbEvent({
+      kbId: doc.kbId,
+      docId,
+      action: "doc_skipped",
+      detail: { name: doc.name, reason: "内容未变化" },
+    });
+    return false;
+  }
+
+  // 中间态只更新状态与 charCount（进度展示用）；contentHash 统一由下方落块后的
+  // 最终 update 落库 —— 本函数全程同步执行，没有需要提前持久化指纹的崩溃窗口。
+  db.update(knowledgeDocs)
+    .set({
+      status: "chunking",
+      error: null,
+      charCount: units.reduce((n, u) => n + u.text.length, 0),
+    })
+    .where(eq(knowledgeDocs.id, docId))
+    .run();
+  emitKbDataChanged({ kbId: doc.kbId, docId, kind: "status" });
+  // 媒体重建不按 chunk 哈希复用旧向量：走到重建即源文件已变，旧向量一律作废重嵌，
+  // 杜绝「字节换了、OCR 巧合不变」时按哈希错拿旧向量。
+  const rows = units.map((u, i) => ({
+    kbId: doc.kbId,
+    docId,
+    seq: i + 1,
+    content: u.text,
+    charCount: u.text.length,
+    headingPath: null,
+    charStart: null,
+    charEnd: null,
+    modality: u.modality,
+    mediaPath: u.mediaPath,
+    mediaIndex: u.mediaIndex,
+    contentHash: textContentHash(`${u.modality}|${u.mediaPath}|${u.mediaIndex}|${u.text}`),
+    embedding: null,
+  }));
+  // 先删后插放在一个事务里：中途失败回滚到旧分块，不会留下半截索引
+  db.transaction((tx) => {
+    tx.delete(knowledgeChunks).where(eq(knowledgeChunks.docId, docId)).run();
+    for (const row of rows) tx.insert(knowledgeChunks).values(row).run();
+  });
+  db.update(knowledgeDocs)
+    .set({
+      chunkCount: rows.length,
+      embeddedCount: 0,
+      charCount: units.reduce((n, u) => n + u.text.length, 0),
+      contentHash: docHash,
+      sourceMtime: mtime,
+      sizeBytes: size,
+      indexedAt: Date.now(),
+    })
+    .where(eq(knowledgeDocs.id, docId))
+    .run();
+  syncDocIndex(doc);
+  emitKbDataChanged({ kbId: doc.kbId, docId, kind: "chunks" });
+  return true;
 }
 
 /** 把该文档最新的分块灌进已加载的索引（没加载就跳过，下次查询整份加载）。 */
@@ -329,20 +559,46 @@ async function embedDocChunks(
   let embedded = 0;
   while (true) {
     const batch = db
-      .select({ id: knowledgeChunks.id, content: knowledgeChunks.content, headingPath: knowledgeChunks.headingPath })
+      .select({
+        id: knowledgeChunks.id,
+        content: knowledgeChunks.content,
+        headingPath: knowledgeChunks.headingPath,
+        modality: knowledgeChunks.modality,
+        mediaPath: knowledgeChunks.mediaPath,
+        mediaIndex: knowledgeChunks.mediaIndex,
+      })
       .from(knowledgeChunks)
       .where(and(eq(knowledgeChunks.docId, docId), isNull(knowledgeChunks.embedding)))
       .limit(32)
       .all();
     if (batch.length === 0) break;
 
-    const vectors = await callEmbeddings(
-      cfg,
-      batch.map((b) => contextText(docName, b.headingPath, b.content)),
-    );
+    // 混合批按 modality 分组：文本行照旧批 32 走 callEmbeddings（callEmbeddings 内部
+    // 还会按 32 分批）；媒体行逐条 callEmbeddingsMultimodal —— 一个媒体单元一个请求，
+    // 大文件内存尖峰可控、失败定位明确，向量按 chunk id 对位回填。
+    const vectors = new Map<number, Float32Array>();
+    const textRows = batch.filter((b) => !b.modality);
+    const mediaRows = batch.filter((b) => b.modality);
+    if (textRows.length > 0) {
+      const vecs = await callEmbeddings(cfg, textRows.map((b) => contextText(docName, b.headingPath, b.content)));
+      textRows.forEach((b, i) => vectors.set(b.id, vecs[i]!));
+    }
+    for (const row of mediaRows) {
+      // 输入构造（读文件 / 页定位 / 大小校验）在 try 外：缺文件、超限等自身语义的
+      // 错误不被误包成「服务拒绝」；嵌入调用失败才加指引前缀（验收 ⑤）。
+      const input = await mediaEmbeddingInput(docName, row);
+      try {
+        const vecs = await callEmbeddingsMultimodal(cfg, [input]);
+        vectors.set(row.id, vecs[0]!);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`嵌入服务拒绝了多模态输入，请检查该库的模态勾选与嵌入模型：${msg}`);
+      }
+    }
+
     const index = peekKbIndex(kbId);
     for (let i = 0; i < batch.length; i++) {
-      const vec = vectors[i]!;
+      const vec = vectors.get(batch[i]!.id)!;
       db.update(knowledgeChunks)
         .set({ embedding: encodeEmbedding(vec) })
         .where(eq(knowledgeChunks.id, batch[i]!.id))
@@ -360,7 +616,7 @@ async function embedDocChunks(
 
     // 首批成功后记录维度（后续批次据此校验）
     if (kb.embeddingDim == null) {
-      const dim = vectors[0]!.length;
+      const dim = vectors.get(batch[0]!.id)!.length;
       db.update(knowledgeBases).set({ embeddingDim: dim }).where(eq(knowledgeBases.id, kbId)).run();
       kb.embeddingDim = dim;
       cfg.embeddingDim = dim;
