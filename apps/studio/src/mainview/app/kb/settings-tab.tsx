@@ -236,7 +236,17 @@ function EnableEmbeddingButton({ kb }: { kb: KbView }) {
   const settings = data?.settings;
   const globalModel = (settings?.EMBEDDING_MODEL ?? "").trim();
   const globalBase = (settings?.EMBEDDING_BASE ?? "").trim();
-  const runningEmbed = served.some((m) => m.purpose === "embedding" && m.status === "running");
+  // 空 base 陷阱防护（与卡片侧 embeddingDefaultsPatch 同一规则）：全局地址留空但嵌入
+  // 实例在跑时，快照进库行的 base 预填该实例地址 —— 否则实例一停，解析会落回聊天
+  // 活动端口（knowledge.ts 自注的「列得出调不通」）。取最后一个 running 实例，与
+  // 主进程 getActiveEmbeddingPort() 同源。
+  let runningEmbedPort: number | undefined;
+  for (const m of served) {
+    if (m.purpose === "embedding" && m.status === "running") runningEmbedPort = m.port;
+  }
+  const runningEmbed = runningEmbedPort !== undefined;
+  const effectiveBase =
+    globalBase || (runningEmbedPort !== undefined ? `http://127.0.0.1:${runningEmbedPort}/v1` : "");
 
   const enableMutation = useMutation({
     mutationFn: async () => {
@@ -245,7 +255,7 @@ function EnableEmbeddingButton({ kb }: { kb: KbView }) {
         id: kb.id,
         patch: {
           embeddingModel: globalModel,
-          embeddingBase: globalBase,
+          embeddingBase: effectiveBase,
           embeddingApiKey: settings?.EMBEDDING_API_KEY ?? "",
         },
       });

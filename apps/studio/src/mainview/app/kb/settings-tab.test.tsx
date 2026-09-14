@@ -329,6 +329,31 @@ test("空配置库点「启用向量检索」：写入全局默认三字段并�
   await view.unmount();
 });
 
+test("有运行实例但全局地址留空 → 点击时快照预填实例地址（按钮路径的空 base 陷阱防护）", async () => {
+  settingsMap = { EMBEDDING_MODEL: "bge-m3", EMBEDDING_BASE: "", EMBEDDING_API_KEY: "" };
+  servedModels = [instance(18912, "embedding", "running")];
+  const view = await renderSettings(kbFixture({ embeddingModel: "", embeddingDim: null }));
+  expect(view.errors).toEqual([]);
+
+  const button = enableButton(view.container);
+  expect(button.disabled).toBe(false);
+
+  await act(async () => {
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(updates.length).toBe(1);
+  // 全局 base 为空但有 running 实例 → 快照进库行的 base 预填该实例地址：
+  // 否则实例一停，该库的解析会落回聊天活动端口（「列得出调不通」）。
+  expect(updates[0]!.patch.embeddingBase).toBe("http://127.0.0.1:18912/v1");
+  expect(embedMissingCalls).toEqual([{ kbId: 1 }]);
+  await view.unmount();
+});
+
 test("后端不可解析（无运行实例且无全局地址）→ 按钮禁用并提示（②-11）", async () => {
   settingsMap = { EMBEDDING_MODEL: "bge-m3", EMBEDDING_BASE: "" };
   servedModels = [];
@@ -349,8 +374,7 @@ test("后端不可解析（无运行实例且无全局地址）→ 按钮禁用�
   await view.unmount();
 });
 
-test("有运行中的嵌入实例（地址留空）→ 后端判据通过，按钮可用（9c）", async () => {
-  settingsMap = { EMBEDDING_MODEL: "bge-m3", EMBEDDING_BASE: "" };
+test("有运行中的嵌入实例（地址留空）→ 后端判据通过，按钮可用（9c）", async () => {  settingsMap = { EMBEDDING_MODEL: "bge-m3", EMBEDDING_BASE: "" };
   servedModels = [instance(18912, "embedding", "running")];
   const view = await renderSettings(kbFixture({ embeddingModel: "", embeddingDim: null }));
   expect(view.errors).toEqual([]);
