@@ -257,6 +257,41 @@ export const CLI_SECTIONS: CliSection[] = [
         zh: "在启动服务器 / 启动编码工具时直接指定模型：已装模型名、文件名、绝对路径或云端模型 id 都可以。省略时会自动选（只有一个模型）或弹出选择。",
         en: "Pin the model while starting a server or a coding tool: an installed name, file name, absolute path or cloud model id all work. Omitted, omi auto-selects when there is exactly one model, otherwise it asks.",
       },
+      {
+        cmd: "POST /v1/embeddings",
+        zh:
+          "嵌入服务（网关端点，应用在运行时可用）：OpenAI Embeddings 兼容，代理「运行中的嵌入实例」。" +
+          "先在模型页把嵌入类模型的类别设为「嵌入 Embedding」并启动，llama-server 会自动附加 --embeddings --pooling 以嵌入模式服务，监听嵌入端口段（EMBEDDING_PORT，默认 18190，段内顺延）。",
+        en:
+          "Embedding serving (a gateway endpoint, available while the app runs): OpenAI Embeddings compatible, proxying the running embedding instance. " +
+          "Set an installed model's category to Embedding in Models and start it; llama-server automatically adds --embeddings --pooling and listens on the embedding port segment (EMBEDDING_PORT, default 18190).",
+        notes: [
+          {
+            zh: "网关无运行实例时返回 503 与启动引导；经网关沿用网关 Key 与 Origin/Host 防线，直连实例无鉴权。",
+            en: "With no running instance the gateway returns 503 plus a startup hint; going through the gateway keeps its key and Origin/Host defenses, while the direct instance has no auth.",
+          },
+          {
+            zh: "llama-server 忽略请求里的 model 字段（只服务启动时加载的模型）；本地实例会忽略收到的 Authorization 头，无害。",
+            en: "llama-server ignores the request's model field (it only serves the model it was started with); the local instance also ignores any Authorization header, harmlessly.",
+          },
+          {
+            zh: "知识库「接口地址」留空时，嵌入 base 按 显式地址 > 运行中嵌入实例 > 云端 remote（VLLM_API_BASE）> 聊天活动端口 回退解析。",
+            en: "With the knowledge base URL left empty, the embedding base resolves by fallback: explicit URL > running embedding instance > cloud remote (VLLM_API_BASE) > active chat port.",
+          },
+        ],
+        examples: [
+          {
+            cmd: `curl http://127.0.0.1:10000/v1/embeddings -H "Content-Type: application/json" -d '{"input": ["第一条", "第二条"]}'`,
+            zh: "经网关向量化：无运行实例时返回 503；设了网关 Key 时加 -H \"Authorization: Bearer <key>\"。",
+            en: `Vectorize via the gateway: 503 when no instance runs; add -H "Authorization: Bearer <key>" when a gateway key is set.`,
+          },
+          {
+            cmd: `curl http://127.0.0.1:18190/v1/embeddings -H "Content-Type: application/json" -d '{"input": "要向量化的文本"}'`,
+            zh: "直连嵌入实例：实际端口以应用「服务器」页为准（段内被占会顺延）。",
+            en: "Vectorize against the instance directly; the actual port is shown on the app's Server page (it shifts within the segment when taken).",
+          },
+        ],
+      },
     ],
   },
   {

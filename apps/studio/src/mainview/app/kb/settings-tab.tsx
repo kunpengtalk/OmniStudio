@@ -330,7 +330,11 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
 
         <Section icon={<SparklesIcon className="size-3.5 text-muted-foreground" />} title={t("kb.settings.embedding")}>
           <p className="text-[11px] leading-4 text-muted-foreground">{t("kb.settings.embeddingHint")}</p>
-          <FormRow label={t("kb.settings.model")} htmlFor="kb-settings-embedding-model">
+          <FormRow
+            label={t("kb.settings.model")}
+            htmlFor="kb-settings-embedding-model"
+            hint={t("kb.settings.embeddingServeHint")}
+          >
             <div className="flex items-center gap-2">
               <KbModelSelect
                 id="kb-settings-embedding-model"

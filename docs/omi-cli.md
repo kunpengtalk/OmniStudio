@@ -127,6 +127,18 @@ omi serve --model <路径>  ·  omi launch <工具> --model <名称|路径|云�
 
 在启动服务器 / 启动编码工具时直接指定模型：已装模型名、文件名、绝对路径或云端模型 id 都可以。省略时会自动选（只有一个模型）或弹出选择。
 
+```bash
+POST /v1/embeddings
+```
+
+嵌入服务（网关端点，应用在运行时可用）：OpenAI Embeddings 兼容，代理「运行中的嵌入实例」。先在模型页把嵌入类模型的类别设为「嵌入 Embedding」并启动，llama-server 会自动附加 --embeddings --pooling 以嵌入模式服务，监听嵌入端口段（EMBEDDING_PORT，默认 18190，段内顺延）。
+- 网关无运行实例时返回 503 与启动引导；经网关沿用网关 Key 与 Origin/Host 防线，直连实例无鉴权。
+- llama-server 忽略请求里的 model 字段（只服务启动时加载的模型）；本地实例会忽略收到的 Authorization 头，无害。
+- 知识库「接口地址」留空时，嵌入 base 按 显式地址 > 运行中嵌入实例 > 云端 remote（VLLM_API_BASE）> 聊天活动端口 回退解析。
+
+`curl http://127.0.0.1:10000/v1/embeddings -H "Content-Type: application/json" -d '{"input": ["第一条", "第二条"]}'` — 经网关向量化：无运行实例时返回 503；设了网关 Key 时加 -H "Authorization: Bearer <key>"。
+`curl http://127.0.0.1:18190/v1/embeddings -H "Content-Type: application/json" -d '{"input": "要向量化的文本"}'` — 直连嵌入实例：实际端口以应用「服务器」页为准（段内被占会顺延）。
+
 ## 基准测速
 
 给当前模型（或云端服务商的模型）跑吞吐测速，结果写进应用里的「基准测试」记录。

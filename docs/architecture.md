@@ -256,11 +256,13 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 | API 网关 | `127.0.0.1:10000` | `GATEWAY_API_KEY`（可选） | 见下 |
 | 图片/媒体服务 | `127.0.0.1:19782` | **无** | 所有媒体产物出口 |
 | 推理服务 | 18080（llama）/ 8081（vLLM）/ 8082（SGLang）/ 18010（MLX） | — | 由 server-manager 管理 |
+| 嵌入服务 | 18190 起（`EMBEDDING_PORT`，段宽 100 顺延；实际端口以应用注册表为准） | — | 嵌入类模型经 llama-server `--embeddings` 服务，不接管聊天活动状态 |
 | ASR 服务 | 18081 | — | whisper-server |
 
 **网关**（`bun/gateway.ts`，2200+ 行）把本机能力包装成标准协议，供外部客户端与集成 CLI 使用：
 
 - 对话：`/v1/chat/completions`、`/v1/responses`、`/v1/messages`（Anthropic）三套协议，按模型名路由到本地推理服务或云端 API
+- 嵌入：`POST /v1/embeddings`，代理运行中的嵌入实例（模型页以嵌入类别启动的模型）；无实例 503 并带启动引导
 - 语音：`/v1/audio/speech`、`/v1/audio/transcriptions`（各有四级/多级回退链）
 - 图像：`/v1/images/generations`
 - 素材：`/v1/media`（只读检索本机素材库，与内置 Agent 的 `media_search` 同一份实现）
@@ -270,6 +272,46 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 网关端口被占时自动 +1..+19 顺延。**鉴权之前**先做 Origin 白名单与 Host 回环校验（防 DNS rebinding），并有 `isSelfBase` 检测防止把上游配成网关自己导致无限递归。
 
 **图片服务**无鉴权且提供文档图片、音频、视频，因此**必须只绑回环** —— 绑全网卡等于把用户文档和录音公开。它支持 HTTP Range（视频拖动播放必需），并给视频容器补了 MIME。
+
+**嵌入访问**：嵌入类模型（category=embedding）经应用启动时，llama-server 自动附加 `--embeddings --pooling <P>`（`EMBEDDING_POOLING`，默认 `last`，可选 `mean`/`none`/`cls`）进入嵌入模式，端口从嵌入段分配——`EMBEDDING_PORT` 基址（默认 18190）起、段宽 100 顺延（18190..18289），与聊天扫描区 18080..18179 互不重叠；嵌入实例不接管聊天活动状态，聊天模型照常服务。**段位是偏好而非契约**——实际端口以应用注册表为准：`resolveEmbeddingBackend()` 返回最近启动的运行实例地址（无实例时 null），「服务器」页可见。
+
+接入一律说 OpenAI Embeddings 方言，两种写法（直连时端口以「服务器」页为准）：
+
+```bash
+# 1) 直连嵌入实例：无鉴权
+curl http://127.0.0.1:18190/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"input": ["第一条", "第二条"]}'
+
+# 2) 经网关：设了 GATEWAY_API_KEY 时需带 Authorization 头；无运行实例时 503（响应体含启动引导）
+curl http://127.0.0.1:10000/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"model": "nomic-embed-text-v1.5", "input": "要向量化的文本"}'
+```
+
+```python
+# OpenAI SDK（Python）：两种写法只差 base_url；经网关时 api_key 用 GATEWAY_API_KEY，
+# 直连实例时 api_key 填任意非空字符串即可（实例不校验）
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:10000/v1", api_key=os.environ["GATEWAY_API_KEY"])
+r = client.embeddings.create(model="nomic-embed-text-v1.5", input=["第一条", "第二条"])
+```
+
+两个容易疑惑的行为：
+
+- **model 字段被忽略**：llama-server 的 /v1/embeddings 只服务它启动时加载的那个模型，请求里的 `model` 字段被忽略；网关把请求体原样转发，所以经网关与直连行为一致。
+- **本地实例会收到 Authorization 头**：KB / 记忆的嵌入调用直连本地实例时会带 `Authorization: Bearer <key>`
+  （知识库配置的 Key，未配置时回落全局 `VLLM_API_KEY`）；llama-server 不校验鉴权头，忽略之，无害。
+
+**KB 嵌入 base 回退链**：知识库「接口地址」（embeddingBase）留空时，按 **显式 base > 运行中嵌入实例 >
+SERVER_MODE=remote 的 VLLM_API_BASE > 聊天活动端口** 依次解析（embeddings.ts 的 `resolveEmbeddingBase`）。
+运行实例排在 remote 之上：remote 模式下默认嵌入后端指向云端 chat provider 本就出不了向量——用户显式启动
+本地嵌入实例是最强意图信号。
+
+**存量模型注意**：早期下载的嵌入模型可能已以 `chat` 类别持久化在模型库 meta（分类修复上线前的存量），
+**不会自愈**——meta 的 category 优先于文件名回退分类。修复旅程：模型详情页把类别改为「嵌入 Embedding」→
+重启模型（以嵌入模式重新拉起，落嵌入段）→ KB 嵌入选择器即可选中该模型（或经网关 /v1/embeddings 调用）。
+类别改键仅对市场下载模型开放；改类别本身只写 meta，重启后按新类别启动。
 
 ## 6. 前端
 
