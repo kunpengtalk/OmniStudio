@@ -3,6 +3,8 @@ import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 // 假的"上游"端口：本地推理服务器 + 云端 OpenAI 兼容 API。
 const LOCAL_PORT = 18099;
 const CLOUD_PORT = 18100;
+// 嵌入上游（/v1/embeddings 的反代目标）。
+const EMBED_PORT = 18101;
 
 // 桩掉网关依赖的后端与设置，让测试不依赖真实 db / 推理服务 / electrobun。
 let SERVER_STATUS: "stopped" | "running" = "running";
@@ -134,6 +136,16 @@ mock.module("./model-store", () => ({
       .replace(/[^a-z0-9_.-]/g, "-"),
 }));
 
+// 嵌入后端解析：网关 /v1/embeddings 的唯一后端来源是「运行中的嵌入实例」。
+// 展开真实模块再覆盖单函数 —— 模式同 ./server-manager：只写死用到的函数，
+// 避免「模块新增导出 → 单跑本文件时解析不到导出」。
+let EMBEDDING_BACKEND: string | null = null;
+const realModelServers = await import("./model-servers");
+mock.module("./model-servers", () => ({
+  ...realModelServers,
+  resolveEmbeddingBackend: () => EMBEDDING_BACKEND,
+}));
+
 // 在所有 mock 注册后动态加载被测模块（静态 import 会被提升到 mock 之前执行）。
 const { startGateway, stopGateway, getGatewayStatus, generateGatewayApiKey, resetModelRouteCaches } = await import("./gateway");
 
@@ -146,6 +158,18 @@ let lastCloudChat: Captured = null;
 // 经由函数读取：让 TS 以声明类型（而非收窄后的 null）参与类型检查。
 const readLocal = (): Captured => lastLocalChat;
 const readCloud = (): Captured => lastCloudChat;
+
+// 嵌入上游捕获：最后一次 /v1/embeddings 请求体（透传断言用）。
+let lastEmbedRequest: Record<string, unknown> | null = null;
+// 经由函数读取：让 TS 以声明类型（而非收窄后的 null）参与类型检查。
+const readEmbedRequest = (): Record<string, unknown> | null => lastEmbedRequest;
+// 固定的 OpenAI 形状嵌入响应（小数组代替真实 4096 维，断言形状透传）。
+const EMBED_UPSTREAM_BODY = {
+  object: "list",
+  data: [{ object: "embedding", index: 0, embedding: [0.1, -0.2, 0.3, 0.4] }],
+  model: "model/wemm-embed",
+  usage: { prompt_tokens: 3, total_tokens: 3 },
+};
 
 // 脚本化响应：下一次 /v1/chat/completions 直接返回预设 Response（用于模拟工具调用等上游输出）。
 let localOverride: Response | null = null;
@@ -229,6 +253,7 @@ function makeUpstream(
 
 let upstream: ReturnType<typeof Bun.serve> | null = null;
 let cloud: ReturnType<typeof Bun.serve> | null = null;
+let embed: ReturnType<typeof Bun.serve> | null = null;
 
 beforeAll(async () => {
   const takeLocal = () => {
@@ -249,6 +274,19 @@ beforeAll(async () => {
     port: CLOUD_PORT,
     fetch: makeUpstream("cloud-gpt", "hello-cloud", (c) => (lastCloudChat = c), takeCloud),
   });
+  // 嵌入上游：返回固定 OpenAI 形状的嵌入响应，并捕获请求体（透传断言用）。
+  embed = Bun.serve({
+    port: EMBED_PORT,
+    async fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/v1/embeddings" && req.method === "POST") {
+        const raw = await req.text();
+        lastEmbedRequest = raw ? JSON.parse(raw) : null;
+        return Response.json(EMBED_UPSTREAM_BODY);
+      }
+      return Response.json({ error: { message: "not found" } }, { status: 404 });
+    },
+  });
 
   const res = await startGateway();
   expect(res.ok).toBe(true);
@@ -258,6 +296,7 @@ afterAll(async () => {
   await stopGateway();
   upstream?.stop();
   cloud?.stop();
+  embed?.stop();
 });
 
 /** 解析 SSE 文本为 {event, data} 数组。 */
@@ -318,6 +357,7 @@ describe("gateway meta endpoints", () => {
     for (const p of [
       "/v1/models",
       "/v1/chat/completions",
+      "/v1/embeddings",
       "/v1/responses",
       "/v1/messages",
       "/v1/audio/speech",
@@ -579,6 +619,88 @@ describe("OpenAI-compatible endpoints", () => {
       SETTINGS.GATEWAY_PORT = "10123";
       await startGateway();
     }
+  });
+});
+
+describe("Embeddings endpoint (/v1/embeddings)", () => {
+  test("proxies to the running embedding instance, passing through request body and response shape", async () => {
+    lastLocalChat = null;
+    lastCloudChat = null;
+    lastEmbedRequest = null;
+    EMBEDDING_BACKEND = `http://127.0.0.1:${EMBED_PORT}`;
+    try {
+      const reqBody = { model: "model/wemm-embed", input: ["hello", "world"] };
+      const res = await fetch(`${GATEWAY_BASE}/v1/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reqBody),
+      });
+      expect(res.status).toBe(200);
+      // 响应体原样透传：OpenAI 形状（object / data[].embedding / usage）。
+      const body = (await res.json()) as typeof EMBED_UPSTREAM_BODY;
+      expect(body).toEqual(EMBED_UPSTREAM_BODY);
+      // 请求体原样转发到嵌入实例，且绝不转发给聊天后端。
+      expect(readEmbedRequest()).toEqual(reqBody);
+      expect(readLocal()).toBeNull();
+      expect(readCloud()).toBeNull();
+    } finally {
+      EMBEDDING_BACKEND = null;
+    }
+  });
+
+  test("with GATEWAY_API_KEY set, requests without a key get 401", async () => {
+    SETTINGS.GATEWAY_API_KEY = "test-key-123";
+    try {
+      const noAuth = await fetch(`${GATEWAY_BASE}/v1/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: "hi" }),
+      });
+      expect(noAuth.status).toBe(401);
+      const body = (await noAuth.json()) as { error: { type: string; code: string } };
+      expect(body.error.type).toBe("authentication_error");
+      expect(body.error.code).toBe("invalid_api_key");
+
+      // 带上正确 Key 后走正常链路（无嵌入实例 → 503 引导，而不是 401）。
+      const withKey = await fetch(`${GATEWAY_BASE}/v1/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authed("test-key-123").headers },
+        body: JSON.stringify({ input: "hi" }),
+      });
+      expect(withKey.status).toBe(503);
+    } finally {
+      SETTINGS.GATEWAY_API_KEY = "";
+    }
+  });
+
+  test("no embedding instance → 503 + actionable guidance", async () => {
+    lastEmbedRequest = null;
+    EMBEDDING_BACKEND = null;
+    const res = await fetch(`${GATEWAY_BASE}/v1/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ input: "hi" }),
+    });
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: { message: string; type: string } };
+    expect(body.error.message).toContain("嵌入服务未运行");
+    expect(body.error.message).toContain("模型页");
+    expect(body.error.type).toBe("server_error");
+    // 无实例时不得有任何转发发生。
+    expect(readEmbedRequest()).toBeNull();
+    expect(readLocal()).toBeNull();
+    expect(readCloud()).toBeNull();
+  });
+
+  test("GET /openapi.json contains /v1/embeddings, and the root endpoints list includes it", async () => {
+    const specRes = await fetch(`${GATEWAY_BASE}/openapi.json`);
+    expect(specRes.status).toBe(200);
+    const spec = (await specRes.json()) as { paths: Record<string, unknown> };
+    expect(Object.keys(spec.paths)).toContain("/v1/embeddings");
+
+    const rootRes = await fetch(`${GATEWAY_BASE}/`);
+    const root = (await rootRes.json()) as { endpoints: string[] };
+    expect(root.endpoints).toContain("POST /v1/embeddings");
   });
 });
 

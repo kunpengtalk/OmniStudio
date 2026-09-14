@@ -8,6 +8,7 @@ import * as Asr from "./asr";
 import { getTTSProviderConfig, listProviderModels, runTTSEdge } from "./voice";
 import { listInstalledModels, slugModelFileName } from "./model-store";
 import { getChatModelName, getLocalRequestModelId } from "./chat-model";
+import { resolveEmbeddingBackend } from "./model-servers";
 import { mergeSystemMessages } from "./chat-messages";
 import * as Memory from "./memory";
 import type { MemoryCategory } from "../shared/memory";
@@ -27,6 +28,7 @@ import { isLocalOrigin, isLoopbackHost } from "../shared/server-info";
  *   - GET  /openapi.json  OpenAPI 3.0 规范
  *   - GET  /v1/models     模型列表（本地 + 云端 + TTS/ASR 能力模型）
  *   - POST /v1/chat/completions        OpenAI Chat Completions（流式透传）
+ *   - POST /v1/embeddings              OpenAI Embeddings（代理运行中的嵌入实例）
  *   - POST /v1/responses               OpenAI Responses API（流式 + 非流式）
  *   - POST /v1/messages                Anthropic Messages API（流式 + 非流式）
  *   - POST /v1/audio/speech            语音合成 TTS（本地 → 推理服务器 → 云端 provider → Edge 在线）
@@ -1332,6 +1334,56 @@ async function handleChatCompletions(req: Request): Promise<Response> {
 }
 
 // ---------------------------------------------------------------------------
+// Embeddings
+// ---------------------------------------------------------------------------
+
+/**
+ * OpenAI Embeddings API（POST /v1/embeddings）。
+ *
+ * 后端固定为「运行中的嵌入实例」（进程内状态解析 —— 后端地址不来自请求参数，
+ * 不引入新的可配置上游，零新增信任面）。没有运行中的嵌入实例时返回 503 与
+ * 可操作引导，而不是转发给聊天后端（聊天模式的 llama-server 对本端点返回 501）。
+ * 嵌入是纯 JSON 请求 / 响应，无流式，直接透传请求体与上游响应。
+ */
+async function handleEmbeddings(req: Request): Promise<Response> {
+  const backend = resolveEmbeddingBackend();
+  if (!backend) {
+    return apiError(
+      503,
+      "嵌入服务未运行：先在模型页启动嵌入类别的模型，或在知识库设置里配置嵌入服务地址。",
+      "server_error",
+    );
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return apiError(400, "请求体必须是合法 JSON");
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${backend}/v1/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      // 嵌入是纯 JSON、无流式，超时参照本仓库嵌入调用先例（embeddings.ts）。
+      signal: AbortSignal.timeout(120_000),
+    });
+  } catch (e) {
+    return apiError(502, `转发失败：${errMsg(e)}`, "upstream_error");
+  }
+  if (!upstream.ok) return forwardUpstreamError(upstream, "嵌入服务返回错误");
+
+  const contentType = upstream.headers.get("content-type") ?? "application/json";
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: { "Content-Type": contentType, ...CORS },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // TTS / ASR
 // ---------------------------------------------------------------------------
 
@@ -1726,7 +1778,7 @@ function openApiSpec(): Record<string, unknown> {
       description:
         "OmniStudio 统一模型网关。聚合本机推理后端（llama.cpp / vLLM / SGLang、whisper-server、audio.cpp TTS）" +
         "与已配置的云端 OpenAI 兼容 API，提供 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三套对话协议，" +
-        "以及 TTS / ASR 端点，另有共享记忆与本地素材库（图片 / 语音 / 视频）查询端点。" +
+        "以及 TTS / ASR / Embeddings 端点，另有共享记忆与本地素材库（图片 / 语音 / 视频）查询端点。" +
         "设置 GATEWAY_API_KEY 后 /v1/* 端点需要 Bearer Token 或 x-api-key 鉴权。",
     },
     servers: [{ url: `http://${host}:${port}` }],
@@ -1824,6 +1876,36 @@ function openApiSpec(): Record<string, unknown> {
           responses: {
             "200": { description: "补全结果（非流式为 JSON，流式为 SSE）" },
             "503": { description: "没有可用的对话后端" },
+          },
+        },
+      },
+      "/v1/embeddings": {
+        post: {
+          summary: "文本向量化（OpenAI Embeddings API）",
+          description:
+            "OpenAI 兼容 Embeddings 接口，代理到运行中的嵌入实例（在模型页以嵌入类别启动的模型）。" +
+            "没有运行中的嵌入实例时返回 503 与启动引导。",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["input"],
+                  properties: {
+                    model: { type: "string", description: "嵌入模型 ID（上游按启动的模型返回，一般可省略）" },
+                    input: {
+                      oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+                      description: "要向量化的文本（单条或数组）",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "嵌入结果（OpenAI 形状：object/data[].embedding/usage）" },
+            "503": { description: "没有运行中的嵌入实例" },
           },
         },
       },
@@ -2173,6 +2255,7 @@ async function route(req: Request): Promise<Response> {
         endpoints: [
           "GET  /v1/models",
           "POST /v1/chat/completions",
+          "POST /v1/embeddings",
           "POST /v1/responses",
           "POST /v1/messages",
           "POST /v1/audio/speech",
@@ -2203,6 +2286,9 @@ async function route(req: Request): Promise<Response> {
     case "/v1/chat/completions":
       if (req.method !== "POST") return apiError(405, "Method Not Allowed");
       return handleChatCompletions(req);
+    case "/v1/embeddings":
+      if (req.method !== "POST") return apiError(405, "Method Not Allowed");
+      return handleEmbeddings(req);
     case "/v1/responses":
       if (req.method !== "POST") return apiError(405, "Method Not Allowed");
       return handleResponses(req);
