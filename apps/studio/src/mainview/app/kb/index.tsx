@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   FileTextIcon,
@@ -50,6 +50,38 @@ export function KbCreateDialog() {
   const [description, setDescription] = useState("");
   const [embeddingModel, setEmbeddingModel] = useState("");
   const [rerankModel, setRerankModel] = useState("");
+
+  // 探活全局默认嵌入配置（开窗后异步进行，弹窗照常秒开）：
+  // configured/reachable 分离 —— 未配置 = 与今天一致；已配置但不可达 = 留空 + hint。
+  // staleTime:0 + retry:false：每次开窗重新探活，探活失败也不重试打扰。
+  const probe = useQuery({
+    queryKey: ["kb-default-embed-probe"],
+    queryFn: () => rpcClient.kbDefaultEmbeddingProbe(),
+    enabled: open,
+    staleTime: 0,
+    retry: false,
+  });
+
+  // 弹窗常驻挂载（只有 DialogContent 卸载），state 会跨开合残留：
+  // 每次开窗重置两个模型字段（探活预填从中接管）；name/description 的残留是既有行为，不动。
+  // touchedRef：用户碰过嵌入下拉后，探活结果永不覆盖（含显式选「不使用」）。
+  const touchedRef = useRef(false);
+  useEffect(() => {
+    if (open) {
+      setEmbeddingModel("");
+      setRerankModel("");
+      touchedRef.current = false;
+    }
+  }, [open]);
+
+  // 一次性预填：探活结论落定（!isFetching 避免重开时拿上一次的陈旧缓存数据预填）、
+  // 可达且用户没碰过下拉时才填一次。用户已选（含「不使用」）时 touched 守卫直接否决。
+  useEffect(() => {
+    const d = probe.data;
+    if (open && !probe.isFetching && d?.configured && d.reachable && d.model && !touchedRef.current) {
+      setEmbeddingModel(d.model);
+    }
+  }, [probe.data, probe.isFetching, open]);
 
   // 弹窗打开时才拉模型候选（本地推理服务的 /v1/models + 设置里的云端模型）。
   const embedCandidates = useKbModelCandidates("embedding", "", "", open);
@@ -109,13 +141,22 @@ export function KbCreateDialog() {
             <KbModelSelect
               id="kb-embed-select"
               value={embeddingModel}
-              onChange={setEmbeddingModel}
+              onChange={(model) => {
+                // 用户主权：碰过下拉 = 字段被用户掌管，探活预填不再接管。
+                touchedRef.current = true;
+                setEmbeddingModel(model);
+              }}
               candidates={embedCandidates.data}
               loading={embedCandidates.isLoading}
             />
             <p className="text-[10px] leading-4 text-muted-foreground/80">
               {t("kb.create.embeddingHint")}
             </p>
+            {probe.data?.configured && !probe.data.reachable && !probe.isFetching && (
+              <p className="text-[10px] leading-4 text-muted-foreground/80">
+                {t("kb.create.embeddingDefaultUnreachable", { model: probe.data.model })}
+              </p>
+            )}
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="kb-rerank-select">{t("kb.create.rerank")}</Label>

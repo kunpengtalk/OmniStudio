@@ -346,6 +346,52 @@ describe("createKb 写入时快照（②-3）", () => {
   });
 });
 
+describe("probeDefaultEmbedding（新建弹窗预填的探活门控）", () => {
+  test("未配置 → 短路返回 configured:false，不发起任何嵌入请求", async () => {
+    // beforeEach 已清空 SETTINGS；假服务还挂着：若探活真的发了请求，hits 会记到
+    expect(await Knowledge.probeDefaultEmbedding()).toEqual({ configured: false });
+    expect(hits.filter((h) => h.path === "/v1/embeddings")).toEqual([]);
+  });
+
+  test("已配置 → 透传 testEmbedding 成功态（reachable / model / dim）", async () => {
+    SETTINGS.EMBEDDING_MODEL = "bge-m3";
+    SETTINGS.EMBEDDING_BASE = `http://127.0.0.1:${KB_BASE_PORT}/v1`;
+    const probe = await Knowledge.probeDefaultEmbedding();
+    expect(probe).toEqual({ configured: true, reachable: true, model: "bge-m3", dim: 32 });
+    // 请求真的落在全局默认的地址上（与建库后真实嵌入同一条解析链）
+    expect(hits.some((h) => h.port === KB_BASE_PORT && h.path === "/v1/embeddings")).toBe(true);
+  });
+
+  test("已配置但端点不可达 → reachable:false + error（不抛异常）", async () => {
+    SETTINGS.EMBEDDING_MODEL = "bge-m3";
+    SETTINGS.EMBEDDING_BASE = "http://127.0.0.1:19191/v1";
+    const probe = await Knowledge.probeDefaultEmbedding();
+    expect(probe).toEqual({
+      configured: true,
+      reachable: false,
+      model: "bge-m3",
+      error: expect.any(String),
+    });
+  });
+});
+
+describe("probeDefaultEmbedding 快照中立", () => {
+  test("显式传 embeddingModel=defaults.model 与不传 → createKb 落库三字段逐一相同", () => {
+    SETTINGS.EMBEDDING_MODEL = "bge-m3";
+    SETTINGS.EMBEDDING_BASE = `http://127.0.0.1:${KB_BASE_PORT}/v1`;
+    SETTINGS.EMBEDDING_API_KEY = "sk-global";
+
+    // 预填只改变 RPC 入参形态（隐式 undefined → 显式同名值），不改变落库行为：
+    // 快照的 base / key 都来自 globalEmbeddingDefaults，与 model 从哪来无关。
+    const explicit = makeKb({ name: "显式传默认模型", embeddingModel: "bge-m3" });
+    const omitted = makeKb({ name: "不传（预填等价形态）" });
+    expect(explicit.embeddingModel).toBe(omitted.embeddingModel);
+    expect(explicit.embeddingBase).toBe(omitted.embeddingBase);
+    expect(explicit.embeddingApiKey).toBe(omitted.embeddingApiKey);
+    expect(explicit.embeddingModel).toBe("bge-m3");
+  });
+});
+
 describe("既有 KB 端点零漂移（②-8）", () => {
   test("显式 model + 空 base：设全局 EMBEDDING_BASE 前后解析结果逐字节一致", () => {
     const kb = makeKb({ name: "既有库", embeddingModel: "bge-m3" });

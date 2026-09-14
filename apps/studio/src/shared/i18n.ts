@@ -979,6 +979,7 @@ const zh: Record<string, string> = {
   "kb.create.loadingModels": "获取模型列表…",
   "kb.create.embedding": "嵌入模型",
   "kb.create.embeddingHint": "可选。不使用 = 纯关键词检索；选择后文档入库时自动向量化，支持口语化提问。",
+  "kb.create.embeddingDefaultUnreachable": "已配置默认嵌入模型 {model}，但当前不可达；可启动嵌入服务后重新打开此窗口",
   "kb.create.rerank": "重排模型",
   "kb.create.rerankHint": "可选。检索结果经重排模型二次打分，精度更高但每次检索多一次请求。",
   "kb.create.submit": "新建知识库",
@@ -3250,6 +3251,8 @@ const en: Record<string, string> = {
   "kb.create.embedding": "Embedding model",
   "kb.create.embeddingHint":
     "Optional. Not used = keyword search only; a model enables semantic recall for conversational queries.",
+  "kb.create.embeddingDefaultUnreachable":
+    "Default embedding model {model} is configured but unreachable. Start the embedding service and reopen this dialog.",
   "kb.create.rerank": "Rerank model",
   "kb.create.rerankHint":
     "Optional. Candidates get a second-stage relevance pass for better precision (one extra request per search).",

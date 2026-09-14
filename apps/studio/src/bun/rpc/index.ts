@@ -2035,6 +2035,13 @@ export type AppRPC = {
         params: { base?: string; apiKey?: string; model: string };
         response: { ok: boolean; dim?: number; error?: string };
       };
+      /** 探测全局默认嵌入配置当前是否可用（新建弹窗预填门控；未配置不发起嵌入请求）。 */
+      kbDefaultEmbeddingProbe: {
+        params: undefined;
+        response:
+          | { configured: false }
+          | { configured: true; reachable: boolean; model: string; dim?: number; error?: string };
+      };
       kbEmbeddingModels: {
         params: { base?: string; apiKey?: string } | undefined;
         response: Knowledge.KbModelCandidates;
@@ -4453,6 +4460,9 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
       kbTestEmbedding: async ({ base, apiKey, model }) => {
         return Knowledge.testEmbedding({ base, apiKey, model });
+      },
+      kbDefaultEmbeddingProbe: async () => {
+        return Knowledge.probeDefaultEmbedding();
       },
       kbEmbeddingModels: async (params) => {
         return Knowledge.suggestEmbeddingModels(params ?? undefined);

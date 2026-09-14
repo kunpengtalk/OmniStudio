@@ -635,6 +635,22 @@ export async function testEmbedding(input: {
 }
 
 /**
+ * 探测全局默认嵌入配置当前是否真的可用（新建知识库弹窗的预填门控）：
+ * 未配置 → configured:false（与今天一致，弹窗不显示探活提示）；已配置则走与建库后
+ * 真实嵌入**同一条解析链**（testEmbedding → callEmbeddings → resolveEmbeddingBase）
+ * 真实嵌入一次。地址怎么解析是 bun 侧的事，webview 只消费 configured/reachable 结论。
+ */
+export async function probeDefaultEmbedding(): Promise<
+  | { configured: false }
+  | { configured: true; reachable: boolean; model: string; dim?: number; error?: string }
+> {
+  const defaults = globalEmbeddingDefaults();
+  if (!defaults.model) return { configured: false };
+  const r = await testEmbedding({ base: defaults.base, apiKey: defaults.apiKey, model: defaults.model });
+  return { configured: true, reachable: r.ok, model: defaults.model, dim: r.dim, error: r.error };
+}
+
+/**
  * 模型候选：按来源分组返回，界面据此把「本地推理服务」和「云端 API」分开列，
  * 并在本地服务上说明「无需 API Key」——地址/key 只在自定义时才需要填。
  */
