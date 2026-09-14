@@ -121,6 +121,7 @@ import type {
 } from "../../shared/modelscope";
 import * as ModelStore from "../model-store";
 import type { InstalledModel } from "../model-store";
+import { updateModelCategory } from "../model-category";
 import { getServerStats, type ServerStats } from "../stats";
 import {
   startBenchmark,
@@ -1172,6 +1173,11 @@ export type AppRPC = {
       setActiveModel: {
         params: { path: string };
         response: { ok: boolean; error?: string };
+      };
+      /** 更新已下载模型的类别（模型详情页下拉）：只对应用下载目录里的模型生效。 */
+      setModelCategory: {
+        params: { path: string; category: ModelCategory };
+        response: { ok: boolean; error?: string; model?: InstalledModel };
       };
       deleteLocalModel: {
         params: { path: string };
@@ -3395,6 +3401,10 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       setActiveModel: async ({ path }) => {
         return ModelStore.setActiveModel(path);
+      },
+
+      setModelCategory: async ({ path, category }) => {
+        return updateModelCategory(path, category);
       },
 
       scanModelDir: async ({ dir }) => {

@@ -73,6 +73,8 @@ type KbModelCandidatesView = {
   service: { base: string; kind: KbServiceKind };
   /** 一个都没认出该类模型、已回退成全量时为 true。 */
   relaxed?: boolean;
+  /** 服务端引导（i18n key）：本地模式没有运行中的嵌入服务时给出。 */
+  hint?: string;
 };
 
 /**
@@ -233,6 +235,13 @@ export function KbModelSelect({
         {candidates?.relaxed && total > 0 && (
           <div className="border-t px-2 py-2 text-[11px] leading-4 text-muted-foreground">
             {t("models.filter.relaxed")}
+          </div>
+        )}
+        {/* 服务端引导：本地模式没有运行中的嵌入服务 —— 本地组为空，先去模型页把
+            嵌入模型（类别为「嵌入」）启动起来，或改用云端 / 自定义地址。 */}
+        {candidates?.hint && (
+          <div className="border-t px-2 py-2 text-[11px] leading-4 text-muted-foreground">
+            {t(candidates.hint)}
           </div>
         )}
       </SelectContent>

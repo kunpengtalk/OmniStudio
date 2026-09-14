@@ -1050,6 +1050,8 @@ const zh: Record<string, string> = {
   "kb.settings.advancedOn": "已自定义",
   "kb.settings.noCandidates": "暂无候选模型：本地推理服务未运行，也未配置云端模型",
   "kb.settings.noCandidatesRemote": "该服务未返回模型列表：检查地址与密钥，或在设置里配置云端模型",
+  "kb.settings.noEmbeddingServer":
+    "本地暂无运行中的嵌入服务：先在模型页将嵌入模型的类别改为「嵌入 Embedding」并启动，或改用云端 / 自定义地址",
   "kb.settings.apiKey": "API Key",
   "kb.settings.embeddingBase": "接口地址",
   "kb.settings.embeddingBasePlaceholder": "https://api.example.com/v1",
@@ -1058,6 +1060,8 @@ const zh: Record<string, string> = {
   "kb.settings.keyHint": "仅保存在本机 SQLite，不会上传。",
   "kb.settings.keywordOnlyNote":
     "当前为纯关键词检索：口语化问法命中率有限。配置嵌入模型后需重新向量化。",
+  "kb.settings.embeddingServeHint":
+    "嵌入模型需先在模型页以「嵌入 Embedding」类别启动；本地嵌入服务未运行时，可展开「自定义接口与密钥」改用云端 / 自定义地址。",
 
   "kb.settings.rerank": "重排模型",
   "kb.settings.rerankHint":
@@ -1324,6 +1328,9 @@ const zh: Record<string, string> = {
   // 按分类筛选模型时，服务端清单里一个都没认出该分类 → 退回全量
   "models.filter.relaxed": "未能从服务返回的模型里识别出该类模型，已列出全部。",
   "models.noPresetInCat": "该分类暂无推荐模型，可从「我的模型」或市场搜索里下载。",
+  // 类别改键（模型详情页）：改完重启模型即按新类别服务
+  "models.categoryLabel": "模型类别",
+  "models.categoryManagedOnly": "仅市场下载的模型支持修改类别",
   "models.viewDetail": "查看详情",
   "models.noGguf": "未找到可下载的模型文件",
   "models.noFiles": "未找到可下载的模型文件",
@@ -3291,6 +3298,8 @@ const en: Record<string, string> = {
     "No candidates: the local inference server is not running and no cloud model is configured",
   "kb.settings.noCandidatesRemote":
     "This endpoint returned no model list: check the URL and key, or configure a cloud model in Settings",
+  "kb.settings.noEmbeddingServer":
+    "No local embedding server running: set an installed model's category to Embedding in Models and start it, or use a cloud / custom endpoint",
   "kb.settings.apiKey": "API Key",
   "kb.settings.embeddingBase": "Base URL",
   "kb.settings.embeddingBasePlaceholder": "https://api.example.com/v1",
@@ -3300,6 +3309,8 @@ const en: Record<string, string> = {
   "kb.settings.keyHint": "Stored only in local SQLite, never uploaded.",
   "kb.settings.keywordOnlyNote":
     "Currently keyword-only: conversational queries may miss. Pick an embedding model and re-embed.",
+  "kb.settings.embeddingServeHint":
+    "Start an embedding model in Models with the “Embedding” category first; when no local embedding server is running, expand “Custom endpoint & key” to use a cloud / custom endpoint.",
 
   "kb.settings.rerank": "Rerank model",
   "kb.settings.rerankHint":
@@ -3574,6 +3585,9 @@ const en: Record<string, string> = {
     "None of the models returned by the service could be identified as this kind, so the full list is shown.",
   "models.noPresetInCat":
     "No recommended models in this category yet — download one from My Models or the marketplace.",
+  // 类别改键（模型详情页）：改完重启模型即按新类别服务
+  "models.categoryLabel": "Model category",
+  "models.categoryManagedOnly": "Only models downloaded from the marketplace support category changes",
   "models.viewDetail": "View details",
   "models.noGguf": "No downloadable model files found.",
   "models.noFiles": "No downloadable model files found.",

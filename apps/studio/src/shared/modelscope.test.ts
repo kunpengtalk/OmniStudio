@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  classifyModel,
   classifyModelName,
   filterModelIds,
   isChatModelCategory,
   MODEL_CATEGORY_SETS,
   modelNameFromRef,
+  type MarketModel,
   type ModelCategory,
 } from "./modelscope";
 
@@ -154,5 +156,47 @@ describe("modelNameFromRef", () => {
   test("空值回落到 fallback", () => {
     expect(modelNameFromRef("", "—")).toBe("—");
     expect(modelNameFromRef("   ", "—")).toBe("—");
+  });
+});
+
+/**
+ * classifyModel = 标签优先 + 名字兜底，唯一的例外是插桩点（image 检查之后、
+ * chat 检查之前）：名字判定为嵌入时压制其后的弱 chat 标签组。平台常给嵌入
+ * 仓库挂 conversational / text-generation 这类宽泛标签，弱标签压过嵌入模型名
+ * 会让模型从嵌入选择器里消失。
+ */
+describe("classifyModel", () => {
+  const base = {
+    name: "",
+    description: "",
+    downloads: 0,
+    likes: 0,
+    license: "",
+    tasks: [],
+    fileSize: 0,
+    params: 0,
+    createdAt: "",
+    lastModified: "",
+    source: "modelscope",
+    formats: [],
+    fileCount: 0,
+  } satisfies Omit<MarketModel, "id" | "tags">;
+
+  const model = (id: string, tags: string[]): MarketModel => ({ ...base, id, tags });
+
+  test("弱 chat 标签不压嵌入模型名：WeMM-Embedding-9B + conversational → embedding", () => {
+    expect(classifyModel(model("WeMM/WeMM-Embedding-9B", ["conversational"]))).toBe("embedding");
+  });
+
+  test("插桩点锁位：名含 Embedding + 强标签 text-to-image → image（强标签仍胜过名字）", () => {
+    expect(classifyModel(model("Qwen/Qwen3-Embedding-8B", ["text-to-image"]))).toBe("image");
+  });
+
+  test("原行为不回归：纯 chat 名 + conversational → chat", () => {
+    expect(classifyModel(model("Qwen/Qwen3.5-4B", ["conversational"]))).toBe("chat");
+  });
+
+  test("原 tags-first 路径不回归：名含 Embedding + feature-extraction → embedding", () => {
+    expect(classifyModel(model("BAAI/bge-m3", ["feature-extraction"]))).toBe("embedding");
   });
 });

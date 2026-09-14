@@ -19,6 +19,14 @@ import { Button } from "@ui/button";
 import { Badge } from "@ui/badge";
 import { Spinner } from "@ui/spinner";
 import { ScrollArea } from "@ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@ui/select";
 import { useRouter } from "@stores/router";
 import { useModelDetailStore } from "@stores/model-detail";
 import { useModelDownloadStore } from "@stores/model-download";
@@ -30,7 +38,9 @@ import {
   engineSupports,
   fileBaseName,
   matchQuant,
+  safeRepoId,
   type MarketFile,
+  type ModelCategory,
   type ModelSource,
 } from "../../shared/modelscope";
 import type { ModelFileKind } from "../../shared/modelscope";
@@ -64,6 +74,17 @@ const SUPPORT_FILE_RE = /\.(json|model|txt|jinja|spm|ya?ml)$/i;
 function sortBySizeAsc<T extends { size: number; name: string }>(files: readonly T[]): T[] {
   return [...files].sort((a, b) => a.size - b.size || a.name.localeCompare(b.name));
 }
+
+/** 类别下拉的选项：可手动指定的分类（不含 all / other —— other 是「没认出来」，不可手选）。 */
+const CATEGORY_OPTIONS: ModelCategory[] = [
+  "chat",
+  "embedding",
+  "rerank",
+  "tts",
+  "asr",
+  "image",
+  "video",
+];
 
 function FileRow({
   file,
@@ -304,6 +325,31 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
     [installedData],
   );
 
+  // 类别改键（③-C2）：只对应用下载目录（managed）里的模型生效 —— setModelMeta 按仓库
+  // 目录写 `.vllm-meta.json`，外部目录 / HF 缓存模型没有这个目录，写了也落不了盘。
+  // repo 两侧都过 safeRepoId：市场页带斜杠的原始 repo id（`Qwen/X`）与安装列表里
+  // 编码过的仓库标签（`Qwen__X`）才能对上。
+  const installed = installedData?.models ?? [];
+  const managedEntries = useMemo(
+    () => installed.filter((m) => m.origin === "managed" && m.repo === safeRepoId(repo ?? "")),
+    [installed, repo],
+  );
+  const externalOnly = useMemo(
+    () =>
+      !managedEntries.length &&
+      installed.some((m) => m.origin !== "managed" && safeRepoId(m.repo) === safeRepoId(repo ?? "")),
+    [installed, managedEntries.length, repo],
+  );
+  const setCategoryMutation = useMutation({
+    // repo 目录下的多个文件条目共享同一份仓库元数据，用第一个条目的 path 落盘即可。
+    mutationFn: async (category: ModelCategory) => {
+      const res = await rpcClient.setModelCategory({ path: managedEntries[0]!.path, category });
+      if (!res.ok) throw new Error(res.error || "Failed to update category");
+      return res.model;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["installed-models"] }),
+  });
+
   // safetensors / MLX 这类"整仓库"模型：权重分片必须和 config / tokenizer 一起下载，
   // 否则 vLLM / SGLang / mlx-lm 加载不了（只下一个 safetensors 是跑不起来的）。
   const supportFiles = useMemo(
@@ -459,7 +505,39 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
                 host: MODEL_SOURCE_META[modelSource].host,
               })}
             </span>
+            {/* 类别改键：仅市场下载（应用下载目录）的模型支持 —— 已下载为 chat 的嵌入
+                模型改到这里再重启，就能被嵌入场景消费（KB 选择器只认嵌入实例）。 */}
+            {managedEntries.length > 0 && managedEntries[0] && (
+              <div className="ml-auto flex items-center gap-2">
+                <span className="text-[11px] text-muted-foreground">{t("models.categoryLabel")}</span>
+                <Select
+                  value={managedEntries[0].category}
+                  onValueChange={(v) => setCategoryMutation.mutate(v as ModelCategory)}
+                >
+                  <SelectTrigger size="sm" className="h-7 w-40 text-xs" disabled={setCategoryMutation.isPending}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {CATEGORY_OPTIONS.map((c) => (
+                        <SelectItem key={c} value={c} className="text-xs">
+                          {t(`models.cat.${c}`)}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </div>
+          {externalOnly && (
+            <p className="mt-2 text-[11px] text-muted-foreground/70">
+              {t("models.categoryManagedOnly")}
+            </p>
+          )}
+          {setCategoryMutation.error instanceof Error && (
+            <p className="mt-2 text-[11px] text-destructive">{setCategoryMutation.error.message}</p>
+          )}
         </div>
 
         {/* Files */}

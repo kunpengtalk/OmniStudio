@@ -16,6 +16,7 @@ import { db } from "./db";
 import { kbIngestJobs, knowledgeBases, knowledgeChunks, knowledgeDocs } from "./db/schema";
 import type { KnowledgeBaseRow, KnowledgeDocRow } from "./db/schema";
 import { callEmbeddings, embeddingHeaders, resolveEmbeddingBase, type EmbeddingConfig } from "./embeddings";
+import { resolveEmbeddingBackend } from "./model-servers";
 import { getKbIndex, invalidateKbIndex, kbIndexStats, peekKbIndex, type KbSearchIndex } from "./kb-index";
 import {
   awaitKbIdle,
@@ -635,6 +636,11 @@ export type KbModelCandidates = {
   service: { base: string; kind: "local" | "remote" | "custom" };
   /** 服务端返回的模型里一个都没认出该分类、已回退成全量时为 true。 */
   relaxed: boolean;
+  /**
+   * 界面引导（i18n key）：嵌入选择器本地模式没有运行中的嵌入服务时给出
+   * 「先去启动嵌入模型」的空态说明，其余情况不带。
+   */
+  hint?: string;
 };
 
 /** 设置里显式配置的云端模型（CLOUD_MODELS，支持字符串或 {id} 两种写法）。 */
@@ -684,16 +690,25 @@ export async function suggestModelCandidates(
   want: readonly ModelCategory[] = ["embedding"],
 ): Promise<KbModelCandidates> {
   const custom = Boolean(input?.base?.trim());
-  const base = resolveEmbeddingBase({ embeddingBase: input?.base ?? "" });
+  // 嵌入候选（want 只含 embedding）的本地组只认「运行中的嵌入实例」（resolveEmbeddingBackend）：
+  // resolveEmbeddingBase 的兜底链在没有嵌入实例时会落到聊天活动端口 —— 把聊天服务列出来的
+  // chat 模型混进嵌入候选只会误导（③-C3）。重排候选沿用原链路（rerank 服务独立部署）。
+  const embeddingOnly = want.length === 1 && want[0] === "embedding";
+  const embedBackend = embeddingOnly && !custom ? resolveEmbeddingBackend() : null;
+  const base = embedBackend ?? resolveEmbeddingBase({ embeddingBase: input?.base ?? "" });
   const kind: KbModelCandidates["service"]["kind"] = custom
     ? "custom"
     : getSetting("SERVER_MODE") === "remote"
       ? "remote"
       : "local";
-  const served = await fetchServedModels(base, input?.apiKey ?? "");
+  const isLocal = kind === "local";
+  // 嵌入选择器本地模式且没有嵌入实例：不再去拉聊天活动端口的 /v1/models，
+  // 本地组直接置空，service.base 也如实留空，引导文案由界面按 hint 呈现。
+  const noEmbedServer = embeddingOnly && isLocal && embedBackend == null;
+  const served = noEmbedServer ? [] : await fetchServedModels(base, input?.apiKey ?? "");
   const cloud = cloudModelIds();
-  const localRaw = kind === "local" ? served : [];
-  const remoteRaw = kind === "local" ? cloud : [...new Set([...served, ...cloud])].sort();
+  const localRaw = isLocal && !noEmbedServer ? served : [];
+  const remoteRaw = isLocal ? cloud : [...new Set([...served, ...cloud])].sort();
   // 一个服务商的 /v1/models 会把对话 / 语音 / 生图模型一起返回：按分类挑干净，
   // 挑不出任何一类（服务端命名认不出来）就保留全量并标记 relaxed，由界面说明。
   const local = filterModelIds(localRaw, want, { relax: true });
@@ -701,8 +716,9 @@ export async function suggestModelCandidates(
   return {
     local: local.ids,
     remote: remote.ids,
-    service: { base, kind },
+    service: { base: noEmbedServer ? "" : base, kind },
     relaxed: local.relaxed || remote.relaxed,
+    hint: noEmbedServer ? "kb.settings.noEmbeddingServer" : undefined,
   };
 }
 

@@ -892,6 +892,7 @@ export function classifyModel(model: MarketModel): ModelCategory {
     names.some((n) => tags.includes(n) || tags.includes(`task:${n}`) || tags.includes(`custom_tag:${n}`));
 
   // 平台声明的任务类型最准，先按标签定；标签缺失时再退回按名字判断。
+  // 唯一例外：名字判定为嵌入时不被弱 chat 标签压过（见下方插桩点说明）。
   if (hasTag("reranking", "text-ranking", "cross-encoder")) return "rerank";
   if (hasTag("feature-extraction", "sentence-similarity", "text-embedding")) return "embedding";
   if (hasTag("text-to-speech", "audio-generation", "text-to-audio")) return "tts";
@@ -900,9 +901,18 @@ export function classifyModel(model: MarketModel): ModelCategory {
   }
   if (hasTag("text-to-video", "image-to-video", "video-generation")) return "video";
   if (hasTag("text-to-image-synthesis", "text-to-image", "image-to-image")) return "image";
+
+  // 插桩点（image 检查之后、chat 检查之前）：名字判定为嵌入时压制其后的弱 chat
+  // 标签组 —— 平台常给嵌入仓库挂 conversational / text-generation 这类宽泛标签，
+  // 若让弱标签压过嵌入模型名，模型会从嵌入选择器里消失（如 WeMM-Embedding-9B）。
+  // rerank / tts / asr / video / image 等强标签检查都在上方，text-to-image 等强
+  // 标签仍然胜过名字里的 Embedding，不受本规则影响。
+  const byName = classifyModelName(id);
+  if (byName === "embedding") return "embedding";
+
   if (hasTag("text-generation", "image-text-to-text", "chat", "conversational")) return "chat";
 
-  const byName = classifyModelName(id);
+  // 标签没认出、名字认出来了 —— 按名字。
   if (byName !== "other") return byName;
 
   // 名字里没有命名特征、标签也没说清 —— 再看一眼简介里的口语化描述。
