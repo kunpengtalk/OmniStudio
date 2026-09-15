@@ -211,6 +211,30 @@ describe("callEmbeddingsMultimodal 形态自适应", () => {
     );
   });
 
+  // 空向量守卫：llama.cpp 对「多模态嵌入尚未支持的模型」（实测 WeMM-Embedding-9B +
+  // mmproj，b10964：HTTP 200、图像正常编码进 token，embedding 却全 null——null 进
+  // Float32Array 静默变 0、维度校验照过）必须在这里被拦下，否则零向量入库后检索永不
+  // 命中，是比直接报错恶劣得多的静默损坏。
+  test("空向量守卫:200 但 embedding 全 null → 明确报错,不静默产出零向量", async () => {
+    stubFetch({
+      props: () => propsWith(MARKER_A),
+      post: () => new Response(JSON.stringify({ data: [{ embedding: [null, null, null, null], index: 0 }] }), { status: 200 }),
+    });
+    await expect(callEmbeddingsMultimodal(cfgFor("http://mm-null-vec"), [{ imageB64: "QUJD" }])).rejects.toThrow(
+      "空向量",
+    );
+  });
+
+  test("零向量守卫:200 且 embedding 全 0 → 明确报错", async () => {
+    stubFetch({
+      props: () => propsWith(MARKER_A),
+      post: () => new Response(JSON.stringify({ data: [{ embedding: [0, 0, 0, 0], index: 0 }] }), { status: 200 }),
+    });
+    await expect(callEmbeddingsMultimodal(cfgFor("http://mm-zero-vec"), [{ imageB64: "QUJD" }])).rejects.toThrow(
+      "零向量",
+    );
+  });
+
   test("多 input 逐条发送:每请求 1 个 input;音频/视频 content part 形态正确", async () => {
     stubFetch({ props: () => reject(404, "no"), post: () => okVec() });
     const vecs = await callEmbeddingsMultimodal(cfgFor("http://mm-multi-content"), [

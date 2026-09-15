@@ -182,9 +182,27 @@ async function multimodalVectorFrom(cfg: EmbeddingConfig, res: Response): Promis
   if (data.length !== 1) throw new Error("嵌入服务返回数量与输入不一致");
   const first = data[0];
   if (!first || !Array.isArray(first.embedding)) throw new Error("嵌入服务返回格式异常");
+  // 空向量守卫：llama.cpp 对「多模态嵌入尚未支持的模型」（如 WeMM，上游
+  // ggml-org/llama.cpp#27938 仍是 open 的功能请求）会以 HTTP 200 返回全 null 的
+  // embedding——null 进 Float32Array 静默变 0，维度校验照过，零向量入库后检索
+  // 永不命中。在源头拒绝：任一元素为 null / 非有限数即报错，别等它变零。
+  if (first.embedding.some((v) => v == null || !Number.isFinite(v))) {
+    throw new Error(
+      "嵌入服务返回了空向量（请求被接受但 embedding 含空值）——该嵌入模型可能不支持多模态输入，请检查该库的模态勾选与嵌入模型",
+    );
+  }
   const arr = new Float32Array(first.embedding);
   if (cfg.embeddingDim != null && arr.length !== cfg.embeddingDim) {
     throw new Error(`向量维度不一致（${arr.length} ≠ ${cfg.embeddingDim}），请检查嵌入模型`);
+  }
+  // 零向量守卫：合法嵌入向量必非零（L2 归一化模型恒为 1）；全零 = 服务端没有
+  // 真正产出向量（典型：上游转换只做了「不崩」，嵌入头没接上）。
+  let normSq = 0;
+  for (let i = 0; i < arr.length; i++) normSq += arr[i]! * arr[i]!;
+  if (normSq === 0) {
+    throw new Error(
+      "嵌入服务返回了零向量——该嵌入模型可能不支持多模态输入，请检查该库的模态勾选与嵌入模型",
+    );
   }
   return arr;
 }
