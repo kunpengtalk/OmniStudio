@@ -99,10 +99,16 @@ function assertPathsFitTar(copy: Record<string, string>) {
     .map((path) => `  ${path.length}  ${path}`)
     .join("\n");
   if (process.platform === "darwin") {
-    // macOS 走 dmg 安装、不经过 tar 解包，历史上就一直带着超限路径（sharp 的 libvips
-    // dylib 与头文件最长 ~127），这里先只告警，不把 macOS 构建一并拦死。
+    // 为什么 macOS 只告警：这个 100 字符限制只卡 **Electrobun 的安装器**（Setup 用的是
+    // Zig std.tar，遇到长名记录直接 `error: TarUnsupportedFileType`），而 macOS 两边都不走它：
+    // 安装是 dmg（挂载复制，没有 tar 解包），自动更新是 `new Bun.Archive().extract()`
+    // —— Bun 自己的 tar 读取器，GNU long-name（`././@LongLink`）能正常还原（实测 124
+    // 字符条目名照常解出）。
+    // 而 macOS 包历史上就带着超限路径（sharp 的 libvips dylib 最长 ~127），要压到 100 以内
+    // 得改 sharp 的平台包布局 —— 收益是零，所以这里只告警，不把 macOS 构建一并拦死。
+    // 反过来：Windows / Linux 的安装器就是那个 Zig 解包器，超一条都装不上，必须失败。
     console.warn(
-      `[electrobun.config] 载荷里有 ${overlong.length} 条路径超过 ${MAX_TAR_PATH} 字符（macOS 走 dmg，暂不阻断）：\n${detail}`,
+      `[electrobun.config] 载荷里有 ${overlong.length} 条路径超过 ${MAX_TAR_PATH} 字符（macOS 走 dmg + Bun.Archive，暂不阻断）：\n${detail}`,
     );
     return;
   }
