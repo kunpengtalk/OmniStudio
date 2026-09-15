@@ -25,6 +25,7 @@ import {
   recall,
   buildChatContext,
   listChunks,
+  listDocs,
   KB_EXPORT_FORMAT,
   KB_EXPORT_VERSION,
   type KbExportPayload,
@@ -143,6 +144,101 @@ describe("listChunks 媒体列透传", () => {
     expect(image.mediaPath).toBe("/tmp/mix.png");
     expect(image.mediaIndex).toBe(0);
     expect(video.modality).toBe("video");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listDocs: firstImageChunkId 派生（行内缩略图入口，读时派生不落库）
+// ---------------------------------------------------------------------------
+
+describe("listDocs firstImageChunkId 派生", () => {
+  /**
+   * 造三份文档：A = 文本块在前 + 两个图片块在后（首图必须是图片块里的 min id，
+   * 不是全块 min id）；B = 纯文本块；C = 纯音视频块。返回各 doc id 与 A 的首图块 id。
+   */
+  function setupThumbKb(name: string): { kbId: number; docA: number; docB: number; docC: number; firstImageChunkId: number } {
+    const kb = createKb({ name });
+    const docA = db
+      .insert(knowledgeDocs)
+      .values({ kbId: kb.id, name: "photo.pdf", kind: "file", status: "ready" })
+      .returning()
+      .get();
+    const docB = db
+      .insert(knowledgeDocs)
+      .values({ kbId: kb.id, name: "notes.md", kind: "note", status: "ready" })
+      .returning()
+      .get();
+    const docC = db
+      .insert(knowledgeDocs)
+      .values({ kbId: kb.id, name: "clip.mp4", kind: "file", status: "ready" })
+      .returning()
+      .get();
+    const aChunks = db
+      .insert(knowledgeChunks)
+      .values([
+        { kbId: kb.id, docId: docA.id, seq: 1, content: "文字块", charCount: 3 },
+        { kbId: kb.id, docId: docA.id, seq: 2, content: "", charCount: 0, modality: "image", mediaPath: "/tmp/photo-2.png", mediaIndex: 0 },
+        { kbId: kb.id, docId: docA.id, seq: 3, content: "修正后的文本", charCount: 6, modality: "image", mediaPath: "/tmp/photo-3.png", mediaIndex: 1 },
+      ])
+      .returning({ id: knowledgeChunks.id })
+      .all();
+    // A 的首图 = 两个图片块里 id 较小者（seq 2），文本块 id 更小但不算
+    const firstImageChunkId = aChunks[1]!.id;
+    expect(firstImageChunkId).toBeLessThan(aChunks[2]!.id);
+
+    // B：纯文本块
+    db.insert(knowledgeChunks)
+      .values({ kbId: kb.id, docId: docB.id, seq: 1, content: "纯文本", charCount: 3 })
+      .run();
+    // C：纯音视频块（modality 过滤不误选）
+    db.insert(knowledgeChunks)
+      .values([
+        { kbId: kb.id, docId: docC.id, seq: 1, content: "", charCount: 0, modality: "audio", mediaPath: "/tmp/clip.mp3", mediaIndex: 0 },
+        { kbId: kb.id, docId: docC.id, seq: 2, content: "", charCount: 0, modality: "video", mediaPath: "/tmp/clip.mp4", mediaIndex: 0 },
+      ])
+      .run();
+
+    return { kbId: kb.id, docA: docA.id, docB: docB.id, docC: docC.id, firstImageChunkId };
+  }
+
+  test("多图片块文档 = min(图片块 id)（文本块 id 更小也不误选）", () => {
+    const { kbId, docA, firstImageChunkId } = setupThumbKb("首图库A");
+    const docs = listDocs(kbId);
+    const byId = new Map(docs.map((d) => [d.id, d]));
+    expect(byId.get(docA)!.firstImageChunkId).toBe(firstImageChunkId);
+  });
+
+  test("纯文本/无块文档 → null；纯音视频块文档 → null（modality 过滤不误选）", () => {
+    const { kbId, docB, docC } = setupThumbKb("首图库BC");
+    const docs = listDocs(kbId);
+    const byId = new Map(docs.map((d) => [d.id, d]));
+    expect(byId.get(docB)!.firstImageChunkId).toBeNull();
+    expect(byId.get(docC)!.firstImageChunkId).toBeNull();
+  });
+
+  test("跨库隔离：他库图片块不串扰（kb_id 过滤走 kbIdx 索引）", () => {
+    const { kbId, docA, firstImageChunkId } = setupThumbKb("首图库隔离");
+    // 另一个库插入带图片块的文档
+    const kb2 = createKb({ name: "另一个库" });
+    const docD = db
+      .insert(knowledgeDocs)
+      .values({ kbId: kb2.id, name: "other.png", kind: "file", status: "ready" })
+      .returning()
+      .get();
+    db.insert(knowledgeChunks)
+      .values({ kbId: kb2.id, docId: docD.id, seq: 1, content: "", charCount: 0, modality: "image", mediaPath: "/tmp/other.png", mediaIndex: 0 })
+      .run();
+
+    // 本库结果不受他库影响
+    const docs = listDocs(kbId);
+    const byId = new Map(docs.map((d) => [d.id, d]));
+    expect(byId.get(docA)!.firstImageChunkId).toBe(firstImageChunkId);
+
+    // 他库自己的文档能取到首图
+    const docs2 = listDocs(kb2.id);
+    expect(docs2).toHaveLength(1);
+    expect(docs2[0]!.firstImageChunkId).not.toBeNull();
+    expect(docs2[0]!.firstImageChunkId).not.toBe(firstImageChunkId);
   });
 });
 

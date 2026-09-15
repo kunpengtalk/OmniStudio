@@ -151,6 +151,107 @@ describe("chunkMediaForRpc", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  test("full 档：输出最长边 2048（>512），thumb 缺省仍 512", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kb-media-"));
+    const bigPath = join(dir, "big.png");
+    await sharp({ create: { width: 3000, height: 2000, channels: 3, background: { r: 50, g: 150, b: 250 } } })
+      .png()
+      .toFile(bigPath);
+
+    const { kbId, docId } = setupDoc("媒体 RPC full 档库");
+    const chunkId = insertChunk(kbId, docId, { seq: 1, modality: "image", mediaPath: bigPath });
+
+    // 缺省（= "thumb"）与显式 "thumb" 一致：最长边 512
+    const defaultView = await chunkMediaForRpc(chunkId);
+    const explicitThumbView = await chunkMediaForRpc(chunkId, "thumb");
+    for (const view of [defaultView, explicitThumbView]) {
+      const b64 = view.dataUrl!.slice("data:image/jpeg;base64,".length);
+      const meta = await sharp(Buffer.from(b64, "base64")).metadata();
+      expect(meta.format).toBe("jpeg");
+      expect(meta.width).toBe(512);
+      expect(meta.height).toBe(341); // 3000×2000 → 512×341
+    }
+
+    // full 档：最长边 2048（>512 且 ≤2048）
+    const fullView = await chunkMediaForRpc(chunkId, "full");
+    const b64 = fullView.dataUrl!.slice("data:image/jpeg;base64,".length);
+    const meta = await sharp(Buffer.from(b64, "base64")).metadata();
+    expect(meta.format).toBe("jpeg");
+    expect(meta.width).toBe(2048);
+    expect(meta.height).toBe(1365); // 3000×2000 → 2048×1365
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("新字段 mediaPath/text：图片块回 OCR 文本与原路径，纯媒体块 text 为空串", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kb-media-"));
+    const photoPath = join(dir, "scan.png");
+    await sharp({ create: { width: 400, height: 300, channels: 3, background: { r: 20, g: 20, b: 20 } } })
+      .png()
+      .toFile(photoPath);
+
+    const { kbId, docId } = setupDoc("媒体 RPC 新字段库");
+    const ocrChunkId = insertChunk(kbId, docId, {
+      seq: 1,
+      content: "OCR 识别的文本",
+      modality: "image",
+      mediaPath: photoPath,
+    });
+    const pureMediaChunkId = insertChunk(kbId, docId, { seq: 2, content: "", modality: "image", mediaPath: photoPath });
+
+    const ocrView = await chunkMediaForRpc(ocrChunkId);
+    expect(ocrView.mediaPath).toBe(photoPath);
+    expect(ocrView.text).toBe("OCR 识别的文本");
+
+    // 纯媒体块：content 列 NOT NULL，合法为空串 —— text 应为 "" 而非 null
+    const pureView = await chunkMediaForRpc(pureMediaChunkId);
+    expect(pureView.mediaPath).toBe(photoPath);
+    expect(pureView.text).toBe("");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("PDF 文件：sharp 解不了 → dataUrl null 降级，元信息照常（页块行为不变）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kb-media-"));
+    const pdfPath = join(dir, "page.pdf");
+    // 最小可识别 PDF：魔数 + 头部，正文残缺 —— 预编译 libvips 不支持 PDF 解码，
+    // 只验证「解码失败 → catch 兜底」这条降级链路
+    writeFileSync(
+      pdfPath,
+      "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\ntrailer<</Root 1 0 R/Size 3>>\n%%EOF\n",
+      "utf8",
+    );
+
+    const { kbId, docId } = setupDoc("媒体 RPC PDF 库");
+    // PDF 页块与图片块同为 image modality：页块走同一链路，降级行为必须一致
+    const chunkId = insertChunk(kbId, docId, { seq: 1, content: "页 OCR 文本", modality: "image", mediaPath: pdfPath });
+
+    const view = await chunkMediaForRpc(chunkId);
+    expect(view.dataUrl).toBeNull();
+    expect(view.modality).toBe("image");
+    expect(view.fileName).toBe("page.pdf");
+    expect(view.mediaPath).toBe(pdfPath);
+    expect(view.text).toBe("页 OCR 文本");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("音视频 full 档：同样 null 降级（既有行为回归）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kb-media-"));
+    const clipPath = join(dir, "clip.mp4");
+    writeFileSync(clipPath, "not-really-video");
+
+    const { kbId, docId } = setupDoc("媒体 RPC 视频库");
+    const chunkId = insertChunk(kbId, docId, { seq: 1, modality: "video", mediaPath: clipPath });
+
+    const view = await chunkMediaForRpc(chunkId, "full");
+    expect(view.dataUrl).toBeNull();
+    expect(view.modality).toBe("video");
+    expect(view.fileName).toBe("clip.mp4");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   test("不存在的 chunkId：抛「分块不存在」", async () => {
     await expect(chunkMediaForRpc(4_000_000_000)).rejects.toThrow("分块不存在");
   });

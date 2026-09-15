@@ -1035,6 +1035,11 @@ const zh: Record<string, string> = {
   "kb.docs.mediaChunk.openOriginal": "点击打开原文件",
   "kb.docs.mediaChunk.loadFailed": "缩略图加载失败",
 
+  // 图片查看弹窗（共享组件 KbImageViewer）。
+  "kb.viewer.title": "查看图片",
+  "kb.viewer.openExternal": "用系统程序打开",
+  "kb.viewer.zoomHint": "滚轮缩放 · 双击复位",
+
   "kb.status.pending": "等待中",
   "kb.status.parsing": "解析中",
   "kb.status.chunking": "切片中",
@@ -3333,6 +3338,11 @@ const en: Record<string, string> = {
   "kb.docs.mediaChunk.unknown": "Media",
   "kb.docs.mediaChunk.openOriginal": "Click to open the original file",
   "kb.docs.mediaChunk.loadFailed": "Failed to load thumbnail",
+
+  // Image viewer dialog (shared KbImageViewer component).
+  "kb.viewer.title": "View image",
+  "kb.viewer.openExternal": "Open with system app",
+  "kb.viewer.zoomHint": "Scroll to zoom · Double-click to reset",
 
   "kb.status.pending": "Pending",
   "kb.status.parsing": "Parsing",

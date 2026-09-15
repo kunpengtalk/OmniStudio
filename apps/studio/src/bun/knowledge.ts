@@ -115,6 +115,8 @@ export type KbDocView = {
   updatedAt: number | null;
   /** 摄取队列里的状态（排队中 / 第几次重试 / 下次重试时间）。 */
   job: KbIngestJobView | null;
+  /** 首个图片块 id（文档列表行内缩略图入口）；读时派生不落库，无图片块为 null。 */
+  firstImageChunkId: number | null;
 };
 
 export type KbChunkView = {
@@ -371,8 +373,15 @@ export function deleteKb(id: number): void {
 // 数据源
 // ---------------------------------------------------------------------------
 
-/** 文档行 → 视图（剔除笔记正文等大字段）。 */
-function toDocView(row: KnowledgeDocRow, job: KbIngestJobView | null = null): KbDocView {
+/**
+ * 文档行 → 视图（剔除笔记正文等大字段）。firstImageChunkId 仅 listDocs 列表路径
+ * 传真实值；其余生产点（单条返回的写入路径）缺省 null，行内缩略图入口不误报。
+ */
+function toDocView(
+  row: KnowledgeDocRow,
+  job: KbIngestJobView | null = null,
+  firstImageChunkId: number | null = null,
+): KbDocView {
   return {
     id: row.id,
     kbId: row.kbId,
@@ -391,6 +400,7 @@ function toDocView(row: KnowledgeDocRow, job: KbIngestJobView | null = null): Kb
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     job,
+    firstImageChunkId,
   };
 }
 
@@ -566,13 +576,28 @@ export function deleteDoc(id: number): void {
 
 export function listDocs(kbId: number): KbDocView[] {
   const jobs = docJobs(kbId);
+  // 行内缩略图入口：一条分组聚合出本库每个文档的首个图片块 id（读时派生不落库）。
+  // 必须带 kb_id = ? 过滤（走 kbIdx 索引，避免全库扫描）；modality='image' 保证
+  // 纯音视频块文档不会被误选。
+  const firstImageChunk = new Map(
+    db
+      .select({
+        docId: knowledgeChunks.docId,
+        firstId: sql<number>`min(${knowledgeChunks.id})`,
+      })
+      .from(knowledgeChunks)
+      .where(and(eq(knowledgeChunks.kbId, kbId), eq(knowledgeChunks.modality, "image")))
+      .groupBy(knowledgeChunks.docId)
+      .all()
+      .map((r) => [r.docId, Number(r.firstId)] as const),
+  );
   return db
     .select()
     .from(knowledgeDocs)
     .where(eq(knowledgeDocs.kbId, kbId))
     .orderBy(desc(knowledgeDocs.updatedAt))
     .all()
-    .map((row) => toDocView(row, jobs.get(row.id) ?? null));
+    .map((row) => toDocView(row, jobs.get(row.id) ?? null, firstImageChunk.get(row.id) ?? null));
 }
 
 export function listChunks(docId: number): KbChunkView[] {

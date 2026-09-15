@@ -10,7 +10,8 @@ import { Window } from "happy-dom";
  *      这里钉住 UI 侧不回退；
  *   2. 分块弹窗里的媒体直嵌块：图片懒加载缩略图（kbChunkMedia）、音视频图标+文件名
  *      （零请求）；纯媒体块正文为空不渲染空段落；
- *   3. 点击媒体块用既有 openPath RPC 打开原文件。
+ *   3. 媒体块点击：图片块打开查看器（KbImageViewer），音视频仍用 openPath 打开原文件；
+ *      文档行内缩略图（firstImageChunkId 非空）点击也打开查看器。
  */
 
 // happy-dom 提供真实 DOM（Radix 的 Dialog / Portal 需要），afterAll 还原全局。
@@ -65,12 +66,14 @@ const chunkMediaCalls: number[] = [];
 const openPathCalls: string[] = [];
 /** 当前用例的分块列表（kbChunks 返回它）。 */
 let chunksFixture: Array<Record<string, unknown>> = [];
+/** 当前用例的文档列表（null = 默认单文档 docFixture()）。 */
+let docsFixture: Array<Record<string, unknown>> | null = null;
 /** 当前用例的缩略图桩：null = 直接成功返回；可设为永不落定的挂起（loading 态用例）。 */
 let chunkMediaStub: (() => unknown) | null = null;
 
 mock.module("@lib/rpc", () => ({
   rpcClient: {
-    kbDocList: async () => ({ docs: [docFixture()] }),
+    kbDocList: async () => ({ docs: docsFixture ?? [docFixture()] }),
     openFileDialog: async (params: { allowedFileTypes?: string }) => {
       openFileDialogCalls.push(params);
       return { paths: [] as string[] };
@@ -84,10 +87,17 @@ mock.module("@lib/rpc", () => ({
     kbDocDelete: async () => ({ ok: true }),
     kbEmbedMissing: async () => ({ ok: true, embedded: 3 }),
     kbChunks: async () => ({ chunks: chunksFixture }),
-    kbChunkMedia: async (params: { chunkId: number }) => {
+    kbChunkMedia: async (params: { chunkId: number; size?: "thumb" | "full" }) => {
       chunkMediaCalls.push(params.chunkId);
       if (chunkMediaStub) return await chunkMediaStub();
-      return { dataUrl: "data:image/jpeg;base64,thumb", modality: "image", fileName: "pic.jpg" };
+      // KbChunkMediaView 全字段：mediaPath/text 供查看器「用系统程序打开」与 OCR 展示。
+      return {
+        dataUrl: "data:image/jpeg;base64,thumb",
+        modality: "image",
+        fileName: "pic.jpg",
+        mediaPath: "/tmp/kb-media/pic.jpg",
+        text: "OCR 文本",
+      };
     },
     openPath: async (params: { path: string }) => {
       openPathCalls.push(params.path);
@@ -139,8 +149,8 @@ function kbFixture(overrides: Partial<KbFixture> = {}): KbFixture {
   };
 }
 
-/** 默认数据源：一个已就绪的文件文档。 */
-function docFixture() {
+/** 默认数据源：一个已就绪的文件文档（overrides 可改 firstImageChunkId 等字段）。 */
+function docFixture(overrides: Record<string, unknown> = {}) {
   return {
     id: 7,
     kbId: 1,
@@ -159,6 +169,8 @@ function docFixture() {
     createdAt: null,
     updatedAt: null,
     job: null,
+    firstImageChunkId: null,
+    ...overrides,
   };
 }
 
@@ -167,6 +179,7 @@ beforeEach(() => {
   chunkMediaCalls.length = 0;
   openPathCalls.length = 0;
   chunksFixture = [];
+  docsFixture = null;
   chunkMediaStub = null;
   // store 是模块级单例：清掉上一个用例的快照。
   useServedStore.setState({ models: [], activeId: null, logs: {} });
@@ -312,15 +325,34 @@ test("分块弹窗：音视频图标+文件名零请求，图片拉缩略图，�
   // 音视频块（id 11）不发媒体请求；只有图片块（id 12）发一次
   expect(chunkMediaCalls).toEqual([12]);
 
-  // 点击媒体块 → openPath 打开原文件（先音频后图片）
+  // 音频块点击 → 仍用 openPath 打开原文件（行为不变）
   const mediaButtons = [...document.querySelectorAll("button")].filter(
     (b) => b.getAttribute("title") === zh("kb.docs.mediaChunk.openOriginal"),
   );
-  expect(mediaButtons.length).toBe(2);
+  expect(mediaButtons.length).toBe(1);
   await act(async () => {
     mediaButtons[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    mediaButtons[1]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   });
+  expect(openPathCalls).toEqual(["/tmp/kb-media/song.mp3"]);
+
+  // 图片块点击 → 打开查看器 Dialog（不再直接 openPath）
+  const imageButton = document.querySelector(`button[aria-label="${zh("kb.viewer.title")}"]`);
+  expect(imageButton).not.toBeNull();
+  await act(async () => {
+    imageButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await flush();
+  // 查看器打开：标题与「用系统程序打开」入口出现（系统打开由弹窗内按钮承担）
+  expect(document.body.textContent).toContain(zh("kb.viewer.title"));
+  const openExternal = [...document.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes(zh("kb.viewer.openExternal")),
+  );
+  expect(openExternal).toBeDefined();
+  await act(async () => {
+    openExternal!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await flush();
+  // 查看器内「用系统程序打开」→ openPath 原文件
   expect(openPathCalls).toEqual(["/tmp/kb-media/song.mp3", "/tmp/kb-media/pic.jpg"]);
   await view.unmount();
 });
@@ -380,6 +412,42 @@ test("未知 modality（恶意/损坏数据）渲染不崩：回退通用图标+
   expect(mediaButtons[0]!.textContent).toContain(zh("kb.docs.mediaChunk.unknown"));
   expect(mediaButtons[0]!.textContent).toContain("song.mp3");
   expect(chunkMediaCalls).toEqual([]);
+  await view.unmount();
+});
+
+test("文档行缩略图：firstImageChunkId 非空渲染缩略图，点击打开查看器", async () => {
+  docsFixture = [docFixture({ firstImageChunkId: 12 })];
+  const view = await mountDocs();
+  expect(view.errors).toEqual([]);
+  // thumb 档请求只发一次（与分块弹窗 MediaChunkBlock 同 queryKey 共享缓存）
+  expect(chunkMediaCalls).toEqual([12]);
+  const thumb = view.container.querySelector(`button[aria-label="${zh("kb.viewer.title")}"]`);
+  expect(thumb).not.toBeNull();
+  expect(thumb!.querySelector("img")).not.toBeNull();
+  // 点击缩略图 → 查看器打开（容器层单实例，portaled 到 body）
+  await act(async () => {
+    thumb!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await flush();
+  expect(document.body.textContent).toContain(zh("kb.viewer.title"));
+  expect(document.body.textContent).toContain(zh("kb.viewer.openExternal"));
+  await view.unmount();
+});
+
+test("非图片文档行无缩略图请求与缩略图按钮（enabled 门控 + 行为不变）", async () => {
+  docsFixture = [
+    docFixture(),
+    docFixture({ id: 8, name: "notes.txt", firstImageChunkId: 12 }),
+  ];
+  const view = await mountDocs();
+  expect(view.errors).toEqual([]);
+  // 只有 firstImageChunkId 非空的 doc 8 发一次请求；无图片块的 doc 7 零请求
+  expect(chunkMediaCalls).toEqual([12]);
+  // 缩略图按钮只有 doc 8 有；doc 7 保留类型图标位
+  const thumbs = view.container.querySelectorAll(`button[aria-label="${zh("kb.viewer.title")}"]`);
+  expect(thumbs.length).toBe(1);
+  const iconSpans = view.container.querySelectorAll("span.size-9");
+  expect(iconSpans.length).toBe(1);
   await view.unmount();
 });
 

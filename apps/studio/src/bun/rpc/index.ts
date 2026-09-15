@@ -2099,10 +2099,10 @@ export type AppRPC = {
         params: undefined;
         response: { ok: boolean; path: string };
       };
-      /** 分块媒体表示：图片=缩略 dataUrl；音视频/文本/文件缺失 dataUrl=null（UI 图标兜底；打开原文件复用 openPath）。 */
+      /** 分块媒体表示：图片=按 size 档位缩放的 dataUrl（thumb 512/full 2048）；音视频/文本/文件缺失 dataUrl=null（UI 图标兜底；打开原文件复用 openPath）。 */
       kbChunkMedia: {
-        params: { chunkId: number };
-        response: { dataUrl: string | null; modality: KbModality | null; fileName: string };
+        params: { chunkId: number; size?: "thumb" | "full" };
+        response: { dataUrl: string | null; modality: KbModality | null; fileName: string; mediaPath: string | null; text: string | null };
       };
       /** 全局备份 / 恢复（设置 → 数据 → 备份与恢复）。 */
       backupList: {
@@ -4531,8 +4531,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         }
       },
 
-      kbChunkMedia: async ({ chunkId }) => {
-        return chunkMediaForRpc(chunkId);
+      kbChunkMedia: async ({ chunkId, size }) => {
+        return chunkMediaForRpc(chunkId, size);
       },
 
       // ---------------------------------------------------------------------

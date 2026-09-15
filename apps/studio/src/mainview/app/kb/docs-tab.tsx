@@ -35,6 +35,7 @@ import { Textarea } from "@ui/textarea";
 import { useT } from "@stores/ui-lang";
 import { KB_TEXT_EXT, KB_IMAGE_EXT, KB_AUDIO_EXT, KB_VIDEO_EXT } from "@/shared/knowledge";
 import { cn } from "@/mainview/lib/utils";
+import { KbImageViewer } from "@/mainview/components/kb-image-viewer";
 import type { KbView, KbDocView, KbChunkView } from "@/bun/knowledge";
 import type { KbModality } from "@/shared/knowledge";
 
@@ -91,9 +92,19 @@ function formatBytes(n: number | null): string | null {
 /**
  * 媒体直嵌块展示：图片懒加载缩略图（kbChunkMedia 的 JPEG data URL，长 staleTime 缓存）；
  * 音视频不调 RPC，直接类型图标 + 文件名。图片拉取失败 / 文件缺失回退同款图标。
- * 点击用既有 openPath RPC 打开原文件。
+ * 点击：图片块打开查看器（KbImageViewer，full 档大图，「用系统程序打开」由查看器底部
+ * 按钮承担）；音视频维持 openPath 打开原文件。
  */
-function MediaChunkBlock({ chunk, docName }: { chunk: KbChunkView; docName: string }) {
+function MediaChunkBlock({
+  chunk,
+  docName,
+  onOpenImage,
+}: {
+  chunk: KbChunkView;
+  docName: string;
+  /** 图片块点击回调（查看器由调用方状态受控）；音视频不走它。 */
+  onOpenImage: (chunkId: number) => void;
+}) {
   const t = useT();
   const isImage = chunk.modality === "image";
   const mediaQuery = useQuery({
@@ -114,8 +125,14 @@ function MediaChunkBlock({ chunk, docName }: { chunk: KbChunkView; docName: stri
     <button
       type="button"
       className="mt-1.5 flex w-fit max-w-full items-center gap-2.5 rounded-lg border bg-muted/30 px-2 py-1.5 text-left transition-colors hover:border-primary/40"
-      title={t("kb.docs.mediaChunk.openOriginal")}
+      title={isImage ? t("kb.viewer.title") : t("kb.docs.mediaChunk.openOriginal")}
+      aria-label={isImage ? t("kb.viewer.title") : t("kb.docs.mediaChunk.openOriginal")}
       onClick={() => {
+        // 图片块→查看器（「用系统程序打开」由查看器底部按钮承担）；音视频→openPath。
+        if (isImage) {
+          onOpenImage(chunk.id);
+          return;
+        }
         if (chunk.mediaPath) void rpcClient.openPath({ path: chunk.mediaPath! });
       }}
     >
@@ -155,6 +172,9 @@ function MediaChunkBlock({ chunk, docName }: { chunk: KbChunkView; docName: stri
 /** 分块查看弹窗：序号 / 字符数 / 是否已向量化 / 内容预览。 */
 function ChunksDialog({ doc, onClose }: { doc: KbDocView | null; onClose: () => void }) {
   const t = useT();
+  // 弹窗层本地查看器状态：媒体块图片点击 → 查看器（音视频维持 openPath）。
+  // ChunksDialog 常驻不卸载，关闭时必须复位，否则下次打开会闪现上一文档残留的查看器。
+  const [viewerChunkId, setViewerChunkId] = useState<number | null>(null);
   const { data, isLoading } = useQuery({
     queryKey: ["kb-chunks", doc?.id],
     queryFn: () => rpcClient.kbChunks({ docId: doc!.id }),
@@ -162,64 +182,75 @@ function ChunksDialog({ doc, onClose }: { doc: KbDocView | null; onClose: () => 
   });
 
   return (
-    <Dialog open={doc != null} onOpenChange={(next) => !next && onClose()}>
-      <DialogContent className="max-h-[80vh] sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle className="truncate pr-6">{t("kb.chunks.title")}</DialogTitle>
-          <DialogDescription className="truncate">{doc?.name}</DialogDescription>
-        </DialogHeader>
-        <div className="-mx-1 max-h-[55vh] overflow-y-auto px-1">
-          {isLoading ? (
-            <div className="flex justify-center py-8">
-              <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
-            </div>
-          ) : (data?.chunks ?? []).length === 0 ? (
-            <p className="py-8 text-center text-xs text-muted-foreground">{t("kb.chunks.empty")}</p>
-          ) : (
-            <div className="flex flex-col gap-2">
-              {data!.chunks.map((c) => (
-                <div key={c.id} className="rounded-lg border px-3 py-2">
-                  <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                    <span className="font-mono">#{c.seq}</span>
-                    <span className="tabular-nums">
-                      {c.charCount} {t("kb.chunks.chars")}
-                    </span>
-                    <span
-                      className={cn(
-                        "ml-auto flex items-center gap-1",
-                        c.embedded ? "text-emerald-600 dark:text-emerald-400" : "",
-                      )}
-                    >
-                      {c.embedded ? t("kb.chunks.embedded") : t("kb.chunks.notEmbedded")}
-                    </span>
+    <>
+      <Dialog
+        open={doc != null}
+        onOpenChange={(next) => {
+          if (!next) {
+            setViewerChunkId(null);
+            onClose();
+          }
+        }}
+      >
+        <DialogContent className="max-h-[80vh] sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="truncate pr-6">{t("kb.chunks.title")}</DialogTitle>
+            <DialogDescription className="truncate">{doc?.name}</DialogDescription>
+          </DialogHeader>
+          <div className="-mx-1 max-h-[55vh] overflow-y-auto px-1">
+            {isLoading ? (
+              <div className="flex justify-center py-8">
+                <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
+              </div>
+            ) : (data?.chunks ?? []).length === 0 ? (
+              <p className="py-8 text-center text-xs text-muted-foreground">{t("kb.chunks.empty")}</p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {data!.chunks.map((c) => (
+                  <div key={c.id} className="rounded-lg border px-3 py-2">
+                    <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                      <span className="font-mono">#{c.seq}</span>
+                      <span className="tabular-nums">
+                        {c.charCount} {t("kb.chunks.chars")}
+                      </span>
+                      <span
+                        className={cn(
+                          "ml-auto flex items-center gap-1",
+                          c.embedded ? "text-emerald-600 dark:text-emerald-400" : "",
+                        )}
+                      >
+                        {c.embedded ? t("kb.chunks.embedded") : t("kb.chunks.notEmbedded")}
+                      </span>
+                    </div>
+                    {c.headingPath && (
+                      <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={c.headingPath}>
+                        {c.headingPath}
+                      </p>
+                    )}
+                    {/* 媒体直嵌块：缩略图/图标替代正文位；OCR 文本非空才补一行预览（纯媒体块合法为空）。 */}
+                    {c.modality ? (
+                      <>
+                        <MediaChunkBlock chunk={c} docName={doc?.name ?? ""} onOpenImage={setViewerChunkId} />
+                        {c.content && (
+                          <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-5">{c.content}</p>
+                        )}
+                      </>
+                    ) : (
+                      <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-5">{c.content}</p>
+                    )}
                   </div>
-                  {c.headingPath && (
-                    <p className="mt-0.5 truncate text-[10px] text-muted-foreground" title={c.headingPath}>
-                      {c.headingPath}
-                    </p>
-                  )}
-                  {/* 媒体直嵌块：缩略图/图标替代正文位；OCR 文本非空才补一行预览（纯媒体块合法为空）。 */}
-                  {c.modality ? (
-                    <>
-                      <MediaChunkBlock chunk={c} docName={doc?.name ?? ""} />
-                      {c.content && (
-                        <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-5">{c.content}</p>
-                      )}
-                    </>
-                  ) : (
-                    <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-xs leading-5">{c.content}</p>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
+                ))}
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+      <KbImageViewer chunkId={viewerChunkId} open={viewerChunkId != null} onClose={() => setViewerChunkId(null)} />
+    </>
   );
 }
 
-/** 一行数据源：类型图标 + 名称状态 + 向量进度 + 元信息 + 悬浮操作。 */
+/** 一行数据源：首图缩略图/类型图标 + 名称状态 + 向量进度 + 元信息 + 悬浮操作。 */
 function DocRow({
   doc,
   embeddingEnabled,
@@ -228,6 +259,7 @@ function DocRow({
   onRetry,
   onDelete,
   busy,
+  onOpenImage,
 }: {
   doc: KbDocView;
   embeddingEnabled: boolean;
@@ -236,17 +268,66 @@ function DocRow({
   onRetry: () => void;
   onDelete: () => void;
   busy: boolean;
+  /** 行内缩略图点击回调（查看器由容器层单实例受控）。 */
+  onOpenImage: (chunkId: number) => void;
 }) {
   const t = useT();
   const style = KIND_STYLES[doc.kind] ?? KIND_STYLES.file!;
   const Icon = style.icon;
   const embeddedPct = doc.chunkCount > 0 ? Math.round((doc.embeddedCount / doc.chunkCount) * 100) : 0;
 
+  // 行内缩略图：有图片块的文档把类型图标位换成首图缩略图（40px 圆角）。与分块弹窗
+  // MediaChunkBlock 同 queryKey 共享缓存；只有图片文档发请求（enabled 门控），失败回退
+  // 类型图标（pending 不算失败，不闪错误占位）。
+  const thumbQuery = useQuery({
+    queryKey: ["kb-chunk-media", doc.firstImageChunkId],
+    queryFn: () => rpcClient.kbChunkMedia({ chunkId: doc.firstImageChunkId! }),
+    enabled: doc.firstImageChunkId != null,
+    staleTime: 10 * 60_000,
+  });
+  // 只在「请求已落定但拿不到图」时才算失败（照抄 MediaChunkBlock 判式）：pending 不算，
+  // 回退类型图标，行内不显示错误文案。
+  const thumbFailed = thumbQuery.isError || (thumbQuery.isSuccess && thumbQuery.data?.dataUrl == null);
+  // 收窄用局部常量：onClick 闭包里 TS 不沿对象属性收窄，也避免渲染中途翻转误用 null。
+  const firstImageChunkId = doc.firstImageChunkId;
+  const showThumb = firstImageChunkId != null && !thumbFailed;
+
   return (
     <div className="group/doc flex items-start gap-3 rounded-xl border bg-card px-3 py-2.5 transition-colors hover:border-foreground/15">
-      <span className={cn("mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg", style.cls)}>
-        <Icon className="size-4" />
-      </span>
+      {showThumb ? (
+        <button
+          type="button"
+          className="mt-0.5 flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border bg-muted/40 transition-colors hover:border-primary/40"
+          title={t("kb.viewer.title")}
+          aria-label={t("kb.viewer.title")}
+          onClick={(e) => {
+            // 不冒泡：行内其他区域点击行为不变。
+            e.stopPropagation();
+            onOpenImage(firstImageChunkId);
+          }}
+        >
+          {thumbQuery.data?.dataUrl ? (
+            <img
+              src={thumbQuery.data.dataUrl}
+              alt={doc.name}
+              loading="lazy"
+              className="size-10 rounded-lg object-cover"
+            />
+          ) : (
+            <span className="flex size-10 items-center justify-center text-muted-foreground">
+              {thumbQuery.isFetching ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : (
+                <ImageIcon className="size-4" />
+              )}
+            </span>
+          )}
+        </button>
+      ) : (
+        <span className={cn("mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg", style.cls)}>
+          <Icon className="size-4" />
+        </span>
+      )}
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
           <span className="truncate text-xs font-medium">{doc.name}</span>
@@ -392,6 +473,8 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
   const [noteContent, setNoteContent] = useState("");
   const [webUrl, setWebUrl] = useState("");
   const [chunksDoc, setChunksDoc] = useState<KbDocView | null>(null);
+  // 行内缩略图查看器：容器层单实例受控（所有 DocRow 缩略图共用一个 KbImageViewer）。
+  const [viewerChunkId, setViewerChunkId] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<KbDocView | null>(null);
 
   const docsQuery = useQuery({
@@ -582,6 +665,7 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
                 doc={d}
                 embeddingEnabled={!!kb.embeddingModel}
                 busy={reingestMutation.isPending}
+                onOpenImage={setViewerChunkId}
                 onChunks={() => setChunksDoc(d)}
                 onReingest={() => reingestMutation.mutate(d.id)}
                 onRetry={() => retryMutation.mutate(d.id)}
@@ -702,6 +786,9 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
       </Dialog>
 
       <ChunksDialog doc={chunksDoc} onClose={() => setChunksDoc(null)} />
+
+      {/* 行内缩略图的查看器：容器层单实例，受控打开，避免每行挂一个 Dialog。 */}
+      <KbImageViewer chunkId={viewerChunkId} open={viewerChunkId != null} onClose={() => setViewerChunkId(null)} />
     </div>
   );
 }
