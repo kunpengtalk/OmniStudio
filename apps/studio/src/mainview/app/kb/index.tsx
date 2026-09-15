@@ -219,6 +219,18 @@ export function KbCreateDialog() {
             </p>
           </div>
         </div>
+        {/* 创建失败必须可见：mutation 曾只有 onSuccess，RPC 拒绝时界面零反馈（线上
+            「点击新建无响应」的直接帮凶）。 */}
+        {createMutation.isError && (
+          <p className="text-xs leading-4 text-destructive">
+            {t("kb.create.error", {
+              message:
+                createMutation.error instanceof Error
+                  ? createMutation.error.message
+                  : String(createMutation.error),
+            })}
+          </p>
+        )}
         <DialogFooter>
           <Button variant="outline" size="sm" onClick={() => setOpen(false)}>
             {t("common.cancel")}

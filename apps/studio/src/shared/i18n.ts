@@ -983,6 +983,8 @@ const zh: Record<string, string> = {
   "kb.create.rerank": "重排模型",
   "kb.create.rerankHint": "可选。检索结果经重排模型二次打分，精度更高但每次检索多一次请求。",
   "kb.create.submit": "新建知识库",
+  // 创建失败反馈：mutation 无 onError 的静默故障教训（RPC 拒绝时界面曾零反馈）。
+  "kb.create.error": "创建失败：{message}",
   // 模态能力勾选（建库弹窗与 KB 设置页共用文案）；语音/视频直嵌本地 llama.cpp 暂不支持。
   "kb.create.embedImage": "图片",
   "kb.create.embedAudio": "语音",
@@ -3277,6 +3279,7 @@ const en: Record<string, string> = {
   "kb.create.rerankHint":
     "Optional. Candidates get a second-stage relevance pass for better precision (one extra request per search).",
   "kb.create.submit": "Create",
+  "kb.create.error": "Create failed: {message}",
   // Modality capability checkboxes (shared copy between create dialog and KB settings).
   "kb.create.embedImage": "Image",
   "kb.create.embedAudio": "Voice",

@@ -75,6 +75,8 @@ const createCalls: Array<{
 }> = [];
 /** 当前用例的探活桩：null = 挂起（resolve 存进 pendingProbeResolve，供「结论后到」时序用例）。 */
 let probeStub: (() => unknown) | null = null;
+/** 当前用例的 kbCreate 失败桩：非 null 时 kbCreate 抛该信息的 Error。 */
+let createError: string | null = null;
 /** 最近一次挂起探活的 resolve。 */
 let pendingProbeResolve: ((value: unknown) => void) | null = null;
 
@@ -111,6 +113,7 @@ mock.module("@lib/rpc", () => ({
     kbCreate: async (params: { name: string; embeddingModel?: string; rerankModel?: string }) => {
       calls.create += 1;
       createCalls.push(params);
+      if (createError !== null) throw new Error(createError);
       return { kb: { id: 1 } };
     },
   },
@@ -130,6 +133,7 @@ beforeEach(() => {
   calls.create = 0;
   createCalls.length = 0;
   pendingProbeResolve = null;
+  createError = null;
   // 默认「未配置」：既有用例的基线语义（与今天一致 = 不预填、无 hint）
   probeStub = () => ({ configured: false });
 });
@@ -512,5 +516,38 @@ test("语音/视频静态 hint 常驻可见；重开弹窗三勾选重置为 fal
   const boxes = [...document.querySelectorAll('input[type="checkbox"]')] as HTMLInputElement[];
   expect(boxes.length).toBe(3);
   expect(boxes.every((b) => !b.checked)).toBe(true);
+  await fx.unmount();
+});
+
+// ---------------------------------------------------------------------------
+// 创建失败反馈：mutation 曾只有 onSuccess，RPC 拒绝时界面零反馈（线上
+// 「点击新建无响应」的直接帮凶 —— 迁移缺列让 kbCreate 必败，而弹窗毫无动静）
+// ---------------------------------------------------------------------------
+
+test("kbCreate 失败 → 错误文案可见、弹窗保持打开（不再静默无响应）", async () => {
+  probeStub = () => ({ configured: false });
+  createError = "no such column: embed_image";
+  const fx = await mountDialog();
+  await fx.open();
+
+  const nameInput = document.querySelector("#kb-name") as HTMLInputElement;
+  const setValue = Object.getOwnPropertyDescriptor(dom.HTMLInputElement.prototype, "value")!.set!;
+  await act(async () => {
+    setValue.call(nameInput, "会失败的库");
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const submit = [...document.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes(zh("kb.create.submit")),
+  );
+  expect(submit).toBeDefined();
+  await act(async () => {
+    submit!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await flush();
+
+  expect(calls.create).toBe(1);
+  // 错误原文案带出来（而不是无声失败），弹窗还开着等用户处置
+  expect(fx.text()).toContain(zh("kb.create.error", { message: "no such column: embed_image" }));
+  expect(fx.text()).toContain(zh("kb.create.title"));
   await fx.unmount();
 });
