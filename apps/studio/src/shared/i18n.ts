@@ -977,6 +977,9 @@ const zh: Record<string, string> = {
   "kb.create.descPlaceholder": "这个库存什么资料、给谁用",
   "kb.create.notUse": "不使用",
   "kb.create.loadingModels": "获取模型列表…",
+  // 模型选择器手填模式（默认模型面板开启 allowCustom 时的提示与「使用」项文案）。
+  "kb.modelSelect.searchOrType": "搜索或输入模型名，回车确认…",
+  "kb.modelSelect.useTyped": "使用「{model}」",
   "kb.create.embedding": "嵌入模型",
   "kb.create.embeddingHint": "可选。不使用 = 纯关键词检索；选择后文档入库时自动向量化，支持口语化提问。",
   "kb.create.embeddingDefaultUnreachable": "已配置默认嵌入模型 {model}，但当前不可达；可启动嵌入服务后重新打开此窗口",
@@ -3270,6 +3273,8 @@ const en: Record<string, string> = {
   "kb.create.descPlaceholder": "What this base stores and who uses it",
   "kb.create.notUse": "Not used",
   "kb.create.loadingModels": "Loading models…",
+  "kb.modelSelect.searchOrType": "Search or type a model name, press Enter…",
+  "kb.modelSelect.useTyped": "Use “{model}”",
   "kb.create.embedding": "Embedding model",
   "kb.create.embeddingHint":
     "Optional. Not used = keyword search only; a model enables semantic recall for conversational queries.",

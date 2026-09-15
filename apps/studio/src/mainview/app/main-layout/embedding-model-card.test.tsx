@@ -248,6 +248,94 @@ test("值没变就不发写请求（失焦不产生噪音）", async () => {
 });
 
 // ---------------------------------------------------------------------------
+// 手填模型（allowCustom）：候选之外的模型名可直接回车或点「使用」项保存
+// ---------------------------------------------------------------------------
+
+/** 手填模式的搜索框（占位符区别于纯搜索模式的 chat.modelSearch）。 */
+function findCustomSearch(): HTMLInputElement {
+  const el = [...document.querySelectorAll("input")].find(
+    (i) => i.placeholder === translate("zh", "kb.modelSelect.searchOrType"),
+  );
+  expect(el).toBeDefined();
+  return el as HTMLInputElement;
+}
+
+const zhUseTyped = (model: string) => translate("zh", "kb.modelSelect.useTyped", { model });
+
+/** Radix Select 触发器要求 pointerType === "mouse" 才开下拉 / 选项才认点击。 */
+const mousePointer = { bubbles: true, button: 0, pointerType: "mouse" } as const;
+
+async function openEmbedSelect(): Promise<HTMLButtonElement> {
+  const trigger = document.querySelector(
+    `button[aria-label="${zh("defaults.embedding")}"]`,
+  ) as HTMLButtonElement | null;
+  expect(trigger).not.toBeNull();
+  await act(async () => {
+    trigger!.dispatchEvent(new PointerEvent("pointerdown", mousePointer));
+  });
+  await flush();
+  return trigger!;
+}
+
+test("手填模型：候选外的名字出现「使用」项，点击保存；候选内的不重复出手填项", async () => {
+  served = [];
+  const view = await renderCard();
+  const trigger = await openEmbedSelect();
+
+  const search = findCustomSearch();
+
+  // 候选内的名字（bge-m3 在本地组）不出现「使用」项
+  await act(async () => {
+    typeInto(search, "bge-m3");
+  });
+  expect(
+    [...document.querySelectorAll('[role="option"]')].filter((el) =>
+      el.textContent?.includes(zhUseTyped("bge-m3")),
+    ),
+  ).toHaveLength(0);
+
+  // 候选外的名字出现「使用「my-custom-embed」」，点击即保存
+  await act(async () => {
+    typeInto(search, "my-custom-embed");
+  });
+  const useItem = [...document.querySelectorAll('[role="option"]')].find((el) =>
+    el.textContent?.includes(zhUseTyped("my-custom-embed")),
+  );
+  expect(useItem).toBeDefined();
+  await act(async () => {
+    useItem!.dispatchEvent(new PointerEvent("pointerdown", mousePointer));
+    useItem!.dispatchEvent(new PointerEvent("pointerup", mousePointer));
+  });
+  await flush();
+  await flush();
+
+  // 手填模型不来自运行实例 → 只写 EMBEDDING_MODEL，不快照实例地址
+  expect(writes).toEqual([{ EMBEDDING_MODEL: "my-custom-embed" }]);
+  // 触发器回显手填值
+  expect(trigger.textContent).toContain("my-custom-embed");
+  await view.unmount();
+});
+
+test("手填模型：搜索框回车直接提交", async () => {
+  served = [];
+  const view = await renderCard();
+  await openEmbedSelect();
+
+  const search = findCustomSearch();
+  await act(async () => {
+    typeInto(search, "text-embed-v4");
+  });
+  await act(async () => {
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  });
+  await flush();
+  await flush();
+
+  expect(writes).toEqual([{ EMBEDDING_MODEL: "text-embed-v4" }]);
+  await view.unmount();
+});
+
+// ---------------------------------------------------------------------------
 // ②-9：空 base 陷阱（规则抽成纯函数，组件里只有这一处判断）
 // ---------------------------------------------------------------------------
 

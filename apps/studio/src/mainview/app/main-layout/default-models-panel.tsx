@@ -466,7 +466,8 @@ export function embeddingDefaultsPatch(input: {
  * 读它作为显式值的兜底。文案必须讲清这两点，否则用户会以为既有 KB 已经切换了。
  *
  * 模型候选复用知识库那套 `kbEmbeddingModels`（只列运行中嵌入实例提供的模型 + 云端候选，
- * 并按来源标注），地址 / 密钥可选；空态引导与 KB 选择器同源。
+ * 并按来源标注），地址 / 密钥可选；空态引导与 KB 选择器同源。选择器开 `allowCustom`：
+ * 候选之外的服务（自建 / 代理）可直接手填模型名，回车或点「使用」项保存。
  */
 export function EmbeddingModelCard() {
   const t = useT();
@@ -547,6 +548,7 @@ export function EmbeddingModelCard() {
           onChange={pickModel}
           candidates={candidates.data}
           loading={candidates.isLoading}
+          allowCustom
           className="flex-1"
         />
         <Button
