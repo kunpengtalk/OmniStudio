@@ -8,7 +8,9 @@ import { useRouter } from "@stores/router";
 import { useServedStore } from "@stores/served";
 import { useT } from "@stores/ui-lang";
 import { fileKind, engineSupports, type InstalledModel, type InferenceEngine } from "@/shared/modelscope";
-import { serverErrorHint } from "@/mainview/lib/server-error";
+import { engineSpec } from "@/shared/engines";
+import { isEngineMissingError, serverErrorHint } from "@/mainview/lib/server-error";
+import { EngineInstaller } from "@/mainview/app/setup-screen/engine-install";
 import { cn } from "@/mainview/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -64,6 +66,15 @@ export function LaunchBar({ installedModels, engine }: { installedModels: Instal
 
   const busy = serverStatus === "starting" || serverStatus === "downloading";
   const startErrorHint = startError ? serverErrorHint(t, startError) : null;
+  const engineMissing = isEngineMissingError(startError);
+  // 引擎能不能一键装、是不是正在装：和引导页用同一个后端来源。webview 里没有
+  // process.platform，界面侧算不出 engineInstallSupport，只能问主进程；安装完成后
+  // lib/rpc.ts 会失效这个 query，这里不用自己刷。只在真的报引擎缺失时才拉。
+  const { data: env } = useQuery({
+    queryKey: ["setup-env"],
+    queryFn: () => rpcClient.getSetupEnvironment(),
+    enabled: engineMissing,
+  });
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border p-3">
@@ -153,6 +164,22 @@ export function LaunchBar({ installedModels, engine }: { installedModels: Instal
               <AlertTriangleIcon className="mt-0.5 size-3 shrink-0" />
               <span className="min-w-0 break-words">{startErrorHint}</span>
             </p>
+          )}
+          {/* 引擎没装时，报错下面直接给「一键安装」（复用引导页那个组件）。
+              这类机器通常已经有本地模型、不会再走引导页，只留一句 brew install 的话
+              用户根本找不到界面上的路 —— issue #8 就是这么来的。 */}
+          {engineMissing && env && (
+            <EngineInstaller
+              engine={engine}
+              support={env.installSupport[engine]}
+              manualHint={engineSpec(engine).installHint}
+              managedInstalling={env.installing === engine}
+              onInstalled={() => {
+                // 装好了先把报错清掉：用户再点一次「启动服务器」就能起来。
+                setStartError(null);
+                queryClient.invalidateQueries({ queryKey: ["served-models"] });
+              }}
+            />
           )}
           <p className="flex items-start gap-1 text-[11px] text-destructive/70">
             <span className="mt-1.5 size-0.5 shrink-0 rounded-full bg-destructive/50" />
