@@ -218,7 +218,7 @@ describe("多路并发 + 断点续传", () => {
 describe("重试与容错", () => {
   test("服务器瞬时 503：自动重试后成功，不把任务判死", async () => {
     const data = makeData(BIG);
-    const { server, requests } = startServer({ data, failFirst: 2 });
+    const { server } = startServer({ data, failFirst: 2 });
     servers.push(server);
     const dest = path.join(dir, "retry.bin");
 
@@ -233,7 +233,7 @@ describe("重试与容错", () => {
   test("分片连接卡死（长时间无字节）：掐掉重连续传，最终完整", async () => {
     const data = makeData(BIG);
     // 首条请求卡死 250ms、空闲阈值 50ms → 客户端掐线重连，重连后正常下完。
-    const { server, requests } = startServer({ data, stallOnce: true, stallOnceMs: 250 });
+    const { server } = startServer({ data, stallOnce: true, stallOnceMs: 250 });
     servers.push(server);
     const dest = path.join(dir, "stall.bin");
 
@@ -248,7 +248,7 @@ describe("重试与容错", () => {
 
   test("服务器忽略 Range：自动回退单流，内容正确", async () => {
     const data = makeData(BIG);
-    const { server, requests } = startServer({ data, ignoreRange: true });
+    const { server } = startServer({ data, ignoreRange: true });
     servers.push(server);
     const dest = path.join(dir, "norange.bin");
 
@@ -263,7 +263,7 @@ describe("重试与容错", () => {
   test("Content-Range 与请求不符：不写坏数据，重试后仍失败要报错", async () => {
     const data = makeData(BIG);
     // 每个分片第一次都收到错区间；重试后正常 → 应该能救回来。
-    const { server, requests } = startServer({ data, wrongRangeOnce: true });
+    const { server } = startServer({ data, wrongRangeOnce: true });
     servers.push(server);
     const dest = path.join(dir, "wrongrange.bin");
 
@@ -283,7 +283,7 @@ describe("远端变化与旧格式", () => {
     // 分片之间留间隔：否则回环上这份文件可能在第一次进度回调之前就下完，取消落到
     // 结束之后（sidecar 已被清理），「留下了续传信息」这条断言就会随机失败 ——
     // 与「暂停后重启」是同一类 flake，CI 上实测挂过。
-    const { server: firstServer, requests: firstRequests } = startServer({
+    const { server: firstServer } = startServer({
       data: first,
       chunkDelayMs: 5,
     });
@@ -401,7 +401,7 @@ describe("远端变化与旧格式", () => {
 describe("旁路数据管理", () => {
   test("removePartialFiles 清掉最终文件、分片与 sidecar", async () => {
     const data = makeData(BIG);
-    const { server, requests } = startServer({ data });
+    const { server } = startServer({ data });
     servers.push(server);
     const dest = path.join(dir, "cleanup.bin");
 

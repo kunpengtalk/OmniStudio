@@ -6,7 +6,6 @@ import {
   PlayIcon,
   XIcon,
   Trash2Icon,
-  CheckCircle2Icon,
   Loader2Icon,
   ClockIcon,
 } from "lucide-react";

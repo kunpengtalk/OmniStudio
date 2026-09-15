@@ -5,6 +5,9 @@ import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { join } from "path";
 import * as fs from "fs";
 
+import * as schema from "./db/schema";
+import { mockModulePartial } from "./test-mocks";
+
 /**
  * 记忆层单测：写入校验 / 判重合并 / 检索排序 / 生命周期 / 注入预算 / 导出导入。
  * 与 chat.test 同款隔离：临时库 + mock ./db、./db/settings，不碰真实数据目录。
@@ -13,7 +16,7 @@ import * as fs from "fs";
 const tmpDb = `/tmp/memory-test-${process.pid}.db`;
 fs.rmSync(tmpDb, { force: true });
 const sqlite = new Database(tmpDb, { create: true });
-const db = drizzle({ client: sqlite });
+const db = drizzle({ client: sqlite, schema });
 migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
 
 // 可变的设置表：测试里直接改这个对象即可切换开关。
@@ -25,14 +28,14 @@ const settingsMap: Record<string, string> = {
   MEMORY_EMBEDDING_API_KEY: "",
   MEMORY_SCOPE_ENABLED: "1",
 };
-mock.module("./db", () => ({ db }));
-mock.module("./db/settings", () => ({
-  getSetting: (key: string) => settingsMap[key] ?? "",
-  getNumericSetting: (key: string) => Number(settingsMap[key] ?? 0) || 0,
-  updateSettings: (patch: Record<string, string>) => Object.assign(settingsMap, patch),
+await mockModulePartial<typeof import("./db")>("./db", { db });
+await mockModulePartial<typeof import("./db/settings")>("./db/settings", {
+  getSetting: (key) => settingsMap[key] ?? "",
+  getNumericSetting: (key) => Number(settingsMap[key] ?? 0) || 0,
+  updateSettings: (patch) => Object.assign(settingsMap, patch),
   getAllSettings: () => ({ ...settingsMap }),
   getActiveServerPort: () => "18080",
-}));
+});
 
 const Memory = await import("./memory");
 const { memories, memoryEvents, memoryMetrics } = await import("./db/schema");

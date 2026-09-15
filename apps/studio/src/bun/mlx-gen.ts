@@ -705,11 +705,6 @@ export async function isMlxModelDownloaded(modelId: string): Promise<boolean> {
   }
 }
 
-/** 失效某个模型的 check 缓存（下载完成/开始后调用）。 */
-function invalidateModelCheck(modelId: string): void {
-  checkCache.delete(modelId);
-}
-
 /** 返回已下载（可生成）的 MLX 模型 id 列表。 */
 export async function getDownloadedMlxModelsSync(): Promise<string[]> {
   const result: string[] = [];

@@ -8,7 +8,8 @@ import * as CloudProviders from "./cloud-providers";
 import { getDataDir } from "./paths";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
-import { ocrLangEntry, OCR_LANG_CATALOG, OCR_TESSDATA_RAW_BASE } from "../shared/ocr";
+import { ocrLangEntry, OCR_LANG_CATALOG, OCR_TESSDATA_BRANCH, OCR_TESSDATA_REPO } from "../shared/ocr";
+import { fetchAssetFromSources, githubRawUrls } from "./mirror-download";
 import { convertFileToImages, generate, type ModelEndpoint } from "./vllm";
 import { getLocalModelName } from "./vllm/model";
 import { getCurrentModelProfile } from "./vllm/model-profile";
@@ -135,31 +136,20 @@ export function saveOcrProviderConfig(cfg: {
   }
 }
 
-/** 把用户填的地址规整成带 /v1 后缀的形式（兼容填不填 /v1 两种写法）。 */
-function normalizeApiBase(base: string): string {
-  let b = base.trim().replace(/\/+$/, "");
-  if (b && !/\/v1$/i.test(b)) b = `${b}/v1`;
-  return b;
-}
-
-/** 从 OpenAI 兼容 /v1/models 拉取可用模型列表。 */
+/**
+ * 从 OpenAI 兼容 /models 拉取可用模型列表。
+ *
+ * 地址候选与响应解析都交给 CloudProviders.fetchRemoteModels：与设置页「获取模型列表」
+ * 用同一份实现 —— 两边各写一套时，同一个上游会一边列得出模型、一边报错。
+ */
 export async function listOcrProviderModels(
   base: string,
   apiKey: string,
 ): Promise<string[]> {
-  const cleanBase = normalizeApiBase(base);
-  if (!cleanBase) throw new Error("Missing API base URL");
-  const res = await fetch(`${cleanBase}/models`, {
-    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(`请求失败（${res.status}）`);
-  const json = (await res.json().catch(() => null)) as { data?: { id?: string }[] } | null;
-  const data = json?.data;
-  if (!Array.isArray(data)) return [];
-  return data
-    .map((m) => m.id)
-    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (!base.trim()) throw new Error("Missing API base URL");
+  const r = await CloudProviders.fetchRemoteModels({ baseUrl: base, apiKey });
+  if (!r.ok) throw new Error(r.error);
+  return r.models;
 }
 
 // ---------------------------------------------------------------------------
@@ -309,40 +299,27 @@ export async function getOcrStatus(): Promise<OcrStatus> {
   };
 }
 
-/** 下载语言模型（traineddata，tessdata_fast，GitHub raw，多镜像回退）。 */
+/** 下载语言模型（traineddata，tessdata_fast，GitHub raw，多链路回退）。 */
 export async function downloadOcrModel(modelId: string): Promise<{ ok: boolean; error?: string }> {
   const entry = ocrLangEntry(modelId);
   if (!entry) return { ok: false, error: "未知模型" };
 
-  const dir = getTessdataDir();
-  mkdirSync(dir, { recursive: true });
   const dest = langModelPath(modelId);
-
-  const url = `${OCR_TESSDATA_RAW_BASE}${modelId}.traineddata`;
-  // 国内镜像（GitHub 加速），依次回退。
-  const mirrors = [url, `https://gh-proxy.com/${url}`, `https://ghfast.top/${url}`];
-
-  let lastError = "";
-  for (const u of mirrors) {
-    try {
-      const res = await fetch(u, { redirect: "follow", signal: AbortSignal.timeout(180_000) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const buf = Buffer.from(await res.arrayBuffer());
-      // GitHub 404 / 代理错误页不是有效格式（traineddata 以二进制 magic 开头，
-      // 不会是 "404"/"<!DOCTYPE" 文本）。
-      const head = buf.subarray(0, 64).toString("utf8");
-      if (buf.length < 1000 || head.startsWith("404") || head.startsWith("<!DO") || head.includes("Not Found")) {
-        throw new Error(`无效的文件内容（${buf.length} 字节）`);
+  const res = await fetchAssetFromSources({
+    urls: await githubRawUrls(OCR_TESSDATA_REPO, OCR_TESSDATA_BRANCH, `${modelId}.traineddata`),
+    dest,
+    what: `Tesseract 语言包 ${modelId}`,
+    source: "ocr",
+    accept: (_file, head, bytes) => {
+      // traineddata 是二进制，代理回的 404 / 错误页是文本（"404: Not Found"、"<!DOCTYPE"）。
+      const text = Buffer.from(head.subarray(0, 64)).toString("utf8");
+      if (bytes < 1000 || text.startsWith("404") || text.startsWith("<!DO") || text.includes("Not Found")) {
+        return `无效的文件内容（${bytes} 字节）`;
       }
-      rmSync(dest, { force: true });
-      await Bun.write(dest, buf);
-      return { ok: true };
-    } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e);
-      rmSync(dest, { force: true });
-    }
-  }
-  return { ok: false, error: `语言包下载失败：${lastError}` };
+      return null;
+    },
+  });
+  return res.ok ? { ok: true } : { ok: false, error: res.error };
 }
 
 /** 启动/切换 Tesseract OCR 引擎到指定语言（下载后即可点击启动）。 */
@@ -655,6 +632,11 @@ export async function runOcrVlm(input: {
       base: provider.base,
       apiKey: provider.apiKey,
       model: provider.model || undefined,
+      // 记账要的是"哪家厂商"，光看地址分不出来（一个地址背后可能是聚合站）。
+      usage: {
+        provider: CloudProviders.getCloudProviderInfo(provider.providerId)?.name ?? "API",
+        upstream: "cloud",
+      },
     };
     remoteLabel = provider.model || "remote";
   } else {

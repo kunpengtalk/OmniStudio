@@ -19,6 +19,7 @@ import {
   classifyModelName,
   filterModelIds,
   isChatModelCategory,
+  modelNameFromRef,
   MODEL_CATEGORY_SETS,
 } from "@/shared/modelscope";
 import { useT } from "@stores/ui-lang";
@@ -29,6 +30,9 @@ import type { BenchmarkRecordRow, BenchmarkRunState, SpeedBenchRow } from "../..
 import type { EvalCategoryRow, EvalSuiteId, EvalSuiteInfo } from "../../bun/eval";
 
 const PRESET_CONTEXTS = [1024, 4096, 8192, 16384, 32768];
+
+/** 权重扩展名（模型名里不带它 —— 与网关的服务名、模型库的展示名同一套约定）。 */
+const WEIGHT_EXT_RE = /\.(gguf|safetensors|bin|pt|pth|ckpt|onnx|ggml)$/i;
 
 function fmtCtx(c: number) {
   return c >= 1000 ? `${(c / 1000).toFixed(c % 1000 === 0 ? 0 : 1)}k` : String(c);
@@ -131,12 +135,28 @@ export function BenchmarkScreen() {
         new Set(
           (installed?.models ?? [])
             .filter((m) => isChatModelCategory(m.category ?? classifyModelName(m.fileName)))
-            .map((m) => m.fileName.replace(/\.gguf$/i, "")),
+            .map((m) => m.fileName.replace(WEIGHT_EXT_RE, "")),
         ),
       ).filter(Boolean),
     [installed],
   );
-  const effectiveModel = model || settingsData?.settings?.CHAT_MODEL || modelOptions[0] || "";
+  /**
+   * 本地模型一律显示「模型名」（模型库里的下载名 / 网关的服务名），**不放路径**：
+   * 设置里的 `LOCAL_MODEL_PATH` / MLX 那种路径型 `CHAT_MODEL` 先对回已装条目，
+   * 对不上再收敛成最后一段。请求该用什么 id 是后端的事（见 localBenchmarkModelId）。
+   */
+  const defaultLocalModel = useMemo(() => {
+    const sm = settingsData?.settings;
+    const activeRef = sm?.LOCAL_MODEL_PATH || sm?.LOCAL_MODEL_NAME || "";
+    const active = (installed?.models ?? []).find(
+      (m) =>
+        activeRef !== "" &&
+        (m.path === activeRef || m.runtimeTarget === activeRef || m.fileName === activeRef),
+    );
+    if (active) return active.fileName.replace(WEIGHT_EXT_RE, "");
+    return modelNameFromRef(activeRef);
+  }, [installed, settingsData]);
+  const effectiveModel = model || defaultLocalModel || modelOptions[0] || "";
 
   // 云端：cloud_providers 表直连，与全局激活状态无关。
   const providers = providersQuery.data?.providers ?? [];
@@ -161,7 +181,11 @@ export function BenchmarkScreen() {
       ).ids,
     [selectedProvider],
   );
-  const effectiveCloudModel = cloudModel || cloudModelOptions[0] || "";
+  // 换服务商后上一个厂商的模型就失效了：对不上当前清单时回落到本厂商的第一条
+  // （不然下拉框会拿别家的模型名去跑这个厂商的接口）。
+  const effectiveCloudModel = cloudModelOptions.includes(cloudModel)
+    ? cloudModel
+    : (cloudModelOptions[0] ?? "");
   const providerIncomplete = !selectedProvider || !selectedProvider.baseUrl.trim();
   const providerKeyMissing = !!selectedProvider && !selectedProvider.apiKey.trim();
 
@@ -197,7 +221,8 @@ export function BenchmarkScreen() {
         return {
           source: "record",
           kind: rec.kind,
-          model: rec.model,
+          // 老记录里可能存着 MLX 的路径型请求 id：展示前收敛成模型名。
+          model: modelNameFromRef(rec.model),
           engine: rec.engine,
           serverMode: rec.serverMode ?? "local",
           status: rec.status,
@@ -215,7 +240,7 @@ export function BenchmarkScreen() {
       return {
         source: "run",
         kind: run.kind,
-        model: run.model,
+        model: modelNameFromRef(run.model),
         engine: run.engine,
         serverMode: run.serverMode,
         status: run.status,
@@ -235,7 +260,7 @@ export function BenchmarkScreen() {
       return {
         source: "record",
         kind: latest.kind,
-        model: latest.model,
+        model: modelNameFromRef(latest.model),
         engine: latest.engine,
         serverMode: latest.serverMode ?? "local",
         status: latest.status,
@@ -312,32 +337,36 @@ export function BenchmarkScreen() {
               <Label htmlFor="benchModel" className="mb-1.5 block text-xs">
                 {t("benchmark.model")}
               </Label>
-              <Input
-                id="benchModel"
-                placeholder={modelOptions[0] ?? "model name"}
-                value={effectiveModel}
-                onChange={(e) => setModel(e.target.value)}
-                disabled={isRunning}
-                className="h-8 text-xs"
-              />
-              {modelOptions.length > 0 && (
-                <div className="mt-1.5 flex max-h-28 flex-wrap gap-1 overflow-y-auto">
-                  {modelOptions.map((m) => (
-                    <button
-                      key={m}
-                      type="button"
-                      onClick={() => setModel(m)}
-                      className={cn(
-                        "rounded-full border px-2 py-0.5 text-[10px] transition-colors",
-                        effectiveModel === m
-                          ? "border-primary bg-primary/10 text-primary"
-                          : "border-border text-muted-foreground hover:text-foreground",
-                      )}
-                    >
-                      {m}
-                    </button>
-                  ))}
+              {modelOptions.length === 0 ? (
+                <div className="rounded-lg border border-dashed px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                  {t("benchmark.noLocalModels")}
                 </div>
+              ) : (
+                <Select
+                  value={effectiveModel || undefined}
+                  onValueChange={setModel}
+                  disabled={isRunning}
+                >
+                  <SelectTrigger id="benchModel" className="h-8 w-full text-xs">
+                    <SelectValue placeholder={t("benchmark.modelPlaceholder")} />
+                  </SelectTrigger>
+                  <SelectContent className="max-w-96">
+                    {/* 当前值不在已装清单里（HF repo id、手工填的名字）：占一行，别让它看起来像没选 */}
+                    {effectiveModel !== "" && !modelOptions.includes(effectiveModel) && (
+                      <SelectItem value={effectiveModel}>
+                        <span className="min-w-0 flex-1 truncate">{effectiveModel}</span>
+                        <span className="shrink-0 text-[10px] text-muted-foreground/70">
+                          {t("defaults.current")}
+                        </span>
+                      </SelectItem>
+                    )}
+                    {modelOptions.map((m) => (
+                      <SelectItem key={m} value={m}>
+                        <span className="min-w-0 flex-1 truncate">{m}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               )}
             </div>
           ) : (
@@ -377,38 +406,36 @@ export function BenchmarkScreen() {
                 )}
               </div>
 
-              <div>
-                <Label htmlFor="benchCloudModel" className="mb-1.5 block text-xs">
-                  {t("benchmark.model")}
-                </Label>
-                <Input
-                  id="benchCloudModel"
-                  placeholder={cloudModelOptions[0] ?? t("benchmark.cloud.modelPlaceholder")}
-                  value={effectiveCloudModel}
-                  onChange={(e) => setCloudModel(e.target.value)}
-                  disabled={isRunning || providers.length === 0}
-                  className="h-8 text-xs"
-                />
-                {cloudModelOptions.length > 0 && (
-                  <div className="mt-1.5 flex max-h-28 flex-wrap gap-1 overflow-y-auto">
-                    {cloudModelOptions.map((m) => (
-                      <button
-                        key={m}
-                        type="button"
-                        onClick={() => setCloudModel(m)}
-                        className={cn(
-                          "rounded-full border px-2 py-0.5 text-[10px] transition-colors",
-                          effectiveCloudModel === m
-                            ? "border-primary bg-primary/10 text-primary"
-                            : "border-border text-muted-foreground hover:text-foreground",
-                        )}
-                      >
-                        {m}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+              {/* 一个服务商都没配时上面那行已经说清楚了：不摆一个空的模型框 */}
+              {providers.length > 0 && (
+                <div>
+                  <Label htmlFor="benchCloudModel" className="mb-1.5 block text-xs">
+                    {t("benchmark.model")}
+                  </Label>
+                  {cloudModelOptions.length === 0 ? (
+                    <div className="rounded-lg border border-dashed px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                      {t("benchmark.cloud.noModels")}
+                    </div>
+                  ) : (
+                    <Select
+                      value={effectiveCloudModel || undefined}
+                      onValueChange={setCloudModel}
+                      disabled={isRunning}
+                    >
+                      <SelectTrigger id="benchCloudModel" className="h-8 w-full text-xs">
+                        <SelectValue placeholder={t("benchmark.cloud.modelPlaceholder")} />
+                      </SelectTrigger>
+                      <SelectContent className="max-w-96">
+                        {cloudModelOptions.map((m) => (
+                          <SelectItem key={m} value={m}>
+                            <span className="min-w-0 flex-1 truncate">{m}</span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                </div>
+              )}
             </div>
           )}
 

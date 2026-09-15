@@ -312,6 +312,16 @@ export const MODEL_CATEGORIES: { value: ModelCategory | "all"; labelKey: string 
   { value: "other", labelKey: "models.cat.other" },
 ];
 
+/**
+ * 只含真实分类（不含「全部」）的那一份：下拉框按分类列选项时用。
+ * 直接 `MODEL_CATEGORIES.filter(...)` 不会收窄类型，`value` 仍是 `"all" | ModelCategory`，
+ * 按分类取值（图标 / 短名）的地方会因此报类型错。
+ */
+export const MODEL_CATEGORY_OPTIONS: { value: ModelCategory; labelKey: string }[] =
+  MODEL_CATEGORIES.filter(
+    (c): c is { value: ModelCategory; labelKey: string } => c.value !== "all",
+  );
+
 /** 需要模型的服务场景 —— 每个场景只认自己那几类模型。 */
 export type ModelCategorySet =
   | "chat"
@@ -349,9 +359,6 @@ export function isChatModelCategory(category: ModelCategory): boolean {
  */
 export function classifyModelName(rawName: string): ModelCategory {
   const name = rawName.toLowerCase();
-  // 去掉标点后连写（`text-embedding-3` / `text_embedding_3` → `textembedding3`），
-  // 便于用「关键词紧跟数字/版本」这类形态匹配。
-  const flat = name.replace(/[^a-z0-9]+/g, "");
   const tokens = new Set(name.split(/[^a-z0-9]+/).filter(Boolean));
   const has = (...keys: string[]) => keys.some((k) => tokens.has(k));
   const hasWord = (...keys: string[]) => keys.some((k) => name.includes(k));

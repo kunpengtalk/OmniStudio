@@ -224,24 +224,20 @@ function normalizeApiBase(base: string): string {
   return b;
 }
 
-/** 从 OpenAI 兼容 /v1/models 拉取可用模型列表。 */
+/**
+ * 从 OpenAI 兼容 /models 拉取可用模型列表。
+ *
+ * 地址候选与响应解析都交给 CloudProviders.fetchRemoteModels：与设置页「获取模型列表」
+ * 用同一份实现 —— 两边各写一套时，同一个上游会一边列得出模型、一边报错。
+ */
 export async function listProviderModels(
   base: string,
   apiKey: string,
 ): Promise<string[]> {
-  const cleanBase = normalizeApiBase(base);
-  if (!cleanBase) throw new Error("Missing API base URL");
-  const res = await fetch(`${cleanBase}/models`, {
-    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(await errorMessage(res, "Failed to list models"));
-  const json = (await res.json().catch(() => null)) as { data?: { id?: string }[] } | null;
-  const data = json?.data;
-  if (!Array.isArray(data)) return [];
-  return data
-    .map((m) => m.id)
-    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (!base.trim()) throw new Error("Missing API base URL");
+  const r = await CloudProviders.fetchRemoteModels({ baseUrl: base, apiKey });
+  if (!r.ok) throw new Error(r.error);
+  return r.models;
 }
 
 // ---------------------------------------------------------------------------

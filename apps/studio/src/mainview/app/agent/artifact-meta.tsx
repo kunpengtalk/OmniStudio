@@ -49,6 +49,61 @@ export function formatSize(size: number | null | undefined): string {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/**
+ * 每条消息下面该显示哪些产物（纯函数，界面只负责画）。
+ *
+ * 归属某条消息的产物归各自的消息；**没有归属**的一律挂到最后一条助手消息下面，
+ * 排在它自己的产物后面。没有归属有两种来源：
+ *   1. `message_id` 为空 —— 这个字段是后补的，自动化跑出来的与历史行都是 NULL
+ *      （现代码在工具回调里现取消息 id，见 agent.ts 的 messageIdNow）；
+ *   2. 归属的消息已经不在这屏里 —— 重跑过 / 被删掉的消息留下的产物。
+ * 两种都不该只活在右侧面板里：产物是这一轮的成果，回答底下就得看得见，
+ * 点一下才去右侧预览（用户不该为了找它去翻面板）。
+ */
+export function artifactsByMessage(
+  artifacts: ArtifactItem[],
+  messages: { id: number; role: string }[],
+): Map<number, ArtifactItem[]> {
+  const known = new Set(messages.map((message) => message.id));
+  const map = new Map<number, ArtifactItem[]>();
+  const unowned: ArtifactItem[] = [];
+  for (const artifact of artifacts) {
+    if (artifact.messageId == null || !known.has(artifact.messageId)) unowned.push(artifact);
+    else {
+      const bucket = map.get(artifact.messageId);
+      if (bucket) bucket.push(artifact);
+      else map.set(artifact.messageId, [artifact]);
+    }
+  }
+  if (unowned.length === 0) return map;
+  // 最后一条助手消息（不是"最后一条消息"：用户刚发完那一轮时最后一条是用户消息）。
+  let lastAssistant: number | null = null;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]!;
+    if (message.role === "assistant") {
+      lastAssistant = message.id;
+      break;
+    }
+  }
+  if (lastAssistant == null) return map;
+  const bucket = map.get(lastAssistant) ?? [];
+  // 按登记顺序（id 升序）追加：产物的先后就是它干活的先后。
+  map.set(
+    lastAssistant,
+    [...bucket, ...unowned.slice().sort((a, b) => a.id - b.id)],
+  );
+  return map;
+}
+
+/** 最后一条助手消息的 id（产出物兜底与「查看所有产物」挂在它下面）。 */
+export function lastAssistantMessageId(messages: { id: number; role: string }[]): number | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]!;
+    if (message.role === "assistant") return message.id;
+  }
+  return null;
+}
+
 /** 能当网页打开的（HTML / SVG）：用 iframe 渲染。 */
 export const WEB_KINDS = new Set(["html"]);
 /** 用原生元素预览的媒体类型。 */

@@ -1,12 +1,24 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "fs";
 import path from "path";
 import { Type } from "typebox";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 
+import { applyPatch } from "./apply-patch";
+import { isInsideWorkspace } from "./permissions";
+import {
+  explainSandboxDenial,
+  logSandboxDegraded,
+  sandboxActive,
+  wrapShellCommand,
+} from "./agent-sandbox";
+import { contextUsage, describeContextUsage } from "./agent-context";
 import { getSetting } from "./db/settings";
+import { isOmniDataPath } from "./paths";
 import { killProcessTree } from "./runtimes/proc";
 import { webSearch } from "./web-search";
 import { listKnowledgeBases, recall } from "./knowledge";
+import { readSkillFile, skillsPromptSection } from "./agent-skills";
+import { capToolResultText, isSpillPath } from "./agent-spill";
 import { audit } from "./skills/audit";
 import { logEvent } from "./app-log";
 
@@ -16,7 +28,7 @@ import { logEvent } from "./app-log";
  * 权限模型（对齐 PI-Desktop 的思路：特权操作必须显式放行）：
  * - 只读工具（read_file / list_dir / glob / grep / web_search）可访问工作区之外的
  *   绝对路径，因为"读"不产生副作用；
- * - 写操作（write_file / edit_file）与 shell（bash）只能作用于工作区目录内，
+ * - 写操作（write_file / edit_file / apply_patch）与 shell（bash）只能作用于工作区目录内，
  *   且 shell 还受 AGENT_ALLOW_SHELL 开关控制。
  */
 
@@ -25,6 +37,11 @@ export type ToolContext = {
   workspace: string;
   /** 是否允许执行 shell 命令。 */
   allowShell: boolean;
+  /**
+   * 当前模型是否接受图片输入（决定要不要给 view_image 工具，见 chat-model 的探测）。
+   * 不确定时不要开：把图片塞进纯文本模型的请求会被服务端直接 400。
+   */
+  vision?: boolean;
   /**
    * 工作区之外已授权的目录（权限弹窗里「始终允许」写入的 + 设置页手工添加的）。
    * 命中这些目录的读写不再被路径层拦住（授权弹窗已经收过用户确认）。
@@ -49,7 +66,33 @@ export type ToolContext = {
   recordArtifact?: (filePath: string, tool: string) => void;
   /** bash 命令超时（毫秒），默认 120 秒；测试 / 特殊场景可以调小。 */
   commandTimeoutMs?: number;
+  /**
+   * 系统提示的 token 估算（agent.ts 注入）：`get_context_remaining` 在
+   * 没有实测用量时用它把系统提示算进占用，否则会低估一大截。
+   */
+  systemPromptTokens?: number;
+  /**
+   * 沙箱升级（agent.ts 注入）：命令被沙箱拦下后，问用户要不要**跳过沙箱重跑一次**。
+   * 返回 null = 允许重试；返回字符串 = 拒绝原因（原样回给模型）。
+   * 无人值守（自动化 / `omi agent run`）不注入 —— 没人可问，就如实报告被拦。
+   */
+  escalateSandbox?: (input: { command: string; output: string }) => Promise<string | null>;
+  /** 打一个探索打点（agent.ts 注入，见 checkpoint / rewind）。 */
+  onCheckpoint?: (goal: string) => ToolOutcome;
+  /** 收网点：用结论替换掉打点之后的中间过程（agent.ts 注入）。 */
+  onRewind?: (input: { report: string; revertFiles: boolean }) => Promise<ToolOutcome>;
+  /** Goal 模式的目标操作（agent.ts 注入，见 bun/agent-goals.ts）。 */
+  onGoal?: (input: { op: string; objective?: string; acceptance?: string; outcome?: string }) => ToolOutcome;
+  /** Plan 模式唯一能写的东西：把方案写到数据目录里（agent.ts 注入）。 */
+  onWritePlan?: (content: string) => ToolOutcome;
 };
+
+/**
+ * 工具结果的形状：`textResult` / `errorResult` 的并集。
+ * 主进程里自己实现工具回调（checkpoint / rewind）时用它，避免手搓一套字段
+ * —— 内核的 `AgentToolResult` 并没有 `isError`，失败是 `details.error` 表达的。
+ */
+export type ToolOutcome = { content: { type: "text"; text: string }[]; details: Record<string, unknown> };
 
 /**
  * 各个工具的 schema 不同，无法直接放进同一个 `AgentTool<any>[]`
@@ -66,7 +109,33 @@ export type BuiltTool = Omit<AgentTool<any>, "execute"> & {
   ) => Promise<AgentToolResult<any>>;
 };
 
-const MAX_OUTPUT_CHARS = 24_000;
+/**
+ * 报错要给出**下一步动作**，不能只说"找不到"。
+ *
+ * 弱模型拿到一句 `File not found: /x/y` 之后最常见的两种反应是：原样再试一次，
+ * 或者干脆换去猜别的文件。把"怎么找"直接写在错误里，比让它自己悟便宜得多。
+ */
+const NOT_FOUND_HINT =
+  "。先别重试同一个路径：用 list_dir 看父目录里到底有什么、或用 glob 按文件名片段找（例如 `**/*名字*`），" +
+  "确认真实路径后再读。";
+
+/** 编辑类工具的"定位失败"提示：旧内容匹配不上，通常是文件已经变了。 */
+const EDIT_MISMATCH_HINT =
+  "。文件内容与你手上的不一致（可能在上次读之后被改过，或你自己记错了）。" +
+  "先 read_file 把当前内容读回来，用读到的原文重新组织这次替换；不要反复猜同一段文本。";
+
+/**
+ * 空结果也要给出下一步。
+ *
+ * "没找到"不等于"不存在"：可能是关键词太窄、大小写不对、或搜错了目录。
+ * 直接告诉模型怎么换姿势，比让它把同样的搜索再发一遍便宜（本地模型尤其爱这么干）。
+ */
+const NO_MATCH_HINT =
+  "(no matches)。没搜到不代表不存在，换个姿势再试一次：" +
+  "① 关键词放宽或只用其中一段（正则里少用 `.*`）；② 检查大小写与中英文标点；" +
+  "③ 确认 path 是你要找的那棵目录树（用 list_dir 看一眼）。" +
+  "三样都试过还没有，再下「确实没有」的结论。";
+
 const MAX_FILE_CHARS = 60_000;
 const COMMAND_TIMEOUT_MS = 120_000;
 /** 直接子进程退出后，再给管道多少时间把末尾输出读干净。 */
@@ -95,10 +164,14 @@ const IGNORED_DIRS = new Set([
   "DerivedData",
 ]);
 
-function truncate(text: string, max = MAX_OUTPUT_CHARS): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, max)}\n…(truncated, ${text.length - max} more chars)`;
-}
+/**
+ * 截断超长输出。
+ *
+ * 位置变了（见 `textResult` 的说明）：现在由 `agent.ts` 的 `afterToolCall` 统一做，
+ * 因为那里才拿得到会话 id 与工具名 —— 截断的同时要把完整输出转存到磁盘并把路径
+ * 写进提示里，模型才有路找回原文。展示层的实现是 `agent-spill.ts` 的
+ * `truncateForModel()`，纯函数带单测。
+ */
 
 /** 把用户/模型给的路径解析成绝对路径。相对路径基于工作区。 */
 export function resolvePath(workspace: string, input: string): string {
@@ -133,15 +206,17 @@ const SECRET_PATH_PATTERNS: RegExp[] = [
   /(^|\/)\.codex(\/|$)/,
   /(^|\/)\.claude(\/|$)/,
   /Library\/Keychains(\/|$)/,
-  // 本应用自己的数据目录：设置表里存着全部云端 API Key
-  /Library\/Application Support\/omni-studio(\/|$)/,
 ];
 
 function assertNotSecret(workspace: string, target: string): void {
   const root = path.resolve(workspace);
   if (target === root || target.startsWith(root + path.sep)) return;
+  // 工具输出的转存目录开一个口子：那是应用自己写出来的文件（模型本来就在工具结果里
+  // 看过它的前半段），不放开就谈不上"截断之后还能读回来"。数据目录的其余部分
+  // （设置表里存着全部云端 API Key）照旧拦死。
+  if (isSpillPath(target)) return;
   const normalized = target.replace(/\\/g, "/");
-  if (SECRET_PATH_PATTERNS.some((re) => re.test(normalized))) {
+  if (SECRET_PATH_PATTERNS.some((re) => re.test(normalized)) || isOmniDataPath(target)) {
     throw new Error(
       `Refusing to access a credential path outside the workspace: ${target}. ` +
         "Copy what you need into the workspace instead.",
@@ -180,11 +255,17 @@ function underAny(target: string, folders: string[]): boolean {
 /**
  * 读权限：工作区内随便读；工作区外必须落在已授权目录里。
  * 凭据路径（SECRET_PATH_PATTERNS）始终拒绝，授权也不放行。
+ *
+ * 唯一的例外是工具输出的转存目录（`agent-spill.ts`）：那是应用自己从工具结果里
+ * 写出来的文件，用户已经授权过产生它的那次工具调用，内容模型本来也看过前半段。
+ * 不放行的话，"截断之后用 read_file 读回原文"会变成每读一次弹一次授权窗 ——
+ * 提示词里那句建议就成了空话。范围只有这一个子目录。
  */
 export function assertReadable(ctx: ToolContext, target: string): void {
   const root = path.resolve(ctx.workspace);
   const abs = path.resolve(target);
   if (abs === root || abs.startsWith(root + path.sep)) return;
+  if (isSpillPath(abs)) return;
   if (underAny(abs, authorizedFoldersOf(ctx))) return;
   throw new Error(
     `需要授权才能访问工作区之外的路径：${abs}。` +
@@ -201,8 +282,16 @@ export function assertWritable(ctx: ToolContext, target: string): void {
   throw new Error(`Path outside workspace is not writable without permission: ${abs}`);
 }
 
+/**
+ * 工具结果的**展示层截断**搬到了 `agent.ts` 的 `afterToolCall`（那里同时做超限转存）。
+ *
+ * 这里只留一道内存防呆：`bash` 的输出在读完之前不知道有多大，一条 `yes` 能吐出
+ * 几百 MB —— 超过硬上限直接丢尾部并说明原因，免得把事件流和数据库一起拖垮。
+ * 也就是说：工具结果在内存里可以是长的，**进入模型上下文之前**才被裁到 24k 字符
+ * （并落盘一份完整版，见 `agent-spill.ts`）。
+ */
 export function textResult(text: string) {
-  return { content: [{ type: "text" as const, text: truncate(text) }], details: {} };
+  return { content: [{ type: "text" as const, text: capToolResultText(text) }], details: {} };
 }
 
 export function errorResult(message: string) {
@@ -287,7 +376,7 @@ function createReadFile(ctx: ToolContext): BuiltTool {
       try {
         const target = resolvePath(ctx.workspace, params.path);
         assertReadable(ctx, target);
-        if (!existsSync(target)) return errorResult(`File not found: ${target}`);
+        if (!existsSync(target)) return errorResult(`File not found: ${target}${NOT_FOUND_HINT}`);
         const raw = readFileSync(target, "utf8");
         const lines = raw.split("\n");
         const start = Math.max(0, (params.offset ?? 1) - 1);
@@ -410,7 +499,7 @@ function createGrep(ctx: ToolContext): BuiltTool {
             if (re.test(line)) hits.push(`${file}:${i + 1}: ${line.trimEnd()}`);
           });
         }
-        return textResult(hits.join("\n") || "(no matches)");
+        return textResult(hits.join("\n") || NO_MATCH_HINT);
       } catch (e) {
         return errorResult(`grep failed: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -464,13 +553,14 @@ function createEditFile(ctx: ToolContext): BuiltTool {
       try {
         const target = resolvePath(ctx.workspace, params.path);
         assertWritable(ctx, target);
-        if (!existsSync(target)) return errorResult(`File not found: ${target}`);
+        if (!existsSync(target)) return errorResult(`File not found: ${target}${NOT_FOUND_HINT}`);
         const original = readFileSync(target, "utf8");
         const occurrences = original.split(params.old_str).length - 1;
-        if (occurrences === 0) return errorResult(`old_str not found in ${target}`);
+        if (occurrences === 0) return errorResult(`old_str not found in ${target}${EDIT_MISMATCH_HINT}`);
         if (occurrences > 1 && !params.replace_all) {
           return errorResult(
-            `old_str occurs ${occurrences} times in ${target}. Pass replace_all=true or make old_str unique.`,
+            `old_str occurs ${occurrences} times in ${target}. Pass replace_all=true or make old_str unique.` +
+              "（更稳的做法：把 old_str 扩到上下几行，让它只匹配一处。）",
           );
         }
         const next = params.replace_all
@@ -483,6 +573,186 @@ function createEditFile(ctx: ToolContext): BuiltTool {
         );
       } catch (e) {
         return errorResult(`edit_file failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  };
+}
+
+/**
+ * apply_patch（对齐 Codex）：一次调用完成多文件的新增 / 修改 / 删除 / 重命名，
+ * 解析与应用规则见 apply-patch.ts。相比连续调用 edit_file，它的价值在于
+ * 「一处匹配不上就整体不动」—— 模型不会留下改了一半的仓库。
+ */
+function createApplyPatch(ctx: ToolContext): BuiltTool {
+  return {
+    name: "apply_patch",
+    label: "Apply patch",
+    description:
+      "Apply a multi-file patch. Wrap hunks between '*** Begin Patch' and '*** End Patch'. " +
+      "Use '*** Add File: <path>' (every content line prefixed with '+'), " +
+      "'*** Update File: <path>' (optional '*** Move to: <new path>', then '@@' sections with " +
+      "context lines prefixed by a space, removals by '-', additions by '+'), and " +
+      "'*** Delete File: <path>'. Prefer this over several edit_file calls: it is atomic — " +
+      "if any section fails to match, nothing is written and you get a precise error.",
+    parameters: Type.Object({
+      patch: Type.String({
+        description: "The full patch text, starting with '*** Begin Patch' and ending with '*** End Patch'.",
+      }),
+    }),
+    execute: async (_toolCallId, params: { patch: string }) => {
+      const resolve = (rawPath: string) => {
+        const target = resolvePath(ctx.workspace, rawPath);
+        assertWritable(ctx, target);
+        return target;
+      };
+      const result = applyPatch(params.patch, {
+        resolve,
+        fs: {
+          read: (target) => {
+            if (!existsSync(target)) return null;
+            if (statSync(target).isDirectory()) {
+              throw new Error(`Refusing to patch a directory: ${target}`);
+            }
+            return readFileSync(target, "utf8");
+          },
+          write: (target, contents) => {
+            mkdirSync(path.dirname(target), { recursive: true });
+            writeFileSync(target, contents, "utf8");
+          },
+          remove: (target) => {
+            if (existsSync(target)) unlinkSync(target);
+          },
+        },
+      });
+      if (!result.ok) return errorResult(result.error);
+      for (const change of result.changes) ctx.recordArtifact?.(change.path, "apply_patch");
+      return textResult(result.summary);
+    },
+  };
+}
+
+/**
+ * request_permissions（对齐 Codex 的同名工具）：模型带着**理由**申请访问工作区之外的路径。
+ *
+ * 关键点：这个工具**必须经过授权闸门**（`permissions.ts` 把它翻译成
+ * external_directory 请求）—— 它能跑起来本身就意味着用户刚点了允许（或策略本就放行）。
+ * 所以工具体内不再自己发起一次询问：那样会先问一次工具、再问一次目录，用户要点两次；
+ * 而如果把它放进免授权名单，模型就能拿到一句假的"已授权"。
+ *
+ * 相比"先撞一次墙再看报错"，它的价值是让用户在卡片上看到**意图**（要哪个目录、拿去做什么），
+ * 而不是一条冷冰冰的路径拒绝；被拒时模型也会拿到明确的拒绝理由。
+ */
+function createRequestPermissions(ctx: ToolContext): BuiltTool {
+  return {
+    name: "request_permissions",
+    label: "Request access",
+    description:
+      "Ask the user to grant access to a path outside the workspace (for example a sibling " +
+      "repository or a data folder). Always explain why you need it. The user approves or denies " +
+      "on a card in the conversation; once approved you may read/write that path in this session.",
+    parameters: Type.Object({
+      path: Type.String({ description: "Absolute path (or path outside the workspace) you need access to." }),
+      reason: Type.String({ description: "One sentence: what you will do with it." }),
+    }),
+    execute: async (_toolCallId, params: { path: string; reason: string }) => {
+      const target = params.path?.trim();
+      if (!target) return errorResult("request_permissions needs a path.");
+      // 工作区内的路径本来就能访问，走到这里说明模型多问了一次。
+      if (isInsideWorkspace(ctx.workspace, path.resolve(ctx.workspace, target))) {
+        return textResult(`${target} is already inside the workspace — no approval needed.`);
+      }
+      return textResult(
+        `Access granted for ${target}. Proceed with the operation; if a workspace rule was added, ` +
+          "further reads/writes under it will not ask again.",
+      );
+    },
+  };
+}
+
+/**
+ * get_context_remaining（对齐 Codex 的同名工具）：让模型自己能看到还剩多少窗口。
+ * 本地模型窗口小，长任务里"该继续读文件还是先收尾"应当由它自己判断 ——
+ * 而不是等压缩真的发生（那时中间历史已经被裁掉了）。
+ */
+function createContextRemaining(ctx: ToolContext): BuiltTool {
+  return {
+    name: "get_context_remaining",
+    label: "Context left",
+    description:
+      "Report how much of the context window is still free for this session. " +
+      "Call it before starting a large read (many files, a big directory) when the task has " +
+      "already been running for a while, or when you are unsure whether you can afford one more step.",
+    parameters: Type.Object({}),
+    execute: async () => {
+      if (ctx.conversationId === undefined) {
+        return errorResult("Context usage is only available inside a conversation.");
+      }
+      const usage = contextUsage(ctx.conversationId, {
+        systemPromptTokens: ctx.systemPromptTokens,
+      });
+      return textResult(describeContextUsage(usage));
+    },
+  };
+}
+
+/** view_image 支持的图片类型（按扩展名判；本地模型走的是服务端的 mtmd / vision 前端）。 */export const IMAGE_MEDIA_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".bmp": "image/bmp",
+};
+
+/** 单张图片上限：base64 会再膨胀 1/3，再大就该先压缩（或用 bash 里的 sips / magick）。 */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+/**
+ * view_image（对齐 Codex 的同名工具）：把本地图片作为图片内容块交回模型，
+ * 让视觉模型能"看"截图 / 设计稿 / 生成结果。仅在当前模型看起来支持图片输入时
+ * 才会注册这个工具（纯文本模型收到图片块会被服务端拒绝）。
+ */
+function createViewImage(ctx: ToolContext): BuiltTool {
+  return {
+    name: "view_image",
+    label: "View image",
+    description:
+      "Read an image file from disk and attach it to the conversation so you can see it " +
+      "(screenshots, diagrams, generated images). Use this whenever the task depends on " +
+      "what an image actually shows.",
+    parameters: Type.Object({
+      path: Type.String({ description: "Path relative to the workspace, or absolute." }),
+    }),
+    execute: async (_toolCallId, params: { path: string }) => {
+      try {
+        const target = resolvePath(ctx.workspace, params.path);
+        assertReadable(ctx, target);
+        if (!existsSync(target)) return errorResult(`Image not found: ${target}`);
+        const mediaType = IMAGE_MEDIA_TYPES[path.extname(target).toLowerCase()];
+        if (!mediaType) {
+          return errorResult(
+            `Unsupported image type: ${path.extname(target) || "(no extension)"}. ` +
+              `Supported: ${Object.keys(IMAGE_MEDIA_TYPES).join(", ")}`,
+          );
+        }
+        const size = statSync(target).size;
+        if (size > MAX_IMAGE_BYTES) {
+          return errorResult(
+            `Image is too large (${Math.round(size / 1024 / 1024)}MB, limit ` +
+              `${MAX_IMAGE_BYTES / 1024 / 1024}MB). Downscale it first (e.g. ` +
+              `\`sips -Z 1568 "${target}" --out /tmp/small.png\`) and view the smaller copy.`,
+          );
+        }
+        const data = readFileSync(target).toString("base64");
+        return {
+          content: [
+            { type: "text" as const, text: `Attached image: ${target} (${mediaType}, ${size} bytes)` },
+            { type: "image" as const, data, mimeType: mediaType },
+          ],
+          details: {},
+        };
+      } catch (e) {
+        return errorResult(`view_image failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     },
   };
@@ -509,6 +779,14 @@ function createBash(ctx: ToolContext): BuiltTool {
       // 出事后要能查到"谁在什么时候跑了什么"。
       audit("agent_shell", `${ctx.workspace}: ${params.command}`);
       const timeoutMs = ctx.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
+      // 命令沙箱（对齐 Codex 的 workspace-write）：开启后把命令跑在平台沙箱里，
+      // 「写到工作区外」与「读凭据目录」由内核拦下，而不是靠命令黑名单。
+      const wrapped = wrapShellCommand(params.command, {
+        workspace: ctx.workspace,
+        shell,
+        authorizedFolders: authorizedFoldersOf(ctx),
+      });
+      if (wrapped.degradedReason) logSandboxDegraded(wrapped.degradedReason);
       try {
         /**
          * - `detached`：独立进程组，超时 / 停止时能整组杀掉。只杀 shell 的话，
@@ -517,7 +795,7 @@ function createBash(ctx: ToolContext): BuiltTool {
          * - `stdin: "ignore"`：别让 `pip install`、`git commit` 这类等输入的命令
          *   把整轮 Agent 挂在这里。
          */
-        const proc = Bun.spawn([shell, "-c", params.command], {
+        const proc = Bun.spawn(wrapped.cmd, {
           cwd: ctx.workspace,
           stdout: "pipe",
           stderr: "pipe",
@@ -549,6 +827,48 @@ function createBash(ctx: ToolContext): BuiltTool {
               : killed === "abort"
                 ? "\n[命令已随本次运行停止一并终止]"
                 : "";
+          // 沙箱拦截时只回一句 "operation not permitted" 谁都看不懂，补一句人话。
+          // 带上实际后端：Landlock 拒写只回裸的 "Permission denied"，只有确认走的是
+          // Landlock 才敢把它算成沙箱拦截（否则普通文件权限问题会被误报）。
+          const sandboxNote =
+            exitCode !== 0 && sandboxActive()
+              ? explainSandboxDenial(combined, { backend: wrapped.backend })
+              : null;
+          if (sandboxNote) {
+            /**
+             * 沙箱升级（对齐 Codex 的 sandbox_approval）：命令**因为沙箱**失败时，
+             * 问用户要不要跳过沙箱重跑一次 —— 而不是让模型自己撞墙或干脆绕路。
+             * 只试一次；被拒绝时把拒绝原因一并回给模型，它知道"别再绕了"。
+             */
+            const escalation = ctx.escalateSandbox
+              ? await ctx.escalateSandbox({ command: params.command, output: combined })
+              : null;
+            if (escalation === null && ctx.escalateSandbox) {
+              audit("agent_shell", `${ctx.workspace}: [跳过沙箱重试] ${params.command}`);
+              const retried = Bun.spawn([shell, "-c", params.command], {
+                cwd: ctx.workspace,
+                stdout: "pipe",
+                stderr: "pipe",
+                stdin: "ignore",
+                detached: true,
+                env: process.env,
+              });
+              const [retryOut, retryErr] = await Promise.all([
+                readOutputBounded(retried.stdout, retried.exited),
+                readOutputBounded(retried.stderr, retried.exited),
+              ]);
+              const retryCode = await retried.exited;
+              const retryCombined = [retryOut, retryErr].filter((part) => part.trim().length > 0).join("\n");
+              return textResult(
+                `$ ${params.command}\n[沙箱拦下（${sandboxNote}），已按你的授权跳过沙箱重试]\n` +
+                  `${retryCombined || "(no output)"}\n[exit ${retryCode}]${note}`,
+              );
+            }
+            return textResult(
+              `$ ${params.command}\n${combined || "(no output)"}\n[exit ${exitCode}]${note}\n${sandboxNote}` +
+                (escalation ? `\n跳过沙箱重试被拒绝：${escalation}` : ""),
+            );
+          }
           return textResult(
             `$ ${params.command}\n${combined || "(no output)"}\n[exit ${exitCode}]${note}`,
           );
@@ -793,6 +1113,92 @@ function createAskUser(ctx: ToolContext): BuiltTool {
 }
 
 /** 子智能体：把一块独立调研 / 执行交给子任务，主上下文只收它的结论。 */
+/**
+ * `goal`：Goal 模式的目标管理。
+ *
+ * 为什么需要一个工具而不是全靠提示词：目标要**跨回合**存在。Goal 模式会自动续跑，
+ * 每次续跑都是一次新的请求 —— 目标、验收标准、跑到哪了，必须落在库里，
+ * 不然模型第二轮就只剩"继续"两个字可以依据。
+ */
+function createGoalTool(ctx: ToolContext): BuiltTool {
+  return {
+    name: "goal",
+    label: "Goal",
+    description:
+      "Manage the current goal (Goal mode). " +
+      "`create` sets the objective and acceptance criteria — call it FIRST, before doing any work, " +
+      "and use ask_user if the criteria are not clear yet. " +
+      "`get` reports objective, status and budget usage. " +
+      "`complete` finishes the goal — pass the evidence in outcome (files, commands, output). " +
+      "`abandon` gives up with a reason — use it when genuinely blocked instead of claiming success.",
+    parameters: Type.Object({
+      op: Type.String({ description: "create | get | complete | abandon" }),
+      objective: Type.Optional(Type.String({ description: "create: what must be achieved, in one sentence." })),
+      acceptance: Type.Optional(
+        Type.String({
+          description: "create: how we will know it is done (concrete, checkable). Agree it with the user first.",
+        }),
+      ),
+      outcome: Type.Optional(
+        Type.String({ description: "complete: the evidence. abandon: why it cannot be done." }),
+      ),
+    }),
+    execute: async (_toolCallId, params: { op: string; objective?: string; acceptance?: string; outcome?: string }) => {
+      if (!ctx.onGoal) return errorResult("Goal 工具只在 Goal 模式下可用。");
+      return ctx.onGoal(params);
+    },
+  };
+}
+
+/**
+ * `write_plan`：Plan 模式**唯一**能写的东西。
+ *
+ * 把方案写进数据目录（不是工作区），并登记成产出物 —— 右侧面板能预览，切回 Agent 模式后
+ * 模型手里也还留着那份方案（否则只能去历史正文里捞）。这是"Plan 模式一行都不许改工作区"
+ * 与"方案要能留下来、能被批准"之间的那个折中。
+ */
+export function createWritePlan(ctx: ToolContext): BuiltTool {
+  return {
+    name: "write_plan",
+    label: "Write plan",
+    description:
+      "Write the implementation plan to a plan file (outside the workspace) and show it to the user. " +
+      "This is the ONLY way to save something in Plan mode — the workspace stays untouched. " +
+      "Write the full plan in one call, replacing any previous version. " +
+      "After writing it, summarise the plan briefly in your reply and stop; the user approves or asks for changes.",
+    parameters: Type.Object({
+      content: Type.String({
+        description:
+          "The plan in Markdown. It must be executable by someone who was not in this conversation: " +
+          "goal, files to touch (with paths), step-by-step changes, risks, and how to verify. " +
+          "Every path you name must have been read in this session — mark anything unverified as such.",
+      }),
+    }),
+    execute: async (_toolCallId, params: { content: string }) => {
+      if (!ctx.onWritePlan) return errorResult("写方案需要会话上下文（这个模式下拿不到）。");
+      if (!params.content?.trim()) return errorResult("方案内容不能为空。");
+      return ctx.onWritePlan(params.content);
+    },
+  };
+}
+
+/**
+ * `task` 的子智能体类型。
+ *
+ * - `explore`：只读调研，自己读一堆文件，只回一段能自包含的结论；
+ * - `general`：全能力（仍然受权限策略约束），用于"这一块独立做完"的活；
+ * - `review`：**审阅当前工作区的改动**。和另外两种的区别是它不需要模型描述要审什么 ——
+ *   工作区里未提交的 diff 由主进程直接喂给它（对齐 oh-my-pi 的 reviewer 子智能体：
+ *   按"能证明的影响 + 确实是这次引入的"给结论，而不是泛泛地说"建议加注释"）。
+ */
+const SUBAGENT_TYPES = ["explore", "general", "review"] as const;
+export type SubagentType = (typeof SUBAGENT_TYPES)[number];
+
+function normalizeSubagentType(raw: string | undefined): SubagentType {
+  const value = raw?.trim();
+  return (SUBAGENT_TYPES as readonly string[]).includes(value ?? "") ? (value as SubagentType) : "general";
+}
+
 function createTaskTool(ctx: ToolContext): BuiltTool {
   return {
     name: "task",
@@ -800,12 +1206,16 @@ function createTaskTool(ctx: ToolContext): BuiltTool {
     description:
       "Delegate a self-contained sub-task to a subagent that has its own context window, then " +
       "returns only its final answer. Use it for broad exploration (\"find every place X is used\") " +
-      "or work that would flood your own context with tool output. The subagent cannot ask the user.",
+      "or work that would flood your own context with tool output. The subagent cannot ask the user.\n" +
+      "- subagent_type=explore: read-only search over the workspace.\n" +
+      "- subagent_type=general: full tools (default), for doing a self-contained piece of work.\n" +
+      "- subagent_type=review: review the CURRENT uncommitted workspace changes. You do not need to " +
+      "describe what changed — the diff is handed to the reviewer; just say what to focus on.",
     parameters: Type.Object({
       description: Type.String({ description: "Short (3-5 words) description of the sub-task." }),
       prompt: Type.String({ description: "Full, self-contained instructions for the subagent." }),
       subagent_type: Type.Optional(
-        Type.String({ description: "explore (read-only search) | general (full tools, default)" }),
+        Type.String({ description: "explore (read-only) | general (full tools, default) | review (review current changes)" }),
       ),
     }),
     execute: async (
@@ -815,7 +1225,7 @@ function createTaskTool(ctx: ToolContext): BuiltTool {
     ) => {
       if (!ctx.spawnSubagent) return errorResult("Subagents are not available in this mode.");
       void signal;
-      const subagentType = params.subagent_type?.trim() === "explore" ? "explore" : "general";
+      const subagentType = normalizeSubagentType(params.subagent_type);
       try {
         const summary = await ctx.spawnSubagent({
           description: params.description,
@@ -888,17 +1298,158 @@ export function htmlToText(html: string): string {
 }
 
 /** 只读工具集：Plan 模式下只用这些，保证"先出方案再动手"。 */
+/**
+ * checkpoint / rewind：给"大范围调研"用的打点与收网（对齐 oh-my-pi 的同名机制）。
+ *
+ * 场景：为了定位一个问题要读十几个文件，读完之后真正有用的只有三五句结论，
+ * 那些中间过程却会一直占着窗口（本地 8k 窗口下尤其致命）。
+ * 打点 → 探索 → `rewind` 交结论 = 把中间过程**整段换掉**。
+ *
+ * 和别的压缩手段的区别：不走模型摘要，所以没有"摘要写歪了"的漂移风险 ——
+ * 留下的就是你亲手写的那份结论。
+ */
+function createCheckpoint(ctx: ToolContext): BuiltTool {
+  return {
+    name: "checkpoint",
+    label: "Checkpoint",
+    description:
+      "Mark the start of a large exploration, then call `rewind` with your findings when it is done. " +
+      "Everything between checkpoint and rewind is dropped from context and replaced by your findings, " +
+      "so use it before reading many files to answer one question. " +
+      "Do NOT use it for ordinary work (edits you want to keep, or a task you are about to finish).",
+    parameters: Type.Object({
+      goal: Type.String({ description: "What you are about to investigate, in one short sentence." }),
+    }),
+    execute: async (_toolCallId, params: { goal: string }) => {
+      if (!ctx.onCheckpoint) return errorResult("Checkpoint is not available in this mode.");
+      return ctx.onCheckpoint(params.goal ?? "");
+    },
+  };
+}
+
+function createRewind(ctx: ToolContext): BuiltTool {
+  return {
+    name: "rewind",
+    label: "Rewind",
+    description:
+      "Finish an exploration started with `checkpoint`: everything read since the checkpoint is dropped and " +
+      "replaced by the report you write here. The report must be self-contained — it is the ONLY thing that " +
+      "survives, so include paths, line numbers, causes and the conclusion. " +
+      "Set revert_files=true only when you created scratch files during the exploration and want them undone.",
+    parameters: Type.Object({
+      report: Type.String({
+        description:
+          "Your findings: conclusion first, then the evidence (file:line, command output). " +
+          "Must stand alone without the exploration it replaces.",
+      }),
+      revert_files: Type.Optional(
+        Type.Boolean({
+          description:
+            "Also restore the workspace to its state at the checkpoint (undoes files YOU changed during the " +
+            "exploration). Default false — leave it false unless you made throwaway changes.",
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params: { report: string; revert_files?: boolean }) => {
+      if (!ctx.onRewind) return errorResult("Rewind is not available in this mode.");
+      return ctx.onRewind({ report: params.report ?? "", revertFiles: params.revert_files === true });
+    },
+  };
+}
+
+/**
+ * think：不给答案的"草稿纸"（对齐 oh-my-pi 的 think 工具）。
+ *
+ * 我们的模型默认 `reasoning: false`（见 `buildModel()`：不强行注入 reasoning 参数），
+ * 也就是说**没有原生推理通道** —— 模型想推理只能在正文里"想出声"，那些过程会留在
+ * 对话记录里、也会挤占本轮上下文。给它一个把推理写进去、只回一个空壳的工具，
+ * 正文就能保持干净（工具结果本身几乎不占 token）。
+ *
+ * 注意：这不是"隐藏思考"。写进来的内容仍会进上下文（它是一条工具调用），
+ * 只是不会出现在给用户看的正文里。
+ */
+function createThink(): BuiltTool {
+  return {
+    name: "think",
+    label: "Think",
+    description:
+      "A private scratchpad for reasoning that should not appear in your visible answer: weighing options, " +
+      "planning a multi-step approach, double-checking an assumption, or working out why something failed. " +
+      "Nothing happens as a result — use it when thinking in the open would clutter the reply. " +
+      "For short reasoning just answer directly; do not call this every turn.",
+    parameters: Type.Object({
+      thoughts: Type.String({ description: "The reasoning to record. Be specific; this is for you, not the user." }),
+    }),
+    execute: async (_toolCallId, params: { thoughts: string }) => {
+      if (!params.thoughts?.trim()) return textResult("------");
+      // 回一个空壳：内容已经进了 transcript，这里再复述一遍纯属浪费窗口。
+      return textResult("------");
+    },
+  };
+}
+
+/**
+ * read_skill：按需读取用户安装的 Skills（对齐 oh-my-pi 的渐进披露）。
+ *
+ * 系统提示里只列了「名字: 描述」，正文要靠这个工具取 —— 技能可能有几千字，
+ * 全塞进系统提示会直接吃掉本地窗口。不带 name 时返回清单，便于模型自己找。
+ */
+function createReadSkill(): BuiltTool {
+  return {
+    name: "read_skill",
+    label: "Read skill",
+    description:
+      "Read a user-installed Skill (a SKILL.md instruction file) by name, or list the available skills " +
+      "when called without a name. Skills often contain the exact procedure the user wants for a task: " +
+      "when the current task matches a skill listed in your system prompt, read it BEFORE acting. " +
+      "Use `file` to read a script or template inside the skill directory (path relative to that directory).",
+    parameters: Type.Object({
+      name: Type.Optional(
+        Type.String({ description: "Skill id as listed in the system prompt. Omit to list all skills." }),
+      ),
+      file: Type.Optional(
+        Type.String({
+          description:
+            "Optional path of a file inside the skill directory (e.g. 'scripts/run.py'). " +
+            "Defaults to SKILL.md.",
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params: { name?: string; file?: string }) => {
+      const name = params.name?.trim();
+      const file = params.file;
+      if (!name) {
+        const section = skillsPromptSection();
+        return textResult(section ?? "这台机器上还没有安装任何 Skill。");
+      }
+      const result = readSkillFile(name, file);
+      if (!result.ok) return errorResult(result.reason);
+      const header = `# Skill: ${result.name}\n（技能目录：${result.path}）`;
+      const tail = result.truncated ? "\n\n…（内容过长已截断，需要更多请用 file 参数读取技能目录里的具体文件）" : "";
+      return textResult(`${header}\n\n${result.text}${tail}`);
+    },
+  };
+}
+
 export function buildReadOnlyTools(ctx: ToolContext): BuiltTool[] {
   return [
     createReadFile(ctx),
     createListDir(ctx),
     createGlob(ctx),
     createGrep(ctx),
+    // 看图是只读的，但只在模型真的能收图片时才给（见 ToolContext.vision）。
+    ...(ctx.vision ? [createViewImage(ctx)] : []),
     createWebSearch(),
     createWebFetch(),
     createKnowledgeSearch(),
+    createReadSkill(),
+    createThink(),
+    createCheckpoint(ctx),
+    createRewind(ctx),
     createTodoWrite(ctx),
     createAskUser(ctx),
+    createContextRemaining(ctx),
+    createRequestPermissions(ctx),
   ];
 }
 
@@ -908,6 +1459,9 @@ export function buildAgentTools(ctx: ToolContext): BuiltTool[] {
     ...buildReadOnlyTools(ctx),
     createWriteFile(ctx),
     createEditFile(ctx),
+    createApplyPatch(ctx),
+    createWritePlan(ctx),
+    createGoalTool(ctx),
     createBash(ctx),
     createTaskTool(ctx),
   ];

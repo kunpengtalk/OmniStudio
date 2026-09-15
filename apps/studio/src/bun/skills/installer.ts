@@ -13,7 +13,7 @@ import {
 import { randomUUID } from "crypto";
 import type { SkillSource, SkillsInstallProgress } from "../../shared/skills";
 import { centralSkillDir, getCentralRepoDir, getTmpDir, ensureCentralRepo, muteSelfWrites } from "./central-repo";
-import { isInsideDir, safeJoin, safeName } from "../path-safety";
+import { isInsideDir, safeJoin } from "../path-safety";
 import {
   upsertSkill,
   getSkillRow,

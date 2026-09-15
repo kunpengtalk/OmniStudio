@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } fro
 import path from "path";
 import { WHISPER_CPP_RELEASE_TAG, WHISPER_CPP_REPO } from "../shared/whispercpp";
 import { getDataDir } from "./paths";
+import { fetchAssetFromSources, githubReleaseUrls, officialWithMirrors } from "./mirror-download";
 
 /**
  * whisper.cpp 本地识别引擎（whisper-cli / whisper-server）的一键安装。
@@ -213,28 +214,29 @@ async function downloadCondaEngine(): Promise<{ ok: boolean; error?: string; ver
 
   for (const f of cfgs) {
     const basename = f.basename.split("/").pop()!;
-    let lastError = "";
-    let ok = false;
-    for (const url of condaUrls(f)) {
-      const tmp = path.join(getEnginesDir(), `.${basename}`);
-      try {
-        const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(600_000) });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        await Bun.write(tmp, res);
-        await extractCondaArchive(tmp, staging);
-        ok = true;
-        break;
-      } catch (e) {
-        lastError = e instanceof Error ? e.message : String(e);
-        rmSync(tmp, { force: true });
-        rmSync(path.join(getEnginesDir(), `.staging-${process.pid}`), { recursive: true, force: true });
-        // 重新铺白 staging，避免上一个失败包留下脏数据。
-        mkdirSync(staging, { recursive: true });
-      }
-    }
-    if (!ok) {
+    const tmp = path.join(getEnginesDir(), `.${basename}`);
+    const condaAll = condaUrls(f);
+    const res = await fetchAssetFromSources({
+      urls: await officialWithMirrors(condaAll[0]!, condaAll.slice(1)),
+      dest: tmp,
+      what: `whisper.cpp 依赖包 ${f.pkg}`,
+      source: "asr",
+      accept: async (file) => {
+        try {
+          await extractCondaArchive(file, staging);
+          return null;
+        } catch (e) {
+          // 解压失败：铺白 staging，别让下一个源读到上一个源的脏数据。
+          rmSync(staging, { recursive: true, force: true });
+          mkdirSync(staging, { recursive: true });
+          return e instanceof Error ? e.message : String(e);
+        }
+      },
+    });
+    rmSync(tmp, { force: true });
+    if (!res.ok) {
       cleanupStaging(staging);
-      return { ok: false, error: `whisper.cpp 引擎安装失败（${f.pkg}）：${lastError}` };
+      return { ok: false, error: `whisper.cpp 引擎安装失败（${f.pkg}）：${res.error}` };
     }
   }
 
@@ -262,12 +264,6 @@ function releaseAssetName(): string | null {
   if (process.platform === "linux" && process.arch === "arm64") return "whisper-bin-ubuntu-arm64.tar.gz";
   if (process.platform === "win32" && process.arch === "x64") return "whisper-bin-x64.zip";
   return null;
-}
-
-function githubAssetUrls(asset: string): string[] {
-  const gh = `https://github.com/${WHISPER_CPP_REPO}/releases/download/${WHISPER_CPP_RELEASE_TAG}/${asset}`;
-  // 国内镜像（GitHub 加速），依次回退。
-  return [gh, `https://gh-proxy.com/${gh}`, `https://ghfast.top/${gh}`];
 }
 
 /** 在解压目录里定位“内容根”（Linux 资产顶层即含 whisper-cli 的目录）。 */
@@ -356,25 +352,20 @@ export async function downloadWhisperEngine(): Promise<{ ok: boolean; error?: st
   }
 
   mkdirSync(getEnginesDir(), { recursive: true });
-  const tmpName = `.engine-${asset}`;
-  let lastError = "";
-  for (const url of githubAssetUrls(asset)) {
-    const tmp = path.join(getEnginesDir(), tmpName);
-    try {
-      const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(600_000) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      await Bun.write(tmp, res);
-      const r = await installGitHubRelease(tmp, WHISPER_CPP_RELEASE_TAG);
-      rmSync(tmp, { force: true });
-      if (r.ok) return { ok: true, version: WHISPER_CPP_RELEASE_TAG };
-      throw new Error(r.error ?? "安装失败");
-    } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e);
-      rmSync(tmp, { force: true });
-      cleanupStaging(path.join(getEnginesDir(), `.staging-${process.pid}`));
-    }
-  }
-  return { ok: false, error: `whisper.cpp 引擎安装失败：${lastError}` };
+  const tmp = path.join(getEnginesDir(), `.engine-${asset}`);
+  const res = await fetchAssetFromSources({
+    urls: await githubReleaseUrls(WHISPER_CPP_REPO, WHISPER_CPP_RELEASE_TAG, asset),
+    dest: tmp,
+    what: "whisper.cpp 引擎",
+    source: "asr",
+    accept: async (file) => {
+      const r = await installGitHubRelease(file, WHISPER_CPP_RELEASE_TAG);
+      return r.ok ? null : (r.error ?? "安装失败");
+    },
+  });
+  rmSync(tmp, { force: true });
+  if (!res.ok) return { ok: false, error: res.error };
+  return { ok: true, version: WHISPER_CPP_RELEASE_TAG };
 }
 
 /** 删除应用内置的引擎（PATH 上的不受影响）。 */

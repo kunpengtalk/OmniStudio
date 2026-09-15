@@ -1,4 +1,18 @@
-import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { drizzle } from "drizzle-orm/bun-sqlite";
+import { migrate } from "drizzle-orm/bun-sqlite/migrator";
+import { tmpdir } from "os";
+import { join } from "path";
+
+import * as schema from "./db/schema";
+// 只借类型：`import type` 在运行时被擦除，不会把真实模块拉进 mock 之前的加载顺序里。
+import type { ASRProviderConfig, AsrStatus } from "./asr";
+import type { TTSProviderConfig } from "./voice";
+import type { ImageGenConfig } from "./image-gen";
+import type { MlxModelInfo } from "./mlx-gen";
+import type { InstalledModel } from "./model-store";
+import { mockModulePartial } from "./test-mocks";
 
 // 假的"上游"端口：本地推理服务器 + 云端 OpenAI 兼容 API。
 const LOCAL_PORT = 18099;
@@ -18,7 +32,7 @@ mock.module("./server-manager", () => ({
   onStatusChange: () => () => {},
 }));
 
-const ASR_STATUS = {
+const ASR_STATUS: AsrStatus = {
   serverRunning: false,
   port: 18081,
   engine: "none",
@@ -27,34 +41,36 @@ const ASR_STATUS = {
   binaryPath: null,
   activeModel: null,
 };
-const ASR_PROVIDER = { base: "", apiKey: "", model: "" };
+const ASR_PROVIDER: ASRProviderConfig = { providerId: "", base: "", apiKey: "", model: "" };
 
-mock.module("./asr", () => ({
+await mockModulePartial<typeof import("./asr")>("./asr", {
   getAsrStatus: async () => ({ ...ASR_STATUS }),
   getASRProviderConfig: () => ({ ...ASR_PROVIDER }),
-}));
+});
 
-const TTS_PROVIDER = { base: "", apiKey: "", model: "" };
+const TTS_PROVIDER: TTSProviderConfig = { providerId: "", base: "", apiKey: "", model: "" };
 
-mock.module("./voice", () => ({
+await mockModulePartial<typeof import("./voice")>("./voice", {
   getTTSProviderConfig: () => ({ ...TTS_PROVIDER }),
   listProviderModels: async () => [] as string[],
   runTTSEdge: async () => ({
     id: 1,
     kind: "tts",
-    status: "ok",
+    status: "done",
+    source: "agent",
     model: "Edge TTS（在线免费）",
     voice: "zh-CN-XiaoxiaoNeural",
     text: "edge",
     audioUrl: `http://127.0.0.1:${LOCAL_PORT}/fake-audio`,
+    audioPath: "audio/tts-fake.mp3",
     refAudioPath: null,
     durationMs: 100,
     error: null,
     createdAt: 0,
   }),
-}));
+});
 
-mock.module("./tts-local", () => ({
+await mockModulePartial<typeof import("./tts-local")>("./tts-local", {
   getTtsLocalStatus: async () => ({
     active: false,
     activeModelId: null,
@@ -68,7 +84,7 @@ mock.module("./tts-local", () => ({
     throw new Error("no local tts");
   },
   listTtsLocalModels: () => [],
-}));
+});
 
 const SETTINGS: Record<string, string> = {
   GATEWAY_ENABLED: "1",
@@ -83,20 +99,47 @@ const SETTINGS: Record<string, string> = {
   IMG_MODEL: "z-image-turbo",
 };
 
-mock.module("./db/settings", () => ({
-  getSetting: (key: string) => SETTINGS[key] ?? "",
+await mockModulePartial<typeof import("./db/settings")>("./db/settings", {
+  getSetting: (key) => SETTINGS[key] ?? "",
   // kb-mcp → knowledge.ts → vllm/vllm.ts 会读重试次数等数值设置。
-  getNumericSetting: (key: string) => Number(SETTINGS[key] ?? 0) || 0,
-  updateSettings: (values: Record<string, string>) => Object.assign(SETTINGS, values),
+  getNumericSetting: (key) => Number(SETTINGS[key] ?? 0) || 0,
+  updateSettings: (values) => Object.assign(SETTINGS, values),
   getAllSettings: () => ({ ...SETTINGS }),
   getActiveServerPort: () => SETTINGS.SERVER_PORT || String(LOCAL_PORT),
-}));
+});
 
 // 桩掉网关生图适配层（gateway-images）：让 /v1/images/generations 不依赖真实 mflux，
 // 也避免直接 mock ./image-gen —— 后者会泄漏给 image-gen.test.ts（它需要真实模块）。
 let IMG_GEN_PARAMS: Record<string, unknown> | null = null;
 let IMG_GEN_RESULT: { records: any[]; error?: string } = { records: [] };
-const IMG_GEN_CONFIG = { backend: "mlx", apiBase: "", apiKey: "", model: "z-image-turbo", comfyBase: "" };
+const IMG_GEN_CONFIG: ImageGenConfig = {
+  backend: "mlx",
+  providerId: "",
+  apiBase: "",
+  apiKey: "",
+  model: "z-image-turbo",
+  comfyBase: "",
+};
+const MLX_MODELS: MlxModelInfo[] = [
+  {
+    id: "z-image-turbo",
+    label: "Z-Image Turbo (6B)",
+    cmd: "",
+    modelArg: null,
+    defaultSteps: 9,
+    approxSizeGb: 6,
+    description: "",
+  },
+  {
+    id: "flux-schnell",
+    label: "FLUX.1 Schnell (12B)",
+    cmd: "",
+    modelArg: "schnell",
+    defaultSteps: 4,
+    approxSizeGb: 12,
+    description: "",
+  },
+];
 
 // 经由函数读取：让 TS 以声明类型（而非收窄后的 null）参与类型检查。
 const readImgParams = (): Record<string, unknown> | null => IMG_GEN_PARAMS;
@@ -109,32 +152,47 @@ const TMP_IMG_DIR = (() => {
   return mkdtempSync(join(tmpdir(), "gw-img-"));
 })();
 
-mock.module("./gateway-images", () => ({
+await mockModulePartial<typeof import("./gateway-images")>("./gateway-images", {
   getImageGenConfig: () => ({ ...IMG_GEN_CONFIG }),
-  generateImage: async (params: unknown) => {
+  generateImage: async (params) => {
     IMG_GEN_PARAMS = params as Record<string, unknown>;
     return IMG_GEN_RESULT;
   },
-  lookupMlxModel: (id: string) =>
-    id === "flux-schnell" || id === "z-image-turbo" || id === "flux-dev" ? { id } : null,
-  IMAGE_MODELS: [
-    { id: "z-image-turbo", label: "Z-Image Turbo (6B)", cmd: "", modelArg: null, defaultSteps: 9, approxSizeGb: 6, description: "" },
-    { id: "flux-schnell", label: "FLUX.1 Schnell (12B)", cmd: "", modelArg: "schnell", defaultSteps: 4, approxSizeGb: 12, description: "" },
-  ],
+  // 从同一份清单里查：以前这里是手写 `{ id }`，缺了 label / cmd / steps —— 一个
+  // 「查得到就等于认得出」的假实现，模型信息一多就对不上真实返回。
+  lookupMlxModel: (id) => MLX_MODELS.find((m) => m.id === id) ?? null,
+  IMAGE_MODELS: MLX_MODELS,
   imagesBaseDir: () => TMP_IMG_DIR,
-}));
+});
 
 // 桩掉「已装本地模型」：默认空 → 所有模型名都走"非本地已装"的旧路由逻辑；
 // 需要验证本地模型路由的测试自行填充 INSTALLED_MODELS。
+//
+// 只填 fileName：被测的路由判断只看这一个字段。返回处显式断言成完整类型，
+// 免得为了满足结构类型把十来个别处用不到的字段编出来（那样反而看不出"这里只用到名字"）。
 let INSTALLED_MODELS: { fileName: string }[] = [];
-mock.module("./model-store", () => ({
-  listInstalledModels: () => INSTALLED_MODELS,
-  slugModelFileName: (fileName: string) =>
+await mockModulePartial<typeof import("./model-store")>("./model-store", {
+  listInstalledModels: () => INSTALLED_MODELS as InstalledModel[],
+  slugModelFileName: (fileName) =>
     fileName
       .replace(/\.(gguf|safetensors|bin|pt|pth|ckpt|onnx|ggml)$/i, "")
       .toLowerCase()
       .replace(/[^a-z0-9_.-]/g, "-"),
-}));
+});
+
+/**
+ * 用量账本要一个**自己控制的**库。
+ *
+ * 不能直接 import 真实的 `./db`：`bun test` 的模块 mock 跨文件泄漏，且 chat.test.ts
+ * 等文件在 afterAll 里删掉了自己的临时库 —— 后加载的文件拿到的是那个已被删除的
+ * 句柄，首次查询就报 "disk I/O error"（报错现场离原因很远）。
+ * 与 chat.test.ts 同一套路：自建库 + mock `./db`；**不删**临时文件，免得把同一个坑
+ * 留给后加载的文件。
+ */
+const usageSqlite = new Database(join(tmpdir(), `omni-gw-usage-${process.pid}.db`), { create: true });
+const usageDb = drizzle({ client: usageSqlite, schema });
+migrate(usageDb, { migrationsFolder: join(import.meta.dir, "db/migrations") });
+await mockModulePartial<typeof import("./db")>("./db", { db: usageDb, sqliteClient: usageSqlite });
 
 // 嵌入后端解析：网关 /v1/embeddings 的唯一后端来源是「运行中的嵌入实例」。
 // 展开真实模块再覆盖单函数 —— 模式同 ./server-manager：只写死用到的函数，
@@ -148,6 +206,8 @@ mock.module("./model-servers", () => ({
 
 // 在所有 mock 注册后动态加载被测模块（静态 import 会被提升到 mock 之前执行）。
 const { startGateway, stopGateway, getGatewayStatus, generateGatewayApiKey, resetModelRouteCaches } = await import("./gateway");
+const { db } = await import("./db");
+const { usageRecords } = await import("./db/schema");
 
 const GATEWAY_BASE = `http://127.0.0.1:10123`;
 
@@ -1145,5 +1205,111 @@ describe("API key auth", () => {
     } finally {
       SETTINGS.GATEWAY_API_KEY = "";
     }
+  });
+});
+
+/**
+ * 网关的用量记账。
+ *
+ * 这一路是外部 agent（Claude Code / Codex…）的唯一入口，请求不产生任何本地消息 ——
+ * 账本记不下来，统计页上就永远看不到它们。两条硬约束：
+ * 1. **透传不能变样**：替客户端向上一跳要的 usage 块必须挡在客户端之外；
+ *    （客户端自己没要 usage 时，它不该在流里看见任何一个额外的块）
+ * 2. **拿到多少记多少**：流式与非流式都要落行，别只记一种。
+ */
+describe("用量记账", () => {
+  const usageRows = () => db.select().from(usageRecords).all();
+
+  /** 上游"按 OpenAI 规范"的收尾：一个只带 usage 的空 chunk，然后 [DONE]。 */
+  const withUsageChunk = () =>
+    sseResponse([
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [], usage: { prompt_tokens: 120, completion_tokens: 40, total_tokens: 160 } },
+    ]);
+
+  beforeEach(() => {
+    db.delete(usageRecords).run();
+    lastLocalChat = null;
+    lastCloudChat = null;
+  });
+
+  test("流式为客户端补 include_usage，但只带 usage 的空 chunk 不转发", async () => {
+    localOverride = withUsageChunk();
+    const res = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "upstream-chat", messages: [{ role: "user", content: "hi" }], stream: true }),
+    });
+    const text = await res.text();
+
+    // 1) 请求里替客户端要了用量
+    expect((readLocal() as { stream_options?: { include_usage?: boolean } })?.stream_options?.include_usage).toBe(true);
+    // 2) 内容照常，额外的空 chunk 不见了
+    expect(text).toContain("hi");
+    expect(text).toContain("[DONE]");
+    expect(text).not.toContain('"choices":[]');
+    // 3) 账本记下了实测用量
+    const rows = usageRows();
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.channel).toBe("gateway");
+    expect(rows[0]!.upstream).toBe("local");
+    expect(rows[0]!.inputTokens).toBe(120);
+    expect(rows[0]!.outputTokens).toBe(40);
+    expect(rows[0]!.estimated).toBe(0);
+  });
+
+  test("客户端自己开了 include_usage 时，那个块原样透传（不能吞掉它要的东西）", async () => {
+    localOverride = withUsageChunk();
+    const res = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "upstream-chat",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+        stream_options: { include_usage: true },
+      }),
+    });
+    const text = await res.text();
+    expect(text).toContain('"choices":[]');
+    expect(text).toContain('"prompt_tokens":120');
+    expect(usageRows().length).toBe(1);
+  });
+
+  test("非流式请求一样记账，且响应体不被改写", async () => {
+    const res = await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "upstream-chat", messages: [{ role: "user", content: "hi" }] }),
+    });
+    const body = (await res.json()) as { usage?: { prompt_tokens?: number } };
+    expect(body.usage?.prompt_tokens).toBe(5);
+    const rows = usageRows();
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.inputTokens).toBe(5);
+    expect(rows[0]!.outputTokens).toBe(3);
+  });
+
+  test("上游一个 token 数都没给时不落行（记 0 只会让调用次数虚高）", async () => {
+    localOverride = sseResponse([{ choices: [{ delta: { content: "hi" } }] }]);
+    await fetch(`${GATEWAY_BASE}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "upstream-chat", messages: [{ role: "user", content: "hi" }], stream: true }),
+    });
+    expect(usageRows().length).toBe(0);
+  });
+
+  test("/v1/messages 也记账，模型名按展示口径记", async () => {
+    const res = await fetch(`${GATEWAY_BASE}/v1/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "upstream-chat", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(res.status).toBe(200);
+    const rows = usageRows();
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.channel).toBe("gateway");
+    expect(rows[0]!.model).toBe("upstream-chat");
   });
 });

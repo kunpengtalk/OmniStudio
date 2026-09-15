@@ -42,6 +42,7 @@ const EXPECTED_TABLES = [
   "agent_artifacts",
   "automations",
   "automation_runs",
+  "usage_records",
 ];
 
 function assert(cond: unknown, msg: string): asserts cond {

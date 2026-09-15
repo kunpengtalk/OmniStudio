@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9c3f60a1-90b1-485f-80ff-adfda2977745",
+  "id": "f6ae26e1-9feb-4e3e-86cc-7d6d6bdac7e0",
   "prevId": "fd6ff495-552f-4b0f-b1fb-c22b03a43de4",
   "tables": {
     "agent_artifacts": {
@@ -1303,30 +1303,6 @@
           "autoincrement": false,
           "default": 1
         },
-        "embed_image": {
-          "name": "embed_image",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "embed_audio": {
-          "name": "embed_audio",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "embed_video": {
-          "name": "embed_video",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -1409,27 +1385,6 @@
         },
         "char_end": {
           "name": "char_end",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "modality": {
-          "name": "modality",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "media_path": {
-          "name": "media_path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "media_index": {
-          "name": "media_index",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,
@@ -2031,6 +1986,13 @@
         "tokens": {
           "name": "tokens",
           "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "stats": {
+          "name": "stats",
+          "type": "text",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

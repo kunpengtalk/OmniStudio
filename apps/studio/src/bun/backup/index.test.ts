@@ -495,7 +495,7 @@ describe("归档不可信输入", () => {
     block.write("00000000000\0", 136, 12, "ascii");
     block.write("        ", 148, 8, "ascii"); // 校验和按 8 个空格计算后再写回
     block.write("0", 156, 1, "ascii");
-    block.write("ustar\0" + "00", 257, 8, "ascii");
+    block.write("ustar\u000000", 257, 8, "ascii");
     let sum = 0;
     for (const byte of block.subarray(0, 512)) sum += byte;
     block.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");

@@ -41,46 +41,48 @@ export function AgentQueuePanel({ conversationId }: { conversationId: number }) 
   if (messages.length === 0) return null;
 
   return (
-    <div className="overflow-hidden rounded-xl border bg-muted/30">
-      <div className="flex items-center gap-1.5 border-b px-3 py-1.5 text-[11px] text-muted-foreground">
-        <SendIcon className="size-3.5" />
+    <div className="composer-panel collapsible">
+      <div className="composer-panel-head">
+        <SendIcon className="size-3.5 shrink-0" aria-hidden />
         <span className="font-medium">{t("agent.queue.title")}</span>
         <span className="tabular-nums">{messages.length}</span>
-        <span className="ml-auto text-[10px] text-muted-foreground/70">{t("agent.queue.hint")}</span>
+        <span className="ml-auto composer-panel-label">{t("agent.queue.hint")}</span>
       </div>
-      <div className="divide-y">
-        {messages.map((message, index) => (
-          <div key={`${index}-${message.slice(0, 12)}`} className="flex items-start gap-1.5 px-3 py-1.5">
-            <span className="mt-0.5 text-[10px] text-muted-foreground/70 tabular-nums">{index + 1}</span>
-            <span className="min-w-0 flex-1 text-[11px] break-words">{message}</span>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="shrink-0 text-muted-foreground"
-              tooltip={t("agent.queue.steer")}
-              disabled={steer.isPending && steeringIndex === index}
-              onClick={() => {
-                setSteeringIndex(index);
-                steer.mutate(index);
-              }}
-            >
-              {steer.isPending && steeringIndex === index ? (
-                <Loader2Icon className="size-3 animate-spin" />
-              ) : (
-                <CornerUpRightIcon className="size-3" />
-              )}
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              className="shrink-0 text-muted-foreground"
-              tooltip={t("agent.queue.remove")}
-              onClick={() => remove.mutate(index)}
-            >
-              <XIcon className="size-3" />
-            </Button>
-          </div>
-        ))}
+      <div className="composer-panel-body composer-panel-scroll">
+        <div className="composer-panel-divide">
+          {messages.map((message, index) => (
+            <div key={`${index}-${message.slice(0, 12)}`} className="flex items-start gap-1.5 py-1.5">
+              <span className="composer-panel-label mt-0.5 shrink-0 tabular-nums">{index + 1}</span>
+              <span className="composer-panel-text break-words">{message}</span>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0"
+                tooltip={t("agent.queue.steer")}
+                disabled={steer.isPending && steeringIndex === index}
+                onClick={() => {
+                  setSteeringIndex(index);
+                  steer.mutate(index);
+                }}
+              >
+                {steer.isPending && steeringIndex === index ? (
+                  <Loader2Icon className="size-3 animate-spin" />
+                ) : (
+                  <CornerUpRightIcon className="size-3" />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0"
+                tooltip={t("agent.queue.remove")}
+                onClick={() => remove.mutate(index)}
+              >
+                <XIcon className="size-3" />
+              </Button>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

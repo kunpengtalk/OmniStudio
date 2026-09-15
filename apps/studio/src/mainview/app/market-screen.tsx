@@ -34,6 +34,7 @@ import {
   type ModelCategory,
   type SearchFormat,
 } from "@/shared/modelscope";
+import { ModelCategoryChips } from "@/mainview/components/model-category-chips";
 import { cn } from "@/mainview/lib/utils";
 
 function formatBytes(bytes: number): string {
@@ -293,27 +294,12 @@ export function MarketScreen({
 
         <FormatSwitch engineFormat={engineFormat} />
 
-        {/* Category filter */}
-        <div className="flex flex-wrap gap-1.5">
-          {MODEL_CATEGORIES.map((cat) => {
-            const isActive = activeCategory === cat.value;
-            return (
-              <button
-                key={cat.value}
-                type="button"
-                onClick={() => setActiveCategory(cat.value)}
-                className={cn(
-                  "rounded-full border px-2.5 py-1 text-xs transition-colors",
-                  isActive
-                    ? "border-primary bg-primary/10 text-primary"
-                    : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-                )}
-              >
-                {t(cat.labelKey)}
-              </button>
-            );
-          })}
-        </div>
+        {/* Category filter：图标 + 两字短名，一行放得下 */}
+        <ModelCategoryChips
+          values={MODEL_CATEGORIES.map((c) => c.value)}
+          value={activeCategory}
+          onChange={setActiveCategory}
+        />
 
         {/* Search results */}
         {submitted && (

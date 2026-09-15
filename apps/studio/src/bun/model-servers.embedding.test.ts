@@ -14,7 +14,11 @@ import { MODEL_CATEGORIES, safeRepoId } from "../shared/modelscope";
  */
 
 const SETTINGS: Record<string, string> = {};
+// 展开真实模块再覆盖（见 test-mocks.ts / mock-hygiene.test.ts）：字面量替身会在
+// db/settings 新增导出（ensureSettingsEncrypted 等）后于 import 阶段直接报缺导出。
+const realSettings = await import("./db/settings");
 mock.module("./db/settings", () => ({
+  ...realSettings,
   getSetting: (key: string) => SETTINGS[key] ?? "",
   getNumericSetting: (key: string) => Number(SETTINGS[key] ?? 0) || 0,
   updateSettings: (values: Record<string, string>) => Object.assign(SETTINGS, values),
@@ -81,7 +85,9 @@ class FakeRuntime {
 }
 
 let created: FakeRuntime[] = [];
+const realRuntimes = await import("./runtimes");
 mock.module("./runtimes", () => ({
+  ...realRuntimes,
   createRuntime: (
     _engine: string,
     overrides?: Record<string, string | undefined>,
@@ -92,7 +98,9 @@ mock.module("./runtimes", () => ({
   },
 }));
 
+const realMlx = await import("./runtimes/mlx");
 mock.module("./runtimes/mlx", () => ({
+  ...realMlx,
   mlxRequestModelId: (target: string) => `/abs/${target}`,
   isMlxActive: () => SETTINGS.INFERENCE_ENGINE === "mlx",
   resolveMlxModel: () => ({ model: "", requestModelId: "" }),
@@ -110,7 +118,9 @@ let INSTALLED: Array<{
   isDir?: boolean;
 }> = [];
 
+const realModelStore = await import("./model-store");
 mock.module("./model-store", () => ({
+  ...realModelStore,
   listInstalledModels: () =>
     INSTALLED.map((entry) => ({
       ...entry,

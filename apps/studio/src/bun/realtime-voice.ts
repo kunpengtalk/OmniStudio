@@ -1,5 +1,6 @@
 import { getSetting, updateSettings } from "./db/settings";
 import * as CloudProviders from "./cloud-providers";
+import { proxyWebSocketOptions } from "./proxy";
 
 /**
  * Qwen Audio Realtime（DashScope「实时语音通话」云端模式）。
@@ -208,9 +209,10 @@ export class RealtimeVoiceClient {
     this.log(`realtime connect: ${url}`);
     let ws: WebSocket;
     try {
-      // Bun 的 WebSocket 支持自定义 headers，但 DOM 类型签名没有，故断言。
+      // Bun 的 WebSocket 支持自定义 headers 与 proxy，但 DOM 类型签名没有，故此处断言。
       ws = new WebSocket(url, {
         headers: { Authorization: `Bearer ${this.cfg.apiKey}` },
+        ...proxyWebSocketOptions(url),
       } as unknown as string);
     } catch (e) {
       this.fail(`无法连接云端实时语音：${e instanceof Error ? e.message : String(e)}`);
@@ -481,6 +483,7 @@ export function testRealtimeConnection(
     try {
       ws = new WebSocket(url, {
         headers: { Authorization: `Bearer ${apiKey}` },
+        ...proxyWebSocketOptions(url),
       } as unknown as string);
     } catch (e) {
       resolve({ ok: false, error: `无法创建 WebSocket 连接：${e instanceof Error ? e.message : String(e)}` });

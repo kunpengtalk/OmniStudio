@@ -2,6 +2,8 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/plus-jakarta-sans";
+/* Agent 工作台自带一套视觉 token，收在 .pi-agent 作用域里（见该文件顶部说明）。 */
+@import "./agent-pi.css";
 
 @source "../../../node_modules/streamdown/dist/*.js";
 @source "../../../node_modules/@streamdown/code/dist/*.js";
@@ -10,6 +12,19 @@
 @source "../../../node_modules/@streamdown/cjk/dist/*.js";
 
 @custom-variant dark (&:is(.dark *));
+
+/*
+  藏原生滚动条但保留滚动能力。
+  `SidebarContent` 一直在用这个类，可它此前没有任何实现 —— 类名挂着、滚动条照画，
+  "侧栏不该有滚动条"的意图从来没生效过。
+*/
+@utility no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}
 
 :root {
   --font-sans: var(--font-plus-jakarta-sans), sans-serif;

@@ -25,6 +25,10 @@ async function appModules(): Promise<AppModules> {
     import("../bun/model-store"),
     import("../bun/db/settings"),
   ]);
+  // 数据层已经加载了，顺手按设置接上代理：CLI 的远端备份 / 版本检查等请求也认它
+  // （见 bun/proxy.ts）。放在这里而不是入口，是为了不把数据层拖进 `omi backup`。
+  const { installProxy } = await import("../bun/proxy");
+  installProxy();
   loaded = { modelStore, settings };
   return loaded;
 }

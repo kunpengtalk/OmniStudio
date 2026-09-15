@@ -1,5 +1,7 @@
 import { afterAll, expect, mock, test } from "bun:test";
 
+import { mockModulePartial } from "./test-mocks";
+
 /**
  * 下载队列的排序行为：小文件先下、显式点击插队、失败自动重试后才判死、
  * 老版本持久化的任务恢复后仍按体积重排。
@@ -9,16 +11,16 @@ import { afterAll, expect, mock, test } from "bun:test";
  */
 
 const settings = new Map<string, string>();
-mock.module("./db/settings", () => ({
-  getSetting: (key: string) => settings.get(key) ?? null,
-  updateSettings: (patch: Record<string, string>) => {
+await mockModulePartial<typeof import("./db/settings")>("./db/settings", {
+  getSetting: (key) => settings.get(key) ?? "",
+  updateSettings: (patch) => {
     for (const [k, v] of Object.entries(patch)) settings.set(k, v);
   },
-}));
+});
 
-mock.module("./model-store", () => ({
+await mockModulePartial<typeof import("./model-store")>("./model-store", {
   setModelMeta: () => {},
-}));
+});
 
 /** 磁盘上「已有数据」的文件名（决定恢复任务时是续传还是判失败）。 */
 const existing = new Set<string>();
@@ -28,10 +30,9 @@ let failFirst = 0;
 const started: string[] = [];
 let gates: Array<() => void> = [];
 
-mock.module("./modelscope", () => ({
-  modelDestPath: (repo: string, fileName: string) => `models/${repo.replace("/", "__")}/${fileName}`,
+await mockModulePartial<typeof import("./modelscope")>("./modelscope", {
+  modelDestPath: (repo, fileName) => `models/${repo.replace("/", "__")}/${fileName}`,
   removePartialFiles: () => {},
-  partialBytesFor: () => 0,
   downloadFile: async (_repo: string, fileName: string) => {
     if (failFirst > 0) {
       failFirst -= 1;
@@ -48,7 +49,7 @@ mock.module("./modelscope", () => ({
     await gate;
     return { path: `models/${fileName}`, size: 1 };
   },
-}));
+});
 
 // 「磁盘上有没有部分数据」由 existsSync/statSync 决定，这里只认 existing 集合。
 mock.module("fs", () => {

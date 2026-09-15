@@ -3,12 +3,12 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronLeftIcon, FolderIcon, MessageSquareIcon, SearchIcon } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
-import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { useAgentStore } from "@stores/agent";
 import { useChatStore } from "@stores/chat";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
+import { PiTip } from "./pi-tip";
 import { McpTab } from "../main-layout/mcp-tab";
 import { AutomationsScreen } from "../automations-screen";
 import { MarketTab } from "../skills/market-tab";
@@ -16,9 +16,14 @@ import { MySkillsTab } from "../skills/my-skills-tab";
 import { PresetsTab } from "../skills/presets-tab";
 import { ToolsTab } from "../skills/tools-tab";
 
-export type AgentSubView = "chat" | "search" | "automations" | "plugins" | "skills";
+export type { AgentSubView } from "@stores/agent";
 
-/** 子视图外壳：标题 + 返回对话。子视图与对话共用同一个主区域（不是一级菜单）。 */
+/**
+ * 子视图外壳：标题 + 返回对话。子视图与对话共用同一个主区域（不是一级菜单）。
+ *
+ * 顶部要留出 46px：顶部工具条是绝对定位盖在主区域上的，不留就会把子视图自己的
+ * 标题栏压在里面（两个标题叠在一起）。
+ */
 function SubViewShell({
   title,
   description,
@@ -32,24 +37,23 @@ function SubViewShell({
 }) {
   const t = useT();
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-center gap-2 border-b px-3 py-1.5">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="text-muted-foreground"
-          tooltip={t("agent.view.back")}
-          onClick={() => useAgentStore.getState().setSubView("chat")}
-        >
-          <ChevronLeftIcon className="size-4" />
-        </Button>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-xs font-medium">{title}</p>
-          {description && <p className="truncate text-[10px] text-muted-foreground">{description}</p>}
-        </div>
-        {actions}
+    <div className="pi-subview" style={{ paddingTop: "var(--pi-toolbar-h)" }}>
+      <div className="pi-subview-head">
+        <PiTip label={t("agent.view.back")}>
+          <button
+            type="button"
+            className="ct-icon-btn"
+            aria-label={t("agent.view.back")}
+            onClick={() => useAgentStore.getState().setSubView("chat")}
+          >
+            <ChevronLeftIcon size={15} aria-hidden />
+          </button>
+        </PiTip>
+        <span className="ct-title">{title}</span>
+        {description ? <span className="ct-sub">{description}</span> : null}
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>{actions}</div>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
+      <div className="pi-subview-body">{children}</div>
     </div>
   );
 }
@@ -93,7 +97,7 @@ export function AgentSearchView() {
         {query.trim().length === 0 ? (
           <p className="py-10 text-center text-[11px] text-muted-foreground">{t("agent.search.empty")}</p>
         ) : searchQuery.isLoading ? (
-          <p className="py-10 text-center text-[11px] text-muted-foreground">{t("common.loading")}</p>
+          <p className="py-10 text-center text-[11px] text-muted-foreground">{t("agent.loading")}</p>
         ) : hits.length === 0 ? (
           <p className="py-10 text-center text-[11px] text-muted-foreground">{t("agent.search.noResult")}</p>
         ) : (

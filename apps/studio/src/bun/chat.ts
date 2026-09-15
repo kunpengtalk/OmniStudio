@@ -4,10 +4,13 @@ import { asc, desc, eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { conversations, messages } from "./db/schema";
 import { getSetting, getActiveServerPort } from "./db/settings";
-import { getChatModelLabel, getChatRequestModelId } from "./chat-model";
+import { getChatModelLabel, getChatProviderLabel, getChatRequestModelId } from "./chat-model";
 import { mergeSystemMessages, parseChatDelta } from "./chat-messages";
+import { computeTokenStats, parseMessageStats, type MessageStats } from "./chat-stats";
+import { estimateMessagesTokens, estimateTokens } from "../shared/token-estimate";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { recordUsage } from "./stats";
+import { currentUpstream, providerLabelFor, recordUsageEvent } from "./usage";
 import { webSearch } from "./web-search";
 import { getLastError, startServer } from "./server-manager";
 import * as Served from "./model-servers";
@@ -24,6 +27,8 @@ export type ChatMessage = {
   reasoning?: string | null;
   images?: string[];
   tokens?: number | null;
+  /** 这次生成的用量统计（输入/输出/速度/首 token 耗时…）；旧消息为 null。 */
+  stats?: MessageStats | null;
   /** user 消息：发送时挂载的知识库 id（重新生成时复用检索）。 */
   kbIds?: number[] | null;
   /** assistant 消息：知识库引用溯源。 */
@@ -31,12 +36,21 @@ export type ChatMessage = {
   createdAt: number;
 };
 
-export type ChatStats = {
+export type ChatStats = MessageStats & {
   conversationId: number;
   messageId: number;
-  tokens: number;
-  tokensPerSec: number;
-  elapsedMs: number;
+  /**
+   * Agent 回合额外带回的上下文占用（输入框上方的占用条用它）。
+   * 结构见 `agent-context.ts`；放在这里是为了让 webview 不必 import 主进程模块。
+   */
+  context?: {
+    windowTokens: number;
+    budgetTokens: number;
+    usedTokens: number;
+    remainingTokens: number;
+    percent: number;
+    source: "usage" | "estimate";
+  };
 };
 
 export type Conversation = {
@@ -73,9 +87,20 @@ type DoneListener = (payload: {
   citations?: KbCitation[];
 }) => void;
 
+/**
+ * 助手消息的行刚建好（回合开跑，一个字还没出）。
+ *
+ * 从"按下发送"到"第一个 token 到达"之间隔着建会话、模型加载、长提示词预填充、
+ * 知识库检索这些活儿，几秒到几十秒都可能。界面此前要等第一个增量才建得出这条
+ * 消息，那段时间屏幕上只有用户自己刚发出去的那个气泡 —— 看起来就是程序挂了。
+ * 把"行已经建好"提前推过去，两个页面各自的「生成中 / 处理中」才有落点。
+ */
+type StartedListener = (payload: { conversationId: number; messageId: number }) => void;
+
 const chunkListeners = new Set<ChunkListener>();
 const doneListeners = new Set<DoneListener>();
 const statsListeners = new Set<(payload: ChatStats) => void>();
+const startedListeners = new Set<StartedListener>();
 
 export function onChatChunk(cb: ChunkListener): () => void {
   chunkListeners.add(cb);
@@ -92,6 +117,11 @@ export function onChatStats(cb: (payload: ChatStats) => void): () => void {
   return () => statsListeners.delete(cb);
 }
 
+export function onChatMessageStarted(cb: StartedListener): () => void {
+  startedListeners.add(cb);
+  return () => startedListeners.delete(cb);
+}
+
 function emitChunk(payload: Parameters<ChunkListener>[0]) {
   for (const cb of chunkListeners) cb(payload);
 }
@@ -104,19 +134,24 @@ function emitChatStats(payload: ChatStats) {
   for (const cb of statsListeners) cb(payload);
 }
 
+function emitStarted(payload: Parameters<StartedListener>[0]) {
+  for (const cb of startedListeners) cb(payload);
+}
+
 /**
- * 在没有 usage 元数据时估算 token 数：CJK（中日韩）字符约 1 token/字，
- * 其余字符按 4 字符/token 折算。仅用于展示吞吐量，精确值以 API 的 usage 为准。
+ * 建一条空的助手消息行，并**立刻**告诉界面它存在了（返回新行 id）。
+ *
+ * 发送 / 重新生成 / 翻译 / 语音通话四条路都要"先落行、再流式写回"，
+ * 各自抄一遍插入语句就会各自漏掉那条推送 —— 收敛到这里，行与通知永远成对。
  */
-function estimateTokens(text: string): number {
-  if (!text) return 0;
-  let cjk = 0;
-  let other = 0;
-  for (const ch of text) {
-    if (/[\u4e00-\u9fff\u3400-\u4dbf\uF900-\uFAFF\u3040-\u30ff\uac00-\ud7af]/.test(ch)) cjk++;
-    else other++;
-  }
-  return cjk + Math.ceil(other / 4);
+function insertAssistantMessage(conversationId: number): number {
+  const inserted = db
+    .insert(messages)
+    .values({ conversationId, role: "assistant", content: "" })
+    .returning({ id: messages.id })
+    .get();
+  emitStarted({ conversationId, messageId: inserted.id });
+  return inserted.id;
 }
 
 const IMAGE_MEDIA_TYPES: Record<string, string> = {
@@ -156,6 +191,17 @@ function parseCitations(row: { citations: string | null }): KbCitation[] | null 
   } catch {
     return null;
   }
+}
+
+/** 行 → 前端消息：JSON 文本列统一在这里解析，界面拿到的是结构化数据。 */
+function rowToMessage(m: typeof messages.$inferSelect): ChatMessage {
+  return {
+    ...m,
+    images: parseImages(m),
+    kbIds: parseJsonNumbers(m),
+    citations: parseCitations(m),
+    stats: parseMessageStats(m.stats),
+  } as ChatMessage;
 }
 
 /** Resolve an image ref to an absolute path, refusing anything outside the images base dir. */
@@ -246,12 +292,7 @@ export function getConversation(id: number): {
     .where(eq(messages.conversationId, id))
     .orderBy(messages.createdAt)
     .all()
-    .map((m) => ({
-      ...m,
-      images: parseImages(m),
-      kbIds: parseJsonNumbers(m),
-      citations: parseCitations(m),
-    }));
+    .map(rowToMessage);
   return { conversation: conv as Conversation, messages: msgs as ChatMessage[] };
 }
 
@@ -355,6 +396,27 @@ export function forkConversation(
   return { ok: true, conversationId: created.id };
 }
 
+/** 会话标题的最大长度（见 titleFromMessage 的选择理由）。 */
+export const CONVERSATION_TITLE_MAX = 24;
+
+/**
+ * 用首条消息生成会话标题：压平空白（换行 / 连续空格归一成单个空格）、超长截断并
+ * **补省略号**。
+ *
+ * 之前四处各写一遍 `content.trim().slice(0, 40)`：硬切在第 40 个字上，既没有省略号
+ * （看不出这句话是被截的），又长得放不进侧栏 —— 标题车道在 13px 字号下只放得下
+ * 十六七个汉字，40 字的 nowrap 标题会把整行顶到 500px 以上，把侧栏撑出横向滚动条。
+ * 24 字是"认得出是哪次会话"与"别把一整句话塞进标题"之间的折中；更窄的车道由
+ * `.pi-thread-title` / `truncate` 的省略号兜底。
+ */
+export function titleFromMessage(content: string): string {
+  const flat = content.replace(/\s+/g, " ").trim();
+  if (!flat) return "New conversation";
+  return flat.length > CONVERSATION_TITLE_MAX
+    ? `${flat.slice(0, CONVERSATION_TITLE_MAX)}…`
+    : flat;
+}
+
 /** 重命名会话（拖拽排序 / 归档都在会话管理里，这里只改标题）。 */
 export function renameConversation(id: number, title: string): { ok: boolean; error?: string } {
   const clean = title.trim();
@@ -379,18 +441,14 @@ export function setConversationArchived(id: number, archived: boolean): { ok: bo
   return updated ? { ok: true } : { ok: false, error: "Conversation not found" };
 }
 
-export function getHistory(conversationId: number): ChatMessage[] {  return db
+export function getHistory(conversationId: number): ChatMessage[] {
+  return db
     .select()
     .from(messages)
     .where(eq(messages.conversationId, conversationId))
     .orderBy(messages.createdAt)
     .all()
-    .map((m) => ({
-      ...m,
-      images: parseImages(m),
-      kbIds: parseJsonNumbers(m),
-      citations: parseCitations(m),
-    })) as ChatMessage[];
+    .map(rowToMessage);
 }
 
 /** Resolve the OpenAI-compatible base URL (without the /v1 suffix). */
@@ -594,8 +652,14 @@ async function streamAssistantReply(opts: {
     ...(opts.disableThinking ? { chat_template_kwargs: { enable_thinking: false } } : {}),
   };
 
+  const startedAt = performance.now();
   let full = "";
   let reasoning = "";
+  /** 首个增量（正文或思考）到达的时刻 —— 首 token 耗时 = 它减 startedAt。 */
+  let firstTokenAt: number | null = null;
+  const markFirstToken = () => {
+    if (firstTokenAt == null) firstTokenAt = performance.now();
+  };
 
   /**
    * 增量按帧批量下发：模型侧每个 token 一次 RPC 会让 webview 每秒重建几十次
@@ -627,6 +691,7 @@ async function streamAssistantReply(opts: {
 
   const appendContent = (delta: string) => {
     if (!delta) return;
+    markFirstToken();
     full += delta;
     pendingContent += delta;
     // 即时消费方（语音通话边生成边合成）仍按 token 回调，不走批量缓冲。
@@ -635,13 +700,94 @@ async function streamAssistantReply(opts: {
   };
   const appendReasoning = (delta: string) => {
     if (!delta) return;
+    markFirstToken();
     reasoning += delta;
     pendingReasoning += delta;
     scheduleFlush();
   };
 
-  const startedAt = performance.now();
-  let usage: { prompt_tokens?: number; completion_tokens?: number } | undefined;
+  /**
+   * usage / timings：两者都可能有，也可能都没有。
+   *
+   * - `usage` 是 OpenAI 兼容的标准字段（prompt / completion tokens，细节里带
+   *   缓存命中与思考 tokens）。
+   * - `timings` 是 llama.cpp 自己的统计（prompt_n / cache_n / predicted_n 与
+   *   各自耗时）—— 本地用它能让卡片显示真实解码速度，而不是把网络往返也算进去。
+   */
+  type UsageLike = {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
+  type TimingsLike = {
+    prompt_n?: number;
+    cache_n?: number;
+    predicted_n?: number;
+    predicted_per_second?: number;
+    predicted_ms?: number;
+  };
+  let usage: UsageLike | undefined;
+  let timings: TimingsLike | undefined;
+
+  /**
+   * 收尾统计：输入 / 输出 / 思考 / 缓存 tokens + 首 token 耗时 + 两种吞吐。
+   *
+   * 输入与输出可能只有一个有实测值（网关只回一半 usage 的情况真实存在），
+   * `source` 因此可能是 mixed —— 界面据此说明"哪些是估算的"。
+   * 中断（语音抢话）也走这里，半截回答的统计同样是可用的。
+   */
+  const collectStats = (): MessageStats => {
+    const measuredOutput = usage?.completion_tokens ?? timings?.predicted_n;
+    const measuredInput =
+      usage?.prompt_tokens ??
+      (timings?.prompt_n == null ? undefined : timings.prompt_n + (timings.cache_n ?? 0));
+    const outputTokens = measuredOutput ?? estimateTokens(full + reasoning);
+    const elapsedMs = Math.max(1, performance.now() - startedAt);
+    const decodePerSec = timings?.predicted_per_second;
+    const stats = computeTokenStats({
+      // 输入侧没有实测值就按请求体估算（系统提示 + 全部历史 + 本轮提问都在里面）。
+      inputTokens: measuredInput ?? estimateMessagesTokens(payload.messages),
+      outputTokens,
+      reasoningTokens: usage?.completion_tokens_details?.reasoning_tokens ?? estimateTokens(reasoning),
+      cachedTokens: usage?.prompt_tokens_details?.cached_tokens ?? timings?.cache_n,
+      elapsedMs,
+      ttftMs: firstTokenAt == null ? null : firstTokenAt - startedAt,
+      // 引擎自己报了纯解码速度时以它为准（不含网络与排队，最接近模型真实速度）。
+      generationMs:
+        decodePerSec && outputTokens > 0 ? (outputTokens / decodePerSec) * 1000 : null,
+      source:
+        measuredOutput != null && measuredInput != null
+          ? "usage"
+          : measuredOutput != null || measuredInput != null
+            ? "mixed"
+            : "estimate",
+      model: getChatModelLabel() || model,
+      provider: getChatProviderLabel() ?? undefined,
+    });
+
+    // 记进用量账本。`collectStats` 每次请求只会走到一次（正常结束或中断各一条路径），
+    // 所以账本不会重复计数。
+    //
+    // 一个字都没出、上游也没回 usage 的请求不记：连接一开始就断了 / 服务端直接拒绝，
+    // 这种失败重试几次就会把「调用次数」撑得比实际大，而它确实没消耗任何算力。
+    if (measuredOutput != null || measuredInput != null || outputTokens > 0) {
+      const upstream = currentUpstream();
+      recordUsageEvent({
+        channel: "chat",
+        upstream,
+        provider: providerLabelFor(upstream),
+        model: getChatModelLabel() || model,
+        inputTokens: stats.inputTokens,
+        outputTokens: stats.outputTokens,
+        cachedTokens: stats.cachedTokens,
+        reasoningTokens: stats.reasoningTokens,
+        estimated: stats.source !== "usage",
+      });
+    }
+    return stats;
+  };
+
   const requestSignal = opts.signal
     ? AbortSignal.any([AbortSignal.timeout(600_000), opts.signal])
     : AbortSignal.timeout(600_000);
@@ -689,7 +835,9 @@ async function streamAssistantReply(opts: {
           if (full.length === 0) content = content.replace(/^\s*<\/?think[\s>]*>/, "").trimStart();
           appendContent(content);
         }
-        if (json.usage) usage = json.usage;
+        if (json.usage) usage = json.usage as UsageLike;
+        // llama.cpp 把 timings 放在最后一个 chunk 里（有则用，没有就靠本地实测）。
+        if (json.timings) timings = json.timings as TimingsLike;
       } catch {
         // skip malformed chunk
       }
@@ -715,8 +863,15 @@ async function streamAssistantReply(opts: {
     const msg = e instanceof Error ? e.message : String(e);
     // 被外部中断（语音通话抢话打断）：保留已生成的部分内容，不当作错误处理。
     if (opts.signal?.aborted) {
+      const partial = collectStats();
       db.update(messages)
-        .set({ content: full, reasoning: reasoning || null, citations: opts.citations ? JSON.stringify(opts.citations) : null })
+        .set({
+          content: full,
+          reasoning: reasoning || null,
+          tokens: partial.tokens,
+          stats: JSON.stringify(partial),
+          citations: opts.citations ? JSON.stringify(opts.citations) : null,
+        })
         .where(eq(messages.id, assistantId))
         .run();
       db.update(conversations)
@@ -724,6 +879,7 @@ async function streamAssistantReply(opts: {
         .where(eq(conversations.id, conversationId))
         .run();
       flushChunks();
+      emitChatStats({ conversationId, messageId: assistantId, ...partial });
       emitDone({
         conversationId,
         messageId: assistantId,
@@ -749,15 +905,14 @@ async function streamAssistantReply(opts: {
     if (flushTimer) clearTimeout(flushTimer);
   }
 
-  const tokens = usage?.completion_tokens ?? estimateTokens(full);
-  const elapsedMs = Math.max(1, performance.now() - startedAt);
-  const tokensPerSec = Math.round((tokens / (elapsedMs / 1000)) * 10) / 10;
+  const stats = collectStats();
 
   db.update(messages)
     .set({
       content: full,
       reasoning: reasoning || null,
-      tokens,
+      tokens: stats.tokens,
+      stats: JSON.stringify(stats),
       citations: opts.citations ? JSON.stringify(opts.citations) : null,
     })
     .where(eq(messages.id, assistantId))
@@ -767,7 +922,7 @@ async function streamAssistantReply(opts: {
     .where(eq(conversations.id, conversationId))
     .run();
 
-  emitChatStats({ conversationId, messageId: assistantId, tokens, tokensPerSec, elapsedMs });
+  emitChatStats({ conversationId, messageId: assistantId, ...stats });
   emitDone({
     conversationId,
     messageId: assistantId,
@@ -818,18 +973,16 @@ export async function sendMessage(
     .run();
 
   if (existingCount === 0) {
-    const title = (content.trim() || images.join(" ")).trim().slice(0, 40) || "New conversation";
+    const title = titleFromMessage(content.trim() || images.join(" "));
     db.update(conversations)
       .set({ title })
       .where(eq(conversations.id, conversationId))
       .run();
   }
 
-  const assistant = db
-    .insert(messages)
-    .values({ conversationId, role: "assistant", content: "" })
-    .returning({ id: messages.id })
-    .get();
+  // 先落行、再组 payload：组 payload 里有联网检索 / 知识库检索（可能要再跑一次模型），
+  // 行早一步存在，界面就能早一步显示"正在干活"。
+  const assistantId = insertAssistantMessage(conversationId);
 
   const { messages: payloadMessages, citations } = await buildPayloadMessages(
     conversationId,
@@ -838,7 +991,7 @@ export async function sendMessage(
   );
   const result = await streamAssistantReply({
     conversationId,
-    assistantId: assistant.id,
+    assistantId,
     payloadMessages,
     citations: citations.length > 0 ? citations : undefined,
   });
@@ -879,21 +1032,17 @@ export async function streamChatTurn(opts: {
   // 首条消息时用开头做会话标题（与 sendMessage 保持一致）。
   if (getHistory(conversationId).length === 1) {
     db.update(conversations)
-      .set({ title: content.trim().slice(0, 40) || "New conversation" })
+      .set({ title: titleFromMessage(content) })
       .where(eq(conversations.id, conversationId))
       .run();
   }
 
-  const assistant = db
-    .insert(messages)
-    .values({ conversationId, role: "assistant", content: "" })
-    .returning({ id: messages.id })
-    .get();
+  const assistantId = insertAssistantMessage(conversationId);
 
   const { messages: payloadMessages } = await buildPayloadMessages(conversationId, content, {});
   const result = await streamAssistantReply({
     conversationId,
-    assistantId: assistant.id,
+    assistantId,
     payloadMessages,
     signal: opts.signal,
     onDelta: opts.onDelta,
@@ -936,6 +1085,10 @@ async function rewriteSearchQuery(latestQuery: string): Promise<string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (apiKey && apiKey !== "EMPTY") headers.Authorization = `Bearer ${apiKey}`;
 
+  const systemPrompt =
+    "你是搜索查询改写器。把用户的消息改写成适合网页搜索引擎的简短关键词" +
+    "（保留实体、数字、时间，去掉请求语气词）。只输出关键词本身，不要解释。";
+
   try {
     const res = await fetch(`${base}/v1/chat/completions`, {
       method: "POST",
@@ -945,19 +1098,31 @@ async function rewriteSearchQuery(latestQuery: string): Promise<string> {
         stream: false,
         max_tokens: 80,
         messages: [
-          {
-            role: "system",
-            content:
-              "你是搜索查询改写器。把用户的消息改写成适合网页搜索引擎的简短关键词" +
-              "（保留实体、数字、时间，去掉请求语气词）。只输出关键词本身，不要解释。",
-          },
+          { role: "system", content: systemPrompt },
           { role: "user", content: raw },
         ],
       }),
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return fallback;
-    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const json = (await res.json()) as {
+      choices?: { message?: { content?: string } }[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    // 改写查询也是实打实的一次模型调用，一样记账。上游没回 usage 时按请求/回答
+    // 文本估算（这条路径只发了两段很短的文本，估算误差无关紧要）。
+    const upstream = currentUpstream();
+    recordUsageEvent({
+      channel: "chat",
+      upstream,
+      provider: providerLabelFor(upstream),
+      model: getChatModelLabel() || model,
+      inputTokens: json.usage?.prompt_tokens ?? estimateTokens(systemPrompt + raw),
+      outputTokens:
+        json.usage?.completion_tokens ??
+        estimateTokens(json.choices?.[0]?.message?.content ?? ""),
+      estimated: json.usage == null,
+    });
     const rewritten = (json.choices?.[0]?.message?.content ?? "")
       .trim()
       .replace(/^["'""''\s]+|["'""''\s]+$/g, "");
@@ -1076,11 +1241,7 @@ export async function regenerateMessage(
     if (m.id >= messageId) deleteMessage(conversationId, m.id);
   }
 
-  const assistant = db
-    .insert(messages)
-    .values({ conversationId, role: "assistant", content: "" })
-    .returning({ id: messages.id })
-    .get();
+  const assistantId = insertAssistantMessage(conversationId);
 
   // 重新生成时沿用原提问挂载的知识库，重跑检索注入（引用随新消息落库）。
   const lastUser = [...context].reverse().find((m) => m.role === "user");
@@ -1094,7 +1255,7 @@ export async function regenerateMessage(
 
   const result = await streamAssistantReply({
     conversationId,
-    assistantId: assistant.id,
+    assistantId,
     payloadMessages,
     citations: citations.length > 0 ? citations : undefined,
   });
@@ -1142,15 +1303,11 @@ export async function translateMessage(
     { role: "user", content: parts.length === 1 ? parts[0]?.text ?? "" : parts },
   ];
 
-  const assistant = db
-    .insert(messages)
-    .values({ conversationId, role: "assistant", content: "" })
-    .returning({ id: messages.id })
-    .get();
+  const assistantId = insertAssistantMessage(conversationId);
 
   const result = await streamAssistantReply({
     conversationId,
-    assistantId: assistant.id,
+    assistantId,
     payloadMessages,
   });
   return { ok: result.ok, error: result.error };

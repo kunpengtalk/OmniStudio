@@ -9,27 +9,32 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
-import { Button } from "@ui/button";
 import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
-import { cn } from "@/mainview/lib/utils";
+import { PiTip } from "./pi-tip";
 import { summarizeEdit } from "./timeline";
 import { parseUnifiedDiff } from "../../../shared/diff";
 
-/** git porcelain 的状态码 → 一个字母 + 配色。 */
-const STATUS_STYLE: Record<string, { label: string; className: string }> = {
-  M: { label: "M", className: "text-amber-600" },
-  A: { label: "A", className: "text-emerald-600" },
-  D: { label: "D", className: "text-destructive" },
-  "??": { label: "U", className: "text-sky-600" },
-  R: { label: "R", className: "text-violet-600" },
-  C: { label: "C", className: "text-violet-600" },
-  U: { label: "!", className: "text-destructive" },
+/** git porcelain 的状态码 → 一个字母 + 语义色（新增绿 / 删除红 / 冲突红 / 其余中性）。 */
+const STATUS_STYLE: Record<string, { label: string; tone: "success" | "error" | "muted" }> = {
+  M: { label: "M", tone: "muted" },
+  A: { label: "A", tone: "success" },
+  D: { label: "D", tone: "error" },
+  "??": { label: "U", tone: "muted" },
+  R: { label: "R", tone: "muted" },
+  C: { label: "C", tone: "muted" },
+  U: { label: "!", tone: "error" },
 };
 
 function statusStyle(status: string) {
   const first = status[0] ?? "M";
   return STATUS_STYLE[status] ?? STATUS_STYLE[first] ?? STATUS_STYLE.M!;
+}
+
+function statusColor(tone: "success" | "error" | "muted"): string {
+  if (tone === "success") return "var(--ds-success)";
+  if (tone === "error") return "var(--ds-error)";
+  return "var(--ds-text-muted)";
 }
 
 /** 本会话改动（工作区不是 git 仓库时的回落）：从 agent 的写文件事件里取。 */
@@ -98,75 +103,83 @@ export function ReviewTab() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-1.5 border-b px-2 py-1.5 text-[11px]">
-        <FileDiffIcon className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate">
+    <div className="wp-body">
+      <div className="wp-toolbar">
+        <FileDiffIcon size={13} aria-hidden style={{ flex: "none", color: "var(--ds-text-muted)" }} />
+        <span className="wp-toolbar-text">
           {changes?.isRepo
             ? t("agent.review.repoChanges", { count: String(files.length) })
             : t("agent.review.sessionChanges", { count: String(files.length) })}
         </span>
-        {totals.added > 0 && <span className="shrink-0 font-mono text-[10px] text-emerald-600">+{totals.added}</span>}
-        {totals.removed > 0 && (
-          <span className="shrink-0 font-mono text-[10px] text-destructive">-{totals.removed}</span>
-        )}
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="size-6 shrink-0 text-muted-foreground"
-          tooltip={t("agent.review.refresh")}
-          onClick={() => changesQuery.refetch()}
-        >
-          <RefreshCwIcon className={cn("size-3.5", changesQuery.isFetching && "animate-spin")} />
-        </Button>
+        {totals.added > 0 ? <span className="review-counters review-add">+{totals.added}</span> : null}
+        {totals.removed > 0 ? <span className="review-counters review-del">-{totals.removed}</span> : null}
+        <PiTip label={t("agent.review.refresh")}>
+          <button
+            type="button"
+            className="wp-action-btn"
+            aria-label={t("agent.review.refresh")}
+            onClick={() => changesQuery.refetch()}
+          >
+            <RefreshCwIcon size={13} className={changesQuery.isFetching ? "animate-spin" : undefined} aria-hidden />
+          </button>
+        </PiTip>
       </div>
 
       {changesQuery.isLoading ? (
-        <div className="flex flex-1 justify-center py-6">
-          <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
+        <div className="wp-empty">
+          <Loader2Icon size={16} className="animate-spin" aria-hidden />
         </div>
       ) : files.length === 0 ? (
-        <p className="py-8 text-center text-[11px] text-muted-foreground">{t("agent.review.empty")}</p>
+        <div className="wp-empty">
+          <span className="wp-empty-mark">
+            <FileDiffIcon size={18} aria-hidden />
+          </span>
+          <p className="wp-empty-title">{t("agent.review.empty")}</p>
+        </div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-          <div className="flex flex-col gap-0.5">
-            {files.map((file) => {
-              const style = statusStyle(file.status);
-              return (
-                <button
-                  key={file.path}
-                  type="button"
-                  onClick={() => setSelected(file.path)}
-                  className="group flex items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-muted/60"
-                  title={file.path}
-                >
-                  <span className={cn("w-3 shrink-0 font-mono text-[11px] font-semibold", style.className)}>
-                    {style.label}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-[11px]">
-                    {file.path.split("/").pop()}
-                    <span className="ml-1.5 text-[10px] text-muted-foreground/60">
-                      {file.path.split("/").slice(0, -1).join("/")}
-                    </span>
-                  </span>
-                  {file.added ? (
-                    <span className="shrink-0 font-mono text-[10px] text-emerald-600">+{file.added}</span>
+        <div className="wp-scroll" style={{ padding: "4px 8px 12px" }}>
+          {files.map((file) => {
+            const style = statusStyle(file.status);
+            const dir = file.path.split("/").slice(0, -1).join("/");
+            return (
+              <button
+                key={file.path}
+                type="button"
+                className="review-row"
+                title={file.path}
+                onClick={() => setSelected(file.path)}
+              >
+                <span className="review-status" style={{ color: statusColor(style.tone) }}>
+                  {style.label}
+                </span>
+                <span className="file-row-name">
+                  {file.path.split("/").pop()}
+                  {dir ? (
+                    <span style={{ marginLeft: 6, color: "var(--ds-text-faint)", fontSize: 10.5 }}>{dir}</span>
                   ) : null}
-                  {file.removed ? (
-                    <span className="shrink-0 font-mono text-[10px] text-destructive">-{file.removed}</span>
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
+                </span>
+                {file.added ? <span className="review-counters review-add">+{file.added}</span> : null}
+                {file.removed ? <span className="review-counters review-del">-{file.removed}</span> : null}
+              </button>
+            );
+          })}
         </div>
       )}
 
-      {!changes?.isRepo && !changesQuery.isLoading && (
-        <p className="border-t px-2 py-1.5 text-[10px] leading-4 text-muted-foreground">
+      {!changes?.isRepo && !changesQuery.isLoading ? (
+        <p
+          style={{
+            flex: "none",
+            padding: "6px 10px",
+            borderTop: "1px solid var(--ds-border-subtle)",
+            color: "var(--ds-text-muted)",
+            fontSize: 10.5,
+            lineHeight: 1.4,
+          }}
+        >
           {t("agent.review.notRepo")}
         </p>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -189,49 +202,54 @@ function DiffView({
   const lines = useMemo(() => parseUnifiedDiff(diff), [diff]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-1.5 border-b px-2 py-1.5">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="size-6 shrink-0 text-muted-foreground"
-          tooltip={t("agent.panel.back")}
-          onClick={onBack}
-        >
-          <ArrowLeftIcon className="size-3.5" />
-        </Button>
-        <span className="min-w-0 flex-1 truncate font-mono text-[11px]" title={filePath}>
+    <div className="wp-body">
+      <div className="file-viewer-head">
+        <PiTip label={t("agent.panel.back")}>
+          <button type="button" className="wp-action-btn" aria-label={t("agent.panel.back")} onClick={onBack}>
+            <ArrowLeftIcon size={13} aria-hidden />
+          </button>
+        </PiTip>
+        <span className="file-viewer-path" title={filePath}>
           {filePath}
         </span>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="wp-scroll" style={{ padding: "0 8px 12px" }}>
         {loading ? (
-          <div className="flex justify-center py-6">
-            <Loader2Icon className="size-4 animate-spin text-muted-foreground" />
+          <div className="wp-empty">
+            <Loader2Icon size={16} className="animate-spin" aria-hidden />
           </div>
         ) : binary ? (
-          <p className="flex items-center justify-center gap-1.5 py-8 text-[11px] text-muted-foreground">
-            <TriangleAlertIcon className="size-3.5" />
-            {t("agent.review.binary")}
-          </p>
+          <div className="wp-empty">
+            <span className="wp-empty-mark">
+              <TriangleAlertIcon size={18} aria-hidden />
+            </span>
+            <p className="wp-empty-title">{t("agent.review.binary")}</p>
+          </div>
         ) : lines.length === 0 || (lines.length === 1 && lines[0]!.text === "") ? (
-          <p className="py-8 text-center text-[11px] text-muted-foreground">{t("agent.review.noDiff")}</p>
+          <div className="wp-empty">
+            <span className="wp-empty-mark">
+              <FileDiffIcon size={18} aria-hidden />
+            </span>
+            <p className="wp-empty-title">{t("agent.review.noDiff")}</p>
+          </div>
         ) : (
-          <pre className="min-w-full text-[10.5px] leading-4">
+          <div className="diff-view" style={{ maxHeight: "none" }}>
             {lines.map((line, index) => (
               <div
                 key={index}
-                className={cn(
-                  "px-2 whitespace-pre-wrap",
-                  line.type === "add" && "bg-emerald-500/10",
-                  line.type === "del" && "bg-destructive/10",
-                  line.type === "meta" && "bg-muted/40 text-muted-foreground",
-                )}
+                className={`diff-line${line.type === "add" ? " add" : line.type === "del" ? " del" : ""}${
+                  line.type === "meta" ? " hunk" : ""
+                }`}
               >
-                {line.text || " "}
+                {line.type === "meta" ? null : (
+                  <span className="diff-line-sign">
+                    {line.type === "add" ? "+" : line.type === "del" ? "-" : ""}
+                  </span>
+                )}
+                <span style={{ minWidth: 0 }}>{line.text || " "}</span>
               </div>
             ))}
-          </pre>
+          </div>
         )}
       </div>
     </div>

@@ -1,17 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CornerDownLeftIcon, FileIcon, SlashIcon } from "lucide-react";
+import { CornerDownLeftIcon, CpuIcon, FileIcon } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { useT } from "@stores/ui-lang";
-import { cn } from "@/mainview/lib/utils";
 import type { WorkspaceTreeNode } from "../../../bun/agent-artifacts";
+import { modelCommandDetail, modelCommandOptions } from "../../../shared/model-command";
 
 export type SlashCommandId =
   | "agent"
   | "plan"
   | "goal"
   | "new"
+  | "init"
+  | "doctor"
+  | "model"
+  | "compact"
+  | "status"
   | "tools"
   | "clear"
   | "help";
@@ -21,14 +26,30 @@ export type SlashCommand = {
   /** 触发词（不含 /）。 */
   command: string;
   labelKey: string;
+  /**
+   * 允许 `/命令 参数` 这种带尾巴的形式（参数由命令自己解释）。
+   *
+   * 不声明此字段的命令必须**整条**就是命令，`/goal 开始干活` 依旧按普通消息发出去 ——
+   * 否则用户那句话会被静默吞掉。
+   */
+  takesArgs?: boolean;
 };
 
-/** 输入框内可用命令（对齐 OpenWork 的 slash command）。 */
+/** 输入框内可用命令（对齐 OpenWork 的 slash command；`/init` 对齐 Codex 的同名命令）。 */
 export const SLASH_COMMANDS: SlashCommand[] = [
   { id: "agent", command: "agent", labelKey: "agent.slash.agent" },
   { id: "plan", command: "plan", labelKey: "agent.slash.plan" },
   { id: "goal", command: "goal", labelKey: "agent.slash.goal" },
   { id: "new", command: "new", labelKey: "agent.slash.new" },
+  { id: "init", command: "init", labelKey: "agent.slash.init" },
+  // /omni-doctor：内置排障技能（`builtin-skills/omni-doctor`）的入口。症状可以直接跟在
+  // 后面（`/omni-doctor 生图失败`），所以声明 takesArgs。
+  { id: "doctor", command: "omni-doctor", labelKey: "agent.slash.doctor", takesArgs: true },
+  // /model：对齐 Codex 的同名命令 —— 在会话里直接换模型，不用去设置页。
+  { id: "model", command: "model", labelKey: "agent.slash.model" },
+  // /compact 与 /status：对齐 Codex —— 手动收紧一次上下文、看一眼会话配置。
+  { id: "compact", command: "compact", labelKey: "agent.slash.compact" },
+  { id: "status", command: "status", labelKey: "agent.slash.status" },
   { id: "tools", command: "tools", labelKey: "agent.slash.tools" },
   { id: "help", command: "help", labelKey: "help" },
 ];
@@ -47,7 +68,11 @@ function flattenFiles(nodes: WorkspaceTreeNode[], out: string[] = []): string[] 
  * 返回 null 表示当前输入不该弹补全。
  */
 export function useComposerSuggestions(input: string, workspace: string) {
-  const slashMatch = /^\/([a-z]*)$/i.exec(input.trimStart());
+  // 命令名允许连字符（`/omni-doctor`）：字符集与 composer 里执行命令的那条判定保持一致，
+  // 否则输入 `/omni-doctor` 时补全面板根本不弹，用户只能靠手敲整条命令。
+  const slashMatch = /^\/([a-z0-9-]*)$/i.exec(input.trimStart());
+  // `/model` 与 `/model <查询词>`：后面这半截是"选哪个模型"，单独一条候选路径。
+  const modelMatch = /^\/model(?:\s+(.*))?$/i.exec(input.trim());
   const mentionMatch = /@([^\s@]*)$/.exec(input);
 
   const filesQuery = useQuery({
@@ -56,29 +81,55 @@ export function useComposerSuggestions(input: string, workspace: string) {
     enabled: mentionMatch != null,
     staleTime: 15_000,
   });
+  const modelsQuery = useQuery({
+    queryKey: ["chat-models"],
+    queryFn: () => rpcClient.listChatModels(),
+    enabled: modelMatch != null,
+    staleTime: 15_000,
+  });
 
   const files = useMemo(
     () => flattenFiles(filesQuery.data?.nodes ?? []),
     [filesQuery.data],
   );
+  const models = useMemo(
+    () => modelCommandOptions(modelsQuery.data?.models ?? [], modelMatch?.[1] ?? ""),
+    [modelsQuery.data, modelMatch],
+  );
 
   return useMemo(() => {
+    // 先判 /model：它同时也能被命令名补全匹配到，但那会弹出一串命令而不是模型。
+    if (modelMatch) {
+      return { kind: "model" as const, query: modelMatch[1] ?? "", items: [] as SlashCommand[], files: [] as string[], models };
+    }
     if (slashMatch) {
       const query = slashMatch[1]!.toLowerCase();
       const items = SLASH_COMMANDS.filter((command) => command.command.startsWith(query));
       if (items.length === 0) return null;
-      return { kind: "slash" as const, query, items, files: [] as string[] };
+      return { kind: "slash" as const, query, items, files: [] as string[], models: [] as ModelOption[] };
     }
     if (mentionMatch) {
       const query = mentionMatch[1]!.toLowerCase();
       const items = files
         .filter((file) => !query || file.toLowerCase().includes(query))
         .slice(0, 12);
-      return { kind: "mention" as const, query, items: [] as SlashCommand[], files: items };
+      return { kind: "mention" as const, query, items: [] as SlashCommand[], files: items, models: [] as ModelOption[] };
     }
     return null;
-  }, [slashMatch, mentionMatch, files]);
+  }, [slashMatch, modelMatch, mentionMatch, files, models]);
 }
+
+/** `/model` 的候选项：与 `ChatModelOption` 的结构子集一致（列表由 RPC 给）。 */
+export type ModelOption = {
+  type: "local" | "api";
+  value: string;
+  label: string;
+  detail?: string;
+  state?: string;
+  isActive?: boolean;
+  providerId?: string;
+  providerName?: string;
+};
 
 /**
  * 补全下拉：键盘上下选择、Tab / 回车确认、Esc 关闭。
@@ -88,11 +139,14 @@ export function ComposerSuggestions({
   input,
   workspace,
   onPickCommand,
+  onPickModel,
   onPickFile,
 }: {
   input: string;
   workspace: string;
   onPickCommand: (id: SlashCommandId) => void;
+  /** 选中 `/model` 的某个候选（复用模型选择器的同一条切换链路）。 */
+  onPickModel: (option: ModelOption) => void;
   onPickFile: (path: string) => void;
 }) {
   const t = useT();
@@ -103,7 +157,9 @@ export function ComposerSuggestions({
   const count = suggestions
     ? suggestions.kind === "slash"
       ? suggestions.items.length
-      : suggestions.files.length
+      : suggestions.kind === "model"
+        ? suggestions.models.length
+        : suggestions.files.length
     : 0;
   const index = Math.min(active, Math.max(0, count - 1));
 
@@ -140,6 +196,9 @@ export function ComposerSuggestions({
         if (suggestions.kind === "slash") {
           const command = suggestions.items[index];
           if (command) onPickCommand(command.id);
+        } else if (suggestions.kind === "model") {
+          const model = suggestions.models[index];
+          if (model) onPickModel(model);
         } else {
           const file = suggestions.files[index];
           if (file) onPickFile(file);
@@ -148,37 +207,13 @@ export function ComposerSuggestions({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [suggestions, count, index, input, onPickCommand, onPickFile]);
+  }, [suggestions, count, index, input, onPickCommand, onPickModel, onPickFile]);
 
   if (!suggestions || dismissedInput === input) return null;
 
   return (
-    <div className="absolute bottom-full left-0 z-40 mb-2 w-full max-w-md overflow-hidden rounded-xl border bg-popover shadow-lg">
-      <div className="flex items-center gap-1.5 border-b px-2.5 py-1.5 text-[10px] text-muted-foreground">
-        {suggestions.kind === "slash" ? (
-          <>
-            <SlashIcon className="size-3" />
-            {t("agent.slash.title")}
-          </>
-        ) : (
-          <>
-            <FileIcon className="size-3" />
-            {t("agent.mention.title")}
-          </>
-        )}
-      </div>
-      <div
-        className="max-h-56 overflow-y-auto p-1"
-        onKeyDown={(event) => {
-          if (event.key === "ArrowDown") {
-            event.preventDefault();
-            setActive((prev) => Math.min(prev + 1, count - 1));
-          } else if (event.key === "ArrowUp") {
-            event.preventDefault();
-            setActive((prev) => Math.max(prev - 1, 0));
-          }
-        }}
-      >
+    <div className="composer-ac">
+      <div className="composer-ac-list">
         {suggestions.kind === "slash"
           ? suggestions.items.map((command, itemIndex) => (
               <button
@@ -186,33 +221,61 @@ export function ComposerSuggestions({
                 type="button"
                 onMouseEnter={() => setActive(itemIndex)}
                 onClick={() => onPickCommand(command.id)}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors",
-                  itemIndex === index ? "bg-muted" : "hover:bg-muted/60",
-                )}
+                className={`composer-ac-item${itemIndex === index ? " active" : ""}`}
               >
-                <span className="font-mono text-[11px]">/{command.command}</span>
-                <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
-                  {t(command.labelKey)}
-                </span>
-                {itemIndex === index && <CornerDownLeftIcon className="size-3 text-muted-foreground" />}
+                <span className="composer-ac-name">/{command.command}</span>
+                <span className="composer-ac-desc">{t(command.labelKey)}</span>
+                {itemIndex === index ? (
+                  <CornerDownLeftIcon size={12} aria-hidden style={{ flex: "none", color: "var(--ds-text-muted)" }} />
+                ) : null}
               </button>
             ))
-          : suggestions.files.map((file, itemIndex) => (
-              <button
-                key={file}
-                type="button"
-                onMouseEnter={() => setActive(itemIndex)}
-                onClick={() => onPickFile(file)}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors",
-                  itemIndex === index ? "bg-muted" : "hover:bg-muted/60",
-                )}
-              >
-                <FileIcon className="size-3 shrink-0 text-muted-foreground" />
-                <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{file}</span>
-              </button>
-            ))}
+          : suggestions.kind === "model"
+            ? suggestions.models.map((model, itemIndex) => (
+                <button
+                  key={`${model.type}-${model.value}`}
+                  type="button"
+                  onMouseEnter={() => setActive(itemIndex)}
+                  onClick={() => onPickModel(model)}
+                  className={`composer-ac-item${itemIndex === index ? " active" : ""}`}
+                >
+                  <CpuIcon size={12} aria-hidden style={{ flex: "none", color: "var(--ds-text-muted)" }} />
+                  <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {model.label}
+                  </span>
+                  {model.isActive ? <span className="pi-menu-badge">{t("agent.slash.model.current")}</span> : null}
+                  <span className="composer-ac-desc" style={{ flex: "none", maxWidth: 160 }}>
+                    {modelCommandDetail(model)}
+                  </span>
+                  {itemIndex === index ? (
+                    <CornerDownLeftIcon size={12} aria-hidden style={{ flex: "none", color: "var(--ds-text-muted)" }} />
+                  ) : null}
+                </button>
+              ))
+            : suggestions.files.map((file, itemIndex) => (
+                <button
+                  key={file}
+                  type="button"
+                  onMouseEnter={() => setActive(itemIndex)}
+                  onClick={() => onPickFile(file)}
+                  className={`composer-ac-item${itemIndex === index ? " active" : ""}`}
+                >
+                  <FileIcon size={12} aria-hidden style={{ flex: "none", color: "var(--ds-text-muted)" }} />
+                  <span className="composer-ac-name" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {file}
+                  </span>
+                  {itemIndex === index ? (
+                    <CornerDownLeftIcon size={12} aria-hidden style={{ flex: "none", color: "var(--ds-text-muted)" }} />
+                  ) : null}
+                </button>
+              ))}
+      </div>
+      <div className="composer-ac-footer">
+        {suggestions.kind === "slash"
+          ? t("agent.slash.title")
+          : suggestions.kind === "model"
+            ? t("agent.slash.model.title")
+            : t("agent.mention.title")}
       </div>
     </div>
   );

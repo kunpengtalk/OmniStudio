@@ -41,6 +41,36 @@ jobs:
       - name: Smoke（KB / 记忆 / 视频 / 迁移）
         run: bun run --cwd apps/studio test:smoke
 
+  linux-sandbox:
+    name: Linux 沙箱（Landlock 端到端）
+    # 为什么单独一个 Linux 作业：Landlock 是真内核行为 —— 在 macOS 上把策略断言写满
+    # 也只是"看起来对"。这个作业真的编一次辅助程序（src/bun/omni-landlock.c），
+    # 真跑命令，验证"工作区外的写入被内核拒绝"。内核 ≥5.13 才有 Landlock：
+    # ubuntu-24.04 runner 是 6.8+，够用。
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: 环境探测（内核 / 编译器 / Landlock）
+        run: |
+          uname -r
+          cc --version | head -1
+
+      - name: Landlock / bwrap 单测
+        run: bun test apps/studio/src/bun/agent-sandbox.test.ts apps/studio/src/bun/landlock-helper.test.ts
+
+      - name: Landlock 端到端（--require：跑不了就算失败，不许静默跳过）
+        working-directory: apps/studio
+        run: bun run scripts/landlock-e2e.ts --require
+
   build:
     name: vite build
     runs-on: macos-14

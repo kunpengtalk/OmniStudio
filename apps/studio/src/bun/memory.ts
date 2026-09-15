@@ -706,7 +706,6 @@ const pendingAccess = new Map<number, number>();
 let accessTimer: ReturnType<typeof setTimeout> | null = null;
 
 function markAccessed(ids: number[]) {
-  const now = Date.now();
   for (const id of ids) pendingAccess.set(id, (pendingAccess.get(id) ?? 0) + 1);
   if (accessTimer) return;
   accessTimer = setTimeout(flushAccessCounts, 2000);

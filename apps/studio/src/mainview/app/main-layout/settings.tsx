@@ -19,6 +19,9 @@ import {
   ShieldIcon,
   PaletteIcon,
   ArchiveIcon,
+  SparklesIcon,
+  SlidersHorizontalIcon,
+  ChartColumnIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -33,12 +36,15 @@ import { AboutTab } from "./about-tab";
 import { WebSearchTab } from "./web-search-tab";
 import { McpTab } from "./mcp-tab";
 import { AppearanceTab } from "./prefs-tabs";
+import { GeneralTab } from "./general-tab";
 import { CliTab } from "./cli-tab";
 import { BackupTab } from "./backup-tab";
 import { PermissionsTab } from "./permissions-tab";
+import { AgentCapsTab } from "./agent-caps-tab";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import { DashboardScreen } from "../dashboard-screen";
+import { UsageScreen } from "../usage-screen";
 import { ConsoleScreen } from "./console-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { ModelsScreen } from "../models-screen";
@@ -75,12 +81,15 @@ type SettingsTab =
   | "gateway"
   | "integrations"
   | "logs"
+  | "usage"
   | "stats"
   | "websearch"
   | "mcp"
   | "permissions"
+  | "agentcaps"
   | "cli"
   | "backup"
+  | "general"
   | "appearance"
   | "about";
 
@@ -93,12 +102,15 @@ const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
   gateway: { icon: <WaypointsIcon className="size-4" />, labelKey: "settings.gateway" },
   integrations: { icon: <BlocksIcon className="size-4" />, labelKey: "settings.integrations" },
   logs: { icon: <TerminalSquareIcon className="size-4" />, labelKey: "console.title" },
+  usage: { icon: <ChartColumnIcon className="size-4" />, labelKey: "settings.usage.title" },
   stats: { icon: <LayoutDashboardIcon className="size-4" />, labelKey: "settings.dashboard" },
   websearch: { icon: <GlobeIcon className="size-4" />, labelKey: "settings.webSearch.title" },
   mcp: { icon: <PlugIcon className="size-4" />, labelKey: "settings.mcp.title" },
   permissions: { icon: <ShieldIcon className="size-4" />, labelKey: "settings.permissions.title" },
+  agentcaps: { icon: <SparklesIcon className="size-4" />, labelKey: "settings.agentCaps.title" },
   cli: { icon: <TerminalIcon className="size-4" />, labelKey: "settings.cli.title" },
   backup: { icon: <ArchiveIcon className="size-4" />, labelKey: "settings.backup.title" },
+  general: { icon: <SlidersHorizontalIcon className="size-4" />, labelKey: "settings.general.title" },
   appearance: { icon: <PaletteIcon className="size-4" />, labelKey: "settings.appearance" },
   about: { icon: <GithubIcon className="size-4" />, labelKey: "settings.aboutTab.title" },
 };
@@ -114,9 +126,9 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
     labelKey: "settings.group.services",
     tabs: ["gateway", "integrations"],
   },
-  { labelKey: "settings.group.tools", tabs: ["websearch", "mcp", "permissions", "cli"] },
-  { labelKey: "settings.group.prefs", tabs: ["appearance", "about"] },
-  { labelKey: "settings.group.data", tabs: ["logs", "backup"] },
+  { labelKey: "settings.group.tools", tabs: ["websearch", "mcp", "permissions", "agentcaps", "cli"] },
+  { labelKey: "settings.group.prefs", tabs: ["general", "appearance", "about"] },
+  { labelKey: "settings.group.data", tabs: ["usage", "logs", "backup"] },
 ];
 
 /** 自带头部（PageHeader / 宽版面板）的页面不再重复显示通用标题。 */
@@ -127,8 +139,10 @@ const SELF_HEADED_TABS: SettingsTab[] = [
   "websearch",
   "mcp",
   "permissions",
+  "agentcaps",
   "cli",
   "backup",
+  "general",
   "appearance",
 ];
 
@@ -455,6 +469,11 @@ export function SettingsScreen() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <DashboardScreen />
         </div>
+      ) : activeTab === "usage" ? (
+        // 使用统计是宽版仪表盘（热力图 + 三张图），与「概览」一样绕开通用窄栏。
+        <ScrollArea className="min-h-0 min-w-0 flex-1">
+          <UsageScreen />
+        </ScrollArea>
       ) : activeTab === "logs" ? (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ConsoleScreen />
@@ -490,10 +509,15 @@ export function SettingsScreen() {
 
             {activeTab === "mcp" && <McpTab />}
             {activeTab === "permissions" && <PermissionsTab />}
+            {activeTab === "agentcaps" && <AgentCapsTab />}
 
             {activeTab === "cli" && <CliTab />}
 
             {activeTab === "backup" && <BackupTab />}
+
+            {activeTab === "general" && (
+              <GeneralTab form={form} updateField={updateField} />
+            )}
 
             {activeTab === "appearance" && (
               <AppearanceTab form={form} updateField={updateField} />

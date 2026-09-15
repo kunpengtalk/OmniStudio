@@ -8,6 +8,7 @@ import { getCurrentModelProfile } from "./model-profile";
 import type { GenerationResult } from "./utils";
 import { detectRepeatToken, imageToBase64 } from "./utils";
 import { recordUsage } from "../stats";
+import { localUsageProvider, recordUsageEvent } from "../usage";
 import { getChatModelLabel } from "../chat-model";
 
 async function callModel(
@@ -56,6 +57,16 @@ async function callModel(
     raw = raw.replace(/ thinking[\s\S]*?<\/think>\s*/g, "").trim();
 
     recordUsage(getChatModelLabel(), result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0);
+    // 一页文档就是一次 VLM 调用，整份 PDF 上百页时这是用量的大头 —— 之前只记进
+    // 内存计数器（重启即清零），统计页里完全看不到。
+    recordUsageEvent({
+      channel: "ocr",
+      upstream: endpoint?.usage?.upstream ?? "local",
+      provider: endpoint?.usage?.provider ?? localUsageProvider(),
+      model: endpoint?.model?.trim() || getChatModelLabel(),
+      inputTokens: result.usage?.inputTokens ?? 0,
+      outputTokens: result.usage?.outputTokens ?? 0,
+    });
 
     return {
       raw,

@@ -3,7 +3,10 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import type { CloudModelType } from "../shared/cloud-providers";
+import type { CloudModelType, CloudProviderInfo } from "../shared/cloud-providers";
+import type { ModelCategory, ModelFileKind, ModelOrigin } from "../shared/modelscope";
+import type { ServerStatus } from "./runtimes/types";
+import { mockModulePartial } from "./test-mocks";
 
 /**
  * 对话模型列表的三条硬要求（用户直接提的）：
@@ -31,22 +34,25 @@ const SETTINGS: Record<string, string> = {
   CLOUD_PROVIDER: "",
 };
 
-mock.module("./db/settings", () => ({
-  getSetting: (key: string) => SETTINGS[key] ?? "",
-  getNumericSetting: (key: string) => Number(SETTINGS[key] ?? 0) || 0,
-  updateSettings: (values: Record<string, string>) => Object.assign(SETTINGS, values),
+// 设置层用「真实导出 + 局部覆盖」：真实模块新增导出时这里自动跟上，不必逐个补。
+await mockModulePartial<typeof import("./db/settings")>("./db/settings", {
+  getSetting: (key) => SETTINGS[key] ?? "",
+  getNumericSetting: (key) => Number(SETTINGS[key] ?? 0) || 0,
+  updateSettings: (values) => Object.assign(SETTINGS, values),
   getAllSettings: () => ({ ...SETTINGS }),
-  getServerPort: (engine: string) =>
-    engine === "llama.cpp" ? (SETTINGS.SERVER_PORT || "8080") : (SETTINGS.VLLM_PORT || "8081"),
+  getServerPort: (engine) =>
+    engine === "llama.cpp" ? SETTINGS.SERVER_PORT || "8080" : SETTINGS.VLLM_PORT || "8081",
   getActiveServerPort: () => SETTINGS.SERVER_PORT || "8080",
   setActiveServerPortOverride: () => {},
-}));
+});
 
 /** 假 runtime：启动即 running，可以手动推状态（用来构造"正在加载"）。 */
 class FakeRuntime {
-  status = "stopped";
+  readonly id = "fake";
+  readonly label = "Fake Engine";
+  status: ServerStatus = "stopped";
   logs = "";
-  readonly statusCbs = new Set<(status: string) => void>();
+  readonly statusCbs = new Set<(status: ServerStatus) => void>();
 
   constructor(readonly overrides: Record<string, string | undefined> = {}) {}
 
@@ -67,30 +73,32 @@ class FakeRuntime {
     this.logs = "";
   };
   onLog = () => () => {};
-  onStatusChange = (cb: (status: string) => void) => {
+  onStatusChange = (cb: (status: ServerStatus) => void) => {
     this.statusCbs.add(cb);
-    return () => this.statusCbs.delete(cb);
+    return () => {
+      this.statusCbs.delete(cb);
+    };
   };
-  setStatus(status: string) {
+  setStatus(status: ServerStatus) {
     this.status = status;
     for (const cb of this.statusCbs) cb(status);
   }
 }
 
 let created: FakeRuntime[] = [];
-mock.module("./runtimes", () => ({
-  createRuntime: (_engine: string, overrides?: Record<string, string | undefined>) => {
+await mockModulePartial<typeof import("./runtimes")>("./runtimes", {
+  createRuntime: (_engine, overrides) => {
     const runtime = new FakeRuntime(overrides);
     created.push(runtime);
     return runtime;
   },
-}));
+});
 
-mock.module("./runtimes/mlx", () => ({
+await mockModulePartial<typeof import("./runtimes/mlx")>("./runtimes/mlx", {
   isMlxActive: () => SETTINGS.INFERENCE_ENGINE === "mlx",
   resolveMlxModel: () => ({ model: "", requestModelId: "" }),
-  mlxRequestModelId: (target: string) => `/abs/${target}`,
-}));
+  mlxRequestModelId: (target) => `/abs/${target}`,
+});
 
 type FakeInstalled = {
   repo: string;
@@ -100,25 +108,25 @@ type FakeInstalled = {
   size: number;
   isActive: boolean;
   isChatModel: boolean;
-  category: string;
+  category: ModelCategory;
   favorite: boolean;
-  origin: string;
+  origin: ModelOrigin;
   isDir: boolean;
-  kind: string;
+  kind: ModelFileKind;
 };
 let INSTALLED: FakeInstalled[] = [];
 const setActiveModelCalls: string[] = [];
 
-mock.module("./model-store", () => ({
-  setActiveModel: (path: string) => {
+await mockModulePartial<typeof import("./model-store")>("./model-store", {
+  setActiveModel: (path) => {
     setActiveModelCalls.push(path);
     return { ok: true };
   },
-  slugModelFileName: (name: string) => name.replace(/\.(gguf|safetensors)$/i, "").toLowerCase(),
-  servedNameForModelPath: (path: string) =>
+  slugModelFileName: (name) => name.replace(/\.(gguf|safetensors)$/i, "").toLowerCase(),
+  servedNameForModelPath: (path) =>
     (path.split("/").pop() ?? path).replace(/\.(gguf|safetensors)$/i, "").toLowerCase(),
   listInstalledModels: () => INSTALLED,
-}));
+});
 
 type FakeProvider = {
   id: string;
@@ -130,23 +138,42 @@ type FakeProvider = {
   /** 已「启动」的厂商才有模型进对话列表。 */
   enabled?: boolean;
 };
+/**
+ * 补上 `CloudProviderInfo` 里对话列表用不到的字段。
+ * 放在这里而不是让每处 fixture 都写一遍：fixture 只该写它真正关心的东西，
+ * 而"返回类型必须是完整的"这件事由这一个函数承担。
+ */
+const asProviderInfo = (p: FakeProvider): CloudProviderInfo => ({
+  vendor: "",
+  videoApi: "",
+  createdAt: 0,
+  updatedAt: 0,
+  enabled: false,
+  ...p,
+});
 let PROVIDERS: FakeProvider[] = [];
 let ACTIVE_PROVIDER: string | null = null;
 const activatedProviders: string[] = [];
 
-mock.module("./cloud-providers", () => ({
-  listCloudProviders: () => ({ providers: PROVIDERS, activeId: ACTIVE_PROVIDER }),
+await mockModulePartial<typeof import("./cloud-providers")>("./cloud-providers", {
+  listCloudProviders: () => ({ providers: PROVIDERS.map(asProviderInfo), activeId: ACTIVE_PROVIDER }),
   activeProviderId: () => ACTIVE_PROVIDER,
-  activateCloudProvider: (id: string) => {
+  activateCloudProvider: (id) => {
     activatedProviders.push(id);
     ACTIVE_PROVIDER = id;
     return { ok: true };
   },
-}));
+});
 
 const Served = await import("./model-servers");
-const { listChatModels, selectChatModel, getChatModelName, getChatModelLabel, getChatRequestModelId } =
-  await import("./chat-model");
+const {
+  listChatModels,
+  selectChatModel,
+  getChatModelName,
+  getChatModelLabel,
+  getChatRequestModelId,
+  chatModelSupportsImages,
+} = await import("./chat-model");
 
 const tmpDir = mkdtempSync(join(tmpdir(), "chat-model-test-"));
 const modelA = join(tmpDir, "a.gguf");
@@ -229,7 +256,7 @@ describe("listChatModels 的本地条目", () => {
         isChatModel: true,
         category: "chat",
         favorite: false,
-        origin: "downloads",
+        origin: "managed",
         isDir: false,
         kind: "gguf",
       },
@@ -254,7 +281,7 @@ describe("listChatModels 的本地条目", () => {
         isChatModel: true,
         category: "chat",
         favorite: false,
-        origin: "downloads",
+        origin: "managed",
         isDir: false,
         kind: "gguf",
       },
@@ -452,5 +479,42 @@ describe("请求侧模型 id", () => {
     SETTINGS.SERVER_MODE = "local";
     SETTINGS.CHAT_MODEL = "qwen3-8b";
     expect(getChatModelName()).toBe("qwen3-8b");
+  });
+});
+
+/**
+ * 视觉能力探测（决定 Agent 是否拿到 view_image）。
+ *
+ * 判错的代价不对称：把图片发给纯文本模型，服务端会直接 400（整轮报废）；
+ * 反过来只是"少一个工具"。所以默认按模型名猜 + 允许强制开关。
+ */
+describe("chatModelSupportsImages", () => {
+  test("本地模型按名字判断：视觉模型 / 纯文本模型", () => {
+    SETTINGS.SERVER_MODE = "local";
+    SETTINGS.CHAT_MODEL = "Qwen2.5-VL-7B-Instruct-4bit";
+    expect(chatModelSupportsImages()).toBe(true);
+
+    SETTINGS.CHAT_MODEL = "qwen3-8b";
+    expect(chatModelSupportsImages()).toBe(false);
+  });
+
+  test("云端模式默认放行（主力模型基本都支持视觉）", () => {
+    SETTINGS.SERVER_MODE = "remote";
+    SETTINGS.VLLM_MODEL_NAME = "gpt-5";
+    expect(chatModelSupportsImages()).toBe(true);
+  });
+
+  test("AGENT_VISION_TOOL 可以强制开关（auto 之外的档位不受模型名影响）", () => {
+    SETTINGS.SERVER_MODE = "local";
+    SETTINGS.CHAT_MODEL = "qwen3-8b";
+    SETTINGS.AGENT_VISION_TOOL = "on";
+    expect(chatModelSupportsImages()).toBe(true);
+
+    SETTINGS.CHAT_MODEL = "Qwen2.5-VL-7B";
+    SETTINGS.AGENT_VISION_TOOL = "off";
+    expect(chatModelSupportsImages()).toBe(false);
+
+    SETTINGS.AGENT_VISION_TOOL = "auto";
+    expect(chatModelSupportsImages()).toBe(true);
   });
 });

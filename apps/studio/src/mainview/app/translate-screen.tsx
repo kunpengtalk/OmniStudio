@@ -27,7 +27,6 @@ import {
 import { useT } from "@stores/ui-lang";
 import { useTranslateStore } from "@stores/translate";
 import { cn } from "@/mainview/lib/utils";
-import type { TranslationRecordRow } from "../../bun/translate";
 import { LiveTranslateTab } from "./live-translate";
 import {
   TRANSLATION_LANGUAGES,
@@ -63,7 +62,6 @@ export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
   const mode = settings?.SERVER_MODE ?? "local";
   const chatModel = settings?.CHAT_MODEL ?? "";
   const apiModel = settings?.VLLM_MODEL_NAME ?? "";
-  const activePath = settings?.LOCAL_MODEL_PATH ?? "";
   const engineKey = isGoogle ? "google" : "model";
 
   const allOptions = modelsQuery.data?.models ?? [];

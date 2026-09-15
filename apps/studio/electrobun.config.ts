@@ -136,6 +136,10 @@ const copy: Record<string, string> = {
   // 常驻 PaddleOCR worker（PP-OCRv6，本地模型目录加载）；主进程以
   // import.meta.dir 同目录相对路径 spawn，必须打进 bundle。
   "src/bun/ppocr-worker.py": "bun/ppocr-worker.py",
+  // Landlock 沙箱辅助程序的 C 源码（Linux）：landlock-helper.ts 以 import.meta.dir
+  // 同目录相对路径现编它（首次使用时 cc 一次，产物缓存在数据目录）。
+  // 漏了它 → Linux 上永远"没有编译器"降级，Landlock 后端形同不存在。
+  "src/bun/omni-landlock.c": "bun/omni-landlock.c",
   // 提示词库内置素材（scripts/bundle-prompt-library-assets.ts 生成）：
   // 有则打进 webview，作为远程封面加载失败时的离线兜底。
   ...(existsSync("dist/prompt-library")

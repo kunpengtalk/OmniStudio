@@ -1,5 +1,7 @@
 import type { Subprocess } from "bun";
 
+import { proxyChildEnv } from "../proxy";
+
 /**
  * 推理服务器子进程的公共设施：四个 runtime（llama.cpp / vLLM / SGLang / MLX）
  * 共用同一套"spawn + 管道日志 + 杀进程"逻辑，避免同一处修四遍。
@@ -58,7 +60,9 @@ export function spawnServerProcess(cmd: string[], env?: Record<string, string>) 
     stdout: "pipe",
     stderr: "pipe",
     detached: true,
-    env: { ...(process.env as Record<string, string>), ...env },
+    // 代理环境变量：vLLM / SGLang / MLX 起服务时会自己去 HuggingFace 拉权重，
+    // 这一步在子进程里，只有 env 能带上代理设置（见 bun/proxy.ts）。
+    env: { ...(process.env as Record<string, string>), ...proxyChildEnv(), ...env },
   });
 }
 

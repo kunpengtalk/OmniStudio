@@ -3,8 +3,6 @@ import { engineForModelKind, engineSupports, resolveEngineForModel } from "../sh
 import { getSetting, getActiveServerPort } from "./db/settings";
 import { dirModelKind, resolveRuntimeTarget } from "./model-scan";
 import { createRuntime, getActiveEngine, getRuntime, type InferenceEngine } from "./runtimes";
-import type { Runtime } from "./runtimes";
-import type { LogListener, StatusListener } from "./runtimes/types";
 import { extractStartupError } from "./runtimes/errors";
 import * as Served from "./model-servers";
 

@@ -5,7 +5,6 @@ import {
   Loader2Icon,
   PlayIcon,
   TerminalIcon,
-  CopyIcon,
   CheckIcon,
   CheckCircle2Icon,
   StarIcon,
@@ -25,6 +24,7 @@ import {
 import { rpcClient } from "@lib/rpc";
 import { SourceBadge } from "@components/source-badge";
 import { ModelCategoryBadge, ModelFormatBadge, MODEL_TAG_CLASS } from "@components/model-category-badge";
+import { ModelCategoryChips } from "@components/model-category-chips";
 import { useEngine } from "@lib/use-engine";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
@@ -32,7 +32,6 @@ import { Label } from "@ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { Badge } from "@ui/badge";
 import { ScrollArea } from "@ui/scroll-area";
-import { Tabs, TabsList, TabsTrigger } from "@ui/tabs";
 import { Spinner } from "@ui/spinner";
 import { useRouter } from "@stores/router";
 import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detail";
@@ -706,18 +705,18 @@ function InstalledModelRow({
   );
 }
 
-/** 已安装模型 tab 页：全部分类各一个 tab（与模型库的分类口径一致），切换展示。 */
+/** 已安装模型分类筛选：全部分类各一颗（与模型库的分类口径一致），切换展示。 */
 type InstalledTab = "all" | ModelCategory;
 
-const INSTALLED_TABS: { value: InstalledTab; labelKey: string }[] = [
-  { value: "all", labelKey: "models.cat.all" },
-  { value: "chat", labelKey: "models.cat.chat" },
-  { value: "embedding", labelKey: "models.cat.embedding" },
-  { value: "rerank", labelKey: "models.cat.rerank" },
-  { value: "tts", labelKey: "models.cat.tts" },
-  { value: "asr", labelKey: "models.cat.asr" },
-  { value: "image", labelKey: "models.cat.image" },
-  { value: "video", labelKey: "models.cat.video" },
+const INSTALLED_TABS: readonly InstalledTab[] = [
+  "all",
+  "chat",
+  "embedding",
+  "rerank",
+  "tts",
+  "asr",
+  "image",
+  "video",
 ];
 
 function InstalledModels({ engine }: { engine: InferenceEngine }) {
@@ -751,9 +750,10 @@ function InstalledModels({ engine }: { engine: InferenceEngine }) {
   const originCount = (value: ModelOrigin) => allModels.filter((m) => m.origin === value).length;
 
   return (
-    <Tabs value={tab} onValueChange={(v) => setTab(v as InstalledTab)} className="gap-3">
-      {/* 来源筛选：应用下载 / 本地目录 / HF 缓存 —— 一眼看出模型是从哪儿来的 */}
-      <div className="flex flex-wrap items-center gap-1.5">
+    <div className="flex flex-col gap-3">
+      {/* 来源筛选：应用下载 / 本地目录 / HF 缓存 —— 一眼看出模型是从哪儿来的。
+          尺寸与下面那条分类筛选对齐（同款药丸、同高），两行叠在一起才像一套。 */}
+      <div className="flex flex-wrap items-center gap-1">
         {(["all", "managed", "external", "hf-cache"] as const).map((o) => {
           const active = origin === o;
           const count = o === "all" ? allModels.length : originCount(o);
@@ -763,28 +763,25 @@ function InstalledModels({ engine }: { engine: InferenceEngine }) {
               type="button"
               onClick={() => setOrigin(o)}
               className={cn(
-                "rounded-full border px-2.5 py-1 text-[11px] transition-colors",
+                "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors",
                 active
                   ? "border-primary bg-primary/10 text-primary"
                   : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
               )}
             >
               {o === "all" ? t("models.cat.all") : t(ORIGIN_LABEL_KEYS[o])}
-              <span className="ml-1 tabular-nums opacity-60">{count}</span>
+              <span className="tabular-nums opacity-60">{count}</span>
             </button>
           );
         })}
       </div>
-      <TabsList className="w-fit max-w-full overflow-x-auto">
-        {INSTALLED_TABS.map((tb) => (
-          <TabsTrigger key={tb.value} value={tb.value} className="gap-1.5 text-xs">
-            {t(tb.labelKey)}
-            <span className="rounded-full bg-background/60 px-1.5 text-[10px] tabular-nums text-muted-foreground">
-              {countFor(tb.value)}
-            </span>
-          </TabsTrigger>
-        ))}
-      </TabsList>
+      {/* 分类筛选：图标 + 两字短名 + 计数 —— 一行放得下，排不下就换行，不拉滚动条 */}
+      <ModelCategoryChips
+        values={INSTALLED_TABS}
+        value={tab}
+        countOf={countFor}
+        onChange={setTab}
+      />
       {models.length === 0 ? (
         <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center">
           <HardDriveIcon className="size-6 text-muted-foreground/50" />
@@ -799,7 +796,7 @@ function InstalledModels({ engine }: { engine: InferenceEngine }) {
           ))}
         </div>
       )}
-    </Tabs>
+    </div>
   );
 }
 
@@ -1009,7 +1006,6 @@ function DefaultModelConfig() {
     queryKey: ["settings"],
     queryFn: () => rpcClient.getSettings(undefined),
   });
-  const settings = data?.settings ?? {};
   const [form, setForm] = useState<Record<string, string>>({});
 
   useEffect(() => {

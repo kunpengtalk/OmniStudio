@@ -1,12 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   CalendarClockIcon,
-  CheckIcon,
-  CircleAlertIcon,
-  FolderIcon,
+  ChevronDownIcon,
+  FolderPlusIcon,
   Loader2Icon,
   MoreHorizontalIcon,
   PencilIcon,
@@ -14,36 +13,127 @@ import {
   PinOffIcon,
   PlusIcon,
   SearchIcon,
-  SparklesIcon,
+  SidebarIcon,
+  SquarePenIcon,
   Trash2Icon,
   WaypointsIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
-import { Button } from "@ui/button";
-import { Input } from "@ui/input";
+import { reportClientError } from "@lib/app-log";
+import { parseWorkspaceRecents, withRecentWorkspace, workspaceLabel } from "@lib/workspace";
 import { useAgentStore, type AgentSubView } from "@stores/agent";
 import { useChatStore } from "@stores/chat";
 import { useT } from "@stores/ui-lang";
-import { cn } from "@/mainview/lib/utils";
+import { PiTip } from "./pi-tip";
 import type { AgentSessionView } from "../../../bun/agent";
 
-/** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前 / 日期。 */
-function relativeTime(ts: number): string {
-  const diff = Date.now() - ts;
-  if (diff < 60_000) return "刚刚";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
-  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
-  return new Date(ts).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
+type TimeBucket = "today" | "yesterday" | "week" | "month" | "earlier";
+
+const BUCKET_ORDER: TimeBucket[] = ["today", "yesterday", "week", "month", "earlier"];
+
+/**
+ * 时间分桶。分组内部按"什么时候动过"再分一层，比一条无尽的列表好找 ——
+ * 用户回想的是"今天早上那个"，而不是第 37 行。
+ */
+function bucketOf(ts: number): TimeBucket {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const day = 86_400_000;
+  if (ts >= startOfToday) return "today";
+  if (ts >= startOfToday - day) return "yesterday";
+  if (ts >= startOfToday - 7 * day) return "week";
+  if (ts >= startOfToday - 30 * day) return "month";
+  return "earlier";
 }
 
-/** 工作区短名：路径最后一段。 */
-function workspaceLabel(path: string): string {
-  const parts = path.split("/").filter(Boolean);
-  return parts[parts.length - 1] ?? path;
+/** 侧栏顶部动作区里的子视图入口：自动化 / 插件。 */
+const SIDE_VIEW_ACTIONS: {
+  view: Exclude<AgentSubView, "chat">;
+  icon: React.ComponentType<{ size?: number; "aria-hidden"?: boolean }>;
+  labelKey: string;
+}[] = [
+  { view: "automations", icon: CalendarClockIcon, labelKey: "agent.nav.automations" },
+  { view: "plugins", icon: WaypointsIcon, labelKey: "agent.nav.plugins" },
+];
+
+/** 快捷键提示里的修饰键：macOS 显示 ⌘，其它平台显示 Ctrl。 */
+const MOD_KEY = /Mac|iPhone|iPad/.test(navigator.userAgent) ? "⌘" : "Ctrl+";
+
+/**
+ * 侧栏顶部动作区：新建任务 / 搜索 / 自动化 / 插件市场。
+ *
+ * 对齐参考实现：这四个是"接下来去哪"的入口，钉在会话列表上方，不落页脚。前两个
+ * 带快捷键提示，实际按键在 AgentWindow 里统一监听（那里是所有子视图的共同祖先）。
+ */
+function SidebarActions({
+  onNewTask,
+  onOpenSearch,
+}: {
+  onNewTask: () => void;
+  onOpenSearch: () => void;
+}) {
+  const t = useT();
+  const subView = useAgentStore((s) => s.subView);
+  const items: {
+    key: string;
+    icon: React.ReactNode;
+    label: string;
+    hint?: string;
+    active?: boolean;
+    onClick: () => void;
+  }[] = [
+    {
+      key: "new",
+      icon: <SquarePenIcon size={15} aria-hidden />,
+      label: t("agent.session.new"),
+      hint: `${MOD_KEY}N`,
+      // 包一层：直接把函数交给 onClick，点击事件会被当成第一个参数传进去，
+      // 而"新建任务"的第一个参数是工作区（侧栏的 onNewTask 支持指定文件夹）。
+      onClick: () => onNewTask(),
+    },
+    {
+      key: "search",
+      icon: <SearchIcon size={15} aria-hidden />,
+      label: t("agent.search.title"),
+      hint: `${MOD_KEY}K`,
+      onClick: onOpenSearch,
+    },
+    ...SIDE_VIEW_ACTIONS.map((item) => {
+      const Icon = item.icon;
+      const active = subView === item.view;
+      return {
+        key: item.view,
+        icon: <Icon size={15} aria-hidden />,
+        label: t(item.labelKey),
+        active,
+        // 再点一次回到会话列表：这几个是"切主区"，不是开关面板。
+        onClick: () => useAgentStore.getState().setSubView(active ? "chat" : item.view),
+      };
+    }),
+  ];
+
+  return (
+    <div className="pi-side-actions">
+      {items.map((item) => (
+        <button
+          key={item.key}
+          type="button"
+          className={`pi-side-action${item.active ? " active" : ""}`}
+          aria-pressed={item.active}
+          aria-label={item.label}
+          onClick={item.onClick}
+        >
+          {item.icon}
+          <span className="pi-side-action-label">{item.label}</span>
+          {item.hint ? <span className="pi-kbd">{item.hint}</span> : null}
+        </button>
+      ))}
+    </div>
+  );
 }
 
+/** 会话行。状态点占最左边 12px 车道，标题从 20px 起 —— 状态变化不会让文字左右跳。 */
 function SessionRow({
   session,
   active,
@@ -65,153 +155,310 @@ function SessionRow({
 }) {
   const t = useT();
   const [menuOpen, setMenuOpen] = useState(false);
-  const progress =
-    session.todo.total > 0 ? `${session.todo.completed}/${session.todo.total}` : null;
+  const progress = session.todo.total > 0 ? `${session.todo.completed}/${session.todo.total}` : null;
 
   return (
-    <div className="relative">
+    <div style={{ position: "relative" }}>
       <button
         type="button"
+        className={`pi-thread${active ? " active" : ""}${session.archived ? " archived" : ""}`}
         onClick={onSelect}
-        className={cn(
-          "group flex w-full flex-col gap-0.5 rounded-lg px-2 py-1.5 text-left transition-colors",
-          active ? "bg-muted" : "hover:bg-muted/60",
-        )}
       >
-        <div className="flex items-center gap-1.5">
+        <span className="pi-thread-status" aria-hidden>
           {session.running ? (
-            <Loader2Icon className="size-3 shrink-0 animate-spin text-primary" />
+            <span className="pi-thread-dot running" />
           ) : session.needsAttention ? (
-            <CircleAlertIcon className="size-3 shrink-0 text-amber-500" />
+            <span className="pi-thread-dot attention" />
           ) : unread ? (
-            <span className="size-1.5 shrink-0 rounded-full bg-primary" />
+            <span className="pi-thread-dot unread" />
+          ) : active ? (
+            <span className="pi-thread-ring" />
           ) : session.pinned ? (
-            <PinIcon className="size-3 shrink-0 text-muted-foreground" />
+            <PinIcon size={11} style={{ color: "var(--ds-accent)" }} />
           ) : null}
-          <span className={cn("min-w-0 flex-1 truncate text-xs", active && "font-medium")}>
-            {session.title}
-          </span>
-          <span className="shrink-0 text-[10px] text-muted-foreground/70">
-            {relativeTime(session.updatedAt)}
-          </span>
-        </div>
-        <div className="flex items-center gap-1.5 pl-0.5">
-          {session.preview && (
-            <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground/70">
-              {session.preview}
-            </span>
-          )}
-          {progress && (
-            <span className="shrink-0 rounded bg-muted px-1 text-[9px] text-muted-foreground">
-              {progress}
-            </span>
-          )}
-        </div>
-        {session.sessionWorkspace && (
-          <span className="flex items-center gap-1 pl-0.5 text-[10px] text-muted-foreground/60">
-            <FolderIcon className="size-2.5" />
-            {workspaceLabel(session.sessionWorkspace)}
-          </span>
-        )}
+        </span>
+        <span className="pi-thread-main">
+          <span className="pi-thread-title">{session.title || t("agent.untitledTask")}</span>
+          {progress ? <span className="pi-thread-progress">{progress}</span> : null}
+        </span>
       </button>
 
       <button
         type="button"
-        onClick={(e) => {
-          e.stopPropagation();
+        className="pi-thread-more"
+        aria-expanded={menuOpen}
+        aria-label={t("agent.session.menu")}
+        style={{ position: "absolute", right: 4, top: 2 }}
+        onClick={(event) => {
+          event.stopPropagation();
           setMenuOpen((v) => !v);
         }}
-        className={cn(
-          "absolute top-1 right-1 rounded p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-background group-hover:opacity-100",
-          menuOpen && "opacity-100",
-        )}
-        title={t("agent.session.menu")}
       >
-        <MoreHorizontalIcon className="size-3.5" />
+        <MoreHorizontalIcon size={14} aria-hidden />
       </button>
 
-      {menuOpen && (
+      {menuOpen ? (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-          <div className="absolute right-1 top-6 z-50 w-40 overflow-hidden rounded-lg border bg-popover py-1 shadow-lg">
+          <div
+            className="pi-menu"
+            style={{ right: 4, top: 30, width: "min(184px, calc(100vw - 16px))" }}
+            role="menu"
+          >
             <button
               type="button"
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-muted"
+              className="pi-menu-item"
               onClick={() => {
                 setMenuOpen(false);
                 onPin(!session.pinned);
               }}
             >
-              {session.pinned ? <PinOffIcon className="size-3.5" /> : <PinIcon className="size-3.5" />}
+              {session.pinned ? <PinOffIcon size={14} aria-hidden /> : <PinIcon size={14} aria-hidden />}
               {session.pinned ? t("agent.session.unpin") : t("agent.session.pin")}
             </button>
             <button
               type="button"
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-muted"
+              className="pi-menu-item"
               onClick={() => {
                 setMenuOpen(false);
                 onRename();
               }}
             >
-              <PencilIcon className="size-3.5" />
+              <PencilIcon size={14} aria-hidden />
               {t("agent.session.rename")}
             </button>
             <button
               type="button"
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-muted"
+              className="pi-menu-item"
               onClick={() => {
                 setMenuOpen(false);
                 onArchive();
               }}
             >
               {session.archived ? (
-                <ArchiveRestoreIcon className="size-3.5" />
+                <ArchiveRestoreIcon size={14} aria-hidden />
               ) : (
-                <ArchiveIcon className="size-3.5" />
+                <ArchiveIcon size={14} aria-hidden />
               )}
               {session.archived ? t("agent.session.unarchive") : t("agent.session.archive")}
             </button>
             <button
               type="button"
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-destructive hover:bg-destructive/10"
+              className="pi-menu-item"
+              style={{ color: "var(--ds-error)" }}
               onClick={() => {
                 setMenuOpen(false);
                 onDelete();
               }}
             >
-              <Trash2Icon className="size-3.5" />
+              <Trash2Icon size={14} aria-hidden />
               {t("agent.session.remove")}
             </button>
           </div>
         </>
-      )}
+      ) : null}
     </div>
   );
 }
 
-/**
- * Agent 会话侧栏（对齐 OpenWork 的会话列表）：
- * 新建任务 / 搜索 / 置顶分组 / 归档折叠 / 重命名 / 删除。
- */
-/** 侧栏入口（对齐 OpenWork：新建任务下面是搜索 / 自动化 / 插件 / 技能）。 */
-const NAV_ITEMS: {
-  view: AgentSubView;
-  icon: React.ComponentType<{ className?: string }>;
-  labelKey: string;
-}[] = [
-  { view: "search", icon: SearchIcon, labelKey: "agent.nav.search" },
-  { view: "automations", icon: CalendarClockIcon, labelKey: "agent.nav.automations" },
-  { view: "plugins", icon: WaypointsIcon, labelKey: "agent.nav.plugins" },
-  { view: "skills", icon: SparklesIcon, labelKey: "agent.nav.skills" },
-];
+/** 分组标题行：折叠箭头 + 标题 +（可选的）行尾动作。 */
+function SectionHeader({
+  label,
+  count,
+  icon,
+  open,
+  onToggle,
+  onSelect,
+  active,
+  title,
+  action,
+}: {
+  label: string;
+  count?: number;
+  icon?: React.ReactNode;
+  open?: boolean;
+  onToggle?: () => void;
+  /**
+   * 传入时标题本身变成"进入这一组"，箭头拆成独立按钮只管折叠。
+   * 一个按钮不能既进组又折叠：项目段要的是"点文件夹就进去看它的会话"。
+   */
+  onSelect?: () => void;
+  active?: boolean;
+  /** 悬停提示。项目标题只显示路径最后一段，完整路径放这里。 */
+  title?: string;
+  action?: React.ReactNode;
+}) {
+  const t = useT();
+  const caret = (
+    <ChevronDownIcon size={12} className={`pi-caret${open ? "" : " collapsed"}`} aria-hidden />
+  );
+  const splitCaret = Boolean(onSelect && onToggle);
 
-export function AgentSessionSidebar({ activeConversationId }: { activeConversationId: number | null }) {
+  const titleNode = onSelect ? (
+    <button
+      type="button"
+      className={`pi-group-title${active ? " active" : ""}`}
+      title={title}
+      aria-current={active ? "true" : undefined}
+      onClick={onSelect}
+    >
+      {splitCaret ? null : caret}
+      {icon}
+      <span>{label}</span>
+      {count != null ? <span className="pi-group-count">{count}</span> : null}
+    </button>
+  ) : onToggle ? (
+    <button type="button" className="pi-group-title" onClick={onToggle}>
+      {caret}
+      {icon}
+      <span>{label}</span>
+      {count != null ? <span className="pi-group-count">{count}</span> : null}
+    </button>
+  ) : (
+    <span className="pi-group-title" style={{ cursor: "default" }}>
+      {icon}
+      <span>{label}</span>
+      {count != null ? <span className="pi-group-count">{count}</span> : null}
+    </span>
+  );
+
+  return (
+    <div className="pi-group-header">
+      {splitCaret ? (
+        <button
+          type="button"
+          className="pi-caret-btn"
+          aria-expanded={Boolean(open)}
+          aria-label={t("agent.sidebar.toggleGroup")}
+          onClick={onToggle}
+        >
+          {caret}
+        </button>
+      ) : null}
+      {titleNode}
+      {action}
+    </div>
+  );
+}
+
+/** 一组会话：内部再按时间分桶（今天 / 昨天 / 近 7 天…）。 */
+function TimeBucketedSessions({
+  sessions,
+  renderRow,
+}: {
+  sessions: AgentSessionView[];
+  renderRow: (session: AgentSessionView) => React.ReactNode;
+}) {
+  const t = useT();
+  const buckets = useMemo(() => {
+    const map = new Map<TimeBucket, AgentSessionView[]>();
+    for (const session of sessions) {
+      const key = bucketOf(session.updatedAt);
+      map.set(key, [...(map.get(key) ?? []), session]);
+    }
+    return map;
+  }, [sessions]);
+
+  return (
+    <>
+      {BUCKET_ORDER.map((bucket) => {
+        const items = buckets.get(bucket);
+        if (!items || items.length === 0) return null;
+        return (
+          <div key={bucket}>
+            <div className="pi-time-label">{t(`agent.sidebar.${bucket}`)}</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>{items.map(renderRow)}</div>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+/** 一段列表默认最多露 5 条，多出来的收在「查看更多」后面。 */
+const LIST_LIMIT = 5;
+
+/**
+ * 一段会话列表：默认只露前 5 条，点「查看更多」展开全部，再点收起。
+ *
+ * 列表是按最近更新排的（新的在最上面），所以收起的是最旧的那批 —— 不点开也
+ * 不会漏掉"刚动过的那个"。置顶段（用户自己攒的短名单，要的就是一眼看到）与归档段
+ * （本来就藏在"归档"折叠后面）不走这里。
+ */
+function SessionList({
+  sessions,
+  renderRow,
+}: {
+  sessions: AgentSessionView[];
+  renderRow: (session: AgentSessionView) => React.ReactNode;
+}) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  const hidden = sessions.length - LIST_LIMIT;
+  const visible = expanded ? sessions : sessions.slice(0, LIST_LIMIT);
+
+  return (
+    <>
+      <TimeBucketedSessions sessions={visible} renderRow={renderRow} />
+      {hidden > 0 ? (
+        <button
+          type="button"
+          className="pi-list-more"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <ChevronDownIcon size={12} className={`pi-caret${expanded ? "" : " collapsed"}`} aria-hidden />
+          <span>
+            {expanded ? t("agent.sidebar.showLess") : t("agent.sidebar.showMore", { count: String(hidden) })}
+          </span>
+        </button>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * Agent 会话侧栏。
+ *
+ * 结构对齐参考实现：顶栏是品牌与「收起侧栏」；主体最上方是动作区（新建任务 / 搜索 /
+ * 自动化 / 插件市场），下面分「会话」与「项目」两段 —— 会话段放没挂项目的临时会话，
+ * 项目段按工作区分组，每组内部再按时间分桶。页脚只留通知中心。
+ *
+ * 项目段是"文件夹即项目"的入口，三种操作各自独立：
+ *   点文件夹   → 进这个项目（展开 + 切到里面最近动过的会话）；
+ *   行尾的 ＋  → 在这个文件夹里开一个新会话；
+ *   段标题的 📁+ → 打开一个还没进列表的文件夹（里面有会话就进去，没有就当场建一个）。
+ * 只做分组不做这几件事的话，"选了文件夹"在界面上等于什么都没发生 —— 右侧还停在
+ * 上一个项目的会话里。
+ *
+ * 动作区放在列表上方而不是页脚：这四个是"接下来去哪"的入口，跟会话内容不是一类；
+ * 其中新建任务与搜索带 ⌘N / ⌘K 提示（按键在 AgentWindow 里监听）。
+ *
+ * 三段列表（置顶 / 会话 / 项目）一律**按最近更新倒序**，新的在最上面；每段默认只露
+ * 前 5 条，剩下的收在行尾的「查看更多」里。
+ */
+export function AgentSessionSidebar({
+  activeConversationId,
+  onNewTask,
+  onOpenSearch,
+  onToggleSidebar,
+  collapsed,
+}: {
+  activeConversationId: number | null;
+  /** 新建任务；带工作区时直接建在那个文件夹里（项目段的 ＋ 与「打开工作区」用）。 */
+  onNewTask: (workspace?: string) => void;
+  onOpenSearch: () => void;
+  onToggleSidebar: () => void;
+  collapsed: boolean;
+}) {
   const t = useT();
   const queryClient = useQueryClient();
-  const subView = useAgentStore((s) => s.subView);
+  const unread = useAgentStore((s) => s.unread);
   const [showArchived, setShowArchived] = useState(false);
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const [openingWorkspace, setOpeningWorkspace] = useState(false);
 
   const sessionsQuery = useQuery({
     queryKey: ["agent-sessions", showArchived],
@@ -220,33 +467,17 @@ export function AgentSessionSidebar({ activeConversationId }: { activeConversati
     refetchInterval: 4000,
   });
   const sessions = useMemo(() => sessionsQuery.data?.sessions ?? [], [sessionsQuery.data]);
-  const unread = useAgentStore((s) => s.unread);
+
+  // 最近工作区设置：打开过的文件夹要与输入框上的工作区选择器共用同一份。
+  const { data: settingsData } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => rpcClient.getSettings(undefined),
+  });
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["agent-sessions"] });
     queryClient.invalidateQueries({ queryKey: ["conversations", "agent"] });
   };
-
-  const createMutation = useMutation({
-    mutationFn: () => rpcClient.createAgentSession({}),
-    onSuccess: (data) => {
-      invalidate();
-      useAgentStore.getState().setSubView("chat");
-      useChatStore.getState().upsertConversation({
-        id: data.session.id,
-        title: data.session.title,
-        app: "agent",
-        modelId: null,
-        pinned: 0,
-        createdAt: data.session.createdAt,
-        updatedAt: data.session.updatedAt,
-      });
-      useChatStore.getState().setActiveConversation(data.session.id);
-      useChatStore.getState().setActiveMessages([]);
-      useChatStore.getState().setStreaming(false);
-      useAgentStore.getState().clear();
-    },
-  });
 
   const pinMutation = useMutation({
     mutationFn: ({ id, pinned }: { id: number; pinned: boolean }) =>
@@ -277,20 +508,111 @@ export function AgentSessionSidebar({ activeConversationId }: { activeConversati
     },
   });
 
-  // 会话列表只做归档分组；按内容搜索走侧栏的「搜索」入口（能搜正文，不只是标题）。
-  const pinned = sessions.filter((session) => session.pinned && !session.archived);
-  const rest = sessions.filter((session) => !session.pinned && !session.archived);
+  /**
+   * 列表顺序在这里定：**最近更新的在最上面**（新的排最前）。
+   *
+   * 服务端本来就按这个顺序返回，这里再排一次是有意的：它是"默认只露 5 条"的前提
+   * —— 顺序反了，收起来的就是最新的那批，而这种错在界面上看不出来。
+   * 时间相同时排序是稳定的（V8 保证），沿用服务端给的先后，行不会自己来回跳。
+   */
+  const live = useMemo(
+    () => sessions.filter((session) => !session.archived).sort((a, b) => b.updatedAt - a.updatedAt),
+    [sessions],
+  );
   const archived = sessions.filter((session) => session.archived);
 
-  // 按工作区分组：会话带自己的 workspace 时归到那个项目下面。
-  const groups = useMemo(() => {
+  /**
+   * 置顶的单独成组摆在最上面：它要"无论挂没挂项目都一眼看得到"，所以不能留在
+   * 各自的段里 —— 那会出现"钉过的会话跑到项目下面找不着"的情况。
+   * 两个非置顶段互斥（按有没有指定工作区划分），任何一条会话只会出现在一处。
+   */
+  const pinned = live.filter((session) => session.pinned);
+  const standalone = useMemo(
+    () => live.filter((session) => !session.pinned && !session.sessionWorkspace),
+    [live],
+  );
+
+  /**
+   * 项目段：按工作区分组，**最近动过的排最前**。
+   * 组的时间取"组内最新那条会话的 updatedAt"，所以在这个项目里新建会话 / 发消息，
+   * 项目自己就会往前排；没人动过就保持原位置（稳定排序，时间相同沿用上面的先后）。
+   */
+  const projects = useMemo(() => {
     const map = new Map<string, AgentSessionView[]>();
-    for (const session of rest) {
-      const key = session.sessionWorkspace ?? "";
-      map.set(key, [...(map.get(key) ?? []), session]);
+    for (const session of live) {
+      if (session.pinned) continue;
+      if (!session.sessionWorkspace) continue;
+      map.set(session.sessionWorkspace, [...(map.get(session.sessionWorkspace) ?? []), session]);
     }
-    return [...map.entries()];
-  }, [rest]);
+    return [...map.entries()].sort((a, b) => {
+      const aTime = Math.max(...a[1].map((s) => s.updatedAt));
+      const bTime = Math.max(...b[1].map((s) => s.updatedAt));
+      return bTime - aTime;
+    });
+  }, [live]);
+
+  /**
+   * 切到某个会话。会话行点击与"点项目文件夹"共用：两条路都只改这几样状态即可 ——
+   * 消息、事件、工作区由 AgentConversation 挂载后自己取。
+   */
+  const selectSession = (session: AgentSessionView) => {
+    useAgentStore.getState().setSubView("chat");
+    if (session.id === activeConversationId) return;
+    useAgentStore.getState().clearUnread(session.id);
+    useChatStore.getState().setActiveConversation(session.id);
+    useChatStore.getState().setActiveMessages([]);
+    useChatStore.getState().setStreaming(false);
+    useAgentStore.getState().clear();
+  };
+
+  /**
+   * 进项目：展开分组，并切到里面最近动过的会话。
+   * 已经在项目里的某个会话上就只展开 —— 否则点一下文件夹会把正在看的会话顶掉。
+   */
+  const enterProject = (workspace: string, items: AgentSessionView[]) => {
+    setCollapsedGroups((prev) => ({ ...prev, [workspace]: false }));
+    if (items.some((session) => session.id === activeConversationId)) return;
+    const latest = [...items].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (latest) selectSession(latest);
+  };
+
+  /** 记住最近工作区：与输入框上的工作区选择器共用一份设置，那边也能直接选到。 */
+  const rememberWorkspace = async (path: string): Promise<void> => {
+    try {
+      const recents = parseWorkspaceRecents(settingsData?.settings?.AGENT_WORKSPACES);
+      await rpcClient.updateSettings({
+        settings: { AGENT_WORKSPACES: JSON.stringify(withRecentWorkspace(recents, path)) },
+      });
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    } catch {
+      // 记不住"最近"不影响打开：选择器里少一条而已，不当错误报给用户。
+    }
+  };
+
+  /**
+   * 打开工作区：选一个文件夹，把它变成当前项目。
+   * 里面已经有会话就进去（切到最近那个），没有就当场在里面建一个 ——
+   * 「打开文件夹」的结果必须是"我现在就在这个文件夹里"，否则等于没打开。
+   */
+  const openWorkspace = async () => {
+    setOpeningWorkspace(true);
+    try {
+      const { path } = await rpcClient.openDirectoryDialog(undefined);
+      const target = path.trim();
+      if (!target) return;
+      void rememberWorkspace(target);
+      const existing = sessions.filter(
+        (session) => !session.archived && session.sessionWorkspace === target,
+      );
+      if (existing.length > 0) enterProject(target, existing);
+      else onNewTask(target);
+    } catch (error) {
+      // 对话框本身失败（IPC / 权限）不该变成一个静默的未处理 rejection。
+      reportClientError("agent.open_workspace_failed", error);
+    } finally {
+      setOpeningWorkspace(false);
+    }
+  };
 
   const renderRow = (session: AgentSessionView) => (
     <SessionRow
@@ -298,16 +620,8 @@ export function AgentSessionSidebar({ activeConversationId }: { activeConversati
       session={session}
       active={session.id === activeConversationId}
       unread={unread.includes(session.id)}
-      onSelect={() => {
-        useAgentStore.getState().setSubView("chat");
-        if (session.id === activeConversationId) return;
-        useAgentStore.getState().clearUnread(session.id);
-        useChatStore.getState().setActiveConversation(session.id);
-        useChatStore.getState().setActiveMessages([]);
-        useChatStore.getState().setStreaming(false);
-        useAgentStore.getState().clear();
-      }}
-      onPin={(pinned) => pinMutation.mutate({ id: session.id, pinned })}
+      onSelect={() => selectSession(session)}
+      onPin={(pinnedNext) => pinMutation.mutate({ id: session.id, pinned: pinnedNext })}
       onArchive={() => archiveMutation.mutate({ id: session.id, archived: !session.archived })}
       onRename={() => {
         setRenamingId(session.id);
@@ -317,114 +631,169 @@ export function AgentSessionSidebar({ activeConversationId }: { activeConversati
     />
   );
 
+  // 收起动画期间组件还在树上，但内容不该再参与交互。
+  useEffect(() => {
+    if (collapsed) setRenamingId(null);
+  }, [collapsed]);
+
+  if (collapsed) return null;
+
+  const loading = sessionsQuery.isLoading && sessions.length === 0;
+
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r bg-muted/20">
-      <div className="flex items-center gap-1.5 border-b px-2 py-2">
-        <Button
-          variant="secondary"
-          size="sm"
-          className="h-7 flex-1 justify-start gap-1.5 text-xs"
-          onClick={() => createMutation.mutate()}
-          disabled={createMutation.isPending}
-        >
-          {createMutation.isPending ? (
-            <Loader2Icon className="size-3.5 animate-spin" />
-          ) : (
-            <PlusIcon className="size-3.5" />
-          )}
-          {t("agent.session.new")}
-        </Button>
+    <aside className="pi-sidebar" aria-label={t("agent.sessions")}>
+      <div className="pi-sidebar-header">
+        <span className="pi-brand" style={{ cursor: "default" }}>
+          {t("apps.agent")}
+        </span>
+        <div className="pi-sidebar-header-actions">
+          <PiTip label={t("agent.sidebar.collapse")}>
+            <button
+              type="button"
+              className="pi-icon-btn"
+              aria-label={t("agent.sidebar.collapse")}
+              onClick={onToggleSidebar}
+            >
+              <SidebarIcon size={15} aria-hidden />
+            </button>
+          </PiTip>
+        </div>
       </div>
 
-      {/* 新建对话下面的一排入口：搜索 / 自动化 / 插件 / Skills —— 都在 Agent 主区域里打开 */}
-      <nav className="flex flex-col gap-0.5 px-2 pt-1 pb-2">
-        {NAV_ITEMS.map((item) => {
-          const Icon = item.icon;
-          const active = subView === item.view;
-          return (
-            <button
-              key={item.view}
-              type="button"
-              onClick={() => useAgentStore.getState().setSubView(active ? "chat" : item.view)}
-              className={cn(
-                "flex items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors",
-                active ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-              )}
-            >
-              <Icon className="size-3.5 shrink-0" />
-              <span className="min-w-0 flex-1 truncate">{t(item.labelKey)}</span>
-            </button>
-          );
-        })}
-      </nav>
-      <div className="mx-2 border-t" />
-
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-        {renamingId != null && (
-          <div className="mb-1 flex items-center gap-1 rounded-lg border bg-background p-1">
-            <Input
-              value={renameValue}
+      <div className="pi-sidebar-body">
+        {renamingId != null ? (
+          <div className="pi-rename-row">
+            <input
               autoFocus
-              onChange={(e) => setRenameValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  renameMutation.mutate({ id: renamingId, title: renameValue });
-                } else if (e.key === "Escape") {
-                  setRenamingId(null);
-                }
+              value={renameValue}
+              aria-label={t("agent.session.rename")}
+              onChange={(event) => setRenameValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") renameMutation.mutate({ id: renamingId, title: renameValue });
+                else if (event.key === "Escape") setRenamingId(null);
               }}
-              className="h-6 flex-1 text-xs"
+              onBlur={() => setRenamingId(null)}
             />
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              onClick={() => renameMutation.mutate({ id: renamingId, title: renameValue })}
-              tooltip={t("common.save")}
-            >
-              <CheckIcon className="size-3.5" />
-            </Button>
           </div>
-        )}
+        ) : null}
 
-        {pinned.length > 0 && (
-          <div className="mb-2">
-            <p className="px-1.5 py-1 text-[10px] font-medium text-muted-foreground/70">
-              {t("agent.session.pinned")}
-            </p>
-            <div className="flex flex-col gap-0.5">{pinned.map(renderRow)}</div>
-          </div>
-        )}
+        <SidebarActions onNewTask={onNewTask} onOpenSearch={onOpenSearch} />
 
-        {groups.map(([workspace, items]) => (
-          <div key={workspace || "__default"} className="mb-2">
-            <p className="flex items-center gap-1 px-1.5 py-1 text-[10px] font-medium text-muted-foreground/70">
-              <FolderIcon className="size-2.5" />
-              {workspace ? workspaceLabel(workspace) : t("agent.session.defaultWorkspaceGroup")}
-            </p>
-            <div className="flex flex-col gap-0.5">{items.map(renderRow)}</div>
-          </div>
-        ))}
+        <div className="pi-scroll-group">
+          {/* 会话段：没挂项目的会话，内部再按时间分桶。新建任务在顶部动作区。 */}
+          <SectionHeader label={t("agent.sidebar.sessionsSection")} />
 
-        {sessions.length === 0 && (
-          <p className="px-2 py-4 text-center text-[11px] text-muted-foreground">
-            {sessionsQuery.isLoading ? t("common.loading") : t("agent.session.empty")}
-          </p>
-        )}
+          {pinned.length > 0 ? (
+            <>
+              <div className="pi-time-label">{t("agent.session.pinned")}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>{pinned.map(renderRow)}</div>
+            </>
+          ) : null}
 
-        {(archived.length > 0 || showArchived) && (
-          <div className="mt-2 border-t pt-2">
-            <button
-              type="button"
-              onClick={() => setShowArchived((v) => !v)}
-              className="flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-[10px] font-medium text-muted-foreground/70 hover:text-foreground"
-            >
-              <ArchiveIcon className="size-3" />
-              {t("agent.session.archived")}
-              <span className="tabular-nums">({archived.length})</span>
-            </button>
-            {showArchived && <div className="mt-0.5 flex flex-col gap-0.5">{archived.map(renderRow)}</div>}
-          </div>
-        )}
+          <SessionList sessions={standalone} renderRow={renderRow} />
+          {!loading && live.length === 0 ? <p className="pi-empty center">{t("agent.session.empty")}</p> : null}
+
+          {loading ? (
+            <div style={{ display: "grid", gap: 6, padding: "6px 8px" }}>
+              {[0, 1, 2, 3].map((i) => (
+                <div
+                  key={i}
+                  style={{
+                    height: 14,
+                    borderRadius: 4,
+                    background: "var(--ds-tile)",
+                    animation: "pi-skeleton 1.4s var(--e-std) infinite",
+                    width: i % 2 === 0 ? "72%" : "52%",
+                  }}
+                />
+              ))}
+            </div>
+          ) : null}
+
+          {/* 项目段：按工作区分组，组内再按时间分桶。段落常驻 —— 「打开工作区」
+              是还没有任何项目的用户唯一的入口，藏在空态后面就永远进不来。 */}
+          <div className="pi-sidebar-sep" />
+          <SectionHeader
+            label={t("agent.sidebar.projectsSection")}
+            action={
+              <PiTip label={t("agent.sidebar.addProject")}>
+                <button
+                  type="button"
+                  className="pi-icon-btn"
+                  aria-label={t("agent.sidebar.addProject")}
+                  disabled={openingWorkspace}
+                  onClick={() => void openWorkspace()}
+                >
+                  {openingWorkspace ? (
+                    <Loader2Icon size={13} className="animate-spin" aria-hidden />
+                  ) : (
+                    <FolderPlusIcon size={13} aria-hidden />
+                  )}
+                </button>
+              </PiTip>
+            }
+          />
+          {projects.map(([workspace, items]) => {
+            const isOpen = !collapsedGroups[workspace];
+            const activeProject = items.some((session) => session.id === activeConversationId);
+            return (
+              <div key={workspace}>
+                <SectionHeader
+                  label={workspaceLabel(workspace)}
+                  title={workspace}
+                  count={items.length}
+                  open={isOpen}
+                  active={activeProject}
+                  onToggle={() =>
+                    setCollapsedGroups((prev) => ({ ...prev, [workspace]: !prev[workspace] }))
+                  }
+                  onSelect={() => enterProject(workspace, items)}
+                  action={
+                    <PiTip label={t("agent.sidebar.newInProject")}>
+                      <button
+                        type="button"
+                        className="pi-icon-btn pi-group-action"
+                        aria-label={t("agent.sidebar.newInProject")}
+                        onClick={() => onNewTask(workspace)}
+                      >
+                        <PlusIcon size={13} aria-hidden />
+                      </button>
+                    </PiTip>
+                  }
+                />
+                <div
+                  className="pi-group-body pi-project-body"
+                  style={{ maxHeight: isOpen ? 2000 : 0 }}
+                  aria-hidden={!isOpen}
+                >
+                  <SessionList sessions={items} renderRow={renderRow} />
+                </div>
+              </div>
+            );
+          })}
+          {!loading && projects.length === 0 ? (
+            <p className="pi-empty">{t("agent.sidebar.emptyProjects")}</p>
+          ) : null}
+
+          {archived.length > 0 || showArchived ? (
+            <>
+              <div className="pi-sidebar-sep" />
+              <SectionHeader
+                label={t("agent.session.archived")}
+                count={archived.length}
+                icon={<ArchiveIcon size={11} aria-hidden />}
+                open={showArchived}
+                onToggle={() => setShowArchived((v) => !v)}
+              />
+              {showArchived ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  {archived.map(renderRow)}
+                  {archived.length === 0 ? <p className="pi-empty">{t("agent.session.empty")}</p> : null}
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </div>
       </div>
     </aside>
   );

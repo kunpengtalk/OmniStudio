@@ -17,7 +17,9 @@ import {
   type AppLogLevel,
 } from "./app-log";
 import * as Memory from "./memory";
+import * as Headless from "./agent-headless";
 import * as CloudProviders from "./cloud-providers";
+import * as Proxy from "./proxy";
 import {
   startBenchmark,
   getBenchmarkRun,
@@ -129,6 +131,26 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
 
     // 统一应用日志：`omi logs` / `omi diag` / 外部诊断工具都走这里。
     // 应用在跑时读内存 + 文件（含上次运行留下的记录），见 app-log.ts。
+    /**
+     * 无头跑一个 Agent 回合（`omi agent run`）。
+     * 流式形态（payload.stream）在 startControlServer 的 fetch 里直接返回 NDJSON，
+     * 不经过这里 —— 这里的返回是"一次拿结果"的形态。
+     */
+    case "agentRun": {
+      const prompt = String(payload.prompt ?? "").trim();
+      if (!prompt) return { ok: false, error: "缺少 prompt" };
+      if (payload.mode !== undefined && !Headless.isHeadlessMode(payload.mode)) {
+        return { ok: false, error: `mode 只能是 ${Headless.HEADLESS_MODES.join(" / ")}` };
+      }
+      const result = await Headless.runHeadlessAgent({
+        prompt,
+        workspace: typeof payload.workspace === "string" ? payload.workspace : undefined,
+        mode: Headless.isHeadlessMode(payload.mode) ? payload.mode : "agent",
+        conversationId: Number(payload.conversationId) || undefined,
+      });
+      return { ok: result.ok, data: result, error: result.error };
+    }
+
     case "logs": {
       const query = {
         level: typeof payload.level === "string" ? (payload.level as AppLogLevel) : undefined,
@@ -326,6 +348,10 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
         return { ok: false, error: "缺少 settings 对象" };
       }
       updateSettings(values as Record<string, string>);
+      // 代理设置（`omi` 也能改）改完立刻生效，不用等下次启动。
+      if (Object.keys(values as Record<string, string>).some((key) => key.startsWith("PROXY_"))) {
+        Proxy.applyProxySettings();
+      }
       return { ok: true };
     }
 
@@ -348,6 +374,67 @@ async function isSocketLive(sockPath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * `agentRun` 的流式形态：每一行一个 JSON（NDJSON）——
+ * 先是 `start`，中间是轨迹事件（可选正文增量），最后一行是 `result`。
+ * 脚本可以边读边处理（`omi agent run --json` 就是这么用的）。
+ */
+function streamAgentRun(payload: Record<string, unknown>): Response {
+  const prompt = String(payload.prompt ?? "").trim();
+  const encoder = new TextEncoder();
+  if (!prompt) {
+    return new Response(
+      `${JSON.stringify({ type: "result", ok: false, error: "缺少 prompt" })}\n`,
+      { status: 400, headers: { "content-type": "application/x-ndjson" } },
+    );
+  }
+  if (payload.mode !== undefined && !Headless.isHeadlessMode(payload.mode)) {
+    return new Response(
+      `${JSON.stringify({ type: "result", ok: false, error: `mode 只能是 ${Headless.HEADLESS_MODES.join(" / ")}` })}\n`,
+      { status: 400, headers: { "content-type": "application/x-ndjson" } },
+    );
+  }
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const write = (line: Headless.HeadlessLine) => {
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(line)}\n`));
+        } catch {
+          // 客户端断开：后面的行没人要了，runHeadlessAgent 会照常跑完（会话仍落库）。
+        }
+      };
+      void Headless.runHeadlessAgent({
+        prompt,
+        workspace: typeof payload.workspace === "string" ? payload.workspace : undefined,
+        mode: Headless.isHeadlessMode(payload.mode) ? payload.mode : "agent",
+        conversationId: Number(payload.conversationId) || undefined,
+        onLine: write,
+        includeChunks: payload.chunks === true,
+      })
+        .catch((error) => {
+          write({
+            type: "result",
+            ok: false,
+            conversationId: Number(payload.conversationId) || 0,
+            messageId: null,
+            text: "",
+            error: error instanceof Error ? error.message : String(error),
+            events: 0,
+          });
+        })
+        .finally(() => {
+          try {
+            controller.close();
+          } catch {
+            // 已经关了
+          }
+        });
+    },
+  });
+  return new Response(stream, { headers: { "content-type": "application/x-ndjson" } });
 }
 
 export async function startControlServer(): Promise<void> {
@@ -376,6 +463,11 @@ export async function startControlServer(): Promise<void> {
           body = (await req.json()) as ControlRequest;
         } catch {
           return Response.json({ ok: false, error: "invalid json body" }, { status: 400 });
+        }
+        // 无头执行要能把事件"边跑边吐"给外部脚本：这一条走 NDJSON 流式响应，
+        // 其余命令仍是「一次请求 → 一个 JSON」。
+        if (body.cmd === "agentRun" && body.payload?.stream === true) {
+          return streamAgentRun(body.payload);
         }
         const response = await handle(body);
         return Response.json(response);

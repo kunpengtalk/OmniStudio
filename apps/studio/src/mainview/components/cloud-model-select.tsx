@@ -29,6 +29,10 @@ import { ModelCategoryIcon } from "@components/model-category-badge";
  * - 页面不提供地址 / 密钥输入：连接信息统一在「设置 → 模型云服务」里维护。
  *
  * 选厂商后该厂商只有一个可用模型时直接选中它，少一次点击。
+ *
+ * 布局是**上下两行**（先厂商、再模型），不给两行并排：并排时两个 Select 各分一半
+ * 宽度，厂商名与模型 id（`Qwen/Qwen-Image-2512` 这类）都会被截成省略号，用户根本
+ * 认不出选的是什么。
  */
 
 export type CloudModelChoice = { providerId: string; model: string };
@@ -117,13 +121,13 @@ export function CloudModelSelect({
   const modelCount = providerModelList.length;
 
   return (
-    <div className={cn("flex min-w-0 items-center gap-2", className)}>
+    <div className={cn("flex min-w-0 flex-col gap-2", className)}>
       <Select
         value={providerId || undefined}
         onValueChange={pickProvider}
         disabled={disabled || providersQuery.isLoading || providerOptions.length === 0}
       >
-        <SelectTrigger size={size} className={cn("min-w-0 flex-1", height)}>
+        <SelectTrigger size={size} className={cn("w-full min-w-0", height)}>
           <SelectValue placeholder={t("cloud.pick.vendor")} />
         </SelectTrigger>
         <SelectContent
@@ -153,7 +157,7 @@ export function CloudModelSelect({
         }}
         disabled={disabled || !selectedProvider}
       >
-        <SelectTrigger size={size} className={cn("min-w-0 flex-[1.4]", height)}>
+        <SelectTrigger size={size} className={cn("w-full min-w-0", height)}>
           <SelectValue placeholder={t("cloud.pick.model")} />
         </SelectTrigger>
         <SelectContent
@@ -210,7 +214,7 @@ export function CloudModelSelect({
         <Button
           variant="outline"
           size="sm"
-          className={cn("shrink-0", size === "sm" && "h-8 text-xs")}
+          className={cn("w-full", size === "sm" && "h-8 text-xs")}
           onClick={goSettings}
         >
           <CloudIcon data-icon="inline-start" className="size-3.5" />

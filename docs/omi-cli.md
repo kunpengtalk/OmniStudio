@@ -163,6 +163,33 @@ omi benchmark --list
 
 列出最近 20 条测速记录（ID / 时间 / 模型 / 平均 TPS / 耗时）；应用里的「基准测试」页有完整历史与图表。
 
+## 无头执行：跑一次 Agent 回合
+
+给脚本、CI、编辑器插件用的入口：跑一个无人值守的 Agent 回合，拿到最终回答或事件流。会话照常落库，跑完可以在界面里打开继续追问。
+
+```bash
+omi agent run <提示词> [--workspace <目录>] [--mode agent|plan|goal]
+```
+
+跑一次无头回合并打印最终回答（默认模式 agent）。--workspace 指定工作区，--mode 选模式；--conversation <id> 可以接着已有会话往下跑。提示词也能从管道读进来（`echo "…" | omi agent run`）。
+
+`omi agent run "把 README 的安装步骤补全"` — 在当前工作区跑一次，打印它最终的回答。
+`omi agent run "继续" --conversation 12 --mode plan` — 接着 12 号会话、用 plan 模式再跑一轮。
+
+```bash
+omi agent run <提示词> --json [--chunks]
+```
+
+输出 NDJSON：每行一个 JSON（`start` / `event` 轨迹事件 / `result` 最终结果；加 --chunks 还有正文增量）。给脚本边跑边消费 —— 比如 `jq -r 'select(.type=="event") | .event.toolName'` 实时看它在调什么工具。
+
+`omi agent run "跑测试并总结失败原因" --json | jq -r 'select(.type=="event") | .event.toolName'` — 实时打印这一轮用到的工具名。
+
+```bash
+  --timeout <毫秒>
+```
+
+等待上限（默认 600000，即 10 分钟）。到点客户端停止等待并退出非零，应用侧的回合仍会跑完并落库。
+
 ## 记忆：写入、检索、接入
 
 同一份长期记忆库的三条调用通道：CLI、MCP、网关 REST。

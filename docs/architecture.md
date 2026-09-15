@@ -150,6 +150,8 @@ apps/
 
 **整仓库下载规则**：safetensors / MLX 这类模型，"下载全部"会额外带上 `config.json` / tokenizer 等加载必需文件（`SUPPORT_FILE_RE`）—— 只下权重分片是跑不起来的；GGUF 是单文件模型，只需要那一个量化文件。
 
+**出站请求统一过代理层**（设置 → 偏好 → 通用，`bun/proxy.ts`）：启动时给 `globalThis.fetch` 挂一层包装，按目标主机决定要不要带 Bun 的 `proxy` 参数，于是云端模型调用、市场搜索、权重与引擎下载、联网检索、远端备份全部自动生效，不必在每个调用点重复接线。判定规则（回环恒直连、局域网看 `PROXY_ALLOW_LOCAL_NETWORK`、其余走代理）与设置页的「谁走代理」展示共用 `shared/proxy.ts` 同一份实现。子进程（pip / python worker / git lfs / brew / 各引擎拉权重）只认环境变量，由 `syncProxyEnv()` 与下载 spawn 点的 `proxyChildEnv()` 负责；WebSocket（Edge TTS / 实时通话）走 `proxyWebSocketOptions()`。
+
 ### 4.4 智能层
 
 **Agent 循环**由 `@earendil-works/pi-agent-core` 驱动（**不是** Vercel AI SDK 的 agent），每个会话一个 Agent 实例，三种模式：`agent` / `plan` / `goal`。
@@ -157,7 +159,7 @@ apps/
 - **Plan 模式在工具集层面硬约束为只读**，并且不注入记忆/MCP 这类有副作用的工具 —— 不是靠提示词约束。
 - **历史回填时只回填 user/assistant 正文，不回放工具调用轨迹。** 轨迹写 `agent_events` 表，纯粹用于 UI 展示和审计。
 - 每步工具调用先 `recordEvent` 落库再广播；步数上限 `AGENT_MAX_STEPS`（默认 40）。
-- Agent 的正文流复用 chat 的 chunk/done/stats 通道，工具事件走独立的 `agentEvent`。
+- Agent 的正文流复用 chat 的 chunk/done/stats 通道，工具事件走独立的 `agentEvent`，**运行态走 `agentRunState`**（开跑 / 收尾各推一次，界面据此显示"还在干活"与停止按钮；打开会话时再用 `getAgentRunState` 补一次 —— 刷新窗口、切会话、自动化在后台起的运行都不经过本窗口的发送按钮，只靠前端自己的标记会把正在跑的会话显示成已经结束）。
 - **需要用户拍板的动作会停下来问**：`generate_image` 在开跑前检查生图后端是否就绪，缺配置 / 缺模型 / 本地引擎没装 / 有多个候选模型可选时，主进程推 `mediaSetup` 消息给界面弹出配置窗（`media-setup.ts` + `components/media-setup-dialog.tsx`），用户确认后经 RPC `resolveMediaSetup` 回传，**同一次工具调用接着往下跑**。用户没指定模型时会扫一遍候选，多于一个就再弹一次确认用哪个。用户点取消（或超时 10 分钟、或按停止 / 会话重置）则工具立即收尾并告诉模型"别再自行重试"。没有界面在监听时（CLI、测试）直接按取消返回，不会挂起。
 
 **工具授权模型**（`permissions.ts` + `agent-interactions.ts`）：每个工具调用先被翻译成一条 `(permission, pattern)` 请求（`bash` → 命令原文、`write_file` → 相对路径、工作区外读写 → `external_directory`、MCP → 工具名），再按「内置默认 → 设置规则 → 工作区规则 → 会话规则」求值（后匹配覆盖先匹配，无匹配则 ask）。动作分 `allow / ask / deny`：`ask` 由 `Agent.beforeToolCall` 挂起，把请求推给界面弹窗，用户选**允许一次 / 本会话总是 / 始终允许（写进工作区规则）/ 拒绝**后工具才继续（`respondAgentPermission`）。审批模式 `AGENT_APPROVAL_MODE` 四档：`smart`（默认，只拦危险命令与工作区外访问）、`manual`（有副作用的工具全问）、`auto`、`strict`。同一工具调用连续重复 3 次会按 `doom_loop` 询问一次，避免模型原地打转。
@@ -165,6 +167,20 @@ apps/
 凭据路径黑名单是硬拦（授权也不放行）：`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.kube`、`.netrc`、`.npmrc`、`.git-credentials`、`~/.omni`、应用自身数据目录等 —— 工具结果会回喂模型，而网页与 MCP 返回的内容可能构成提示词注入。写操作默认只能落在工作区内（或 `AGENT_AUTHORIZED_FOLDERS` 里显式授权的目录）。`bash` 每条命令先写审计日志，且受 `AGENT_ALLOW_SHELL` 开关控制。
 
 **上下文压缩**（`agent-compaction.ts`）挂在 `Agent.transformContext` 上：每次请求前按 `SERVER_CTX_SIZE` 的 60% 预算裁剪历史，保留第一条任务陈述与最近的进展，中间换成一条说明消息（并往轨迹里写一条 `compact` 状态），长任务因此不会在 8k 窗口的本地模型上直接炸掉；尾部刻意不以工具结果开头，否则真实 OpenAI 兼容服务会因「tool 消息没有对应的 tool_calls」直接 400。
+
+**工程能力对齐 Codex**（详见 [docs/codex-parity.md](./codex-parity.md)）：
+
+- **项目指令**（`agent-instructions.ts`）在 `buildSystemPrompt()` 里注入：从工作区向上找到含 `.git` 的项目根，按「项目根 → 工作区」逐级读 `AGENTS.md`（同目录 `AGENTS.override.md` 优先），用户级指令在 `<数据目录>/AGENTS.md`，总量默认 8KB 封顶（本地窗口小，Codex 的 32KB 默认值在这里会把窗口塞满），截断处写明"后面还有内容"；设置页「Agent 能力」能看到**实际装载了哪几个文件**。输入框的 `/init` 就是让 Agent 补一份 AGENTS.md。
+- **`apply_patch`**（`apply-patch.ts`）是 V4A 补丁（`*** Begin Patch` … `*** Add File / Update File / Delete File`），一次改多个文件、**任何一处定位失败就整体不落盘**；定位逐级放宽（精确 → 忽略行尾空白 → 忽略首尾空白 → Unicode 标点归一化），模糊命中时上下文行用文件里的原文，不重写用户格式。权限按补丁里所有文件一起求值：全在区内是 `edit`（模式取公共目录，如 `src/*`），有一个在区外就是 `external_directory`。
+- **`view_image`** 把本地图片作为图片内容块交给模型（`pi-ai` 会把它转成工具结果之后的 user 消息 —— OpenAI 兼容 API 里只有这个位置能放图片）。它**只在模型可能支持视觉时才注册**（`chat-model.ts` 的 `chatModelSupportsImages()`，按模型名启发式判断，`AGENT_VISION_TOOL` 可强制 auto / on / off），同时 `buildModel().input` 跟着变 —— 声明了 `image` 却不支持，服务端会直接 400。
+- **手动压缩与会话速览**（`/compact`、`/status`）：`compactConversationNow()` 复用自动压缩的算法与估算、只把预算收紧到一半（窗口 30%）——"现在多留点余量"；只动内存里的上下文，库里的历史一条不删（文档写明，避免用户以为压缩 = 删记录）。`describeAgentSession()` 把模型 / 窗口 / 预算 / 审批与沙箱档位一次汇总，数字全部现取，界面不另存一份状态。
+- **会话内换模型**（`/model`）：候选清单是 `shared/model-command.ts` 的纯函数（本地只列已启动实例、云端只列用户添加过的对话模型），切换复用 `selectChatModel`；Agent 侧的会话缓存键**算上了当前模型**（`currentModelKey()`），所以换完下一轮就用新模型，而历史由 `historyAsAgentMessages()` 从库里回填 —— 换引擎不换上下文。
+- **生命周期 hooks**（`agent-hooks.ts`）：`session_start` 与 `user_prompt_submit` 两个时机跑用户脚本（事件 JSON 走 stdin，stdout 纯文本即上下文、`{"decision":"block"}` 可拦下这一轮）。`session_start` 的输出作为「会话启动上下文」**挂在会话上**，每轮重建系统提示时要带上它（否则第一轮之后就被覆盖 —— live-check 逮到过这个坑）。hooks 只从设置读取，绝不执行工作区里的文件；失败 / 超时只记警告，上下文有 8KB/16KB 上限。
+- **主动申请权限**（`request_permissions` 工具）：模型带着理由申请工作区之外的路径，翻译成 `external_directory` 的授权卡片；工具**必须过闸门**（能跑起来 = 用户刚点了允许），工具体内不再二次询问 —— 否则用户要点两次，或模型会拿到一句没有依据的"已授权"。
+- **外部通知回调**（`agent-notify.ts`）：设置项 `AGENT_NOTIFY_COMMAND` 配了就把事件 JSON 交给用户命令（最后一个参数 + `OMNI_NOTIFY_PAYLOAD`）—— 触发点只有通知中心的 `notify()` 一处，回合跑完 / 需要授权 / 自动化结果 / 出错全覆盖；载荷不做字符串拼接（注入用例已钉住），失败只写统一日志。
+- **命令沙箱**（`agent-sandbox.ts`）：权限闸门管得住工具，管不住 `bash` 里的一行命令 —— 开启后 `bash` 跑在 macOS 的 Seatbelt 里（`sandbox-exec -p <策略>`）。三档：`off`（= danger-full-access）、`workspace-write`（写只允许工作区 / 临时目录 / 已授权目录）、`read-only`（工作区与用户目录一律不可写，只有临时目录例外 —— 测试运行器与编译器要写 TMPDIR）；三档都拒凭据目录读取，联网可开关。命令**因为沙箱**失败时会问一次「是否跳过沙箱重试」（权限项 `sandbox_escalation`，`smart`/`manual` 询问、`auto`/`strict` 默认拒绝），允许则只对这一次去掉沙箱重跑并写审计日志，拒绝则把原因交给模型；只试一次、普通失败不触发、无人值守不注入。策略里的路径**必须带 realpath**（`/tmp` 是 `/private/tmp` 的软链，否则拦截会静默失效）。默认关闭。后端按平台选：macOS 用 Seatbelt（`sandbox-exec -p <策略>`），Linux 用 bubblewrap（`--ro-bind / /` + 白名单 `--bind` + 凭据目录 `--tmpfs` 挖空 + `--unshare-pid/--die-with-parent`，策略生成是纯函数所以能在 macOS 上单测），其它平台降级为不沙箱并在设置页写明；Linux 上还会探测真实的空沙箱（装了 bwrap 但容器禁用非特权 user namespace 时要降级），并在缺依赖时给出安装命令。**Landlock 是完整可用的兜底后端**（没有 bwrap 时自动启用，与 Codex 现在的选择一致 —— 它也是 bwrap 为主、Landlock 留档）：`landlockRuleset()` 是纯函数（档位 → 允许路径集合：`/` 只给读、可写目录再叠一组写位，写位必须全列进 `handled`，因为 Landlock 只处理声明的权限），`landlockRulesetSpec()` 出稳定 JSON，C 辅助程序 `src/bun/omni-landlock.c` 首用时按源码 hash 现编（要 cc；不往仓库塞预编译二进制）后只做"读规格 → 发 `landlock_*` 系统调用 → exec 命令"。它表达不了的写在 `unsupported` 里、不假装做了：规则只能"允许"，所以凭据目录的**读**拦不住（要 bwrap）；net 规则没实现，所以关掉联网开关时辅助程序直接拒绝执行、让位给 bwrap。两个真跑才发现的坑有回归用例：`/dev/null` 必须放行（否则 `2>/dev/null` 全线失败）、FUSE / 网络盘上规则整片落空（用 canary 探测识别后换后端）。端到端见 `scripts/landlock-e2e.ts` 与 CI 的 `linux-sandbox` 作业。
+- **上下文占用**（`agent-context.ts`）：会话内记住上一轮实测的 `usage.prompt_tokens`，没有实测值时按消息估算（复用压缩那套 `estimateTokens`），预算 = 窗口的 60% —— 所以输入框上的占用条与"什么时候开始裁历史"是同一个判据。模型侧配只读工具 `get_context_remaining`（占用高时明确要求先 todo_write 记进度再继续），用户侧占用条按 70% / 90% 变色。
+- **回合快照与回退**（`agent-snapshots.ts`）：影子 git 仓库建在数据目录（`git --git-dir <影子> --work-tree <工作区>`，**不碰用户自己的 `.git`**），`node_modules` / 构建产物写进 `.git/info/exclude`；`runAgentTurn` 在 Agent 动文件之前提交一次并绑定该轮助手消息；界面上的「撤销本轮」先预览再执行，回退走 `add -A` + `read-tree --reset -u <sha>`（**不动 HEAD**，所以还能回退到更近的一轮）。提交信息里带会话 / 消息 / 毫秒时间戳：同一秒同样内容在不同工作区会算出同一个 commit sha，撞车会回退到别人的工作区。没有 git 时整条链路静默降级。影子仓库跟着回合数长，占用超阈值（或轮数到顶）时在提交后顺手 `git gc`，设置页显示占用并提供「立即清理」——历史不受影响，每轮快照都是 HEAD 的祖先。
 
 **会话能力面对齐 OpenWork / Claude Cowork**（详见 [docs/openwork-parity.md](./openwork-parity.md)）：`todo_write` 待办清单（`agent_todos` + 输入框上方的进度面板）、`ask_user` 反问（弹窗里选或自填）、`task` 子智能体（独立上下文跑只读/完整工具，只把结论带回主线）、侧边面板（多页签：产出物 / 审查 / 文件 / 终端 / 浏览器 + 预览页签，左侧分隔条可拖宽）—— 产出物与工作区文件走回环文件服务的 `/artifact/<id>`、`/workspace/<rootId>/<路径>`，HTML 在 iframe 里当网页加载；审查页签读 git 改动与 diff（`bun/workspace-changes.ts`，argv 调 git、路径限工作区内）；终端页签是真 PTY（`bun/terminal-sessions.ts` 的 `Bun.Terminal`，输出按帧批量推给 xterm，窗口关闭时统一 kill）、消息流渲染（工具调用一行一个、思考是「思考 · 持续了 N 秒」可展开行、正文不套气泡，见 `app/agent/message.tsx` 与 `app/agent/timeline.tsx`；正文与思考按 40ms 批量流式下发）、会话侧栏（置顶 / 归档 / 搜索 / 重命名 / 工作区分组，`conversations.workspace`）、自动化（`automations` + 30 秒巡检，到点开一条真实会话跑任务）、输入框的 `/` 命令与 `@` 文件提及。**运行中还能继续输入**：Enter 排队（本轮结束后逐条 drain）、Cmd/Ctrl+Enter 用 `Agent.steer` 立即插进当前这一轮，停止按钮会连队列一起取消。**授权与提问不做浮层弹窗**：请求与结果各落一条 `agent_events`（`permission_request` / `permission`、`question_request` / `question`，`args` 里带同一个 id），界面按 id 配对后在**触发它的那条消息下面**渲染确认卡片 —— 不遮挡输入框，答完收成一行记录留在流里。Agent 侧栏「新建任务」下面是搜索 / 自动化 / 插件 / Skills 四个入口，点开后在 Agent 主区域内渲染（`app/agent/agent-views.tsx`），它们不是应用的一级菜单。搜索走 `searchAgentSessions()`：标题 + 全部消息正文，结果带命中片段。通知中心（`bun/notifications.ts` + 顶栏铃铛）收集"后台发生的事"：需要授权的请求、自动化的成功 / 失败、无人值守回合的结束；助手消息支持**从这里分支**（`Chat.forkConversation`，复制到该条消息为止，原会话不动）。
 
@@ -330,6 +346,8 @@ SERVER_MODE=remote 的 VLLM_API_BASE > 聊天活动端口** 依次解析（embed
 
 主进程推送的事件在 `lib/rpc.ts` 的 message handler 里**直接写 store**（不走 React 路径，避免每 token 重渲染），只在进入终态时 `queryClient.invalidateQueries()` 刷新对应 key。
 
+**用量与速度展示**（`bun/chat-stats.ts` + `components/token-stats.tsx`）：聊天与 Agent 两条路径共用 `MessageStats` 这一份口径 —— **生成速度只算解码窗口**（首 token 之后到结束；引擎自带 `timings.predicted_per_second` 时以它为准），端到端吞吐才含预填充 / 网络 / 工具执行时间；输入 / 输出 / 思考 / 缓存 tokens 有 `usage` 就用实测，没有就按 `shared/token-estimate.ts` 估算，卡片上标明来源。消息底部那行胶囊（`1,012 Tokens · 177.7 Token/秒`）点开是详情卡片；**生成中的实时值**来自 `stores/chat.ts` 的 `liveStats`（按增量累计字符数，而不是每个增量各自取整），收尾后由 `chatStats` 推来的实测值接管。统计随助手消息持久化在 `messages.stats`（JSON 列），刷新会话后速度仍是当时那次的真实值。
+
 组件调主进程**没有封装层**：直接 `import { rpcClient }` 然后 `rpcClient.xxx()`。全项目约 220 处调用，语音页最多（53 处）。只有一处轻封装：`lib/use-engine.ts`（读写引擎设置）。
 
 **i18n** 是单文件双语词典 `shared/i18n.ts`（3000+ 键）+ 简单的 `{name}` 插值，运行时语言存 `stores/ui-lang.ts`，默认中文、回落链 zh → en → key。设置页的 tab 结构、屏幕与路由的映射关系见 `main-layout/settings.tsx` 的 `TAB_DEFS` / `TAB_GROUPS`。
@@ -348,6 +366,8 @@ omi <cmd>
 命令表在 `src/cli/index.ts` 的 `COMMANDS`（`start` / `stop` / `restart` / `serve` / `launch` / `memory` / `backup` / `model` / `cloud` / `models` / `model-info` / `status` / `server` / `install` / `guide` / `version` / `update`）。表里的值是「取处理函数的异步工厂」—— 命令模块按需 `import`，避免解析参数时把别人的依赖（尤其是 import 即跑迁移的数据层）一起拖进来；`omi backup` 正是靠这一点在数据库迁移失败、应用起不来时照常工作。
 
 **帮助体系是数据驱动的**：`src/shared/cli-docs.ts` 是唯一数据源，`omi guide`（文本 / `--md` / `--json` / `--lang en`）、`docs/omi-cli.md`、应用内「设置 → 工具 → 命令行」页三处都从它渲染，因此永远一致。`scripts/omi-docs-smoke.ts` 校验命令表 ↔ 帮助文本 ↔ 数据源 ↔ 磁盘上的文档四者同步。
+
+**`omi agent run`** 是给脚本用的入口（对齐 Codex 的 `codex exec`）：`agent-headless.ts` 跑一个无人值守回合（不弹授权卡片，被拦下的动作直接以拒绝理由回到模型），控制通道的 `agentRun` 命令支持 **NDJSON 流式响应**（`start` / `event` / `result`，可选正文增量），`--json` 就是把它逐行打给调用方；会话照常落库，跑完能在界面里继续追问。
 
 **`omi launch <tool>`** 是最复杂的命令：确认应用在线 → 解析模型 → 确保网关与推理服务 → 给 claude / codex / opencode / openclaw / hermes / pi 各写各的配置 → 注入记忆上下文到 CLAUDE.md / AGENTS.md 的托管区块 → 挂载 `omni-memory` MCP → 以 `Bun.spawn` 继承 stdio 启动目标工具并透传退出码。
 
@@ -415,6 +435,7 @@ omni-control.sock       CLI 控制通道
 5. **流式更新要节流**：chat 增量 40ms、下载进度 400ms、日志 80ms —— 都是为了避免 webview 高频重渲染。**emitDone 前必须 flush**，否则尾部乱序。
 6. **图片服务无鉴权，只能绑回环。**
 7. **新引擎只改 `shared/engines.ts` + 写一个 Runtime 实现**，别在别处硬编码引擎判断。
+8. **出站 HTTP 走全局 `fetch`**（`bun/proxy.ts` 装的代理包装）**或显式 `proxy` 参数**；不要为远端主机另开 socket 或旁路 HTTP 客户端，否则那条请求会绕过用户的代理设置。本机 IPC（控制套接字的 `unix:` 请求）例外，包装层主动放行。
 
 ## 11. 已知架构债
 

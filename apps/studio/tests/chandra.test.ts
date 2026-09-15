@@ -32,7 +32,8 @@ describe("parseHtml", () => {
     const out = parseHtml(html);
     const match = out.match(/data-math-latex="([^"]+)"/);
     expect(match).not.toBeNull();
-    const latex = Buffer.from(match?.[1]!, "base64").toString("utf8");
+    if (!match) throw new Error("没有 data-math-latex 属性");
+    const latex = Buffer.from(match[1]!, "base64").toString("utf8");
     expect(latex).toContain("&=");
     expect(latex).not.toContain("&amp;");
   });

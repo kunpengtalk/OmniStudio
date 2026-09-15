@@ -26,10 +26,15 @@ import { runMemoryMaintenance } from "./memory";
 import { runKbMaintenance } from "./knowledge";
 import { notify } from "./notifications";
 import { log, logEvent, mirrorConsole } from "./app-log";
+import { installProxy } from "./proxy";
 
 // 统一日志最先装好：从这一行之后，主进程的 console.* 与关键失败都会落到
 // `<数据目录>/logs/app.log`（排查入口见 `omi logs` / `omi diag`）。
 mirrorConsole("app");
+
+// 代理（设置 → 偏好 → 通用）要在任何网络请求之前接上：这一行之后，云端模型、
+// 模型/引擎下载、联网检索与子进程都会按设置走代理，回环与局域网直连。
+installProxy();
 
 // Check if Vite dev server is running for HMR
 async function getMainViewUrl(): Promise<string> {

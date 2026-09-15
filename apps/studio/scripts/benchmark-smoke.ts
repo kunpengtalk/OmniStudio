@@ -16,9 +16,13 @@ process.env.OMNI_DB_PATH = join(dataDir, "sqlite.db");
 
 type ChatBody = {
   stream?: boolean;
+  model?: string;
   messages?: { content?: string }[];
   max_tokens?: number;
 };
+
+/** 最近一次请求里的 model id —— 用来断言「发出去的」与「记录下来的」不是一回事。 */
+let lastRequestModel = "";
 
 // fake OpenAI 兼容服务器：流式按 max_tokens 发 delta + 末尾 usage chunk；非流式返回 usage。
 const FAKE_GEN_TOKENS = 24;
@@ -28,6 +32,7 @@ const server = Bun.serve({
     const url = new URL(req.url);
     if (url.pathname !== "/v1/chat/completions") return new Response("not found", { status: 404 });
     const body = (await req.json()) as ChatBody;
+    lastRequestModel = body.model ?? "";
     const promptTokens = Math.floor((body.messages?.[0]?.content ?? "").length / 4);
     if (!body.stream) {
       return Response.json({
@@ -140,6 +145,31 @@ try {
     check("second start rejected", "error" in b, b);
     mod.cancelBenchmark(a.runId);
     await Bun.sleep(300);
+  }
+
+  // 6. 展示名与请求 id 分离：路径型请求 id（MLX）照样发给服务器，
+  //    但记录 / 界面里只能是模型名 —— 历史表头不该出现 `/Users/…`。
+  const pathModel = "/Users/me/lmstudio/models/abenzerps/Apodex-1.1-mini-MLX-4bit";
+  const pathRun = mod.startBenchmark({ model: pathModel, genLength: 16, batchSize: 1, contexts: [512] });
+  if ("runId" in pathRun) {
+    let pRun = mod.getBenchmarkRun(pathRun.runId);
+    for (let i = 0; i < 200 && pRun?.status === "running"; i++) {
+      await Bun.sleep(50);
+      pRun = mod.getBenchmarkRun(pathRun.runId);
+    }
+    check("path run finishes", pRun?.status === "done", pRun?.status);
+    check("request keeps the path id", lastRequestModel === pathModel, lastRequestModel);
+    check("run shows the model name", pRun?.model === "Apodex-1.1-mini-MLX-4bit", pRun?.model);
+    const pathRec = mod.listBenchmarkRecords().find((r) => r.id === pRun?.recordId);
+    check("record shows the model name", pathRec?.model === "Apodex-1.1-mini-MLX-4bit", pathRec?.model);
+    check(
+      "record keeps the request id in params",
+      (pathRec?.params as { requestModel?: string } | null)?.requestModel === pathModel,
+      pathRec?.params,
+    );
+    mod.clearBenchmarkRecords();
+  } else {
+    check("path-model run start", false, pathRun);
   }
 } catch (e) {
   failed = true;

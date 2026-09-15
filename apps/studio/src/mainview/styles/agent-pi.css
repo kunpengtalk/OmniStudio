@@ -1,0 +1,3597 @@
+/*
+  Agent 工作台的设计系统。
+
+  这是一套**独立于应用其余部分**的视觉语言：中性灰阶（不是品牌蓝）、去描边的分层
+  surface、46px 工具条、圆角胶囊控件。之所以整体收在 `.pi-agent` 作用域里，是因为
+  应用其它页面走的是 shadcn 的 oklch token；把两套混在一起会让「改一个变量、
+  另一个页面跟着变」这种事故反复发生。
+
+  值全部落成 `--ds-*` 语义 token，组件只用 token —— 想调深浅只改这一段。
+*/
+
+.pi-scope {
+  /* ---- 浅色（默认） ---- */
+  --ds-bg-primary: #ffffff;
+  --ds-bg-sidebar: #f3f3f3;
+  --ds-bg-secondary: #f9f9f9;
+  --ds-bg-tertiary: #f3f3f3;
+  --ds-bg-inset: #ededed;
+  --ds-bg-under: #f9f9f9;
+  --ds-bg-elevated: color-mix(in oklab, #ffffff 70%, transparent);
+  --ds-bg-elevated-opaque: #ffffff;
+  --ds-bg-composer: #ffffff;
+  --ds-bg-hover: color-mix(in oklab, #1a1c1f 5%, transparent);
+  --ds-bg-active: color-mix(in oklab, #1a1c1f 8%, transparent);
+  --ds-bg-chip: color-mix(in oklab, #1a1c1f 4%, transparent);
+
+  --ds-text-primary: #1a1c1f;
+  --ds-text-secondary: color-mix(in oklab, #1a1c1f 74%, transparent);
+  --ds-text-muted: #5d5d5d;
+  --ds-text-faint: #afafaf;
+
+  --ds-border-default: color-mix(in oklab, #1a1c1f 8%, transparent);
+  --ds-border-subtle: color-mix(in oklab, #1a1c1f 5%, transparent);
+  --ds-border-strong: color-mix(in oklab, #1a1c1f 12%, transparent);
+
+  --ds-tile: color-mix(in oklab, #1a1c1f 3.5%, transparent);
+  --ds-tile-hover: color-mix(in oklab, #1a1c1f 6%, transparent);
+  --ds-tile-deep: color-mix(in oklab, #1a1c1f 8%, transparent);
+  --ds-raised: #ffffff;
+  --ds-raised-shadow: 0 1px 2px rgba(0, 0, 0, 0.1), 0 0 0 0.5px rgba(0, 0, 0, 0.04);
+
+  --ds-accent: #1a1c1f;
+  --ds-accent-hover: #303030;
+  --ds-accent-soft: #5d5d5d;
+
+  --ds-success: #00a240;
+  --ds-warning: #e25507;
+  --ds-error: #e02e2a;
+  --ds-info: #5d5d5d;
+  --ds-purple: #7c3aed;
+
+  --ds-shadow-dialog: 0 16px 48px rgba(0, 0, 0, 0.12);
+  --ds-shadow-composer: 0 3px 7.5px #0000000a, 0 0 20px #0000000d;
+
+  /* ---- 几何 / 字号阶梯（组件只能从这里取） ---- */
+  --pi-toolbar-h: 46px;
+  --pi-sidebar-w: 275px;
+  --pi-main-min-w: 450px;
+  --pi-content-max-w: 760px;
+  --pi-composer-max-w: 768px;
+  --pi-workpanel-w: 360px;
+  --pi-workpanel-min-w: 244px;
+  --pi-dock-h: 168px;
+  --pi-sidebar-ease: 200ms cubic-bezier(0.22, 1, 0.36, 1);
+
+  --pi-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --pi-font-mono: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --r-3xs: 4px;
+  --r-2xs: 6px;
+  --r-xs: 8px;
+  --r-sm: 10px;
+  --r-md: 12px;
+  --r-md-plus: 14px;
+  --r-lg: 16px;
+  --r-lg-plus: 18px;
+  --r-xl: 20px;
+  --r-2xl: 24px;
+  --r-full: 9999px;
+
+  --m-fast: 150ms;
+  --m-normal: 200ms;
+  --m-slow: 300ms;
+  --e-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --e-in: cubic-bezier(0.4, 0, 1, 1);
+  --e-std: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/*
+  工作台根节点。刻意不把上面的 token 直接挂在 `.pi-agent` 上：提示气泡、右键菜单这类
+  浮层要 portal 到 body 才不会被子树的 overflow 裁掉，而那些浮层同样需要这套 token，
+  所以 token 单独落成一个可复用的 `.pi-scope`。
+*/
+.pi-agent {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: var(--ds-bg-primary);
+  color: var(--ds-text-primary);
+  font-family: var(--pi-font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.dark .pi-scope {
+  --ds-bg-primary: #181818;
+  --ds-bg-sidebar: #000000;
+  --ds-bg-secondary: #212121;
+  --ds-bg-tertiary: #282828;
+  --ds-bg-inset: #0d0d0d;
+  --ds-bg-under: #000000;
+  --ds-bg-elevated: color-mix(in oklab, #212121 96%, transparent);
+  --ds-bg-elevated-opaque: #282828;
+  --ds-bg-composer: color-mix(in oklab, #212121 96%, transparent);
+  --ds-bg-hover: color-mix(in oklab, #ffffff 6%, transparent);
+  --ds-bg-active: color-mix(in oklab, #ffffff 10%, transparent);
+  --ds-bg-chip: color-mix(in oklab, #ffffff 6%, transparent);
+
+  --ds-text-primary: #ffffff;
+  --ds-text-secondary: color-mix(in oklab, #ffffff 70%, transparent);
+  --ds-text-muted: color-mix(in oklab, #ffffff 52%, transparent);
+  --ds-text-faint: color-mix(in oklab, #ffffff 38%, transparent);
+
+  --ds-border-default: color-mix(in oklab, #ffffff 8%, transparent);
+  --ds-border-subtle: color-mix(in oklab, #ffffff 5%, transparent);
+  --ds-border-strong: color-mix(in oklab, #ffffff 14%, transparent);
+
+  --ds-tile: color-mix(in oklab, #ffffff 3.5%, transparent);
+  --ds-tile-hover: color-mix(in oklab, #ffffff 6%, transparent);
+  --ds-tile-deep: color-mix(in oklab, #ffffff 8%, transparent);
+  --ds-raised: #282828;
+  --ds-raised-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+
+  --ds-accent: #ffffff;
+  --ds-accent-hover: #ededed;
+  --ds-accent-soft: #afafaf;
+
+  --ds-success: #40c977;
+  --ds-warning: #ff8549;
+  --ds-error: #ff6764;
+  --ds-info: #afafaf;
+  --ds-purple: #c27aff;
+
+  --ds-shadow-dialog: 0 16px 48px rgba(0, 0, 0, 0.55);
+  color-scheme: dark;
+}
+
+/* 消息正文、输入框、代码要能选中 —— 应用全局把选择关掉了。 */
+.pi-agent input,
+.pi-agent textarea,
+.pi-agent pre,
+.pi-agent code,
+.pi-agent .selectable {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ---------------------------------------------------------------- */
+/* 滚动条：静止时不画，指针进到容器里才浮出拇指                        */
+/* ---------------------------------------------------------------- */
+.pi-agent ::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.pi-agent ::-webkit-scrollbar-track {
+  background: transparent;
+}
+.pi-agent ::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: var(--r-full);
+  border: 1px solid transparent;
+  background-clip: content-box;
+}
+.pi-agent:hover ::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--ds-text-primary) 16%, transparent);
+  background-clip: content-box;
+}
+.pi-agent ::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--ds-text-primary) 28%, transparent);
+  background-clip: content-box;
+}
+
+.pi-agent :focus-visible {
+  outline: 1.5px solid color-mix(in oklab, var(--ds-accent) 80%, transparent);
+  outline-offset: 2px;
+}
+.pi-agent ::selection {
+  background: color-mix(in oklab, var(--ds-text-primary) 18%, transparent);
+}
+
+/* ================================================================ */
+/* 通用：按钮 / 菜单 / 提示                                          */
+/* ================================================================ */
+
+/* 工具条上的方形图标按钮：28×28、圆角胶囊、无描边。 */
+.pi-icon-btn {
+  height: 28px;
+  min-width: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  border-radius: var(--r-full);
+  color: var(--ds-text-secondary);
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: default;
+  white-space: nowrap;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out),
+    transform var(--m-fast) var(--e-out);
+}
+.pi-icon-btn:hover:not(:disabled) {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.pi-icon-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.pi-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.pi-icon-btn.active {
+  background: var(--ds-bg-active);
+  color: var(--ds-text-primary);
+}
+
+/* 浮层（菜单 / 弹窗 / 提示）共用一套配方：不透明抬高面色 + 细边 + 大投影。 */
+.pi-menu {
+  position: absolute;
+  z-index: 40;
+  padding: 6px;
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: var(--r-lg);
+  background: var(--ds-bg-elevated-opaque);
+  box-shadow: var(--ds-shadow-dialog);
+}
+.pi-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--ds-text-primary);
+  font-size: 13px;
+  line-height: 1.3;
+  text-align: left;
+  cursor: default;
+  transition: background var(--m-fast) var(--e-out);
+}
+.pi-menu-item:hover,
+.pi-menu-item.kb-active {
+  background: var(--ds-bg-hover);
+}
+.pi-menu-item.active {
+  background: var(--ds-bg-active);
+}
+.pi-menu-item .pi-menu-check {
+  margin-left: auto;
+  color: var(--ds-accent);
+  flex: none;
+}
+.pi-menu-item:disabled {
+  opacity: 0.45;
+}
+/* 破坏性动作（删除）：与 .msg-action.danger 同一套配色，hover 才变红 */
+.pi-menu-item.danger:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--ds-error) 10%, transparent);
+  color: var(--ds-error);
+}
+/* 右键菜单（贴鼠标的浮层）：标签过长时截断，不把整块菜单拉宽 */
+.pi-menu[data-slot="pi-context-menu"] {
+  max-width: min(320px, calc(100vw - 16px));
+}
+.pi-menu[data-slot="pi-context-menu"] .pi-menu-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pi-menu-sep {
+  height: 6px;
+}
+
+/* 双列菜单（页面 → 子页）的入口行：左图标、标签、右侧当前值、chevron。 */
+.pi-menu-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--ds-text-primary);
+  font-size: 12.5px;
+  line-height: 1.3;
+  cursor: default;
+  transition: background var(--m-fast) var(--e-out);
+}
+.pi-menu-entry:hover {
+  background: var(--ds-bg-hover);
+}
+.pi-menu-entry > svg:first-child {
+  color: var(--ds-text-secondary);
+  flex: none;
+}
+.pi-menu-entry-label {
+  flex: none;
+}
+.pi-menu-entry-value {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ds-accent);
+  font-size: 12px;
+}
+.pi-menu-entry > svg:last-child {
+  color: var(--ds-text-muted);
+  flex: none;
+}
+.pi-menu-back {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--ds-text-primary);
+  font-size: 12.5px;
+  cursor: default;
+}
+.pi-menu-back:hover {
+  background: var(--ds-bg-hover);
+}
+.pi-menu-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  margin: 6px 4px;
+  padding: 0 9px;
+  border-radius: var(--r-md);
+  background: var(--ds-bg-inset);
+  color: var(--ds-text-muted);
+}
+.pi-menu-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ds-text-primary);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.pi-menu-search input::placeholder {
+  color: var(--ds-text-muted);
+}
+.pi-menu-scroll {
+  max-height: 264px;
+  overflow-y: auto;
+  /* overflow-y:auto 会把 overflow-x 也算成 auto：模型名过长时别长出横向滚动条 */
+  overflow-x: hidden;
+}
+.pi-menu-group-label {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 7px 10px 3px;
+  background: var(--ds-bg-elevated-opaque);
+  color: var(--ds-text-secondary);
+  font-size: 13px;
+  font-weight: 560;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.pi-menu-group .pi-menu-item {
+  padding-left: 22px;
+  font-size: 12px;
+  font-weight: 400;
+}
+.pi-menu-option-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+.pi-menu-option-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pi-menu-option-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.pi-menu-badge {
+  padding: 0 4px;
+  border-radius: var(--r-sm);
+  background: var(--ds-tile-deep);
+  color: var(--ds-text-faint);
+  font-size: 10.5px;
+  line-height: 16px;
+  text-transform: lowercase;
+}
+.pi-menu-ctx {
+  color: var(--ds-text-faint);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.pi-menu-empty {
+  padding: 16px 10px;
+  color: var(--ds-text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+.pi-menu-heading {
+  padding: 4px 10px 7px;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+}
+
+/* 提示气泡 */
+.pi-tip-host {
+  display: inline-flex;
+  min-width: 0;
+}
+.pi-tip {
+  position: fixed;
+  z-index: 1000;
+  max-width: calc(100vw - 16px);
+  transform: translate(-50%, -100%);
+  padding: 3px 7px;
+  border: 1px solid var(--ds-border-default);
+  border-radius: var(--r-sm);
+  background: var(--ds-bg-elevated-opaque);
+  box-shadow: var(--ds-raised-shadow);
+  color: var(--ds-text-secondary);
+  font-size: 11px;
+  line-height: 1.3;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.pi-tip[data-side="bottom"] {
+  transform: translate(-50%, 0);
+}
+
+/* ================================================================ */
+/* 骨架：侧栏 | 主区 | 右侧面板                                       */
+/* ================================================================ */
+
+.pi-agent.sidebar-collapsed .pi-main {
+  --pi-content-max-w: 640px;
+  --pi-composer-max-w: 640px;
+}
+
+.pi-sidebar {
+  position: relative;
+  display: flex;
+  flex: 0 0 var(--pi-sidebar-w);
+  width: var(--pi-sidebar-w);
+  max-width: 520px;
+  min-width: 0;
+  flex-direction: column;
+  background: var(--ds-bg-sidebar);
+  overflow: hidden;
+}
+.pi-sidebar.is-exiting {
+  animation: pi-sidebar-out var(--m-fast) var(--e-in) both;
+}
+@keyframes pi-sidebar-out {
+  from {
+    flex-basis: var(--pi-sidebar-w);
+    width: var(--pi-sidebar-w);
+  }
+  to {
+    flex-basis: 0;
+    width: 0;
+    transform: translateX(-8px);
+    opacity: 0;
+  }
+}
+@keyframes pi-sidebar-in {
+  from {
+    flex-basis: 0;
+    width: 0;
+    transform: translateX(-8px);
+    opacity: 0;
+  }
+  to {
+    flex-basis: var(--pi-sidebar-w);
+    width: var(--pi-sidebar-w);
+  }
+}
+.pi-sidebar-header,
+.pi-sidebar-body {
+  min-width: var(--pi-sidebar-w);
+}
+.pi-sidebar-header {
+  display: flex;
+  flex: 0 0 var(--pi-toolbar-h);
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px;
+  -webkit-app-region: drag;
+}
+.pi-sidebar-header .pi-icon-btn,
+.pi-sidebar-header button {
+  -webkit-app-region: no-drag;
+}
+.pi-sidebar-header-actions {
+  display: flex;
+  margin-left: auto;
+  align-items: center;
+  gap: 2px;
+}
+.pi-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-primary);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: default;
+}
+/* 品牌位只是标识，不是按钮 —— 只有它真的可点时（button.pi-brand）才给悬停反馈。 */
+button.pi-brand:hover {
+  background: var(--ds-bg-hover);
+}
+.pi-sidebar-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  padding: 0 8px 6px;
+  overflow: hidden;
+}
+/* 页脚动作（顶栏右上角的通知铃铛用这个类）：只有图标，不占列表宽度。 */
+.pi-footer-action {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--ds-text-muted);
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.pi-footer-action:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.pi-footer-action.active {
+  background: var(--ds-bg-active);
+  color: var(--ds-text-primary);
+}
+/* 侧栏顶部动作区：新建任务 / 搜索 / 自动化 / 插件市场（对齐参考实现 —— 这四个是
+   "接下来去哪"的入口，钉在会话列表上方。通知不在这里：外层顶栏右上角已经有一个
+   全局铃铛，侧栏再放一个是重复入口）。 */
+.pi-side-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 2px 6px;
+}
+.pi-side-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: 13px;
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.pi-side-action:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.pi-side-action.active {
+  background: var(--ds-bg-active);
+  color: var(--ds-text-primary);
+}
+.pi-side-action > svg {
+  flex: none;
+  color: var(--ds-text-muted);
+}
+.pi-side-action:hover > svg,
+.pi-side-action.active > svg {
+  color: var(--ds-text-primary);
+}
+.pi-side-action-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pi-side-action .pi-kbd {
+  flex: none;
+  color: var(--ds-text-muted);
+}
+
+/* 分组小标题 + 右侧工具按钮（hover 才浮出） */
+.pi-list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+  padding: 4px 4px 0;
+  border-radius: var(--r-sm);
+}
+.pi-list-label {
+  color: var(--ds-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* 会话行：28px 高、10px 圆角、20px 左内边距留给状态点 */
+.pi-scroll-group {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 2px;
+  overflow-y: auto;
+  /*
+    只写 overflow-y: auto 时，overflow-x 的 visible 会被计算成 auto ——
+    任何比容器宽的行走出去，这里就会长出一条横向滚动条。会话标题是
+    nowrap 的，长标题（首条消息前 40 字）正好能顶到 530px，而侧栏只有 275px。
+  */
+  overflow-x: hidden;
+  overscroll-behavior-y: contain;
+}
+.pi-thread {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+  /*
+    关键：不加 min-width: 0，纤程项的自动最小尺寸就是内容的 min-content
+    —— nowrap 的标题会把整行顶宽到文本宽度（实测 530px），侧栏跟着横向滚动。
+    压回 0 之后标题才有机会走 .pi-thread-title 的省略号。
+  */
+  min-width: 0;
+  /*
+    width: 100% 不是装饰：`<button>` 即使在 display: flex 下，width: auto 也按
+    **内容**（fit-content）算，而行外面还套着一层定位用的 div（用来装行尾的"更多"
+    按钮），拿不到父级 flex 的 stretch —— 结果整行的点击区只有文字那么宽，标题长的
+    行还会撑出行宽、把"更多"按钮顶到侧栏外面点不着。显式铺满即可。
+  */
+  width: 100%;
+  padding: 0 2px 0 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.pi-thread:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.pi-thread.active {
+  background: var(--ds-bg-active);
+  color: var(--ds-text-primary);
+}
+.pi-thread.archived {
+  opacity: 0.68;
+}
+.pi-thread-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 6px 5px 20px;
+}
+.pi-thread-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 18px;
+}
+.pi-thread-status {
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  display: flex;
+  width: 12px;
+  height: 12px;
+  transform: translateY(-50%);
+  align-items: center;
+  justify-content: center;
+}
+.pi-thread-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--r-full);
+}
+.pi-thread-dot.running {
+  background: var(--ds-warning);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ds-warning) 15%, transparent);
+  animation: pi-breathe 1.6s ease-in-out infinite;
+}
+.pi-thread-dot.attention {
+  background: var(--ds-purple);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ds-purple) 15%, transparent);
+  animation: pi-pulse-purple 1.2s ease-in-out infinite;
+}
+.pi-thread-dot.unread {
+  background: var(--ds-accent);
+}
+.pi-thread-ring {
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--ds-accent);
+  border-radius: var(--r-full);
+}
+@keyframes pi-breathe {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.68;
+    transform: scale(0.78);
+  }
+}
+@keyframes pi-pulse-purple {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.15);
+  }
+}
+.pi-thread-more {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-2xs);
+  background: transparent;
+  color: var(--ds-text-muted);
+  cursor: default;
+  opacity: 0;
+  transition: opacity var(--m-fast) var(--e-out);
+}
+.pi-thread:hover .pi-thread-more,
+.pi-thread:focus-within .pi-thread-more,
+.pi-thread-more[aria-expanded="true"] {
+  opacity: 1;
+}
+.pi-thread-more:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.pi-thread-progress {
+  flex: none;
+  padding: 0 4px;
+  border-radius: var(--r-3xs);
+  background: var(--ds-tile-deep);
+  color: var(--ds-text-muted);
+  font-size: 9.5px;
+  line-height: 15px;
+  font-variant-numeric: tabular-nums;
+}
+/*
+  列表尾部的「查看更多」：一段最多露 5 条，多出来的收在这一行后面。
+  箭头落在会话行状态点的那条车道里，标签于是和标题同列 —— 点开之后看起来还是同一份
+  列表，只是多了几行。同样是 `<button>`，同样要显式铺满（见 .pi-thread 的说明）。
+*/
+.pi-list-more {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 4px 6px 4px 4px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.pi-list-more:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.pi-list-more > span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 分组（项目 / 时间）表头 */
+.pi-group-header {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+  padding: 0 2px;
+}
+.pi-group-title {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: default;
+  text-align: left;
+  transition: color var(--m-fast) var(--e-out);
+}
+.pi-group-title:hover {
+  color: var(--ds-text-primary);
+}
+.pi-group-title span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pi-caret {
+  flex: none;
+  color: var(--ds-text-muted);
+  transition: transform var(--m-fast) var(--e-out);
+}
+/* 两种写法并存是有意的：分组标题给的是"收起状态"（默认朝下），工具行给的是
+   "展开状态"（默认朝右），各自按自己更好写的那一侧命名。 */
+.pi-caret.collapsed {
+  transform: rotate(-90deg);
+}
+.pi-caret.open {
+  transform: rotate(90deg);
+}
+/* 项目分组：箭头单独成按钮（只折叠），标题那块留给"进这个项目"。 */
+.pi-caret-btn {
+  display: inline-flex;
+  flex: none;
+  width: 18px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  cursor: default;
+}
+.pi-caret-btn:hover .pi-caret {
+  color: var(--ds-text-primary);
+}
+.pi-group-title.active {
+  color: var(--ds-text-primary);
+}
+/* 分组行尾的动作按钮：跟着行高收小；项目行的 ＋ 悬停 / 键盘聚焦才浮出，
+   免得一排加号把文件夹名挤成省略号。 */
+.pi-group-header .pi-icon-btn {
+  height: 22px;
+  min-width: 22px;
+  padding: 0 3px;
+}
+.pi-group-action {
+  opacity: 0;
+  transition: opacity var(--m-fast) var(--e-out);
+}
+.pi-group-header:hover .pi-group-action,
+.pi-group-header:focus-within .pi-group-action {
+  opacity: 1;
+}
+.pi-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+  transition:
+    max-height var(--m-slow) var(--e-out),
+    opacity var(--m-normal) var(--e-out);
+}
+.pi-group-body.collapsed {
+  max-height: 0 !important;
+  opacity: 0;
+  pointer-events: none;
+}
+.pi-time-label {
+  padding: 6px 6px 2px 20px;
+  color: var(--ds-text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+/* 项目分组里的会话缩进一级：分组标题与项目名同列，会话让出缩进以示从属。 */
+.pi-project-body {
+  margin-left: 13px;
+  padding-left: 9px;
+}
+.pi-group-count {
+  flex: none;
+  color: var(--ds-text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.pi-empty {
+  padding: 5px 8px;
+  color: var(--ds-text-muted);
+  font-size: 13px;
+}
+.pi-empty.center {
+  padding: 24px 8px;
+  text-align: center;
+  font-size: 12px;
+}
+.pi-sidebar-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--ds-border-subtle);
+}
+.pi-rename-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+  padding: 4px 6px;
+  border-radius: var(--r-sm);
+  background: var(--ds-tile);
+}
+.pi-rename-row input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ds-text-primary);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+/* ================================================================ */
+/* 主区 + 顶部工具条                                                 */
+/* ================================================================ */
+
+.pi-main {
+  position: relative;
+  display: flex;
+  min-width: var(--pi-main-min-w);
+  flex: 1;
+  flex-direction: column;
+  background: var(--ds-bg-primary);
+  overflow: hidden;
+}
+
+.pi-topbar {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  height: var(--pi-toolbar-h);
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: var(--ds-bg-primary);
+  -webkit-app-region: drag;
+}
+.pi-topbar .ct-left,
+.pi-topbar .ct-right,
+.pi-topbar button {
+  -webkit-app-region: no-drag;
+}
+.ct-left {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  margin-right: auto;
+}
+.ct-right {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  /* 给右上角那个绝对定位的面板开关留位（28px 按钮 + 12px 右边距）。面板开关钉在
+     .pi-main 的右上角，面板展开与否都在原地，所以预留必须常驻 —— 曾经在
+     workpanel-open 时清零，动作组正好挪到开关底下，两个图标叠着显示。 */
+  padding-right: 36px;
+}
+.ct-title-wrap {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.ct-title {
+  color: var(--ds-text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+.ct-sub {
+  margin-left: 8px;
+  color: var(--ds-text-muted);
+  font-size: 11px;
+}
+/* 行动作收在一个 segmented 容器里 */
+.ct-actions {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border-radius: var(--r-md);
+  background: var(--ds-tile);
+}
+.ct-icon-btn {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.ct-icon-btn:hover:not(:disabled) {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.ct-icon-btn:disabled {
+  opacity: 0.4;
+}
+.ct-icon-btn.active {
+  background: var(--ds-bg-active);
+  color: var(--ds-text-primary);
+}
+/* 侧栏收起时把「唤回侧栏」的按钮补回标题左边（带滑入） */
+.ct-lead {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    left var(--m-normal) var(--e-out),
+    opacity var(--m-normal) var(--e-out);
+}
+.pi-agent.sidebar-collapsed .ct-lead {
+  position: static;
+  opacity: 1;
+  pointer-events: auto;
+  transition:
+    opacity var(--m-fast) var(--e-in),
+    left var(--m-fast) var(--e-in);
+}
+
+/* 右侧面板开关：钉在右上角 */
+.pi-panel-toggle {
+  position: absolute;
+  top: 9px;
+  right: 12px;
+  z-index: 30;
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.pi-panel-toggle:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.pi-panel-toggle[aria-pressed="true"] {
+  background: var(--ds-tile-deep);
+  color: var(--ds-text-primary);
+  box-shadow: var(--ds-raised-shadow);
+}
+.pi-panel-toggle:disabled {
+  opacity: 0.35;
+}
+/* 两个图标叠在一起做交叉淡出，不是直接换一个节点（换节点会闪） */
+.pi-panel-toggle-icon {
+  position: relative;
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+.pi-panel-toggle-icon > svg {
+  position: absolute;
+  inset: 0;
+  transition: opacity var(--m-fast) var(--e-out);
+}
+.pi-panel-toggle-icon > svg:last-child {
+  opacity: 0;
+}
+.pi-panel-toggle[aria-pressed="true"] .pi-panel-toggle-icon > svg:first-child {
+  opacity: 0;
+}
+.pi-panel-toggle[aria-pressed="true"] .pi-panel-toggle-icon > svg:last-child {
+  opacity: 1;
+}
+
+/* ================================================================ */
+/* 消息流                                                            */
+/* ================================================================ */
+
+.thread-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-anchor: none;
+  scrollbar-gutter: stable;
+}
+.thread-content {
+  width: min(100%, var(--pi-content-max-w));
+  margin: 0 auto;
+  padding: var(--pi-toolbar-h) 32px calc(var(--pi-dock-h) + 16px);
+  transition: width var(--pi-sidebar-ease);
+}
+.thread-loading {
+  display: grid;
+  gap: 10px;
+  padding-top: 40px;
+}
+.thread-loading > div {
+  height: 14px;
+  border-radius: var(--r-2xs);
+  background: var(--ds-tile);
+  animation: pi-skeleton 1.4s var(--e-std) infinite;
+}
+.thread-loading > div:nth-child(1) {
+  width: 62%;
+}
+.thread-loading > div:nth-child(2) {
+  width: 88%;
+}
+.thread-loading > div:nth-child(3) {
+  width: 44%;
+}
+@keyframes pi-skeleton {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* 空会话：居中插画 + 说明 */
+.thread-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 18vh 0 0;
+  text-align: center;
+}
+.thread-hero-mark {
+  display: flex;
+  width: 46px;
+  height: 46px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-md-plus);
+  background: var(--ds-tile-deep);
+  color: var(--ds-text-secondary);
+}
+.thread-hero-title {
+  color: var(--ds-text-primary);
+  font-size: 15px;
+  font-weight: 520;
+}
+.thread-hero-hint {
+  max-width: 42ch;
+  color: var(--ds-text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* 一行消息 */
+.msg-row {
+  display: flex;
+  gap: 12px;
+  padding: 12px 0;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 140px;
+}
+.msg-row.user {
+  justify-content: flex-end;
+}
+.msg-row.assistant {
+  padding-top: 6px;
+  padding-bottom: 14px;
+}
+.msg-col {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.msg-row.user .msg-col {
+  width: min(max-content, 82%, 600px);
+  max-width: min(82%, 600px);
+  align-items: flex-end;
+}
+.msg-col.agent {
+  width: min(100%, 720px);
+  align-items: flex-start;
+}
+/* 用户气泡：右下角收一个小角，是这一屏里唯一的实心块 */
+.msg-bubble-user {
+  padding: 10px 15px;
+  border-radius: var(--r-lg-plus) var(--r-lg-plus) var(--r-xs) var(--r-lg-plus);
+  background: color-mix(in oklab, var(--ds-text-primary) 8%, transparent);
+  color: var(--ds-text-primary);
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+/* Agent 侧不画气泡：内容自己承担分层，套壳只会让代码块看起来被包了两次 */
+.msg-bubble-agent {
+  width: 100%;
+  min-width: 0;
+  color: var(--ds-text-primary);
+}
+.msg-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 20px;
+  color: var(--ds-text-muted);
+  font-size: 11px;
+}
+.msg-chip {
+  padding: 1px 8px;
+  border-radius: var(--r-full);
+  background: color-mix(in oklab, var(--ds-text-primary) 5%, transparent);
+  color: var(--ds-text-secondary);
+  font-size: 11px;
+}
+.msg-chip.model {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.msg-actions {
+  display: flex;
+  min-height: 24px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding-top: 2px;
+  opacity: 0;
+  transition: opacity var(--m-fast) var(--e-out);
+}
+.msg-row:hover .msg-actions,
+.msg-row:focus-within .msg-actions {
+  opacity: 1;
+}
+.msg-action {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.msg-action:hover:not(:disabled) {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.msg-action.icon {
+  min-width: 26px;
+  justify-content: center;
+  padding-inline: 5px;
+}
+.msg-action.primary {
+  background: var(--ds-accent);
+  color: var(--ds-bg-primary);
+}
+.msg-action.danger:hover {
+  background: color-mix(in oklab, var(--ds-error) 10%, transparent);
+  color: var(--ds-error);
+}
+.msg-action:disabled {
+  opacity: 0.45;
+}
+
+/* 思考过程：折叠成一行，展开后是弱化的正文 */
+.think-block {
+  width: 100%;
+  margin: 2px 0;
+}
+.think-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+  cursor: default;
+}
+.think-toggle:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-secondary);
+}
+.think-body {
+  margin: 2px 0 4px;
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  background: var(--ds-tile);
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+/* 运行中：三点呼吸 + 已用时 */
+.working-indicator {
+  display: flex;
+  width: min(100%, 720px);
+  align-items: center;
+  gap: 7px;
+  padding: 8px 0 4px 16px;
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+}
+.working-mark {
+  display: flex;
+  width: 18px;
+  height: 8px;
+  align-items: center;
+  gap: 2px;
+}
+.working-mark i {
+  width: 4px;
+  height: 4px;
+  border-radius: var(--r-full);
+  background: currentColor;
+  opacity: 0.35;
+  animation: pi-dot 1s var(--e-std) infinite;
+}
+.working-mark i:nth-child(2) {
+  animation-delay: 120ms;
+}
+.working-mark i:nth-child(3) {
+  animation-delay: 240ms;
+}
+@keyframes pi-dot {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+.working-elapsed {
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.working-indicator[data-phase="retrying"],
+.working-indicator[data-phase="recovering"] {
+  color: var(--ds-warning);
+}
+.working-indicator[data-phase="waiting-subagents"] {
+  color: var(--ds-purple);
+}
+
+/* 工具活动：一组可折叠的工具行 */
+.tool-group {
+  width: 100%;
+  margin: 7px 0;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 40px;
+}
+
+/*
+ * 时间轴：模型说的话与工具调用按发生顺序混排（说了什么 → 调了什么 → 又说了什么）。
+ * 正文段贴消息左沿（它们是这轮说的话），工具 / 状态 / 交互卡片缩进一级
+ * （它们是过程）。`.timeline-detail` 的缩进与旧轨迹体的缩进一致，视觉上仍是
+ * "正文为主、过程为辅"。
+ */
+.msg-timeline {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.msg-timeline > .msg-bubble-agent {
+  margin: 4px 0;
+}
+.timeline-detail {
+  margin-left: 7px;
+  padding-left: 12px;
+}
+
+/*
+ * 这一轮的状态行：跑动中「处理中 · N 秒」、跑完「已处理 · N 秒 · N 次工具调用」。
+ *
+ * 铺满整列 + 底下压一条发丝线（同行/参考实现就是这个写法）：它是"这一轮"的表头，
+ * 上面是别轮的历史，下面是这一轮的过程 —— 一条线比再加一条间距更省地方。
+ * `width: 100%` 不可省：`.msg-col.agent` 是 `align-items: flex-start`，不写就只
+ * 撑到文字宽，线也跟着断在中间。
+ */
+.run-status {
+  display: flex;
+  width: 100%;
+  min-height: 22px;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 7px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ds-border-subtle);
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+}
+.tool-group-header {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  gap: 5px;
+  margin: 0 -3px;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.tool-group-header:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.tool-group-label {
+  font-weight: 500;
+}
+.tool-group-count {
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.tool-group-caret {
+  color: var(--ds-text-muted);
+  transition: transform var(--m-fast) var(--e-out);
+}
+.tool-group-caret.open {
+  transform: rotate(90deg);
+}
+/* 用 grid-template-rows 0fr→1fr 做无固定高度的折叠动画 */
+.tool-group-collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows var(--m-normal) var(--e-out),
+    opacity var(--m-fast) var(--e-out);
+}
+.tool-group-collapse.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.tool-group-collapse > div {
+  min-height: 0;
+  overflow: hidden;
+}
+.tool-group-body {
+  margin: 3px 0 6px 7px;
+  padding: 2px 0 2px 12px;
+}
+.tool-row {
+  margin: 3px 0;
+}
+.tool-row-header {
+  display: inline-flex;
+  max-width: 100%;
+  min-height: 24px;
+  align-items: center;
+  gap: 4px;
+  margin: 0 -4px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.tool-row-header:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.tool-row-name {
+  font-weight: 500;
+  flex: none;
+}
+.tool-row-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ds-text-muted);
+  font-family: var(--pi-font-mono);
+  font-size: 11.5px;
+}
+/*
+ * 分组行（「查阅 · 2 搜索, 1 列表」）的三截：家族名 + `·` + 计数。
+ * 计数走名词、不走等宽字体：它是给人读的"两个文件、一个列表"，不是参数。
+ */
+.tool-row-counts {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.tool-sep {
+  flex: none;
+  color: var(--ds-text-faint);
+}
+/* 子智能体那一行的任务描述：与文件名不同，它是自然语言，会截断但不用等宽字体。 */
+.tool-row-desc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+}
+/*
+ * 子智能体行是过程里最重的一行：标签与类型取正文色（参考实现里也只有这行是深色），
+ * 描述与计数仍然收在弱化灰里 —— 一行读下来是「谁去干了什么」。
+ */
+.subagent-head .tool-group-label,
+.subagent-head .tool-group-type {
+  color: var(--ds-text-primary);
+}
+.tool-group-type {
+  flex: none;
+  font-weight: 500;
+}
+/*
+ * 展开后的成员行：只缩进一级（与单个工具行展开自己的细节同一档），
+ * 不再叠加 .tool-group-body 的缩进 —— 两层加起来成员行会被推到 50px 开外。
+ */
+.tool-group-rows {
+  margin: 2px 0 6px 24px;
+  padding-left: 12px;
+}
+.tool-row-state {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  color: var(--ds-text-muted);
+  font-size: 11px;
+}
+.tool-row-state.error {
+  color: var(--ds-error);
+}
+/* 状态点：只有"出错"一种活着 —— 正常的行不画点（满屏绿点等于没说任何事）。 */
+.tool-row-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: var(--ds-text-faint);
+}
+.tool-row-dot.error {
+  background: var(--ds-error);
+}
+.tool-row-dot.running {
+  background: var(--ds-text-secondary);
+  animation: pi-breathe 1.1s ease-in-out infinite;
+}
+.tool-spinner {
+  width: 11px;
+  height: 11px;
+  flex: none;
+  border: 1.5px solid var(--ds-border-default);
+  border-top-color: var(--ds-text-secondary);
+  border-radius: var(--r-full);
+  animation: pi-spin 0.8s linear infinite;
+}
+@keyframes pi-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.tool-row-chip {
+  flex: none;
+  padding: 0 5px;
+  border-radius: var(--r-xs);
+  background: var(--ds-tile-deep);
+  color: var(--ds-text-muted);
+  font-family: var(--pi-font-mono);
+  font-size: 10.5px;
+  line-height: 18px;
+}
+.tool-row-body {
+  margin: 4px 0 6px 24px;
+  padding: 4px 0 8px 12px;
+}
+.tool-block {
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  background: var(--ds-tile);
+  color: var(--ds-text-secondary);
+  font-family: var(--pi-font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  user-select: text;
+}
+.tool-block.error {
+  background: color-mix(in oklab, var(--ds-error) 7%, transparent);
+  color: color-mix(in oklab, var(--ds-error) 72%, var(--ds-text-primary));
+}
+.tool-note {
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  background: var(--ds-tile);
+  color: var(--ds-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.tool-note.error {
+  background: color-mix(in oklab, var(--ds-error) 7%, transparent);
+  color: var(--ds-error);
+}
+.tool-file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: var(--r-2xs);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-family: var(--pi-font-mono);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: default;
+}
+.tool-file:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.tool-file-path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+.tool-diff {
+  max-height: 320px;
+  overflow: auto;
+  border-radius: var(--r-md);
+  background: var(--ds-tile);
+  font-family: var(--pi-font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.tool-diff-line {
+  display: flex;
+  gap: 8px;
+  padding: 0 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tool-diff-line.add {
+  background: color-mix(in oklab, var(--ds-success) 14%, transparent);
+}
+.tool-diff-line.del {
+  background: color-mix(in oklab, var(--ds-error) 14%, transparent);
+}
+.tool-diff-line.hunk {
+  padding: 2px 8px;
+  background: color-mix(in oklab, var(--ds-text-primary) 4%, transparent);
+  color: var(--ds-text-muted);
+  font-size: 10.5px;
+}
+
+/* 产出物区：卡片 + 「查看所有产物」入口（挂在助手消息下面） */
+.artifact-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.artifact-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.artifact-more {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 4px;
+  margin-left: -6px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.artifact-more:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.artifact-card {
+  display: flex;
+  max-width: 260px;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: var(--ds-tile);
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.artifact-card:hover {
+  background: var(--ds-tile-hover);
+  color: var(--ds-text-primary);
+}
+.artifact-card-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.artifact-card-kind {
+  flex: none;
+  color: var(--ds-text-faint);
+  font-size: 10.5px;
+}
+
+/* Agent 正文里的富文本：字号与行高跟消息一致 */
+.prose-pi {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ds-text-primary);
+  text-wrap: pretty;
+  overflow-wrap: break-word;
+}
+.prose-pi > *:first-child {
+  margin-top: 0;
+}
+.prose-pi > *:last-child {
+  margin-bottom: 0;
+}
+.prose-pi a {
+  color: var(--ds-text-primary);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--ds-text-primary) 32%, transparent);
+  text-underline-offset: 3px;
+}
+.prose-pi a:hover {
+  text-decoration-color: color-mix(in oklab, var(--ds-text-primary) 85%, transparent);
+}
+
+/* ================================================================ */
+/* 输入区                                                            */
+/* ================================================================ */
+
+.composer-dock {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  display: flex;
+  justify-content: center;
+  padding: 0 24px 16px;
+  pointer-events: none;
+}
+.composer-stack {
+  display: flex;
+  width: min(100%, var(--pi-composer-max-w));
+  flex-direction: column;
+  pointer-events: auto;
+  transition: width var(--pi-sidebar-ease);
+}
+/* 卡片区（待办 / 目标 / 方案 / 队列 / 工具 / 状态）自己滚。
+   不封顶的话，一份十几条的待办清单就能把输入框顶出屏幕、消息流只剩一条缝 ——
+   而那个状态没有任何补救手段：dock 是绝对定位的，超出的部分直接跑到窗口外。
+   同 .composer-ac-list：只纵滚，横向 hidden。 */
+.composer-stack-panels {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  max-height: min(45vh, 420px);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.composer-shell {
+  position: relative;
+  width: 100%;
+  border-radius: var(--r-xl);
+  background: var(--ds-bg-composer);
+  box-shadow: var(--ds-shadow-composer);
+  transition:
+    background var(--m-fast) var(--e-out),
+    box-shadow var(--m-normal) var(--e-out);
+}
+.composer-shell:focus-within {
+  box-shadow: 0 7px 24px color-mix(in oklab, var(--ds-text-primary) 9%, transparent);
+}
+.composer-input-wrap {
+  position: relative;
+  min-height: 44px;
+  padding: 10px 12px 0;
+}
+.composer-input {
+  display: block;
+  width: 100%;
+  min-height: calc(3lh);
+  max-height: calc(7lh);
+  overflow-y: auto;
+  border: 0;
+  background: transparent;
+  color: var(--ds-text-primary);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  resize: none;
+  outline: none;
+}
+.composer-input::placeholder {
+  color: var(--ds-text-secondary);
+  opacity: 0.72;
+}
+/* 输入框自己不再画焦点框：聚焦由外层 .composer-shell 的投影表示，而 :focus-visible
+   那圈 1.5px 描边用的 --ds-accent 是近黑色（#1a1c1f），落在这个大方框上就是"打字时
+   一口黑框"。键盘导航需要的焦点可见性由 shell 承担。 */
+.composer-input:focus-visible {
+  outline: none;
+}
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 8px;
+}
+.composer-left,
+.composer-right {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+.composer-right {
+  margin-left: auto;
+}
+.composer-right .pi-icon-btn {
+  max-width: 220px;
+  padding: 0 10px;
+}
+
+/* 模式胶囊：固定宽度，切换标签时整条工具条不跟着抖 */
+.composer-mode-chip {
+  width: 88px;
+  min-width: 88px;
+  max-width: 88px;
+  flex: 0 0 88px;
+  justify-content: flex-start;
+  padding: 0 10px;
+}
+.composer-mode-face {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  animation: pi-face-in var(--m-fast) var(--e-out) both;
+}
+.composer-mode-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@keyframes pi-face-in {
+  from {
+    opacity: 0;
+    transform: translateX(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.composer-mode-chip[data-planning="true"] {
+  color: var(--ds-text-primary);
+}
+.composer-mode-chip[data-planning="true"] svg {
+  color: var(--ds-purple);
+  animation: pi-planning 1.2s var(--e-std) infinite;
+}
+@keyframes pi-planning {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+/* 模式 / 权限胶囊里的文字比纯图标按钮亮一档：它们承载状态，不是次要动作 */
+.composer-left .pi-icon-btn {
+  color: color-mix(in oklab, var(--ds-text-primary) 78%, transparent);
+}
+.composer-left .pi-icon-btn:hover {
+  color: var(--ds-text-primary);
+}
+
+/* 模型 + 推理等级：一个胶囊装两件事，点开是两级菜单 */
+.composer-model-chip {
+  max-width: min(300px, calc(100vw - 24px));
+  padding: 0 9px;
+  gap: 4px;
+}
+.composer-model-chip .pi-model-name {
+  min-width: 0;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-model-chip .pi-model-level {
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ds-accent);
+  font-size: 12px;
+}
+.composer-model-chip svg:first-child {
+  color: var(--ds-accent);
+}
+.pi-model-dot {
+  color: var(--ds-text-muted);
+}
+
+/* 发送 / 停止 */
+.send-btn {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-full);
+  background: var(--ds-accent);
+  color: var(--ds-bg-primary);
+  cursor: default;
+  transition:
+    opacity var(--m-fast) var(--e-out),
+    transform var(--m-fast) var(--e-out);
+}
+.send-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+.send-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+.send-btn:disabled {
+  background: color-mix(in oklab, var(--ds-text-primary) 18%, transparent);
+  color: color-mix(in oklab, var(--ds-bg-primary) 70%, transparent);
+}
+.dark .send-btn:disabled {
+  color: color-mix(in oklab, var(--ds-bg-primary) 70%, #ffffff);
+}
+.stop-btn {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-full);
+  background: color-mix(in oklab, var(--ds-text-primary) 16%, transparent);
+  color: var(--ds-text-primary);
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    transform var(--m-fast) var(--e-out);
+}
+.stop-btn:hover {
+  background: color-mix(in oklab, var(--ds-text-primary) 22%, transparent);
+}
+.stop-btn:active {
+  transform: scale(0.94);
+}
+
+/* 附件 chip */
+.composer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 12px 0;
+}
+.composer-chip {
+  display: inline-flex;
+  max-width: min(100%, 240px);
+  align-items: center;
+  gap: 6px;
+  padding: 3px 5px 3px 7px;
+  border-radius: var(--r-md);
+  background: var(--ds-tile-deep);
+  color: var(--ds-text-secondary);
+  font-size: 11.5px;
+}
+.composer-chip-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-chip-x {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--ds-text-muted);
+  cursor: default;
+}
+.composer-chip-x:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.composer-chip-img {
+  padding: 3px;
+  border-radius: var(--r-md);
+  background: var(--ds-tile);
+}
+.composer-chip-img img {
+  display: block;
+  max-height: 48px;
+  max-width: 120px;
+  border-radius: var(--r-xs);
+  object-fit: cover;
+}
+
+/* 工作区 chip（输入框上方左侧） */
+.composer-workspace {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px 8px;
+}
+.composer-ws-chip {
+  display: inline-flex;
+  max-width: 220px;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-full);
+  background: var(--ds-tile);
+  color: var(--ds-text-secondary);
+  font-size: 11.5px;
+  cursor: default;
+}
+.composer-ws-chip:hover {
+  background: var(--ds-tile-hover);
+  color: var(--ds-text-primary);
+}
+.composer-ws-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-ws-badge {
+  flex: none;
+  padding: 0 4px;
+  border-radius: var(--r-3xs);
+  background: var(--ds-tile-deep);
+  color: var(--ds-text-faint);
+  font-size: 9.5px;
+  line-height: 14px;
+}
+
+/* 排队中的后续消息：贴在输入框上方，每条可插话 / 删除 */
+.composer-queued {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.composer-queued-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 12px;
+  border-radius: var(--r-lg);
+  background: var(--ds-bg-composer);
+  box-shadow: var(--ds-shadow-composer);
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+}
+.composer-queued-text {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-queued-btn {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: var(--ds-tile-deep);
+  color: var(--ds-text-secondary);
+  font-size: 12px;
+  cursor: default;
+}
+.composer-queued-btn:hover {
+  background: var(--ds-tile-hover);
+  color: var(--ds-text-primary);
+}
+
+/* 输入框上方的进度面板（待办 / 目标 / 方案 / 队列）统一按卡片收口 */
+.composer-panel {
+  /* 卡片区是滚动容器（.composer-stack-panels）：卡片必须守住自己的高度，
+     否则 flex 默认的 shrink 会把它们等比压扁成一排"标题条"，容器反而不滚 */
+  flex: none;
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border-radius: var(--r-lg);
+  background: var(--ds-bg-composer);
+  box-shadow: var(--ds-shadow-composer);
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+}
+.composer-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ds-text-primary);
+  font-size: 12.5px;
+  font-weight: 520;
+}
+.composer-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+}
+/* 工具清单：一列名字 + 一列说明。pi-agent 的工具说明是整段英文文档，不截断就是
+   一面字墙（每行都换行、面板被撑高、还得滚动）—— 名字定宽、说明单行省略，
+   完整文字挂在 title 上。 */
+.composer-panel-name {
+  flex: none;
+  width: 104px;
+  overflow: hidden;
+  color: var(--ds-text-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-panel-desc {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--ds-text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-panel-row.done {
+  color: var(--ds-text-muted);
+  text-decoration: line-through;
+}
+.composer-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.composer-panel-btn {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--ds-tile-deep);
+  color: var(--ds-text-primary);
+  font-size: 12.5px;
+  cursor: default;
+}
+.composer-panel-btn:hover {
+  background: var(--ds-tile-hover);
+}
+.composer-panel-btn:disabled {
+  opacity: 0.5;
+}
+.composer-panel-btn.primary {
+  background: var(--ds-accent);
+  color: var(--ds-bg-primary);
+}
+.composer-panel-btn.primary:hover {
+  background: var(--ds-accent-hover);
+}
+
+/* ---- 进度卡片（待办 / 目标 / 队列 / 方案）的共用骨架 ----
+   这几张卡片是**浮在消息流上方**的，所以底色必须不透明：早先用 shadcn 的
+   `bg-muted/30` 当底，30% 的透明底挡不住任何东西，底下的正文直接透上来，
+   两段文字叠在一起看着像渲染错乱。颜色同理只能取 --ds-* —— 混用 shadcn
+   的 oklch token，暗色主题下卡片和它自己的文字会分属两套灰阶。 */
+.composer-panel.collapsible {
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--ds-border-subtle);
+}
+/* 需要用户拍板的卡片（方案批准）：描边点出强调色，但底仍是实心的。
+   头行比别的卡片亮一档 —— 这张卡是在要一个决定，不是进度展示。 */
+.composer-panel.accent {
+  border-color: color-mix(in oklab, var(--ds-accent) 28%, transparent);
+  background: color-mix(in oklab, var(--ds-accent) 4%, var(--ds-bg-composer));
+}
+.composer-panel.accent .composer-panel-head {
+  color: var(--ds-text-primary);
+}
+.composer-panel-head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ds-text-muted);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: default;
+}
+.composer-panel-head:hover {
+  color: var(--ds-text-primary);
+}
+.composer-panel-body {
+  border-top: 1px solid var(--ds-border-subtle);
+  padding: 8px 12px;
+}
+/* 卡内清单：条数由模型给定，长起来能顶满整屏 —— 封顶后自己滚。同 .composer-ac-list，
+   只纵滚、横向必须 hidden，否则一条长路径就撑出横向滚动条。 */
+.composer-panel-scroll {
+  max-height: min(280px, 40vh);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.composer-panel-bar {
+  display: block;
+  width: 64px;
+  height: 4px;
+  flex: none;
+  overflow: hidden;
+  border-radius: var(--r-full);
+  background: var(--ds-tile-deep);
+}
+.composer-panel-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--ds-accent);
+  transition: width var(--m-normal) var(--e-out);
+}
+.composer-panel-pill {
+  flex: none;
+  padding: 0 4px;
+  border-radius: var(--r-3xs);
+  background: var(--ds-tile-deep);
+  color: var(--ds-text-muted);
+  font-size: 9.5px;
+  line-height: 14px;
+}
+.composer-panel-pill.accent {
+  background: color-mix(in oklab, var(--ds-accent) 10%, transparent);
+  color: var(--ds-text-primary);
+}
+.composer-panel-pill.warn {
+  background: color-mix(in oklab, var(--ds-warning) 12%, transparent);
+  color: var(--ds-warning);
+}
+.composer-panel-pill.error {
+  background: color-mix(in oklab, var(--ds-error) 12%, transparent);
+  color: var(--ds-error);
+}
+.composer-panel-objective {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--ds-text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 体内的一行说明：11px 是进度卡片的正文档，跟头的 11px 对齐 */
+.composer-panel-line {
+  font-size: 11px;
+  line-height: 16px;
+}
+.composer-panel-label {
+  color: var(--ds-text-faint);
+}
+.composer-panel-tone-warn {
+  color: var(--ds-warning);
+}
+.composer-panel-tone-error {
+  color: var(--ds-error);
+}
+.composer-panel-text {
+  min-width: 0;
+  flex: 1;
+  color: var(--ds-text-primary);
+  font-size: 11px;
+  line-height: 16px;
+}
+.composer-panel-text.done,
+.composer-panel-text.cancelled {
+  color: var(--ds-text-faint);
+  text-decoration: line-through;
+}
+/* 卡内多行之间用发丝线分隔（队列的每条消息、待办的每一行） */
+.composer-panel-divide > * + * {
+  border-top: 1px solid var(--ds-border-subtle);
+}
+
+/* 斜杠命令 / @ 提及补全 */
+.composer-ac {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  max-height: min(380px, calc(100vh - 160px));
+  overflow: hidden;
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: var(--r-lg);
+  background: var(--ds-bg-elevated-opaque);
+  box-shadow: var(--ds-shadow-dialog);
+}
+.composer-ac-list {
+  max-height: 320px;
+  overflow-y: auto;
+  /* 同上：补全项里的文件路径很长，只能往省略号走，不能横向滚 */
+  overflow-x: hidden;
+  padding: 6px;
+}
+.composer-ac-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--ds-text-primary);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: default;
+}
+.composer-ac-item:hover,
+.composer-ac-item.active {
+  background: var(--ds-bg-hover);
+}
+.composer-ac-name {
+  flex: none;
+  font-family: var(--pi-font-mono);
+  font-size: 12.5px;
+}
+.composer-ac-desc {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+}
+.composer-ac-footer {
+  padding: 6px 12px;
+  background: var(--ds-tile);
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+}
+
+/* ================================================================ */
+/* 上下文占用（环形 + 明细浮层）                                      */
+/* ================================================================ */
+.ctx {
+  position: relative;
+  display: inline-flex;
+  color: var(--ds-accent);
+}
+.ctx[data-level="warning"] {
+  color: var(--ds-warning);
+}
+.ctx[data-level="critical"] {
+  color: var(--ds-error);
+}
+.ctx-trigger {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px 3px 5px;
+  border: 0;
+  border-radius: var(--r-full);
+  background: transparent;
+  color: currentColor;
+  line-height: 1.3;
+  cursor: default;
+  transition: background var(--m-fast) var(--e-out);
+}
+.ctx-trigger:hover {
+  background: color-mix(in oklab, currentColor 8%, transparent);
+}
+.ctx[data-open="true"] .ctx-trigger {
+  background: color-mix(in oklab, currentColor 12%, transparent);
+}
+.ctx-ring {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  overflow: visible;
+  transform: rotate(-90deg);
+}
+.ctx-ring circle {
+  fill: none;
+  stroke-width: 2.5;
+}
+.ctx-ring-track {
+  stroke: color-mix(in oklab, var(--ds-text-primary) 14%, transparent);
+}
+.ctx-ring-progress {
+  stroke: currentColor;
+  stroke-linecap: round;
+  transition: stroke-dashoffset var(--m-normal) var(--e-out);
+}
+.ctx-ring-value {
+  color: currentColor;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ctx-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 60;
+  width: min(376px, calc(100vw - 32px));
+  max-height: min(560px, calc(100vh - 32px));
+  overflow-y: auto;
+  padding: 16px;
+  border: 1px solid var(--ds-border-default);
+  border-radius: var(--r-md-plus);
+  background: var(--ds-bg-elevated-opaque);
+  box-shadow: var(--ds-shadow-dialog);
+  color: var(--ds-text-primary);
+  font-size: 11px;
+  line-height: 1.45;
+  text-align: left;
+  animation: pi-pop-in var(--m-fast) var(--e-out) both;
+}
+@keyframes pi-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.ctx-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ctx-big {
+  font-size: 16px;
+  font-weight: 560;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.ctx-big-pct {
+  font-size: 16px;
+  font-weight: 600;
+  color: currentColor;
+}
+.ctx-section {
+  margin-top: 14px;
+}
+.ctx-label {
+  color: var(--ds-text-muted);
+  font-size: 10.5px;
+}
+.ctx-value {
+  color: var(--ds-text-primary);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.ctx-weak {
+  color: var(--ds-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.ctx-values {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 2px 10px;
+}
+.ctx-kpi {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 2px 0;
+}
+.ctx-summary-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+/* ================================================================ */
+/* 右侧面板                                                          */
+/* ================================================================ */
+.wp {
+  position: relative;
+  z-index: 20;
+  display: flex;
+  flex: 0 0 var(--pi-workpanel-w);
+  width: var(--pi-workpanel-w);
+  min-width: 0;
+  flex-direction: column;
+  background: var(--ds-bg-secondary);
+  overflow: hidden;
+}
+@keyframes pi-wp-in {
+  from {
+    flex-basis: 0;
+    width: 0;
+    transform: translateX(8px);
+    opacity: 0;
+  }
+  to {
+    flex-basis: var(--pi-workpanel-w);
+    width: var(--pi-workpanel-w);
+  }
+}
+@keyframes pi-wp-out {
+  from {
+    flex-basis: var(--pi-workpanel-w);
+    width: var(--pi-workpanel-w);
+  }
+  to {
+    flex-basis: 0;
+    width: 0;
+    transform: translateX(8px);
+    opacity: 0;
+  }
+}
+.wp.entering {
+  animation: pi-wp-in var(--m-normal) var(--e-out) both;
+}
+.wp.exiting {
+  animation: pi-wp-out var(--m-fast) var(--e-in) both;
+}
+/*
+  拖拽改宽度的分隔条。整条落在面板**内部**（左边缘贴左边框），不用负偏移：
+  面板本身是 overflow:hidden，负偏移的那一半会被裁掉，命中区只剩一半宽。
+*/
+.wp-resize {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  z-index: 30;
+  width: 8px;
+  cursor: col-resize;
+}
+.wp-resize::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 1px;
+  background: transparent;
+  transition: background var(--m-fast) var(--e-out);
+}
+.wp-resize:hover::after,
+.wp-resize[data-resizing="true"]::after {
+  width: 2px;
+  background: var(--ds-border-strong);
+}
+.wp-header {
+  display: flex;
+  flex: 0 0 auto;
+  height: var(--pi-toolbar-h);
+  align-items: center;
+  gap: 4px;
+  padding: 0 12px;
+  -webkit-app-region: drag;
+}
+.wp-header button {
+  -webkit-app-region: no-drag;
+}
+.wp-tabs {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  height: 32px;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scroll-padding-inline: 2px;
+}
+.wp-tabs::-webkit-scrollbar {
+  display: none;
+}
+.wp-tab {
+  display: flex;
+  min-width: 92px;
+  max-width: 180px;
+  height: 28px;
+  flex: none;
+  align-items: center;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-muted);
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.wp-tab:hover,
+.wp-tab.active {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.wp-tab-btn {
+  display: flex;
+  height: 28px;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px 0 10px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: default;
+}
+.wp-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wp-tab-close {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-muted);
+  cursor: default;
+  opacity: 0;
+  transition: opacity var(--m-fast) var(--e-out);
+}
+.wp-tab:hover .wp-tab-close,
+.wp-tab.active .wp-tab-close {
+  opacity: 1;
+}
+.wp-tab-close:hover {
+  background: var(--ds-bg-active);
+  color: var(--ds-text-primary);
+}
+.wp-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+  padding-right: 8px;
+  border-right: 1px solid var(--ds-border-subtle);
+}
+.wp-action-btn {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-md);
+  background: var(--ds-tile);
+  color: var(--ds-text-secondary);
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.wp-action-btn:hover {
+  background: var(--ds-bg-active);
+  color: var(--ds-text-primary);
+}
+.wp-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+.wp-toolbar {
+  display: flex;
+  min-height: 34px;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+}
+.wp-toolbar-text {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ds-text-muted);
+  font-size: 12px;
+}
+.wp-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  /* 文件名一律走省略号（见 .wp-name）：超出宽度不横向滚 */
+  overflow-x: hidden;
+  padding: 4px 8px 12px;
+}
+.wp-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 28px 24px;
+  color: var(--ds-text-muted);
+  text-align: center;
+}
+.wp-empty-mark {
+  display: flex;
+  width: 38px;
+  height: 38px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-full);
+  background: color-mix(in oklab, var(--ds-text-primary) 7%, transparent);
+}
+.wp-empty-title {
+  color: var(--ds-text-primary);
+  font-size: 15px;
+  font-weight: 520;
+}
+.wp-empty-body {
+  max-width: 34ch;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* 文件树 */
+.file-tree {
+  padding: 6px 6px 16px;
+}
+.file-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: var(--r-2xs);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.file-row:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.file-row.active {
+  background: var(--ds-bg-active);
+  color: var(--ds-text-primary);
+}
+.file-row-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-row-meta {
+  flex: none;
+  color: var(--ds-text-faint);
+  font-size: 10.5px;
+}
+.file-viewer-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+}
+.file-viewer-path {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  color: var(--ds-text-secondary);
+  font-family: var(--pi-font-mono);
+  font-size: 11.5px;
+}
+.file-code {
+  padding: 10px 12px 20px;
+  color: var(--ds-text-secondary);
+  font-family: var(--pi-font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow-x: auto;
+  user-select: text;
+}
+
+/* 浏览器页签 */
+.wp-browser-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+}
+.wp-browser-url {
+  height: 26px;
+  min-width: 0;
+  flex: 1;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-full);
+  background: var(--ds-tile-hover);
+  color: var(--ds-text-primary);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.wp-browser-url::placeholder {
+  color: var(--ds-text-muted);
+}
+.wp-browser-url:focus {
+  background: var(--ds-raised);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ds-accent) 22%, transparent);
+}
+.wp-browser-frame {
+  min-height: 0;
+  flex: 1;
+  border: 0;
+  background: var(--ds-bg-primary);
+}
+
+/* 审查（git 变更 / diff） */
+.review-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+}
+.review-row:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.review-status {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  font-family: var(--pi-font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+.review-status.added {
+  color: var(--ds-success);
+}
+.review-status.deleted {
+  color: var(--ds-error);
+}
+.review-counters {
+  flex: none;
+  display: flex;
+  gap: 5px;
+  font-family: var(--pi-font-mono);
+  font-size: 10.5px;
+}
+.review-add {
+  color: var(--ds-success);
+}
+.review-del {
+  color: var(--ds-error);
+}
+.diff-view {
+  max-height: min(360px, 42vh);
+  overflow: auto;
+  border-radius: var(--r-sm);
+  background: var(--ds-tile);
+  font-family: var(--pi-font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.diff-line {
+  display: flex;
+  gap: 8px;
+  padding: 0 10px 0 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.diff-line-sign {
+  flex: none;
+  width: 12px;
+  color: var(--ds-text-muted);
+}
+.diff-line.add {
+  background: color-mix(in oklab, var(--ds-success) 12%, transparent);
+}
+.diff-line.del {
+  background: color-mix(in oklab, var(--ds-error) 12%, transparent);
+}
+.diff-line.hunk {
+  padding: 2px 8px;
+  background: color-mix(in oklab, var(--ds-text-primary) 4%, transparent);
+  color: var(--ds-text-muted);
+  font-size: 10.5px;
+}
+
+/* 产出物列表 */
+.artifact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+}
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: default;
+}
+.artifact-row:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.artifact-row.active {
+  background: var(--ds-bg-active);
+  color: var(--ds-text-primary);
+}
+
+
+
+/* 消息流里的授权 / 提问卡片：未应答时是要做决定的卡片，应答后收成一行记录。 */
+.perm-card {
+  width: min(100%, 720px);
+  margin: 4px 0;
+  overflow: hidden;
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: var(--r-md);
+  background: var(--ds-bg-elevated-opaque);
+}
+.perm-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--ds-border-subtle);
+}
+.perm-mark {
+  display: flex;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  border-radius: var(--r-2xs);
+  background: var(--ds-tile-deep);
+  color: var(--ds-text-secondary);
+}
+.perm-mark.warn {
+  background: color-mix(in oklab, var(--ds-warning) 15%, transparent);
+  color: var(--ds-warning);
+}
+.perm-title {
+  color: var(--ds-text-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.perm-sub {
+  margin-top: 2px;
+  color: var(--ds-text-muted);
+  font-size: 11px;
+}
+.perm-sub code {
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: var(--r-3xs);
+  background: var(--ds-tile-deep);
+  font-family: var(--pi-font-mono);
+}
+.perm-detail {
+  padding: 8px 12px;
+}
+.perm-detail-row {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+}
+.perm-detail-key {
+  width: 56px;
+  flex: none;
+  color: var(--ds-text-muted);
+}
+.perm-detail-value {
+  min-width: 0;
+  flex: 1;
+  color: var(--ds-text-secondary);
+  font-family: var(--pi-font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.perm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--ds-tile);
+}
+.perm-note {
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  border-radius: var(--r-2xs);
+  background: color-mix(in oklab, var(--ds-warning) 10%, transparent);
+  color: var(--ds-warning);
+  font-size: 11px;
+  line-height: 1.4;
+}
+/* 已应答：一行记录，点开才是详情。 */
+.perm-row {
+  width: min(100%, 720px);
+  margin: 3px 0;
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: var(--r-md);
+  background: var(--ds-tile);
+  overflow: hidden;
+}
+.perm-row.denied {
+  border-color: color-mix(in oklab, var(--ds-warning) 26%, transparent);
+  background: color-mix(in oklab, var(--ds-warning) 5%, transparent);
+}
+.perm-row.allowed {
+  border-color: color-mix(in oklab, var(--ds-success) 22%, transparent);
+  background: color-mix(in oklab, var(--ds-success) 5%, transparent);
+}
+.perm-row-btn {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: default;
+}
+.perm-row-btn:hover {
+  color: var(--ds-text-primary);
+}
+.perm-row-text {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.perm-row-body {
+  padding: 6px 12px 8px;
+  border-top: 1px solid var(--ds-border-subtle);
+}
+
+/* ================================================================ */
+/* ⌘K 搜索面板                                                       */
+/* ================================================================ */
+.pi-search-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  padding: clamp(48px, 16vh, 140px) 24px 48px;
+  background: color-mix(in oklab, #000000 45%, transparent);
+  animation: pi-fade-in var(--m-normal) var(--e-out) both;
+}
+@keyframes pi-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.pi-search-dialog {
+  display: flex;
+  width: min(100%, 620px);
+  max-height: min(460px, 100%);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--ds-border-default);
+  border-radius: var(--r-lg-plus);
+  background: var(--ds-bg-elevated-opaque);
+  box-shadow: var(--ds-shadow-dialog);
+  animation: pi-search-in var(--m-normal) var(--e-out) both;
+}
+@keyframes pi-search-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.pi-search-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 8px;
+  color: var(--ds-text-muted);
+}
+.pi-search-head input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ds-text-primary);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.35;
+  outline: none;
+}
+.pi-search-head input::placeholder {
+  color: var(--ds-text-muted);
+}
+.pi-search-results {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px;
+}
+.pi-search-group {
+  padding: 10px 10px 4px;
+  color: var(--ds-text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.pi-search-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--r-md-plus);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: default;
+}
+.pi-search-item:hover,
+.pi-search-item.active {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.pi-search-item mark {
+  background: transparent;
+  color: var(--ds-text-primary);
+  font-weight: 600;
+}
+.pi-search-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pi-search-sub {
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+}
+.pi-search-foot {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--ds-border-subtle);
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+}
+.pi-kbd {
+  padding: 1px 5px;
+  border-radius: var(--r-3xs);
+  background: var(--ds-tile-deep);
+  font-family: var(--pi-font-mono);
+  font-size: 10.5px;
+}
+
+/* ================================================================ */
+/* 通知中心                                                          */
+/* ================================================================ */
+.pi-notif-wrap {
+  position: relative;
+}
+/*
+  通知面板：`fixed` + portal 到 body。它挂在侧栏页脚（窗口底部），所以坐标由触发器
+  现算（向上开），而且不能留在侧栏里 —— 侧栏 `overflow: hidden` 会把它裁掉。
+*/
+.pi-notif-pop {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  width: min(360px, calc(100vw - 24px));
+  max-height: min(560px, calc(100vh - 58px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--ds-bg-elevated-opaque);
+  box-shadow: var(--ds-shadow-dialog);
+  animation: pi-pop-in var(--m-fast) var(--e-out) both;
+}
+.pi-notif-head {
+  display: flex;
+  min-height: 46px;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 10px 4px 14px;
+}
+.pi-notif-title {
+  flex: 1;
+  color: var(--ds-text-primary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.pi-notif-filter {
+  min-width: 58px;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r-2xs);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: default;
+}
+.pi-notif-filter:hover {
+  background: var(--ds-bg-hover);
+}
+.pi-notif-filter.active {
+  background: var(--ds-bg-active);
+  color: var(--ds-text-primary);
+}
+.pi-notif-list {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  /* 通知正文是错误原文，含长路径 / URL：只截断，不横向滚 */
+  overflow-x: hidden;
+  padding: 2px 6px 8px;
+}
+.pi-notif-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  gap: 9px;
+  width: 100%;
+  padding: 10px 9px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-secondary);
+  text-align: left;
+  cursor: default;
+}
+.pi-notif-item:hover {
+  background: var(--ds-bg-hover);
+}
+.pi-notif-item.unread {
+  background: color-mix(in oklab, var(--ds-accent) 5%, transparent);
+  color: var(--ds-text-primary);
+}
+.pi-notif-item.unread:hover {
+  background: color-mix(in oklab, var(--ds-accent) 9%, transparent);
+}
+.pi-notif-dot {
+  position: absolute;
+  top: 16px;
+  right: 9px;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--r-full);
+  background: var(--ds-accent);
+}
+.pi-notif-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ds-text-muted);
+}
+.pi-notif-body {
+  min-width: 0;
+}
+.pi-notif-name {
+  color: inherit;
+  font-size: 13px;
+  font-weight: 500;
+}
+.pi-notif-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--ds-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.pi-notif-time {
+  color: var(--ds-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.pi-notif-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--r-full);
+  background: var(--ds-error);
+  color: #ffffff;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* ================================================================ */
+/* 子视图（搜索 / 自动化 / 插件 / 技能）                              */
+/* ================================================================ */
+.pi-subview {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+.pi-subview-head {
+  display: flex;
+  flex: none;
+  height: var(--pi-toolbar-h);
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  color: var(--ds-text-primary);
+  font-size: 14px;
+  font-weight: 500;
+}
+.pi-subview-body {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 16px 24px;
+}
+
+/* ================================================================ */
+/* 降级：尊重「减少动态效果」                                        */
+/* ================================================================ */
+@media (prefers-reduced-motion: reduce) {
+  .pi-agent *,
+  .pi-agent *::before,
+  .pi-agent *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

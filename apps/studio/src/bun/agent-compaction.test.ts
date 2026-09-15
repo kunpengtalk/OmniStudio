@@ -1,12 +1,29 @@
 /**
  * 上下文压缩单测：token 估算、裁剪边界（保留任务陈述与最近消息）、
- * 以及"预算充足时绝不改动"这条安全约束。
+ * 「预算充足时绝不改动」这条安全约束，以及重复读取的去重。
  */
 import { describe, expect, test } from "bun:test";
 
-import { compactMessages, estimateMessagesTokens, estimateTokens } from "./agent-compaction";
+import {
+  compactMessages,
+  estimateMessagesTokens,
+  estimateTokens,
+  pruneSupersededReads,
+} from "./agent-compaction";
 
 const message = (role: string, content: string) => ({ role, content });
+
+/** 造一次「助手发起读取 → 收到结果」的配对。 */
+const readCall = (id: string, path: string, args: Record<string, unknown> = {}) => ({
+  role: "assistant",
+  content: [{ type: "toolCall", id, name: "read_file", arguments: { path, ...args } }],
+});
+const readResult = (id: string, text: string) => ({
+  role: "toolResult",
+  toolCallId: id,
+  toolName: "read_file",
+  content: [{ type: "text", text }],
+});
 
 describe("estimateTokens", () => {
   test("中文按字、英文按字符比例估算", () => {
@@ -75,6 +92,21 @@ describe("compactMessages", () => {
     expect(result.messages[2]?.role).not.toBe("tool");
   });
 
+  test("同样拦住 AgentMessage 形态的工具结果（transformContext 里角色叫 toolResult）", () => {
+    // 回归：真实运行时 `transformContext` 收到的是 AgentMessage，工具结果的角色是
+    // `toolResult` 而不是线上协议里的 `tool`。只匹配 `tool` 的话这道保护等于没生效。
+    const messages = [
+      message("user", "任务陈述"),
+      message("assistant", "先读文件"),
+      message("toolResult", "文件内容很长很长的内容块 ".repeat(30)),
+      message("toolResult", "另一段工具结果 ".repeat(30)),
+      message("assistant", "继续"),
+      message("toolResult", "工具结果 ".repeat(30)),
+    ];
+    const result = compactMessages(messages, 40, placeholder);
+    expect(result.messages[2]?.role).not.toBe("toolResult");
+  });
+
   test("消息很少时不动（避免刚开会话就触发压缩）", () => {
     const messages = [message("user", "任务"), message("assistant", "x".repeat(5000))];
     const result = compactMessages(messages, 10, placeholder);
@@ -97,5 +129,75 @@ describe("compactMessages", () => {
     const tight = compactMessages(many(), 20, placeholder);
     expect(tight.messages.length).toBe(6); // 任务 + 占位 + 最近 4 条
     expect(tight.tokensAfter).toBeLessThan(tight.tokensBefore);
+  });
+});
+
+describe("pruneSupersededReads", () => {
+  const placeholder = (path: string) => `（已省略：${path} 的旧读取结果）`;
+  const big = (label: string) => `${label} `.repeat(400); // 每条都足够大，能过 MIN_PRUNE_TOKENS
+
+  test("同一路径的旧读取被最新的整份读取取代", () => {
+    const messages = [
+      message("user", "改一下 a.ts"),
+      readCall("c1", "a.ts"),
+      readResult("c1", big("第一次读到的旧内容")),
+      message("assistant", "改完再读一遍"),
+      readCall("c2", "a.ts"),
+      readResult("c2", big("第二次读到的内容")),
+    ];
+    const result = pruneSupersededReads(messages, placeholder);
+    expect(result.pruned).toBe(1);
+    expect(result.tokensSaved).toBeGreaterThan(0);
+    // 旧的那条被换成占位，新的那条原样保留
+    expect(JSON.stringify(result.messages[2])).toContain("已省略");
+    expect(JSON.stringify(result.messages[2])).not.toContain("第一次读到的旧内容");
+    expect(JSON.stringify(result.messages[5])).toContain("第二次读到的内容");
+    // 消息条数与顺序不变（工具调用与结果的配对不能被打散）
+    expect(result.messages.length).toBe(messages.length);
+    expect(result.messages[1]).toEqual(messages[1]);
+  });
+
+  test("最新一次只是分页读取时，绝不丢旧的全量结果", () => {
+    const messages = [
+      readCall("c1", "a.ts"),
+      readResult("c1", big("全量内容")),
+      readCall("c2", "a.ts", { offset: 40, limit: 20 }),
+      readResult("c2", big("只看 40-60 行")),
+    ];
+    const result = pruneSupersededReads(messages, placeholder);
+    expect(result.pruned).toBe(0);
+    expect(result.messages).toBe(messages);
+  });
+
+  test("分页读在前、全量读在后：旧的分页结果可以省", () => {
+    const messages = [
+      readCall("c1", "a.ts", { offset: 0, limit: 20 }),
+      readResult("c1", big("前 20 行")),
+      readCall("c2", "a.ts"),
+      readResult("c2", big("后来整份读了一遍")),
+    ];
+    expect(pruneSupersededReads(messages, placeholder).pruned).toBe(1);
+  });
+
+  test("不同路径 / 不同工具之间互不取代", () => {
+    const messages = [
+      readCall("c1", "a.ts"),
+      readResult("c1", big("a 的内容")),
+      readCall("c2", "b.ts"),
+      readResult("c2", big("b 的内容")),
+      { role: "assistant", content: [{ type: "toolCall", id: "c3", name: "grep", arguments: { pattern: "x" } }] },
+      { role: "toolResult", toolCallId: "c3", toolName: "grep", content: [{ type: "text", text: big("grep 结果") }] },
+    ];
+    expect(pruneSupersededReads(messages, placeholder).pruned).toBe(0);
+  });
+
+  test("省下的量太小就不动手（占位文本自己也要花 token）", () => {
+    const messages = [
+      readCall("c1", "a.ts"),
+      readResult("c1", "短"),
+      readCall("c2", "a.ts"),
+      readResult("c2", "也短"),
+    ];
+    expect(pruneSupersededReads(messages, placeholder).pruned).toBe(0);
   });
 });

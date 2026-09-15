@@ -10,9 +10,9 @@
  * 版面识别与内容提取，走现有的 vLLM pipeline。
  */
 
-/** tessdata_fast 仓库（GitHub raw 下载根地址）。 */
+/** tessdata_fast 仓库（语言包按 raw 取，实际下载走 bun/mirror-download 的多链路回退）。 */
 export const OCR_TESSDATA_REPO = "tesseract-ocr/tessdata_fast";
-export const OCR_TESSDATA_RAW_BASE = `https://github.com/${OCR_TESSDATA_REPO}/raw/main/`;
+export const OCR_TESSDATA_BRANCH = "main";
 
 export type OcrEngineType = "tesseract" | "vlm" | "paddleocr";
 

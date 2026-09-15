@@ -130,6 +130,71 @@ test("启动厂商：地址自带版本段时不会探到不存在的 /v1/models
   expect(tried).toEqual(["https://api.bare.example/models", "https://api.bare.example/v1/models"]);
 });
 
+test("裸域名 + 站点根路径是前端首页：自动退回 /v1/models 拿到清单（New API 这类聚合站）", async () => {
+  // 上游是 New API / one-api 时，用户常常只填到域名一级（官方文档给的就是这个）。
+  // 站点根路径返回的是 SPA 首页：200 + text/html —— 只补 /models 的实现会在这里
+  // 抛 SyntaxError: Failed to parse JSON，设置页于是显示「获取失败」。
+  const id = makeProvider({ name: "聚合站", baseUrl: "https://agg.example", apiKey: "sk-agg" });
+  const seen: string[] = [];
+  globalThis.fetch = mock(async (url: URL | string) => {
+    seen.push(String(url));
+    if (String(url).endsWith("/v1/models")) {
+      return new Response(JSON.stringify({ object: "list", data: [{ id: "gpt-image-1" }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("<!doctype html><html><body>前端首页</body></html>", {
+      status: 200,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }) as never;
+
+  const res = await CloudProviders.setCloudProviderEnabled(id, true);
+  expect(res.ok).toBe(true);
+  expect(seen).toEqual(["https://agg.example/models", "https://agg.example/v1/models"]);
+  expect(CloudProviders.getCloudProviderInfo(id)!.models.map((m) => m.id)).toEqual(["gpt-image-1"]);
+});
+
+test("候选地址都不是模型清单：说清「返回的是网页、地址要填到 /v1」，而不是 SyntaxError", async () => {
+  globalThis.fetch = mock(
+    async () =>
+      new Response("<!doctype html><html></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+  ) as never;
+
+  const r = await CloudProviders.fetchRemoteModels({ baseUrl: "https://site.example", apiKey: "sk-x" });
+  expect(r.ok).toBe(false);
+  expect(r.error).toContain("网页");
+  expect(r.error).toContain("/v1");
+  expect(r.error).not.toContain("SyntaxError");
+});
+
+test("上游用 JSON 报文报错（New API 管理接口形状）：把上游原话交回界面", async () => {
+  globalThis.fetch = mock(
+    async () =>
+      new Response(JSON.stringify({ message: "Unauthorized, invalid access token", success: false }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+  ) as never;
+
+  const r = await CloudProviders.fetchRemoteModels({ baseUrl: "https://agg.example/v1", apiKey: "sk-x" });
+  expect(r.ok).toBe(false);
+  expect(r.error).toContain("Unauthorized, invalid access token");
+});
+
+test("清单形状：{data} / {models} / 根数组都认", async () => {
+  for (const body of [{ data: [{ id: "a" }] }, { models: [{ id: "b" }] }, [{ id: "c" }]]) {
+    globalThis.fetch = mock(async () => new Response(JSON.stringify(body), { status: 200 })) as never;
+    const r = await CloudProviders.fetchRemoteModels({ baseUrl: "https://shape.example/v1", apiKey: "sk" });
+    expect(r.ok).toBe(true);
+    expect(r.models).toHaveLength(1);
+  }
+});
+
 test("停用激活中的厂商：回到本地模式（对话不会继续打到已停用的地址）", async () => {
   const id = makeProvider({ name: "停用测试", baseUrl: "https://off.example/v1", apiKey: "sk-x" });
   globalThis.fetch = mock(

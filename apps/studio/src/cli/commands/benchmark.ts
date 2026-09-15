@@ -5,6 +5,7 @@ import { controlRequest, isAppRunning } from "../client";
 import { printTable } from "../format";
 import { pickNumbered } from "../tui";
 import { resolveDataDir } from "../data-dir";
+import { modelNameFromRef } from "../../shared/modelscope";
 import type {
   BenchmarkRecordRow,
   BenchmarkRunState,
@@ -126,7 +127,10 @@ function printRowLine(r: SpeedBenchRow) {
 function printResult(state: BenchmarkRunState) {
   const statusText =
     state.status === "done" ? "\x1b[32m完成\x1b[0m" : state.status === "cancelled" ? "已取消" : `\x1b[31m失败\x1b[0m`;
-  console.log(`\n${statusText}  ${state.model}  [${targetLabel(state)}]  ${state.params.genLength} tok × 并发 ${state.params.batchSize}`);
+  // 老记录里可能存着 MLX 的路径型请求 id：终端里也一律显示模型名。
+  console.log(
+    `\n${statusText}  ${modelNameFromRef(state.model)}  [${targetLabel(state)}]  ${state.params.genLength} tok × 并发 ${state.params.batchSize}`,
+  );
   if (state.error) console.log(`错误：${state.error}`);
 
   const s = state.summary;
@@ -165,7 +169,7 @@ function printRecords(records: BenchmarkRecordRow[]) {
     records.map((r) => [
       String(r.id),
       fmtTime(r.createdAt),
-      r.model,
+      modelNameFromRef(r.model),
       targetLabel(r),
       r.status === "done" ? "完成" : r.status === "cancelled" ? "取消" : "失败",
       r.summary ? String(r.summary.avgTps) : "-",

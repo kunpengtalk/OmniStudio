@@ -1,5 +1,7 @@
 import { createHash } from "crypto";
 
+import { proxyWebSocketOptions } from "./proxy";
+
 /**
  * Microsoft Edge 在线 TTS 客户端（完全免费、无需任何 API Key）。
  * 协议基于 edge-tts（https://github.com/rany2/edge-tts）：
@@ -114,9 +116,10 @@ export function edgeSynthesize(text: string, voice: string, opts: EdgeSynthesize
 
     let ws: WebSocket;
     try {
-      // Bun 的 WebSocket 支持自定义 headers，但 DOM 类型签名没有，故此处断言。
+      // Bun 的 WebSocket 支持自定义 headers 与 proxy，但 DOM 类型签名没有，故此处断言。
       ws = new WebSocket(url, {
         headers: WSS_HEADERS,
+        ...proxyWebSocketOptions(url),
       } as unknown as string | string[] | undefined);
     } catch (e) {
       reject(e instanceof Error ? e : new Error(String(e)));

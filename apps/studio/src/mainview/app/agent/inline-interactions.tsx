@@ -16,6 +16,7 @@ import { Input } from "@ui/input";
 import { useAgentStore, type PermissionReply } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
+import { PiTip } from "./pi-tip";
 import type { PendingPermission, QuestionPrompt } from "../../../bun/agent-interactions";
 import type { PermissionRequest } from "../../../bun/permissions";
 import type { AgentEventRow } from "../../../bun/agent";
@@ -98,119 +99,99 @@ export function InlinePermissionCard({
     const denied = reply === "deny";
     const text = settleEvent?.output ?? `${denied ? "已拒绝" : "已允许"}：${asks.permission} · ${asks.pattern}`;
     return (
-      <div
-        className={cn(
-          "overflow-hidden rounded-xl border text-xs",
-          denied ? "border-amber-500/30 bg-amber-500/5" : "border-emerald-500/25 bg-emerald-500/5",
-        )}
-      >
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px]"
-        >
+      <div className={`perm-row ${denied ? "denied" : "allowed"}`}>
+        <button type="button" className="perm-row-btn" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
           <ShieldCheckIcon
-            className={cn("size-3 shrink-0", denied ? "text-amber-600" : "text-emerald-600")}
+            size={13}
+            aria-hidden
+            style={{ flex: "none", color: denied ? "var(--ds-warning)" : "var(--ds-success)" }}
           />
-          <span className="min-w-0 flex-1 truncate">{text}</span>
-          <ChevronDownIcon className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-180")} />
+          <span className="perm-row-text">{text}</span>
+          <ChevronDownIcon size={13} className={`pi-caret${open ? "" : " collapsed"}`} aria-hidden />
         </button>
-        {open && (
-          <div className="space-y-1 border-t bg-background/40 px-3 py-2 text-[11px]">
-            <p className="text-muted-foreground">{asks.title}</p>
+        {open ? (
+          <div className="perm-row-body">
+            <p style={{ color: "var(--ds-text-muted)", fontSize: 11 }}>{asks.title}</p>
             {Object.entries(asks.detail ?? {}).map(([key, value]) => (
-              <div key={key} className="flex gap-2">
-                <span className="w-16 shrink-0 text-muted-foreground">{key}</span>
-                <span className="min-w-0 flex-1 font-mono text-[11px] break-all">{String(value)}</span>
+              <div key={key} className="perm-detail-row">
+                <span className="perm-detail-key">{key}</span>
+                <span className="perm-detail-value">{String(value)}</span>
               </div>
             ))}
           </div>
-        )}
+        ) : null}
       </div>
     );
   }
 
   // 待应答：直接画在消息流里（不浮层遮挡输入框），用户就地确认。
   return (
-    <div
-      className={cn(
-        "overflow-hidden rounded-xl border bg-popover text-xs shadow-sm",
-        isDoomLoop ? "border-amber-500/40" : "border-primary/30",
-      )}
-      data-permission-request={asks.permission}
-    >
-      <div className="flex items-start gap-2 border-b px-3 py-2">
-        <div
-          className={cn(
-            "mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-md",
-            isDoomLoop ? "bg-amber-500/15 text-amber-600" : "bg-primary/10 text-primary",
-          )}
-        >
-          {isDoomLoop ? <AlertTriangleIcon className="size-3.5" /> : <ShieldCheckIcon className="size-3.5" />}
+    <div className="perm-card" data-permission-request={asks.permission}>
+      <div className="perm-card-head">
+        <div className={`perm-mark${isDoomLoop ? " warn" : ""}`}>
+          {isDoomLoop ? <AlertTriangleIcon size={13} aria-hidden /> : <ShieldCheckIcon size={13} aria-hidden />}
         </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-[11px] font-medium">{asks.title}</p>
-          <p className="mt-0.5 text-[10px] text-muted-foreground">
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <p className="perm-title">{asks.title}</p>
+          <p className="perm-sub">
             {t("agent.permission.subtitle")} · {label}
-            <span className="ml-1.5 rounded bg-muted px-1 font-mono">{asks.tool ?? asks.permission}</span>
+            <code>{asks.tool ?? asks.permission}</code>
           </p>
         </div>
       </div>
 
-      <div className="space-y-1 px-3 py-2">
-        {isDoomLoop && (
-          <p className="rounded-md bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-700 dark:text-amber-400">
-            {t("agent.permission.doomLoop")}
-          </p>
-        )}
+      <div className="perm-detail">
+        {isDoomLoop ? <p className="perm-note">{t("agent.permission.doomLoop")}</p> : null}
         {Object.entries(asks.detail ?? {}).map(([key, value]) => (
-          <div key={key} className="flex gap-2 text-[11px]">
-            <span className="w-14 shrink-0 text-muted-foreground">{key}</span>
-            <span className="min-w-0 flex-1 font-mono text-[10px] break-all">{String(value)}</span>
+          <div key={key} className="perm-detail-row">
+            <span className="perm-detail-key">{key}</span>
+            <span className="perm-detail-value">{String(value)}</span>
           </div>
         ))}
       </div>
 
-      <div className="flex flex-wrap items-center gap-1.5 border-t bg-muted/30 px-3 py-2">
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-6 text-[11px]"
+      <div className="perm-actions">
+        <button
+          type="button"
+          className="composer-panel-btn"
           disabled={respond.isPending}
           onClick={() => respond.mutate({ id: asks.id, reply: "deny" })}
         >
-          <XIcon data-icon="inline-start" />
+          <XIcon size={12} aria-hidden />
           {t("agent.permission.deny")}
-        </Button>
-        <div className="ml-auto flex items-center gap-1.5">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 text-[11px]"
-            tooltip={t("agent.permission.workspaceHint")}
-            disabled={respond.isPending}
-            onClick={() => respond.mutate({ id: asks.id, reply: "workspace" })}
-          >
-            {t("agent.permission.workspace")}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            className="h-6 text-[11px]"
+        </button>
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+          <PiTip label={t("agent.permission.workspaceHint")}>
+            <button
+              type="button"
+              className="composer-panel-btn"
+              disabled={respond.isPending}
+              onClick={() => respond.mutate({ id: asks.id, reply: "workspace" })}
+            >
+              {t("agent.permission.workspace")}
+            </button>
+          </PiTip>
+          <button
+            type="button"
+            className="composer-panel-btn"
             disabled={respond.isPending}
             onClick={() => respond.mutate({ id: asks.id, reply: "session" })}
           >
             {t("agent.permission.session")}
-          </Button>
-          <Button
-            size="sm"
-            className="h-6 text-[11px]"
+          </button>
+          <button
+            type="button"
+            className="composer-panel-btn primary"
             disabled={respond.isPending}
             onClick={() => respond.mutate({ id: asks.id, reply: "once" })}
           >
-            {respond.isPending ? <Loader2Icon data-icon="inline-start" className="animate-spin" /> : <CheckIcon data-icon="inline-start" />}
+            {respond.isPending ? (
+              <Loader2Icon size={12} className="animate-spin" aria-hidden />
+            ) : (
+              <CheckIcon size={12} aria-hidden />
+            )}
             {t("agent.permission.once")}
-          </Button>
+          </button>
         </div>
       </div>
     </div>

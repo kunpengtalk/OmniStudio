@@ -29,6 +29,7 @@ export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台
   status               查看服务器 / 网关状态
   server <action>      管理服务器：list | start | stop | restart | info | logs
   logs                 查看统一应用日志（各子系统失败与关键事件都在这儿）
+  agent run <提示词>    无头跑一个 Agent 回合；--json 输出 NDJSON 事件流（供脚本消费）
   benchmark [model]    跑基准测速（本地引擎 / 云端 API），结果入库
   install              检查推理引擎依赖（llama.cpp / vLLM / SGLang / MLX）
   guide                打印完整使用手册（--md / --json / --lang en）
@@ -46,10 +47,31 @@ export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台
   omi memory add "偏好用中文回答"     写入一条共享记忆
   omi backup create --out ~/Backups  把设置 / 技能 / 聊天 / 记忆等打包备份
   omi launch claude --model qwen3-4b  用当前模型启动 Claude Code
+  omi agent run "跑一遍测试并总结" --json  无头执行并把事件流交给脚本
 
 运行 'omi help <命令>' 查看单命令详情，'omi guide' 查看完整手册（含记忆接入与 code 加载）。`;
 
 export const CMD_HELP: Record<string, string> = {
+  agent: `无头跑一个 Agent 回合（对齐 Codex 的 codex exec）。
+
+用法：omi agent run <提示词> [选项]
+     echo "提示词" | omi agent run
+
+选项：
+  --json                输出 NDJSON 事件流（每行一个 JSON），供脚本消费
+  --chunks              在 --json 里连正文增量一起输出
+  --workspace <目录>     指定工作区（默认用应用里配置的那个）
+  --mode <模式>          agent（默认）| plan | goal
+  --conversation <id>   在已有会话里接着跑（默认新建一条）
+  --timeout <毫秒>       等待上限（默认 600000）
+
+说明：
+  会话照常落库（标题取提示词前 40 字），跑完可以在界面里打开继续追问。
+  无人值守：不会弹授权卡片，被策略拦下的动作直接以拒绝理由回到模型。
+
+示例：
+  omi agent run "把 README 的安装步骤补全"
+  omi agent run "跑测试并总结失败" --json | jq -r 'select(.type=="event") | .event.toolName'`,
   start: `启动 OmniStudio 应用；未运行时自动拉起（安装路径或 --app-path）。
 
 用法：omi start [options]
@@ -379,7 +401,7 @@ export const TOPIC_HELP: Record<string, string> = {
   omi backup remote test
   omi backup remote list
   omi backup remote download OmniStudio-20260912-101500.omnibackup
-  omi backup restore ~/Library/Application\ Support/omni-studio.kunpengtalk.com/dev/backups/OmniStudio-20260912-101500.omnibackup`,
+  omi backup restore ~/Library/Application Support/omni-studio.kunpengtalk.com/dev/backups/OmniStudio-20260912-101500.omnibackup`,
   "memory add": `写入一条共享记忆（外部 Agent 的写回通道）。
 
 用法：omi memory add <内容> [options]

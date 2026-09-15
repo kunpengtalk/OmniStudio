@@ -868,7 +868,7 @@ function verifyInstruction(id: string, kw: IfevalKwargs, response: string, promp
       return relationOk(caps, String(kw.relation ?? ""), num(kw.capital_frequency, num(kw.capital_word_frequency)));
     }
     case "detectable_content:number_placeholders": {
-      const placeholders = response.match(/\[[^\[\]]+\]/g) ?? [];
+      const placeholders = response.match(/\[[^[\]]+\]/g) ?? [];
       return placeholders.length >= num(kw.num_placeholders);
     }
     case "detectable_content:postscript": {

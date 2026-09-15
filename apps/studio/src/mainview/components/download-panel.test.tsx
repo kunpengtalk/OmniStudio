@@ -147,10 +147,6 @@ const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query
 const { TooltipProvider } = await import("./ui/tooltip");
 const { DownloadsButton } = await import("./download-panel");
 const { useModelDownloadStore } = await import("@stores/model-download");
-const { translate } = await import("../../shared/i18n");
-
-const zh = (key: string, params?: Record<string, string>) => translate("zh", key, params);
-
 afterAll(() => {
   for (const [key, value] of savedGlobals) {
     (globalThis as unknown as Record<string, unknown>)[key] = value;

@@ -35,6 +35,7 @@ import {
   ModelCategoryBadge,
   ModelFormatBadge,
 } from "@/mainview/components/model-category-badge";
+import { ModelCategoryChips } from "@/mainview/components/model-category-chips";
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "—";
@@ -338,38 +339,12 @@ export function ModelsScreen({
             <SparklesIcon className="size-4 text-primary" />
             {t("models.recommended")}
           </h3>
-          <div className="mb-3 flex flex-wrap gap-1.5">
-            <button
-              type="button"
-              onClick={() => setActiveCategory("all")}
-              className={cn(
-                "rounded-full border px-2.5 py-1 text-xs transition-colors",
-                activeCategory === "all"
-                  ? "border-primary bg-primary/10 text-primary"
-                  : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-              )}
-            >
-              {t("models.cat.all")}
-            </button>
-            {MODEL_CATEGORIES.filter((c) => c.value !== "all").map((cat) => {
-              const isActive = activeCategory === cat.value;
-              return (
-                <button
-                  key={cat.value}
-                  type="button"
-                  onClick={() => setActiveCategory(cat.value)}
-                  className={cn(
-                    "rounded-full border px-2.5 py-1 text-xs transition-colors",
-                    isActive
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-                  )}
-                >
-                  {t(cat.labelKey)}
-                </button>
-              );
-            })}
-          </div>
+          <ModelCategoryChips
+            className="mb-3"
+            values={MODEL_CATEGORIES.map((c) => c.value)}
+            value={activeCategory}
+            onChange={setActiveCategory}
+          />
           <div className="flex flex-col gap-2">
             {presets.map((preset) => (
               <PresetRow key={preset.repo} preset={preset} onOpenDetail={onOpenDetail} />

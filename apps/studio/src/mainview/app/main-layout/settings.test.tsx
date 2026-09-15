@@ -2,11 +2,13 @@ import { afterAll, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
 
 /**
- * 设置导航的回归测试：「偏好 → 通用」整页被删掉，但页里的设置没有跟着一起丢。
+ * 设置导航的回归测试。
  *
- * 那一页三条设置里，更新通道 / 自动检查更新在「关于」页本来就有（重复入口），
- * 只有「启动应用时自动拉起本地推理服务」是独一份的，已搬到服务器自己的「概览」页。
- * 这里锁住两件事：导航里不再出现「通用」，以及概览页上那条开关仍能改到设置。
+ * 两件事：
+ *   1. 「偏好 → 通用」这一页在加进代理设置时**整页被删过一次**，页里的设置没跟着丢
+ *      （更新通道 / 自动检查更新在「关于」页，启动时自动拉起推理服务搬到了服务器概览页）。
+ *      现在它回来了 —— 承载代理设置 —— 这里锁住导航条目与点进去能渲染出代理卡；
+ *   2. 概览页上那条自启动开关仍能改到设置。
  *
  * happy-dom 提供真实 DOM（Radix 的 Switch 需要），afterAll 还原全局。
  */
@@ -82,6 +84,16 @@ mock.module("@lib/rpc", () => ({
       settingsPatches.push(settings);
       return { settings: {} };
     },
+    getProxyStatus: async () => ({
+      mode: "system" as const,
+      url: "",
+      source: "none" as const,
+      allowLocalNetwork: true,
+      systemUrl: "",
+      pacUrl: null,
+      exceptions: [],
+    }),
+    testProxy: async () => ({ ok: true, url: "", source: "none" }),
   },
 }));
 
@@ -123,7 +135,7 @@ async function renderSettings() {
   };
 }
 
-test("设置导航就是这一份：没有「通用」「性能」「记忆」这类重复入口", async () => {
+test("设置导航就是这一份：通用（代理）在偏好分组里，没有「性能」「记忆」这类重复入口", async () => {
   const { text, cleanup } = await renderSettings();
   const nav = document.querySelector("nav[aria-label]");
   expect(nav).not.toBeNull();
@@ -140,14 +152,35 @@ test("设置导航就是这一份：没有「通用」「性能」「记忆」�
     "联网检索",
     "MCP",
     "Agent 权限",
+    "Agent 能力",
     "命令行",
+    "通用",
     "外观",
     "关于我们",
+    "使用统计",
     "控制台",
     "备份与恢复",
   ]);
   // 删掉的页面没有留下把 i18n key 原样渲染出来的残留。
   expect(text).not.toContain("settings.prefs.");
+  await cleanup();
+});
+
+test("点「通用」进得去代理卡：模式、本地网络开关、采样都在", async () => {
+  const { cleanup } = await renderSettings();
+  const nav = document.querySelector("nav[aria-label]");
+  const general = [...nav!.querySelectorAll("button")].find((b) => b.textContent?.trim() === "通用");
+  expect(general).not.toBeUndefined();
+  await act(async () => {
+    (general as unknown as HTMLElement).click();
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const text = document.body.textContent ?? "";
+  expect(text).toContain(zh("settings.proxy.title"));
+  expect(text).toContain(zh("settings.proxy.allowLocalNetwork"));
+  expect(document.querySelectorAll('[data-slot="proxy-sample"]')).toHaveLength(4);
   await cleanup();
 });
 

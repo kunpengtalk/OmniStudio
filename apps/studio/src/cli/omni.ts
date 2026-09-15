@@ -467,7 +467,7 @@ async function cmdChat(args: string[], ctx: Ctx) {
   } else {
     modelName = backend.chatModel.getChatModelName();
   }
-  if (!modelName) fail("没有可用的对话模型：先 \`omni model set <模型>\`，或在设置里配置 VLLM_MODEL_NAME。");
+  if (!modelName) fail("没有可用的对话模型：先 `omni model set <模型>`，或在设置里配置 VLLM_MODEL_NAME。");
 
   // 本地模式：确保推理服务器已就绪（CLI 没有控制台，按设置后台拉起）。
   const base = backend.chat.getChatBaseUrl();

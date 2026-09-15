@@ -3,8 +3,12 @@
  * 不依赖数据库与 electrobun，可直接跑 `bun test`。
  */
 import { describe, expect, test } from "bun:test";
+import { mkdirSync } from "node:fs";
+import path from "path";
 
+import { conversationSpillDir, spillRoot } from "./agent-spill";
 import {
+  canonicalCommand,
   defaultRules,
   displayPath,
   evaluate,
@@ -13,6 +17,7 @@ import {
   matchesPermissionPattern,
   parseRuleList,
   permissionRequestForTool,
+  summarizeEffectivePermissions,
   winningRule,
   type PermissionRule,
 } from "./permissions";
@@ -55,8 +60,124 @@ describe("winningRule", () => {
   });
 });
 
+/**
+ * 命令归一化（对齐 Codex 的 command_canonicalization）。
+ *
+ * 回归的是「一个空格绕过审批」：smart 模式把危险命令写成通配规则
+ * （`*rm -rf*` / `*git push*`），而 `rm  -rf /`（两个空格）、`rm "-rf" /` 都是
+ * 等价写法却不匹配 —— 用户以为有审批，实际上直接放行了。
+ */
+/**
+ * 沙箱升级（对齐 Codex 的 sandbox_approval）：命令被沙箱拦下后申请"跳过沙箱重跑一次"。
+ * 它单独一档的原因见 defaultRules 里的注释：auto 说的是"别为工具调用打扰我"，
+ * 不是"悄悄关掉我特意开启的沙箱"。
+ */
+describe("沙箱升级权限", () => {
+  const request = { permission: "sandbox_escalation", pattern: "echo x > ~/a.txt" };
+
+  test("smart / manual 下询问；auto / strict 下默认拒绝", () => {
+    expect(evaluate(request, defaultRules("smart")).action).toBe("ask");
+    expect(evaluate(request, defaultRules("manual")).action).toBe("ask");
+    expect(evaluate(request, defaultRules("auto")).action).toBe("deny");
+    expect(evaluate(request, defaultRules("strict")).action).toBe("deny");
+  });
+
+  test("用户可以显式放行（设置页加一条规则就够）", () => {
+    const rules = defaultRules("auto").concat([
+      { permission: "sandbox_escalation", pattern: "*", action: "allow" },
+    ]);
+    expect(evaluate(request, rules).action).toBe("allow");
+  });
+
+  test("工具调用翻译：带上命令原文与沙箱输出，模式用归一化后的命令", () => {
+    const translated = permissionRequestForTool({
+      toolName: "escalate_sandbox",
+      workspace: "/tmp/ws",
+      args: { command: "rm  -rf /tmp/x", output: "zsh:1: operation not permitted: /tmp/x" },
+    });
+    expect(translated?.permission).toBe("sandbox_escalation");
+    expect(translated?.pattern).toBe("rm -rf /tmp/x");
+    expect(translated?.detail["命令"]).toBe("rm  -rf /tmp/x");
+    expect(translated?.detail["沙箱输出"]).toContain("operation not permitted");
+    expect(translated?.title).toContain("沙箱");
+  });
+
+  test("生效权限摘要里能一眼看到它是询问还是拒绝", () => {
+    const summary = summarizeEffectivePermissions(null, "/tmp/ws");
+    const row = summary.find((item) => item.permission === "sandbox_escalation");
+    expect(row).toBeDefined();
+    expect(row!.label).toBe("跳过命令沙箱");
+    expect(["ask", "deny", "allow"]).toContain(row!.action);
+  });
+});
+
+describe("命令归一化", () => {
+  test("折叠空白、剥引号与转义，但保留引号内的空白", () => {
+    expect(canonicalCommand("rm  -rf   /tmp")).toBe("rm -rf /tmp");
+    expect(canonicalCommand("rm\t-rf\t/tmp")).toBe("rm -rf /tmp");
+    expect(canonicalCommand('rm "-rf" /tmp')).toBe("rm -rf /tmp");
+    expect(canonicalCommand("rm\\ -rf /tmp")).toBe("rm -rf /tmp");
+    expect(canonicalCommand(`echo "a  b"`)).toBe("echo a  b");
+    expect(canonicalCommand("  ")).toBe("");
+  });
+
+  test("等价写法不再绕过危险命令规则（smart 模式）", () => {
+    const rules = defaultRules("smart");
+    for (const command of [
+      "rm -rf /tmp/x",
+      "rm  -rf /tmp/x",
+      "rm\t-rf /tmp/x",
+      'rm "-rf" /tmp/x',
+      "git  push origin main",
+      "sudo   rm /etc/hosts",
+    ]) {
+      expect(evaluate({ permission: "bash", pattern: command }, rules).action).toBe("ask");
+    }
+  });
+
+  test("普通命令不会被归一化误伤", () => {
+    const rules = defaultRules("smart");
+    for (const command of ["npm  test", "ls -la", "git status", 'echo "a  b"']) {
+      expect(evaluate({ permission: "bash", pattern: command }, rules).action).toBe("allow");
+    }
+  });
+
+  test("「本会话总是」存的是归一化命令，之后的等价写法同样命中", () => {
+    const request = permissionRequestForTool({
+      toolName: "bash",
+      args: { command: "rm  -rf /tmp/whatever" },
+      workspace: "/tmp/ws",
+    });
+    expect(request?.pattern).toBe("rm  -rf /tmp/whatever"); // 展示仍是用户那条原文
+    expect(request?.always).toEqual(["rm -rf /tmp/whatever"]); // 规则用归一化形式
+    const rules = defaultRules("smart").concat([
+      { permission: "bash", pattern: request!.always[0]!, action: "allow" },
+    ]);
+    for (const command of ["rm  -rf /tmp/whatever", 'rm "-rf" /tmp/whatever']) {
+      expect(evaluate({ permission: "bash", pattern: command }, rules).action).toBe("allow");
+    }
+  });
+
+  test("isDangerousCommand 也看归一化形式", () => {
+    expect(isDangerousCommand("rm  -rf /tmp")).toBe(true);
+    expect(isDangerousCommand('rm "-rf" /tmp')).toBe(true);
+    expect(isDangerousCommand("npm  test")).toBe(false);
+  });
+});
+
 describe("permissionRequestForTool", () => {
   const workspace = "/tmp/ws";
+
+  /**
+   * 回归：新工具如果没在翻译表里登记，会掉进 default 分支被当成 MCP 外部工具
+   * （smart 模式放行、manual/strict 直接拦），于是"这个功能怎么不好使"很难定位。
+   * 这条是 live-check 实际踩出来的：goal / write_plan 一开始都被当成 mcp 拒掉了。
+   */
+  test("不碰工作区的内置工具不该被当成外部工具（goal / write_plan / think）", () => {
+    for (const toolName of ["goal", "write_plan", "think", "read_skill", "todo_write"]) {
+      expect(permissionRequestForTool({ toolName, args: {}, workspace })).toBeNull();
+    }
+  });
 
   test("bash 用命令原文作为模式", () => {
     const request = permissionRequestForTool({
@@ -93,6 +214,26 @@ describe("permissionRequestForTool", () => {
     expect(
       permissionRequestForTool({ toolName: "read_file", args: { path: "/etc/hosts" }, workspace })
         ?.permission,
+    ).toBe("external_directory");
+  });
+
+  test("工具输出的转存目录不算「工作区之外」：读回超限输出不该再弹一次授权", () => {
+    // 转存文件是应用自己从工具结果里写出来的（用户已授权过产生它的那次调用），
+    // 不放行就等于"截断之后能读回原文"是句空话 —— 每读一次都要用户点一下。
+    //
+    // 先把这个目录建出来：`isSpillPath` 拿**真实路径**比对（防"先建软链再读"，
+    // 见 agent-spill.ts），根目录在盘上不存在就无从解析，只能保守地判成"不在转存
+    // 目录里"。真实路径下它必定存在（有文件才谈得上读它），所以这里不能省 ——
+    // 省了就变成依赖"别的测试先写过一次转存"，单独跑本文件必然红。
+    const spillDir = conversationSpillDir(42);
+    mkdirSync(spillDir, { recursive: true });
+    const spillFile = path.join(spillDir, "2026-01-01T00-00-00-000Z-bash.txt");
+    expect(permissionRequestForTool({ toolName: "read_file", args: { path: spillFile }, workspace })).toBeNull();
+    expect(permissionRequestForTool({ toolName: "grep", args: { pattern: "x", path: spillFile }, workspace })).toBeNull();
+    // 口子没有开大：数据目录的其余部分照旧要授权（设置表里存着全部云端 API Key）。
+    const settingsDb = path.join(spillRoot(), "..", "omni-studio.db");
+    expect(
+      permissionRequestForTool({ toolName: "read_file", args: { path: settingsDb }, workspace })?.permission,
     ).toBe("external_directory");
   });
 

@@ -9,6 +9,14 @@ export type ModelEndpoint = {
   base?: string;
   apiKey?: string;
   model?: string;
+  /**
+   * 用量记账用的归属信息。
+   *
+   * 调用方（OCR 页）比这里更清楚这次请求落在谁身上：显式填了 `base` 就说明是
+   * 页面自己配的远程服务，否则就是本地推理服务器。不填时按"本地 + 当前引擎"
+   * 记账 —— 一次性调用（OCR 等）都走这个默认值。
+   */
+  usage?: { provider: string; upstream: "local" | "cloud" };
 };
 
 /**

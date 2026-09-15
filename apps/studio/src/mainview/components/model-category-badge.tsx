@@ -40,6 +40,24 @@ export const MODEL_CATEGORY_ICONS: Record<ModelCategory, LucideIcon> = {
   other: TagIcon,
 };
 
+/**
+ * 分类 → 筛选条上的两字短名（图标和它一起用）。
+ *
+ * 长名（"语音合成 TTS"）留给列表里的分类标签，筛选条一整行七八颗挤在
+ * 窄栏里，只有短名才排得下、不出现横向滚动条。全名放 title 悬浮提示。
+ */
+export const MODEL_CATEGORY_SHORT_KEYS: Record<ModelCategory | "all", string> = {
+  all: "models.catShort.all",
+  chat: "models.catShort.chat",
+  embedding: "models.catShort.embedding",
+  rerank: "models.catShort.rerank",
+  tts: "models.catShort.tts",
+  asr: "models.catShort.asr",
+  image: "models.catShort.image",
+  video: "models.catShort.video",
+  other: "models.catShort.other",
+};
+
 /** 权重格式 → 图标。 */
 export const MODEL_FORMAT_ICONS: Record<ModelFormatKind, LucideIcon> = {
   gguf: FileBoxIcon,

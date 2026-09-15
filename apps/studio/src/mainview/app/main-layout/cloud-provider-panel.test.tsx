@@ -4,11 +4,14 @@ import { Window } from "happy-dom";
 /**
  * 模型云服务面板的回归测试：分类标签的样式统一 + 「获取模型列表」的挑选流程。
  *
- * 之前两件事都被改过：
+ * 之前这几件事都被改过：
  *   1. 分类标签一色一类（蓝/青/紫/琥珀…），一行下来像调色板 —— 现在一套中性样式，
  *      靠小图标区分，颜色只留给状态；
  *   2. 「获取模型列表」直接把服务商返回的上百个模型全写进配置 —— 现在只弹框列出来，
- *      用户逐个「+」添加，弹框里能看到哪些已经加过。
+ *      用户逐个「+」添加，弹框里能看到哪些已经加过；
+ *   3. 拉不到清单时打开空弹框、把上游报错原文（`获取失败：密钥无效或没有权限（HTTP 401）`）
+ *      挂在清单区 —— 密钥过期是配置状态，不是页面错误：现在不弹框，只在模型卡片里
+ *      留一行中性结论，原文交给 logs/app.log。
  */
 
 // happy-dom 提供真实 DOM（Radix 的 Dialog 需要），afterAll 还原全局。
@@ -222,46 +225,94 @@ test("分类条是固定的：云端一个都没有的那些分类也照常列�
   const view = await renderPanel();
   await openPicker(view.container);
 
-  // 十个 tab 一个不少，计数对得上号：生图 / 生视频 / 其它 / 失效 是 0 也照常列出
-  const tabTexts = [...document.body.querySelectorAll("button")].map(
-    (b) => b.textContent?.trim() ?? "",
-  );
+  // 十个 tab 一个不少，计数对得上号：生图 / 生视频 / 其它 / 失效 是 0 也照常列出。
+  // 筛选条上用的是两字短名（图标 + 短名 + 计数），完整分类名放在 title 里。
+  const chips = [...document.body.querySelectorAll<HTMLElement>("button[aria-pressed]")];
   const expected: [string, number][] = [
-    ["models.cat.all", 5],
-    ["models.cat.chat", 2],
-    ["models.cat.embedding", 1],
-    ["models.cat.rerank", 1],
-    ["models.cat.tts", 1],
-    ["models.cat.asr", 0],
-    ["models.cat.image", 0],
-    ["models.cat.video", 0],
-    ["models.cat.other", 0],
+    ["models.catShort.all", 5],
+    ["models.catShort.chat", 2],
+    ["models.catShort.embedding", 1],
+    ["models.catShort.rerank", 1],
+    ["models.catShort.tts", 1],
+    ["models.catShort.asr", 0],
+    ["models.catShort.image", 0],
+    ["models.catShort.video", 0],
+    ["models.catShort.other", 0],
     ["cloud.tabStale", 0],
   ];
   for (const [key, count] of expected) {
-    expect(tabTexts).toContain(`${zh(key)}${count}`);
+    const chip = chips.find((b) => b.textContent?.trim() === `${zh(key)}${count}`);
+    expect(chip).toBeDefined();
   }
+  // 分类颗带图标（全部 / 失效 是筛选口径，没有图标）
+  expect(chips.find((b) => b.textContent?.includes(zh("models.catShort.embedding")))!.querySelector("svg")).not.toBeNull();
+  // 完整分类名没有丢，作为悬浮提示留在短名上
+  expect(chips.map((b) => b.getAttribute("title"))).toContain(
+    `${zh("models.cat.embedding")} · 1`,
+  );
+  expect(chips.map((b) => b.getAttribute("title"))).toContain(`${zh("cloud.tabStale")} · 0`);
+  // 之前贴完整分类名时一行排不下，横向滚动条就是这么来的：筛选条必须是换行排版
+  const row = chips[0]!.parentElement!;
+  expect(row.className).toContain("flex-wrap");
+  expect(row.className).not.toContain("overflow-x");
 
   await view.unmount();
 });
 
-test("拉取失败也只是清单空：页面照旧、分类条还在，并给重试", async () => {
-  remoteResult = { ok: false, models: [], error: "请求失败：HTTP 401" };
+test("拉取失败不弹框、也不把上游报错写在页面上", async () => {
+  remoteResult = { ok: false, models: [], error: "密钥无效或没有权限（HTTP 401）" };
   try {
     const view = await renderPanel();
     await openPicker(view.container);
 
-    // 标题 / 分类条 / 搜索都在，不是一个独占整屏的错误页
-    expect(view.text).toContain(zh("cloud.pickTitle"));
-    expect(view.text).toContain(zh("models.cat.embedding"));
-    expect(rowOf(REMOTE[0]!)).toBeNull();
-    // 错误原因和「重试」写在清单区域里
-    expect(view.text).toContain("请求失败：HTTP 401");
-    const retry = [...document.body.querySelectorAll("button")].find((b) =>
-      b.textContent?.includes(zh("common.retry")),
+    // 弹框不打开：空清单里挂一句 401，用户看不出该改什么，只会以为页面坏了
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    // 上游报错原文一个字都不上面（原文归 logs/app.log 的 cloud-provider.models.failed）
+    expect(view.text).not.toContain("HTTP 401");
+    expect(view.text).not.toContain("密钥无效或没有权限");
+    // 只留一行结论，与「检查」同一套文案，且是中性的（红字留给真正的错误状态）
+    const line = [...view.container.querySelectorAll("p")].find((p) =>
+      p.textContent?.includes(zh("cloud.checkFail")),
     );
-    expect(retry).toBeDefined();
+    expect(line).toBeDefined();
+    expect(line!.className).toContain("text-muted-foreground");
+    expect(line!.className).not.toContain("text-destructive");
     expect(updates.length).toBe(0);
+
+    await view.unmount();
+  } finally {
+    remoteResult = { ok: true, models: REMOTE };
+  }
+});
+
+test("改完密钥重新拉取：上一行结论消失，弹框正常打开", async () => {
+  remoteResult = { ok: false, models: [], error: "密钥无效或没有权限（HTTP 401）" };
+  try {
+    const view = await renderPanel();
+    await openPicker(view.container);
+    expect(view.text).toContain(zh("cloud.checkFail"));
+
+    // 在密钥框里改一下（失焦即保存）→ 上一次的结论作废
+    const key = view.container.querySelector<HTMLInputElement>('input[type="password"]');
+    expect(key).not.toBeNull();
+    await act(async () => {
+      // 直接赋 .value 会被 React 的 value tracker 吞掉：走原生 setter 才会触发 onChange。
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      setValue.call(key!, "sk-new");
+      key!.dispatchEvent(new Event("input", { bubbles: true }));
+      // React 17+ 的 onBlur 接的是 focusout（bubbles），不是 blur。
+      key!.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(view.text).not.toContain(zh("cloud.checkFail"));
+
+    remoteResult = { ok: true, models: REMOTE };
+    await openPicker(view.container);
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(rowOf(REMOTE[3]!)).not.toBeNull();
 
     await view.unmount();
   } finally {

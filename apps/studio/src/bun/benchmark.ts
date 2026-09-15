@@ -8,6 +8,7 @@ import {
 } from "./db/settings";
 import { getCloudProviderInfo } from "./cloud-providers";
 import { getChatModelName, getLocalRequestModelId } from "./chat-model";
+import { modelNameFromRef } from "../shared/modelscope";
 import { listInstalledModels, slugModelFileName } from "./model-store";
 import { isMlxActive } from "./runtimes/mlx";
 import {
@@ -115,10 +116,12 @@ export type BenchmarkRunState = {
   durationMs?: number;
   /** eval 任务的实时进度。 */
   eval?: BenchmarkEvalInfo;
+  /** **展示名**（模型名 / 云模型 id），落库与界面都用它 —— 绝不是 MLX 那种路径型请求 id。 */
   model: string;
   /** local（本地引擎）/ remote（激活的云服务商槽位）/ cloud（按 id 直连的云服务商）。 */
   serverMode: string;
   engine?: string;
+  /** 任务参数；本地任务额外带 `requestModel`（真正发到服务器的模型 id，MLX 下是绝对路径）。 */
   params: Record<string, unknown>;
 };
 
@@ -488,6 +491,9 @@ let runCounter = 0;
  *
  * - 活动模型（界面默认填的就是它）→ 本地引擎认的 id；
  * - 已装的其它模型 → 用它的加载目标（MLX 能按需加载该目录；其它引擎认服务名 slug）。
+ *
+ * 返回的是**请求 id**：只往 HTTP body 里填，别拿它当展示名（MLX 下是一串绝对路径，
+ * 见 `startBenchmark` 里的 displayModel）。
  */
 export function localBenchmarkModelId(requested: string): string {
   const active = new Set(
@@ -542,6 +548,9 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
   if (!requested) return { error: "No model configured" };
   // 本地目标要把服务名换算成引擎认的 id（云端按模型 id 直传）。
   const model = params.providerId || serverMode === "remote" ? requested : localBenchmarkModelId(requested);
+  // 请求 id 与展示名分开：MLX 的请求 id 是绝对路径（它只认这个），历史记录 / 界面里
+  // 显示的必须是模型名 —— 表头和侧栏不该出现 `/Users/…`。请求 id 留在 params.requestModel。
+  const displayModel = modelNameFromRef(requested, requested);
 
   const batchSize = Math.max(params.batchSize ?? 1, 1);
   const genLength = Math.max(params.genLength ?? 128, 16);
@@ -565,13 +574,13 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
     kind,
     progress: { total: contexts.length, done: 0, phase: "warmup" },
     rows: [],
-    model,
+    model: displayModel,
     serverMode,
     engine,
     params:
       kind === "speed"
-        ? { genLength, batchSize, contexts, temperature }
-        : { suite, sampleSize, concurrency },
+        ? { genLength, batchSize, contexts, temperature, requestModel: model }
+        : { suite, sampleSize, concurrency, requestModel: model },
   };
   if (kind === "eval") {
     state.eval = {

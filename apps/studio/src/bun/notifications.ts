@@ -7,6 +7,7 @@
  */
 import { randomUUID } from "crypto";
 import { logEvent } from "./app-log";
+import { notifyExternal } from "./agent-notify";
 
 export type NotificationKind = "run_finished" | "permission" | "automation" | "error" | "info";
 
@@ -51,6 +52,12 @@ export function notify(input: {
   };
   items.unshift(notification);
   if (items.length > MAX_NOTIFICATIONS) items.length = MAX_NOTIFICATIONS;
+  /**
+   * 外部通知回调（对齐 Codex 的 notify）：配了 `AGENT_NOTIFY_COMMAND` 就把这件事
+   * 作为 JSON 载荷交给用户自己的命令。这里是**唯一的触发点** ——
+   * 每种事件各埋一次点迟早会漏掉一种。
+   */
+  notifyExternal(input);
   // 通知只活一次运行，但它记的是"后台出过事"—— 顺手进统一日志，
   // 事后排查时才能在 app.log 里看到自动化失败 / 权限请求这些线索。
   logEvent({

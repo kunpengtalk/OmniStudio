@@ -25,19 +25,6 @@ const SPEECH_START_CHUNKS = 2;
 /** 云端输出采样率（Qwen Realtime 返回 PCM16 24k）。 */
 const REALTIME_OUTPUT_RATE = 24000;
 
-/** PCM16 base64 → AudioBuffer（云端音频无 WAV 头，24k 单声道）。 */
-function pcm16ToAudioBuffer(ctx: AudioContext, base64: string, sampleRate: number): AudioBuffer {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const frames = Math.floor(bytes.length / 2);
-  const buf = ctx.createBuffer(1, frames, sampleRate);
-  const ch = buf.getChannelData(0);
-  const dv = new DataView(bytes.buffer);
-  for (let i = 0; i < frames; i++) ch[i] = dv.getInt16(i * 2, true) / 0x8000;
-  return buf;
-}
-
 /**
  * 把连续多个 PCM 音频块拼成一块 AudioBuffer 再播。
  * 云端 `response.audio.delta` 每块只有一小段（几十到几百毫秒），若逐块

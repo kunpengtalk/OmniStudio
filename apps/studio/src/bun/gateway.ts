@@ -7,8 +7,9 @@ import * as TTSLocal from "./tts-local";
 import * as Asr from "./asr";
 import { getTTSProviderConfig, listProviderModels, runTTSEdge } from "./voice";
 import { listInstalledModels, slugModelFileName } from "./model-store";
-import { getChatModelName, getLocalRequestModelId } from "./chat-model";
+import { getChatModelLabel, getChatModelName, getLocalRequestModelId } from "./chat-model";
 import { resolveEmbeddingBackend } from "./model-servers";
+import { providerLabelFor, recordUsageEvent } from "./usage";
 import { mergeSystemMessages } from "./chat-messages";
 import * as Memory from "./memory";
 import type { MemoryCategory } from "../shared/memory";
@@ -407,6 +408,185 @@ async function callUpstreamChat(backend: ChatBackend, params: Record<string, unk
   });
 }
 
+// ---------------------------------------------------------------------------
+// 用量记账
+//
+// 网关是外部 agent（Claude Code / Codex / Pi…）唯一的入口，这些请求**不产生任何
+// 本地消息** —— 不在这里记一笔，用户在统计页里就永远看不到它们，而这恰恰是
+// 「我一天到底花了多少 token」最主要的来源。
+// ---------------------------------------------------------------------------
+
+/** 上游响应里跟用量有关的字段（OpenAI 规范 + llama.cpp 的 timings）。 */
+type UpstreamUsage = {
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
+  /** llama.cpp 不按 OpenAI 规范回 usage 时给的是 timings。 */
+  timings?: { prompt_n?: number; predicted_n?: number; cache_n?: number };
+  /** 判断"只带 usage 的空 chunk"用（OpenAI 规定那种块 choices 为空数组）。 */
+  choices?: unknown[];
+};
+
+/** 从一段响应体里抽出输入 / 输出 tokens；两边都没数就返回 null。 */
+function tokensFromUpstream(payload: UpstreamUsage | null | undefined): {
+  input: number;
+  output: number;
+  cached?: number;
+  reasoning?: number;
+} | null {
+  if (!payload) return null;
+  const usage = payload.usage;
+  const timings = payload.timings;
+  const input = usage?.prompt_tokens ?? (timings?.prompt_n == null ? 0 : timings.prompt_n + (timings.cache_n ?? 0));
+  const output = usage?.completion_tokens ?? timings?.predicted_n ?? 0;
+  if (!input && !output) return null;
+  return {
+    input,
+    output,
+    ...(usage?.prompt_tokens_details?.cached_tokens == null && timings?.cache_n == null
+      ? {}
+      : { cached: usage?.prompt_tokens_details?.cached_tokens ?? timings?.cache_n }),
+    ...(usage?.completion_tokens_details?.reasoning_tokens == null
+      ? {}
+      : { reasoning: usage.completion_tokens_details.reasoning_tokens }),
+  };
+}
+
+/**
+ * 客户端请求里填的模型名 → 统计页上显示的模型名。
+ *
+ * 本地后端会把请求 id 换成推理服务实际认的那个（MLX 下是绝对路径，见
+ * normalizeLocalPayload），把路径记进统计页没人看得懂，换回展示名。
+ */
+function gatewayModelLabel(backend: ChatBackend, model: string): string {
+  if (backend.kind === "local") {
+    const label = getChatModelLabel();
+    if (label && (model === getLocalRequestModelId() || model === getChatModelName())) return label;
+  }
+  return model || getChatModelLabel() || "";
+}
+
+/** 记一次网关转发。厂商按**实际路由到的那一端**算，与当前 SERVER_MODE 无关。 */
+function recordGatewayUsage(
+  backend: ChatBackend,
+  model: string,
+  tokens: { input: number; output: number; cached?: number; reasoning?: number } | null,
+): void {
+  // 上游没回用量（老版本 vLLM 没开 include_usage、纯流式的第三方服务）时
+  // 两边都是 0 —— 记一行 0 只会让"调用次数"虚高，不如不记。
+  if (!tokens || (tokens.input === 0 && tokens.output === 0)) return;
+  recordUsageEvent({
+    channel: "gateway",
+    upstream: backend.kind,
+    provider: providerLabelFor(backend.kind),
+    model: gatewayModelLabel(backend, model),
+    inputTokens: tokens.input,
+    outputTokens: tokens.output,
+    ...(tokens.cached == null ? {} : { cachedTokens: tokens.cached }),
+    ...(tokens.reasoning == null ? {} : { reasoningTokens: tokens.reasoning }),
+  });
+}
+
+/**
+ * 透传上游响应，同时"顺路"看出里面的 usage。
+ *
+ * /v1/chat/completions 是**纯透传**（不解析、不重排），所以记账只能在字节流上做：
+ * SSE 的 data 行解出来找 usage / timings，其余字节原样转发 —— 客户端收到的内容
+ * 与不记账时**完全一致**。
+ *
+ * 唯一的例外是我们主动注入 `stream_options.include_usage` 时上游多回的那个
+ * 只带 usage 的空 chunk（`choices: []`）：客户端本来没要它，透传就该把它丢掉。
+ * 不注入的话，绝大多数外部 agent 都不会回 usage，网关这一路就等于没统计。
+ */
+function passthroughWithUsage(
+  upstream: Response,
+  backend: ChatBackend,
+  model: string,
+  opts: { sse: boolean; dropUsageChunk: boolean },
+): Response {
+  const contentType = upstream.headers.get("content-type") ?? "application/json";
+  if (!upstream.body) return upstream;
+
+  let reported = false;
+  const report = (payload: UpstreamUsage | null) => {
+    if (reported) return; // usage 只认第一次拿到的（流式里它是最后一块，不会重复）
+    const tokens = tokensFromUpstream(payload);
+    if (!tokens) return;
+    reported = true;
+    recordGatewayUsage(backend, model, tokens);
+  };
+
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+  // 非 SSE（一次性的 JSON 响应体）攒到最后一起解析，只留一份副本。
+  let jsonBody = "";
+
+  const transform = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      if (!opts.sse) {
+        jsonBody += decoder.decode(chunk, { stream: true });
+        controller.enqueue(chunk);
+        return;
+      }
+      buffer += decoder.decode(chunk, { stream: true });
+      let idx: number;
+      let out = "";
+      // 按行处理：整行拿到手才能判断它是不是"只带 usage 的空 chunk"。
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx + 1);
+        buffer = buffer.slice(idx + 1);
+        report(linePayload(line));
+        if (opts.dropUsageChunk && isUsageOnlyLine(line)) continue;
+        out += line;
+      }
+      if (out) controller.enqueue(encoder.encode(out));
+    },
+    flush(controller) {
+      if (!opts.sse) {
+        jsonBody += decoder.decode();
+        try {
+          report(JSON.parse(jsonBody) as UpstreamUsage);
+        } catch {
+          // 上游回的不是 JSON（错误页等）—— 没有用量可记
+        }
+        return;
+      }
+      buffer += decoder.decode();
+      if (!buffer) return;
+      report(linePayload(buffer));
+      if (!(opts.dropUsageChunk && isUsageOnlyLine(buffer))) controller.enqueue(encoder.encode(buffer));
+    },
+  });
+
+  return new Response(upstream.body.pipeThrough(transform), {
+    status: upstream.status,
+    headers: { "Content-Type": contentType, ...CORS },
+  });
+}
+
+/** 一行 SSE 的 JSON 负载；不是 data 行（空行、注释、[DONE]）返回 null。 */
+function linePayload(line: string): UpstreamUsage | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("data:")) return null;
+  const payload = trimmed.slice(5).trim();
+  if (!payload || payload === "[DONE]") return null;
+  try {
+    return JSON.parse(payload) as UpstreamUsage;
+  } catch {
+    return null; // 半行（跨 chunk 被切开）—— 拼接完整后自然会被解析到
+  }
+}
+
+/** 一行 SSE 是不是"只带 usage 的空 chunk"（OpenAI 的 include_usage 收尾块）。 */
+function isUsageOnlyLine(line: string): boolean {
+  const payload = linePayload(line);
+  return payload != null && Array.isArray(payload.choices) && payload.choices.length === 0 && payload.usage != null;
+}
+
 async function upstreamErrorMessage(res: Response, fallback: string): Promise<string> {
   const body = await res.text().catch(() => "");
   if (!body) return `${fallback} (${res.status})`;
@@ -793,7 +973,13 @@ async function handleMessages(req: Request): Promise<Response> {
 
       let res: Response;
       try {
-        res = await callUpstreamChat(backend, { ...params, stream: true });
+        // 这条路径的响应由网关自己重组成 Anthropic 协议，往上游多要一个 usage
+        // 不会改变客户端看到的东西（不像 /v1/chat/completions 是纯透传）。
+        res = await callUpstreamChat(backend, {
+          ...params,
+          stream: true,
+          stream_options: { include_usage: true },
+        });
       } catch (e) {
         send("error", { type: "error", error: { type: "api_error", message: `Forward failed: ${errMsg(e)}` } });
         send("message_stop", { type: "message_stop" });
@@ -868,11 +1054,19 @@ async function handleMessages(req: Request): Promise<Response> {
         usage: { input_tokens: inTokens ?? 0, output_tokens: outTokens ?? 0 },
       });
       send("message_stop", { type: "message_stop" });
+      recordGatewayUsage(backend, model, {
+        input: inTokens ?? 0,
+        output: outTokens ?? 0,
+      });
     });
   }
 
   try {
     const result = await runChatNonStream(backend, params);
+    recordGatewayUsage(backend, model, {
+      input: result.usage?.prompt_tokens ?? 0,
+      output: result.usage?.completion_tokens ?? 0,
+    });
     return json({
       id: uid("msg"),
       type: "message",
@@ -1144,7 +1338,12 @@ async function handleResponses(req: Request): Promise<Response> {
 
       let res: Response;
       try {
-        res = await callUpstreamChat(backend, { ...params, stream: true });
+        // 同 /v1/messages：响应由网关重组，多要一个 usage 不影响客户端。
+        res = await callUpstreamChat(backend, {
+          ...params,
+          stream: true,
+          stream_options: { include_usage: true },
+        });
       } catch (e) {
         failedSend(`Forward failed: ${errMsg(e)}`);
         return;
@@ -1271,6 +1470,7 @@ async function handleResponses(req: Request): Promise<Response> {
           usage: responsesUsage({ prompt_tokens: inTokens, completion_tokens: outTokens }),
         }),
       });
+      recordGatewayUsage(backend, model, { input: inTokens ?? 0, output: outTokens ?? 0 });
     });
   }
 
@@ -1279,6 +1479,10 @@ async function handleResponses(req: Request): Promise<Response> {
     const output: Record<string, unknown>[] = [];
     if (result.content) output.push(responsesMessage(result.content, "completed"));
     output.push(...responsesFunctionCallItems(result.toolCalls));
+    recordGatewayUsage(backend, model, {
+      input: result.usage?.prompt_tokens ?? 0,
+      output: result.usage?.completion_tokens ?? 0,
+    });
     return json(
       responsesEnvelope(model, body, {
         status: "completed",
@@ -1318,18 +1522,27 @@ async function handleChatCompletions(req: Request): Promise<Response> {
     return apiError(503, errMsg(e), "server_error");
   }
 
+  // 记账需要上游回报用量，而多数推理服务（vLLM / SGLang）默认不报 —— 客户端没
+  // 主动要的话替它要一次，代价只是上游多回一个只带 usage 的空 chunk，透传时丢掉
+  // （见 passthroughWithUsage），客户端的流与不记账时一模一样。
+  const streaming = body.stream === true;
+  const streamOptions = body.stream_options as Record<string, unknown> | undefined;
+  const injectedUsage = streaming && streamOptions?.include_usage !== true;
+  const upstreamBody = injectedUsage
+    ? { ...body, stream_options: { ...(streamOptions ?? {}), include_usage: true } }
+    : body;
+
   let upstream: Response;
   try {
-    upstream = await callUpstreamChat(backend, body);
+    upstream = await callUpstreamChat(backend, upstreamBody);
   } catch (e) {
     return apiError(502, `转发失败：${errMsg(e)}`, "upstream_error");
   }
   if (!upstream.ok) return forwardUpstreamError(upstream, "推理服务器返回错误");
 
-  const contentType = upstream.headers.get("content-type") ?? "application/json";
-  return new Response(upstream.body, {
-    status: upstream.status,
-    headers: { "Content-Type": contentType, ...CORS },
+  return passthroughWithUsage(upstream, backend, model, {
+    sse: streaming,
+    dropUsageChunk: injectedUsage,
   });
 }
 
@@ -1597,12 +1810,6 @@ function parseImageSize(size: string): { width: number; height: number } | null 
   const height = Number(m[2]);
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
   return { width, height };
-}
-
-/** 从 imageUrl 逆向出 images 根目录下的相对路径（chatImageUrl 的 ref）。 */
-function refFromImageUrl(imageUrl: string): string | null {
-  const m = /^https?:\/\/[^/]+\/(.+)$/.exec(imageUrl);
-  return m ? decodeURIComponent(m[1]!) : null;
 }
 
 async function handleImageGeneration(req: Request): Promise<Response> {

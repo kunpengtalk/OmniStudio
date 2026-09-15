@@ -2,8 +2,9 @@ import { eq } from "drizzle-orm";
 
 import { db } from "./db";
 import { cloudProviders } from "./db/schema";
-import { getAllSettings, getSetting, updateSettings } from "./db/settings";
+import { ensureSettingsEncrypted, getAllSettings, getSetting, updateSettings } from "./db/settings";
 import { logEvent } from "./app-log";
+import { decryptSecret, encryptSecret, isEncryptedSecret } from "./secrets";
 import {
   getPreset,
   isLocalBaseUrl,
@@ -39,13 +40,18 @@ function rowToInfo(row: typeof cloudProviders.$inferSelect): CloudProviderInfo {
     name: row.name,
     vendor: row.vendor,
     baseUrl: row.baseUrl,
-    apiKey: row.apiKey,
+    apiKey: decryptSecret(row.apiKey),
     models: parseCloudModels(row.models),
     enabled: row.enabled === 1,
     videoApi: (row.videoApi ?? "") as CloudVideoApi,
     createdAt: row.createdAt ?? 0,
     updatedAt: row.updatedAt ?? 0,
   };
+}
+
+/** 读行时取明文 apiKey（密文落盘、读取解密；旧明文透传）。 */
+function rowApiKey(row: { apiKey: string }): string {
+  return decryptSecret(row.apiKey);
 }
 
 function getRow(id: string) {
@@ -59,12 +65,36 @@ export function activeProviderId(): string | null {
 }
 
 /**
+ * 一次性把历史遗留的**明文** apiKey 加密落盘（幂等：已加密的跳过）。
+ *
+ * 老版本把 cloud_providers.apiKey 与 settings 里的密钥明文存 SQLite；升级后读取侧
+ * （decryptSecret / settings 透明层）能透传旧明文，但值仍躺在盘上。本函数在每次
+ * 访问云服务配置时兜底扫描，把明文翻成密文，保证「不写回就不落密文」的旧行也能
+ * 被收进来。成本是一次全表扫描，命中明文才写库，日常调用开销可忽略。
+ */
+function ensureApiKeysEncrypted(): void {
+  const rows = db.select().from(cloudProviders).all();
+  for (const row of rows) {
+    if (row.apiKey && !isEncryptedSecret(row.apiKey)) {
+      db.update(cloudProviders)
+        .set({ apiKey: encryptSecret(row.apiKey), updatedAt: Date.now() })
+        .where(eq(cloudProviders.id, row.id))
+        .run();
+    }
+  }
+  // settings 里的敏感槽位（VLLM_API_KEY / GATEWAY_API_KEY）同样兜底：交给 settings
+  // 层的 ENCRYPTED_KEYS 统一加密，这里不重复其明细逻辑。
+  ensureSettingsEncrypted();
+}
+
+/**
  * 首次访问时把散落在 settings 里的旧云服务配置迁移入表（幂等：表非空即跳过）。
  * - CUSTOM_PROVIDERS 里的自定义服务商 → 各一行（api_key 为空，旧版未存）；
  * - 当前 CLOUD_PROVIDER（预设或自定义）→ 一行，带上 VLLM_API_KEY 与 CLOUD_MODELS；
  * - 全新安装（无任何云配置）→ 预置一行 OmniLabs（未激活），引导用户补 Key。
  */
-function ensureMigrated(): void {
+export function ensureMigrated(): void {
+  ensureApiKeysEncrypted();
   const existing = db.select({ id: cloudProviders.id }).from(cloudProviders).all();
   if (existing.length > 0) return;
 
@@ -118,7 +148,7 @@ function ensureMigrated(): void {
         name: preset.name,
         vendor: preset.vendor,
         baseUrl: (legacy.VLLM_API_BASE ?? "").trim() || preset.baseUrl,
-        apiKey: key === "EMPTY" ? "" : key,
+        apiKey: key === "EMPTY" ? "" : encryptSecret(key),
         models: JSON.stringify(Array.from(merged.values())),
         // 迁移过来的激活厂商直接置为已启用：用户本来就在用它。
         enabled: 1,
@@ -150,10 +180,12 @@ function ensureMigrated(): void {
 
 /** 激活行的配置写回旧 settings 槽位（网关 / chat-model / CLI / 集成选择器消费）。 */
 function syncActiveSlot(row: typeof cloudProviders.$inferSelect): void {
+  // apiKey 落库是密文（见 secrets.ts）。传给 settings 前先解成明文 —— settings 层
+  // 对 VLLM_API_KEY 会再加密存储、读取时透明解出，所以这里拿到的一定是明文。
   updateSettings({
     CLOUD_PROVIDER: row.id,
     VLLM_API_BASE: row.baseUrl,
-    VLLM_API_KEY: row.apiKey || "EMPTY",
+    VLLM_API_KEY: decryptSecret(row.apiKey) || "EMPTY",
     CLOUD_MODELS: row.models,
   });
 }
@@ -245,7 +277,8 @@ export function updateCloudProvider(
   const next = {
     name: patch.name?.trim() || row.name,
     baseUrl: patch.baseUrl !== undefined ? patch.baseUrl.trim() : row.baseUrl,
-    apiKey: patch.apiKey !== undefined ? patch.apiKey.trim() : row.apiKey,
+    // 新 key 前端传来的是明文，落盘前加密；未提供时保持库里既有值（已是密文，不再动）。
+    apiKey: patch.apiKey !== undefined ? encryptSecret(patch.apiKey.trim()) : row.apiKey,
     models: patch.models !== undefined ? JSON.stringify(patch.models) : row.models,
     videoApi: patch.videoApi !== undefined ? patch.videoApi : (row.videoApi ?? ""),
   };
@@ -329,67 +362,147 @@ export function resolveCloudProvider(id: string | undefined | null): CloudProvid
 }
 
 /**
- * 探测厂商地址 + 密钥是否可用（GET /models，与设置页「检查」同一个探针）。
- *
- * `/models` 是最轻的鉴权探针：401/403 判定为密钥无效（不再往下试），其余错误
- * （404 / 网络不通）原样回给用户。本机端点（Ollama / LM Studio）不要求 Key。
- */
-export async function probeProviderKey(input: {
-  baseUrl: string;
-  apiKey: string;
-  timeoutMs?: number;
-}): Promise<{ ok: boolean; error?: string; models?: string[] }> {
-  const base = input.baseUrl.trim().replace(/\/+$/, "");
-  const key = input.apiKey.trim();
-  if (!base) return { ok: false, error: "缺少 API 地址" };
-  if (!key && !isLocalBaseUrl(base)) return { ok: false, error: "缺少 API 密钥" };
-
-  const headers: Record<string, string> =
-    key && key !== "EMPTY" ? { Authorization: `Bearer ${key}` } : {};
-  let lastError = "请求失败";
-  for (const url of modelListUrls(base)) {
-    try {
-      const res = await fetch(url, {
-        headers,
-        signal: AbortSignal.timeout(input.timeoutMs ?? 10_000),
-      });
-      // 鉴权失败与地址无关，换个候选也一样，直接判定。
-      if (res.status === 401 || res.status === 403) {
-        return { ok: false, error: `密钥无效或没有权限（HTTP ${res.status}）` };
-      }
-      if (res.ok) {
-        // 顺便把模型清单带回去：启用时就能告诉用户这家有几张牌。
-        const json = (await res.json().catch(() => null)) as {
-          data?: { id?: unknown }[];
-          models?: { id?: unknown }[];
-        } | null;
-        const items = json?.data ?? json?.models;
-        // 200 但不是模型清单（门户首页之类）说明这个候选地址不对，试下一个。
-        if (Array.isArray(items)) {
-          const models = items.map((m) => (typeof m?.id === "string" ? m.id : "")).filter(Boolean);
-          return { ok: true, models };
-        }
-        lastError = "该地址没有返回模型清单，可能不是 OpenAI 兼容接口";
-        continue;
-      }
-      lastError = `请求失败：HTTP ${res.status}`;
-    } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e);
-    }
-  }
-  return { ok: false, error: lastError };
-}
-
-/**
  * 探测地址的候选（按顺序试）。
  *
  * 地址带不带版本段由用户填的 base 决定，仓库里两种约定都有：设置页「获取模型列表」
  * 直接补 `/models`（base 自带 `/v1`），对话请求则先去掉 `/v1` 再补 `/v1/…`。
  * 只按后者补 `/v1/models` 会让 Gemini 这类 base 已经带了 `/v1beta/openai` 的厂商
  * 探到一个不存在的路径（404）——而启用是功能页选到该厂商的前提，等于这家永远用不了。
+ *
+ * 不带版本段的地址两个都试：New API / one-api 这类聚合站，根路径往往就是**前端首页**
+ * （200 + text/html），只补 `/models` 拿到的是网页而不是模型清单。
  */
-function modelListUrls(base: string): string[] {
-  return /\/v\d/i.test(base) ? [`${base}/models`] : [`${base}/models`, `${base}/v1/models`];
+export function modelListUrls(base: string): string[] {
+  const b = base.trim().replace(/\/+$/, "");
+  if (!b) return [];
+  return /\/v\d/i.test(b) ? [`${b}/models`] : [`${b}/models`, `${b}/v1/models`];
+}
+
+/** 错误信息里只带路径：同一条地址会试两个候选，整条贴两遍没人看得下去。 */
+function pathOf(url: string): string {
+  try {
+    return new URL(url).pathname || url;
+  } catch {
+    return url;
+  }
+}
+
+/** 从响应体里读模型 id；不是 OpenAI 兼容清单时给出下一步动作，而不是 SyntaxError。 */
+async function readModelList(
+  res: Response,
+): Promise<{ ok: true; models: string[] } | { ok: false; reason: string }> {
+  const text = (await res.text().catch(() => "")).replace(/^\uFEFF/, "").trim();
+  if (!text) return { ok: false, reason: "响应是空的" };
+
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    const type = (res.headers.get("content-type") ?? "").split(";")[0]!.trim();
+    // 聚合站的首页就是这种「看着成功、其实不是接口」的响应：200 + 一页 HTML。
+    return {
+      ok: false,
+      reason:
+        /html/i.test(type) || text.startsWith("<")
+          ? `返回的是网页（${type || "text/html"}）而不是接口，服务地址要填到 /v1 这一级`
+          : `不是 JSON（${type || "未知类型"}）：${text.slice(0, 120)}`,
+    };
+  }
+
+  const items = Array.isArray(json)
+    ? json
+    : ((json as { data?: unknown }).data ?? (json as { models?: unknown }).models);
+  if (!Array.isArray(items)) {
+    // 派生实现（New API 的管理接口）是这种形状：{"success":false,"message":"..."}。
+    const body = json as { message?: unknown; error?: unknown };
+    const nested = (body.error as { message?: unknown } | undefined)?.message;
+    const upstream =
+      typeof body.message === "string" && body.message
+        ? body.message
+        : typeof nested === "string" && nested
+          ? nested
+          : "";
+    return {
+      ok: false,
+      reason: upstream ? `上游返回：${upstream}` : "响应里没有模型清单（data / models 字段）",
+    };
+  }
+
+  const models = Array.from(
+    new Set(
+      items
+        .map((m) => (typeof (m as { id?: unknown } | null)?.id === "string" ? (m as { id: string }).id : ""))
+        .filter(Boolean),
+    ),
+  );
+  return { ok: true, models };
+}
+
+/**
+ * 拉取 OpenAI 兼容模型清单：候选地址逐个试，返回第一个能读出清单的结果。
+ *
+ * 这一份实现是设置页「获取模型列表」、启用厂商的密钥探针、各功能页的「获取模型」
+ * 共用的 —— 以前它们各写各的（功能页会把 base 补成 `/v1`，设置页只补 `/models`
+ * 还直接 `res.json()`），同一个上游在不同页面表现不一致：base 只填到域名一级时，
+ * 设置页会拿到聚合站首页的 HTML，抛一句 `SyntaxError: Failed to parse JSON`。
+ */
+export async function fetchRemoteModels(input: {
+  baseUrl: string;
+  apiKey?: string;
+  timeoutMs?: number;
+}): Promise<{ ok: boolean; models: string[]; url?: string; error?: string }> {
+  const urls = modelListUrls(input.baseUrl);
+  if (urls.length === 0) return { ok: false, models: [], error: "缺少 API 地址" };
+
+  const key = (input.apiKey ?? "").trim();
+  const headers: Record<string, string> =
+    key && key !== "EMPTY" ? { Authorization: `Bearer ${key}` } : {};
+
+  const failures: string[] = [];
+  let authError = "";
+  for (const url of urls) {
+    let res: Response;
+    try {
+      res = await fetch(url, { headers, signal: AbortSignal.timeout(input.timeoutMs ?? 15_000) });
+    } catch (e) {
+      failures.push(`${pathOf(url)}：${e instanceof Error ? e.message : String(e)}`);
+      continue;
+    }
+    if (res.status === 401 || res.status === 403) {
+      // 鉴权失败与路径无关，但候选还是走完：有的网关只在 /v1 那一层鉴权。
+      authError ||= `密钥无效或没有权限（HTTP ${res.status}）`;
+      continue;
+    }
+    if (!res.ok) {
+      failures.push(`${pathOf(url)}：HTTP ${res.status}`);
+      continue;
+    }
+    const parsed = await readModelList(res);
+    if (parsed.ok) return { ok: true, models: parsed.models, url };
+    failures.push(`${pathOf(url)}：${parsed.reason}`);
+  }
+  return { ok: false, models: [], error: authError || failures.join("；") };
+}
+
+/**
+ * 探测厂商地址 + 密钥是否可用（GET /models，与设置页「检查」同一个探针）。
+ *
+ * `/models` 是最轻的鉴权探针：401/403 判定为密钥无效，其余错误（404 / 网络不通）
+ * 原样回给用户。本机端点（Ollama / LM Studio）不要求 Key。
+ */
+export async function probeProviderKey(input: {
+  baseUrl: string;
+  apiKey: string;
+  timeoutMs?: number;
+}): Promise<{ ok: boolean; error?: string; models?: string[] }> {
+  const base = input.baseUrl.trim();
+  const key = input.apiKey.trim();
+  if (!base) return { ok: false, error: "缺少 API 地址" };
+  if (!key && !isLocalBaseUrl(base)) return { ok: false, error: "缺少 API 密钥" };
+
+  const r = await fetchRemoteModels({ baseUrl: base, apiKey: key, timeoutMs: input.timeoutMs ?? 10_000 });
+  // 顺便把模型清单带回去：启用时就能告诉用户这家有几张牌。
+  return r.ok ? { ok: true, models: r.models } : { ok: false, error: r.error };
 }
 
 /**
@@ -422,7 +535,7 @@ export async function setCloudProviderEnabled(
     return { ok: true };
   }
 
-  const probe = await probeProviderKey({ baseUrl: row.baseUrl, apiKey: row.apiKey });
+  const probe = await probeProviderKey({ baseUrl: row.baseUrl, apiKey: rowApiKey(row) });
   if (!probe.ok) {
     logEvent({
       level: "warn",
@@ -608,7 +721,7 @@ export function ensureAppProvidersMigrated(): void {
         name: providerNameForBase(base),
         vendor: "旧配置迁移",
         baseUrl: base,
-        apiKey: key,
+        apiKey: key ? encryptSecret(key) : "",
         models: "[]",
         // 正在被使用的厂商直接启用：它已经被用户用了很久了。
         enabled: 1,
@@ -621,7 +734,7 @@ export function ensureAppProvidersMigrated(): void {
     } else {
       const patch: Record<string, unknown> = { updatedAt: now };
       if (row.enabled !== 1) patch.enabled = 1;
-      if (key && !row.apiKey.trim()) patch.apiKey = key;
+      if (key && !row.apiKey.trim()) patch.apiKey = encryptSecret(key);
       if (app.videoApi && (row.videoApi ?? "") !== app.videoApi) patch.videoApi = app.videoApi;
       if (Object.keys(patch).length > 1) {
         db.update(cloudProviders).set(patch).where(eq(cloudProviders.id, row.id)).run();

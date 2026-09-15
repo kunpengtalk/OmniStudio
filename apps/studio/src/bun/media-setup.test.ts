@@ -2,6 +2,8 @@ import { afterAll, expect, mock, test } from "bun:test";
 
 import type { MediaSetupAnswer, MediaSetupPayload } from "./media-setup";
 import type { CloudProviderInfo } from "../shared/cloud-providers";
+import type * as CloudProviders from "./cloud-providers";
+import { mockModulePartial } from "./test-mocks";
 
 // ---------------------------------------------------------------------------
 // 生图配置走真实 settings（bunfig 的 test-preload 已把数据目录指向本进程专属临时目录）。
@@ -12,10 +14,15 @@ import type { CloudProviderInfo } from "../shared/cloud-providers";
 //
 // 新模型：页面不再保存地址 / 密钥，只记 IMG_PROVIDER_ID；地址与密钥由服务商行提供，
 // 所以这里的 fake 必须实现 resolveCloudProvider / listEnabledCloudProviders。
+//
+// 只替换"读服务商行"的那几个函数，其余走 `mockModulePartial` 的真实实现：生图这条路
+// 还会调到 `fetchRemoteModels`（`listImageApiModels` → 拉 /models 扫描候选模型，
+// 见 image-gen.ts），手写清单时漏掉它，"选了厂商没选模型"那两条用例就变成
+// `fetchRemoteModels is not a function`；真实实现铺开之后，这条路上新增的调用不会再漏。
 // ---------------------------------------------------------------------------
 const fakeProviders: CloudProviderInfo[] = [];
 
-mock.module("./cloud-providers", () => ({
+await mockModulePartial<typeof CloudProviders>("./cloud-providers", {
   activeProviderId: () => fakeProviders[0]?.id ?? null,
   listCloudProviders: () => ({
     providers: fakeProviders,
@@ -27,7 +34,7 @@ mock.module("./cloud-providers", () => ({
     fakeProviders.find((p) => p.id === (id ?? "").trim()) ?? null,
   saveAppModelChoice: () => ({ ok: true }),
   ensureAppProvidersMigrated: () => {},
-}));
+});
 
 const MediaSetup = await import("./media-setup");
 const { getSetting, updateSettings } = await import("./db/settings");

@@ -326,6 +326,51 @@ export const CLI_SECTIONS: CliSection[] = [
     ],
   },
   {
+    id: "agent",
+    titleZh: "无头执行：跑一次 Agent 回合",
+    titleEn: "Headless run: one agent turn",
+    descZh:
+      "给脚本、CI、编辑器插件用的入口：跑一个无人值守的 Agent 回合，拿到最终回答或事件流。会话照常落库，跑完可以在界面里打开继续追问。",
+    descEn:
+      "For scripts, CI and editor plugins: run one unattended agent turn and get the final answer or an event stream. The session is persisted, so you can open it in the app afterwards.",
+    entries: [
+      {
+        cmd: "omi agent run <提示词> [--workspace <目录>] [--mode agent|plan|goal]",
+        zh: "跑一次无头回合并打印最终回答（默认模式 agent）。--workspace 指定工作区，--mode 选模式；--conversation <id> 可以接着已有会话往下跑。提示词也能从管道读进来（`echo \"…\" | omi agent run`）。",
+        en: "Run one headless turn and print the final answer (agent mode by default). --workspace picks the workspace, --mode the mode, and --conversation <id> continues an existing session. The prompt can also come from a pipe.",
+        examples: [
+          {
+            cmd: 'omi agent run "把 README 的安装步骤补全"',
+            zh: "在当前工作区跑一次，打印它最终的回答。",
+            en: "Run once in the current workspace and print the final answer.",
+          },
+          {
+            cmd: 'omi agent run "继续" --conversation 12 --mode plan',
+            zh: "接着 12 号会话、用 plan 模式再跑一轮。",
+            en: "Continue session 12 in plan mode.",
+          },
+        ],
+      },
+      {
+        cmd: "omi agent run <提示词> --json [--chunks]",
+        zh: "输出 NDJSON：每行一个 JSON（`start` / `event` 轨迹事件 / `result` 最终结果；加 --chunks 还有正文增量）。给脚本边跑边消费 —— 比如 `jq -r 'select(.type==\"event\") | .event.toolName'` 实时看它在调什么工具。",
+        en: "Emit NDJSON: one JSON per line (start / event / result, plus content deltas with --chunks) so scripts can consume the run as it happens, e.g. watch tool calls with jq.",
+        examples: [
+          {
+            cmd: `omi agent run "跑测试并总结失败原因" --json | jq -r 'select(.type=="event") | .event.toolName'`,
+            zh: "实时打印这一轮用到的工具名。",
+            en: "Print the tools used during the turn, live.",
+          },
+        ],
+      },
+      {
+        cmd: "  --timeout <毫秒>",
+        zh: "等待上限（默认 600000，即 10 分钟）。到点客户端停止等待并退出非零，应用侧的回合仍会跑完并落库。",
+        en: "Client-side wait limit (default 600000 ms). On timeout the client stops waiting and exits non-zero; the turn still finishes in the app and is persisted.",
+      },
+    ],
+  },
+  {
     id: "memory",
     titleZh: "记忆：写入、检索、接入",
     titleEn: "Memory: save, search, connect",

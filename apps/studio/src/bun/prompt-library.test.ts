@@ -4,7 +4,9 @@ import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { join } from "path";
 import * as fs from "fs";
-import { mock } from "bun:test";
+
+import * as schema from "./db/schema";
+import { mockModulePartial } from "./test-mocks";
 
 // ---------------------------------------------------------------------------
 // 独立临时测试库（跑全部迁移，得到真实的 prompt 表）
@@ -12,10 +14,10 @@ import { mock } from "bun:test";
 const tmpDb = `/tmp/prompt-library-test-${process.pid}.db`;
 fs.rmSync(tmpDb, { force: true });
 const sqlite = new Database(tmpDb, { create: true });
-const db = drizzle({ client: sqlite });
+const db = drizzle({ client: sqlite, schema });
 migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
 
-mock.module("./db", () => ({ db }));
+await mockModulePartial<typeof import("./db")>("./db", { db });
 
 // 提示词模块路径位于 src/bun/ 下，import.meta.dir 即 src/bun，seed JSON 就在旁边
 const PromptLib = await import("./prompt-library");

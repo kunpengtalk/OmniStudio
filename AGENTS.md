@@ -78,6 +78,22 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   Video is the exception that proves the rule: video APIs are not standardized, so the
   provider row also carries `videoApi` ("minimax" | "seedance") and polling looks the
   submitter up by the record's `providerId`.
+- **One proxy governs every outbound request** (Settings → Preferences → General):
+  `bun/proxy.ts` wraps `globalThis.fetch` at startup, so cloud model calls (chat / image /
+  video / TTS / ASR / OCR / translate), the model hubs, engine and weight downloads, web
+  search and remote backup all honor `PROXY_MODE` (`system` / `custom` / `none`) +
+  `PROXY_URL` without touching a single call site. Loopback always bypasses (local inference
+  server, gateway, media server); LAN follows the `PROXY_ALLOW_LOCAL_NETWORK` toggle. The
+  rules live in `shared/proxy.ts` and the settings page renders "who goes through the proxy"
+  from that same code, so the UI cannot drift from the real behavior.
+  Subprocesses (`pip`, python workers, `git lfs`, brew, and the four inference engines
+  fetching weights) only read env vars: `syncProxyEnv()` keeps `HTTP(S)_PROXY` + `NO_PROXY`
+  in the process env, and download spawns merge `proxyChildEnv()`.
+  Three Bun quirks shape this: per-request `proxy` beats env, **socks is unsupported**
+  (`UnsupportedProxyProtocol`), and env proxies are latched at startup while `NO_PROXY`
+  ignores CIDR — hence "no proxy" is expressed as `NO_PROXY=*` instead of deleting variables.
+  `bun run --cwd apps/studio scripts/proxy-smoke.ts` exercises the whole chain, including a
+  real trip through a local HTTP proxy.
 
 ## Hard Rules
 
@@ -88,12 +104,18 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
 - Python helper scripts (`mlx-worker.py`, `mlx-model.py`, `ppocr-worker.py`) are spawned via
   `import.meta.dir` relative paths, so they must stay listed in `electrobun.config.ts`'s
   `build.copy`. Missing them exits Python with code 2 and surfaces as bogus model download failures.
+  Same rule for `omni-landlock.c` (the Linux Landlock helper `landlock-helper.ts` compiles with
+  `cc` on first use): if it is not copied into `bun/`, Linux silently degrades to "no compiler".
 - Child processes are spawned `detached` and killed by process group (`kill(-pid)`) — killing
   only the direct child leaves VRAM-hogging orphans behind.
 - Anything that resolves a user-supplied path (downloads, media, Skills deletes) must validate
   it against the data directory — inputs arrive from the webview and the control socket.
 - Adding an inference engine means editing `src/shared/engines.ts` plus one `Runtime`
   implementation; do not hardcode engine checks elsewhere.
+- Outbound HTTP goes through the global `fetch` (patched by `bun/proxy.ts`) or, when you must
+  bypass it, per-request `proxy` — do not open raw sockets or side-channel HTTP clients for
+  remote hosts, or that request silently ignores the user's proxy settings. Loopback IPC
+  fetches (`unix:` control socket) are exempt and deliberately left untouched.
 - `src/bun/backup/*` must not import `db/index.ts` or `electrobun` — that isolation is what
   lets `omi backup` work when the app won't start (migrations failed). Entry points that
   need the data layer belong in `src/cli/commands/backup.ts`, not in the kernel.
@@ -118,6 +140,129 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   `bun run scripts/omi-docs-smoke.ts --write`; the same script verifies sync.
 - A legacy second CLI (`src/cli/omni.ts`, commands `chat`/`doctor`/`config`/`gateway`)
   still exists alongside `omi`; new work goes into `omi` only.
+
+## Data Directory Layout
+
+All user data lives under `<userData>` (macOS: `~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>`):
+
+```
+omni-studio.db          SQLite (WAL) — 33 tables, Drizzle ORM
+models/<repo>/...       Downloaded model weights
+engines/{paddleocr,mflux,whispercpp,audiocpp,tessdata}/   Local engine binaries/data
+images/{<docId>,chat,gen,edit,ocr,audio,videos}/          Media artifacts
+uploads/                Uploaded source files for OCR / translation
+backups/                *.omnibackup archives + temp restore dirs
+mlx-downloads/          MLX weight download progress (.part resume)
+omni-control.sock       CLI control channel (0600 permissions)
+logs/app.log            JSONL app log (2MB rotation, secrets redacted)
+```
+
+**Never hardcode paths to these directories.** Use `src/bun/paths.ts` (`getUserDataDir()`) and `src/bun/db/index.ts` (`getDbPath()`). Both compute userData without importing `electrobun`.
+
+---
+
+## Frontend Conventions
+
+- **Navigation is explicit dual-state, no URL routing:** `stores/app.ts` manages `activeApp` (~18 apps: chat, agent, voicecall, voice, image, video, ocr, translate, prompt, skills, kb, memory, automations, benchmark, gateway, usage, dashboard); `stores/router.ts` manages routes within each app.
+- **State management is dual-track:** TanStack Query for data fetched from main process; Zustand for UI state and streaming data. Main-process push events write stores directly in `lib/rpc.ts` message handler (bypassing React render cycle), only calling `queryClient.invalidateQueries()` on terminal events.
+- **RPC calls are direct:** ~220 call sites use `import { rpcClient }` then `rpcClient.xxx()` — no wrapper layer. Voice screen has the most (53+ calls). One light wrapper exists: `lib/use-engine.ts` for engine settings reads/writes.
+- **Adding a new Screen:** Create `app/<name>-screen.tsx`, register it in `main-layout/settings.tsx`'s `TAB_DEFS` / `TAB_GROUPS`, add an icon to `app-rail`, and define RPC methods in `src/bun/rpc/index.ts`.
+
+---
+
+## Adding New RPC Methods
+
+The RPC contract lives in `src/bun/rpc/index.ts` (~5,400 lines) which holds both type definitions AND all handlers. To add a new method:
+
+1. Add `{ params: ..., response: ... }` to `bun.requests` schema section
+2. Implement the handler function inside the same file's handler block
+3. Call from frontend via `rpcClient.<methodName>(params)`
+4. If the main process needs to push events back, add to `webview.messages` and subscribe with `initXxxBroadcast(win)` pattern
+
+**Error convention is inconsistent:** Most handlers return `{ ok: false, error }` discriminated union; only transport-layer errors are Promise rejects. Check existing patterns before deciding.
+
+---
+
+## Database Migrations
+
+Migrations live in `apps/studio/src/bun/db/migrations/` (currently 0000–0031). Generated by `drizzle-kit generate`:
+
+```bash
+cd apps/studio && bun run db:generate
+```
+
+**Critical rules:**
+- **Always check migration ordering.** The `when` field determines execution order — if a new migration's `when` is less than a previous one, older databases skip it entirely during upgrade.
+- New tables/columns go into SQL files; Drizzle schema lives in `src/bun/db/schema.ts`.
+- WAL mode + `busy_timeout=5000` + `synchronous=NORMAL` supports concurrent reads from CLI/MCP bridge while app runs.
+
+---
+
+## Testing Conventions
+
+### Unit Tests (`bun test`)
+
+All tests auto-isolate via `test-preload.ts` which sets `OMNI_DATA_DIR` to a temp directory before any module loads. This prevents tests from touching the real database at import time.
+
+```bash
+# Run all unit tests
+bun run test
+
+# Run a single file
+bun test src/bun/chat.test.ts
+```
+
+Test files are co-located with source: `src/bun/foo.ts` → `src/bun/foo.test.ts`. ~92 test files total (63 in bun/, 29 in mainview/).
+
+### Smoke Tests (`test:smoke`)
+
+End-to-end integration tests that exercise real DB operations, media pipelines, and Agent capabilities. Each script independently creates its own data dir:
+
+```bash
+cd apps/studio && bun run test:smoke
+```
+
+Runs: migrations-smoke, memory-smoke, kb-smoke, kb-chat-smoke, kb-rerank-smoke, kb-access-smoke, kb-governance-smoke, video-gen-smoke, backup-smoke, proxy-smoke, agent-capabilities-smoke, agent-live-check, agent-resilience-smoke, omi-docs-smoke, builtin-skills-smoke.
+
+---
+
+## Troubleshooting Guide
+
+When something is broken, follow this order:
+
+1. **Check app log:** `omi logs` or read `<dataDir>/logs/app.log` — every subsystem failure should have an entry here
+2. **One-shot diagnostic dump:** `bun run --cwd apps/studio scripts/omni-diag.ts`
+3. **OmniDoctor skill:** `.agents/skills/omni-doctor/` has a full triage procedure for each subsystem
+4. **Inference server logs** are NOT in app.log (they use a separate 200k in-memory buffer): `omi server logs`
+5. **Control socket status:** `omi status` to verify the running instance and channel
+
+Common symptoms and their likely causes:
+- **Image/audio preview 404** → Image server port conflict; check if another OmniStudio instance holds it
+- **"Model download failed" en masse** → Python helper script missing from bundle (check `electrobun.config.ts` copy list)
+- **Agent stuck / not responding** → Check permissions mode (`AGENT_APPROVAL_MODE`), sandbox settings, or context compaction issues
+- **Migration fails on startup** → Check migration ordering in `db/migrations/`; try `omi backup` to save state before fixing
+
+---
+
+## Agent Tool Registration
+
+New tools go through these files:
+
+1. **Implementation:** Create `src/bun/<tool-name>.ts` — pure function that returns `{ ok: true/false, ... }`
+2. **Registration:** Add tool definition to `agent-tools.ts` with name, description, parameters schema, and permission pattern
+3. **Permission model:** Tools map to `(permission, pattern)` tuples — `bash` maps to command text, `write_file` to relative path, out-of-workspace access to `external_directory`, MCP to tool name
+4. **Approval modes:** `smart` (default, only dangerous commands + workspace-outside), `manual` (all side-effect tools ask), `auto`, `strict`
+5. **Credential blacklist:** Hard-blocked paths (`~/.ssh`, `~/.aws`, etc.) cannot be authorized even by user consent
+
+See `permissions.ts` for the full authorization evaluation chain: built-in defaults → settings rules → workspace rules → session rules.
+
+---
+
+## i18n
+
+All UI strings live in a single bilingual dictionary file: `shared/i18n.ts` (~3,000+ keys). Runtime language is stored in `stores/ui-lang.ts`. Default is Chinese with fallback chain zh → en → key. Uses simple `{name}` interpolation. When adding new UI elements, add both `zh` and `en` entries before shipping.
+
+---
 
 ## Checks
 

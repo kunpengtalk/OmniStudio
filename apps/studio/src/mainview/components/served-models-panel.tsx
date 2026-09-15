@@ -166,8 +166,9 @@ function ServedModelRow({ model }: { model: ServedModelInfo }) {
     <div className="flex flex-col gap-2 rounded-lg border p-3">
       <div className="flex flex-wrap items-center gap-2">
         {model.isDir && <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/60" />}
+        {/* 标题用展示名：MLX 的 servedName 是绝对路径，摆在这里就成了「模型名是一串路径」 */}
         <span className="min-w-0 truncate text-sm font-medium">
-          {model.servedName || model.label}
+          {model.label || model.servedName}
         </span>
         <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
           {ENGINE_SHORT_NAMES[model.engine]}
@@ -234,7 +235,12 @@ function ServedModelRow({ model }: { model: ServedModelInfo }) {
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <EndpointCopy endpoint={model.endpoint} />
-        <span className="font-mono text-[11px] text-muted-foreground/70">{model.servedName}</span>
+        {/* 与展示名不同的才是「请求 id」（llama.cpp 的 slug 与名字一样，就不重复显示了） */}
+        {model.servedName && model.servedName !== model.label && (
+          <span className="max-w-96 truncate font-mono text-[11px] text-muted-foreground/70">
+            {t("console.requestId")} {model.servedName}
+          </span>
+        )}
         {model.repo && (
           <span className="max-w-72 truncate text-[11px] text-muted-foreground/70">
             {model.repo}
@@ -391,7 +397,7 @@ function ServedModelTerminal({ model }: { model: ServedModelInfo }) {
       }}
     >
       <TerminalHeader>
-        <TerminalTitle>{model.servedName || model.label}</TerminalTitle>
+        <TerminalTitle>{model.label || model.servedName}</TerminalTitle>
         <TerminalActions>
           <TerminalCopyButton />
           <TerminalClearButton />
@@ -470,7 +476,7 @@ export function ServedModelLogs() {
             <SelectContent>
               {models.map((m) => (
                 <SelectItem key={m.id} value={m.id}>
-                  {m.servedName || m.label}
+                  {m.label || m.servedName}
                   <span className="ml-2 text-[10px] text-muted-foreground">
                     :{m.port}
                   </span>

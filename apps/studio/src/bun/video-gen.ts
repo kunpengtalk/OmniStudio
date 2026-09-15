@@ -14,6 +14,7 @@ import {
   SEEDANCE_VIDEO_MODELS,
 } from "../shared/cloud-providers";
 import { logEvent } from "./app-log";
+import { providerLabelFor, recordUsageEvent } from "./usage";
 
 // 模型清单的唯一真源在 shared/cloud-providers（预设与服务商用同一份），
 // 这里继续对外导出，保持既有导入方（rpc / 脚本）不变。
@@ -215,6 +216,26 @@ function resolveCloudTarget(providerId: string): CloudVideoTarget {
     key: provider.apiKey.trim(),
     videoApi,
   };
+}
+
+/**
+ * 记一次生视频提交。
+ *
+ * 跟生图同一种情况：没有 token 口径（云端按秒 / 次计费，本地 ComfyUI 免费），
+ * 但每次提交都是用户眼里的一次"调用"，统计页里得看得见。没有 token 就记
+ * `requests: 1`，token 留 0。
+ */
+function recordVideoUsage(
+  upstream: "local" | "cloud",
+  provider: string,
+  model: string | null | undefined,
+): void {
+  recordUsageEvent({
+    channel: "video",
+    upstream,
+    provider: provider || providerLabelFor(upstream),
+    model: model ?? "",
+  });
 }
 
 /** 失败日志用：解析不到也只能记个空，别让日志本身抛错。 */
@@ -628,7 +649,15 @@ function buildComfyVideoWorkflow(p: {
 async function submitComfy(
   cfg: VideoGenConfig,
   params: SubmitVideoParams,
-): Promise<{ promptId: string; width: number; height: number; frames: number; seed: number }> {
+): Promise<{
+  promptId: string;
+  width: number;
+  height: number;
+  frames: number;
+  seed: number;
+  /** 实际用的 checkpoint（没填时会自动探一个），用量记录要的是它。 */
+  checkpoint: string;
+}> {
   const base = cfg.comfyBase.trim().replace(/\/+$/, "");
   if (!base) throw new Error("请先配置 ComfyUI 服务地址（如 http://127.0.0.1:8188）");
 
@@ -678,7 +707,7 @@ async function submitComfy(
   if (!res.ok) throw new Error(await errorMessage(res, "提交 ComfyUI 工作流失败"));
   const json = (await res.json().catch(() => null)) as { prompt_id?: string } | null;
   if (!json?.prompt_id) throw new Error("ComfyUI 未返回 prompt_id，请检查服务日志");
-  return { promptId: json.prompt_id, width: size.width, height: size.height, frames, seed };
+  return { promptId: json.prompt_id, width: size.width, height: size.height, frames, seed, checkpoint };
 }
 
 // ---------------------------------------------------------------------------
@@ -747,6 +776,9 @@ export async function submitVideoGeneration(
         seed: submitted.seed,
         steps: params.steps ?? 20,
       });
+      // 生视频按秒 / 次计费，没有 token 口径，记一行只为了让统计页看得到
+      // "用了几次"，模型名是 ComfyUI 的 checkpoint（用户认的就是它）。
+      recordVideoUsage("local", "ComfyUI", submitted.checkpoint);
       return { record: toRow(record) };
     }
 
@@ -756,6 +788,11 @@ export async function submitVideoGeneration(
       target.videoApi === "seedance"
         ? await submitSeedance(target, params, cfg.model)
         : await submitMinimax(target, params, cfg.model);
+    recordVideoUsage(
+      "cloud",
+      target.providerName,
+      common.model ?? (target.videoApi === "seedance" ? SEEDANCE_VIDEO_MODELS[0]! : MINIMAX_VIDEO_MODELS[0]!),
+    );
     const record = insertVideoRecord({ ...common, taskId });
     return { record: toRow(record) };
   } catch (e) {

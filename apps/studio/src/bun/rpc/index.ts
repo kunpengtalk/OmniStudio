@@ -50,6 +50,7 @@ import * as Agent from "../agent";
 import type {
   AgentEventRow,
   AgentMode,
+  AgentRunState,
   AgentSessionSearchHit,
   AgentSessionView,
 } from "../agent";
@@ -60,6 +61,29 @@ import {
 } from "../agent-interactions";
 import type { TodoItem } from "../agent-todos";
 import { listTodos as listAgentTodoItems } from "../agent-todos";
+import type { AgentGoal } from "../agent-goals";
+import {
+  getGoal as getAgentGoal,
+  maxGoalContinuations,
+  setGoalStatus as setAgentGoalStatus,
+} from "../agent-goals";
+
+/**
+ * 推给界面的目标视图：比库里的多一个"续跑上限"。
+ * 上限是可配置的，前端不该自己算一遍（算错了界面就会显示 3/6 实际只允许 2 次）。
+ */
+type AgentGoalView = AgentGoal & { maxContinuations: number };
+
+function goalView(conversationId: number): AgentGoalView | null {
+  const goal = getAgentGoal(conversationId);
+  return goal ? { ...goal, maxContinuations: maxGoalContinuations() } : null;
+}
+import type { AgentPlan } from "../agent-plans";
+import {
+  approvePlan as approveAgentPlan,
+  clearPlan as clearAgentPlan,
+  getPlan as getAgentPlan,
+} from "../agent-plans";
 import type { ArtifactItem, WorkspaceTreeNode } from "../agent-artifacts";
 import {
   deleteArtifact as deleteAgentArtifactRow,
@@ -91,6 +115,7 @@ import type { ApprovalMode as AgentApprovalMode, EffectivePermissionRow } from "
 import * as Automations from "../automations";
 import * as Notifications from "../notifications";
 import type { AppNotification } from "../notifications";
+import * as ViewState from "../view-state";
 import type { AutomationItem, AutomationRunItem } from "../automations";
 import * as Mcp from "../mcp";
 import type { McpServerConfig } from "../mcp";
@@ -103,8 +128,27 @@ import type { VoiceCallOutgoing, VoiceCallPhase, VoiceCallPreflight } from "../v
 import * as RealtimeVoice from "../realtime-voice";
 import type { RealtimeProviderConfig } from "../realtime-voice";
 import * as Translate from "../translate";
-import { listChatModels, selectChatModel, type ChatModelOption } from "../chat-model";
+import {
+  listChatModels,
+  selectChatModel,
+  chatModelSupportsImages,
+  getChatModelLabel,
+  type ChatModelOption,
+} from "../chat-model";
+import {
+  loadProjectInstructions,
+  projectDocEnabled,
+  projectDocMaxBytes,
+  userInstructionsPath,
+} from "../agent-instructions";
+import * as Snapshots from "../agent-snapshots";
+import * as Context from "../agent-context";
+import * as Sandbox from "../agent-sandbox";
+import * as NotifyHook from "../agent-notify";
+import * as Hooks from "../agent-hooks";
 import * as CloudProviders from "../cloud-providers";
+import * as Proxy from "../proxy";
+import type { ProxyStatus, ProxyTestResult } from "../proxy";
 import type {
   CloudModelEntry,
   CloudProviderInfo,
@@ -123,6 +167,8 @@ import * as ModelStore from "../model-store";
 import type { InstalledModel } from "../model-store";
 import { updateModelCategory } from "../model-category";
 import { getServerStats, type ServerStats } from "../stats";
+import { getUsageStats } from "../usage";
+import type { UsageStats } from "../../shared/usage";
 import {
   startBenchmark,
   getBenchmarkRun,
@@ -261,6 +307,16 @@ export type AppRPC = {
         params: { settings: Record<string, string> };
         response: { ok: boolean };
       };
+      /** 代理（设置 → 偏好 → 通用）：当前生效的地址与「谁走代理、谁直连」的采样。 */
+      getProxyStatus: {
+        params: undefined;
+        response: ProxyStatus;
+      };
+      /** 「测试代理」：按当前（或表单里正在编辑的）设置请求一次模型市场。 */
+      testProxy: {
+        params: Proxy.ProxyTestOverride | undefined;
+        response: ProxyTestResult;
+      };
       checkConnection: {
         params: { baseUrl?: string; apiKey?: string } | undefined;
         response: { connected: boolean; error?: string };
@@ -345,6 +401,14 @@ export type AppRPC = {
       getServerStats: {
         params: undefined;
         response: ServerStats;
+      };
+      /**
+       * 用量统计（设置 → 数据 → 使用统计）。`rangeDays` 只影响趋势与分组表，
+       * 「累计」那几个数永远是全量口径。
+       */
+      getUsageStats: {
+        params: { rangeDays?: number } | undefined;
+        response: UsageStats;
       };
       clearServerLogs: {
         params: undefined;
@@ -680,8 +744,14 @@ export type AppRPC = {
         response: { ok: boolean; error?: string };
       };
       listAgentEvents: {
-        params: { conversationId: number };
+        /** `afterId` = 只取比它新的事件（跑动中界面按 id 增量追平，见 Agent.listAgentEvents）。 */
+        params: { conversationId: number; afterId?: number };
         response: { events: AgentEventRow[] };
+      };
+      /** 会话当前是否在跑（打开会话时取一次：刷新窗口 / 切回会话都要能把状态补上）。 */
+      getAgentRunState: {
+        params: { conversationId: number };
+        response: AgentRunState;
       };
       listAgentTools: {
         params: { mode?: string } | undefined;
@@ -751,6 +821,28 @@ export type AppRPC = {
       listAgentTodos: {
         params: { conversationId: number };
         response: { todos: TodoItem[] };
+      };
+      getAgentGoal: {
+        params: { conversationId: number };
+        response: { goal: AgentGoalView | null };
+      };
+      /** 目标的人工操作：暂停自动推进 / 恢复 / 放弃。 */
+      setAgentGoalStatus: {
+        params: { conversationId: number; status: "active" | "paused" | "dropped"; outcome?: string };
+        response: { ok: boolean; goal: AgentGoalView | null };
+      };
+      getAgentPlan: {
+        params: { conversationId: number };
+        response: { plan: AgentPlan | null; approved: boolean };
+      };
+      /** 批准方案并切到 Agent 模式执行（界面上的「批准并执行」）。 */
+      approveAgentPlan: {
+        params: { conversationId: number };
+        response: { ok: boolean; error?: string };
+      };
+      clearAgentPlan: {
+        params: { conversationId: number };
+        response: { ok: boolean };
       };
       listAgentArtifacts: {
         params: { conversationId: number };
@@ -860,6 +952,211 @@ export type AppRPC = {
         params: { folders: string[] };
         response: { ok: boolean };
       };
+      /**
+       * Agent 能力开关（对齐 Codex 的那批能力）：项目指令（AGENTS.md）与看图工具。
+       * 项目指令的现状单独有 getAgentInstructions：设置页要展示「读到了哪几个文件」。
+       */
+      getAgentCapabilities: {
+        params: undefined;
+        response: {
+          visionTool: "auto" | "on" | "off";
+          /** 当前模型看起来能不能收图片（auto 档的实际判定结果）。 */
+          visionAvailable: boolean;
+          modelName: string;
+        };
+      };
+      setAgentCapabilities: {
+        params: { visionTool?: "auto" | "on" | "off" };
+        response: { ok: boolean };
+      };
+      getAgentInstructions: {
+        params: { workspace?: string } | undefined;
+        response: {
+          enabled: boolean;
+          maxBytes: number;
+          workspace: string;
+          truncated: boolean;
+          files: { path: string; source: "user" | "project"; bytes: number }[];
+          userPath: string;
+        };
+      };
+      setAgentInstructions: {
+        params: { enabled?: boolean; maxBytes?: number };
+        response: { ok: boolean };
+      };
+      /**
+       * 回合快照与回退（对齐 Codex 的回合安全网）：每轮 Agent 开跑前记一次工作区状态，
+       * 界面据此给助手消息挂「撤销本轮」。
+       */
+      listAgentSnapshots: {
+        params: { conversationId?: number } | undefined;
+        response: {
+          enabled: boolean;
+          gitAvailable: boolean;
+          workspace: string;
+          turns: number;
+          snapshots: { id: string; messageId: number | null; label: string; createdAt: number; files: number }[];
+          /** 影子仓库占用与维护阈值（设置页显示"吃了多少磁盘"）。 */
+          usage: {
+            repoDir: string;
+            bytes: number;
+            turns: number;
+            lastSnapshotAt: number | null;
+            lastGcAt: number | null;
+            truncated: boolean;
+          } | null;
+          gcThresholds: { bytes: number; turns: number };
+        };
+      };
+      /** 手动整理影子仓库（设置页的「立即清理」）。 */
+      gcAgentSnapshots: {
+        params: undefined;
+        response: {
+          ok: boolean;
+          ran: boolean;
+          reason?: string;
+          freedBytes: number;
+          bytesBefore: number;
+          bytesAfter: number;
+        };
+      };
+      /** 回退前先看一眼会改哪些文件（状态 A / ? = 会被删除）。 */
+      previewAgentSnapshot: {
+        params: { id: string };
+        response: {
+          ok: boolean;
+          workspace?: string;
+          files?: { status: string; path: string }[];
+          error?: string;
+        };
+      };
+      revertAgentSnapshot: {
+        params: { id: string };
+        response: { ok: boolean; restored?: string[]; removed?: string[]; error?: string };
+      };
+      setAgentSnapshots: {
+        params: { enabled: boolean };
+        response: { ok: boolean };
+      };
+      /**
+       * 上下文占用（对齐 Codex 的 /status）：输入框上的占用条用它。
+       * 实测优先（上一轮的 usage.prompt_tokens），否则按消息估算。
+       */
+      /**
+       * 命令沙箱（对齐 Codex 的 workspace-write）：管住 bash 里那些不经过
+       * 工具层路径校验的操作（写工作区外、读凭据目录）。
+       */
+      getAgentSandbox: {
+        params: undefined;
+        response: {
+          mode: "off" | "workspace-write" | "read-only";
+          supported: boolean;
+          /** 实际生效的后端：macOS 的 seatbelt / Linux 的 bwrap 或 landlock / none。 */
+          backend: "seatbelt" | "bwrap" | "landlock" | "none";
+          platform: string;
+          allowNetwork: boolean;
+          /** Linux 上 bwrap 是否探测通过（没装的话界面给出安装命令）。 */
+          bwrapAvailable: boolean;
+          /** 后端偏好：auto（默认）/ bwrap / landlock（设置项 AGENT_SANDBOX_BACKEND）。 */
+          backendPreference: "auto" | "bwrap" | "landlock";
+          /**
+           * Landlock（Linux 5.13+）：策略生成已就绪，辅助程序是首次使用时按源码现编的
+           * （需要 C 编译器）。`helperAvailable` 是**真实探测结果**（编译 + 内核 ABI），
+           * 不是"理论上可以"。
+           */
+          landlock: {
+            policyReady: boolean;
+            helperAvailable: boolean;
+            abi: number | null;
+            reason: string | null;
+            note: string;
+          };
+        };
+      };
+      setAgentSandbox: {
+        params: { mode?: "off" | "workspace-write" | "read-only"; allowNetwork?: boolean };
+        response: { ok: boolean };
+      };
+      /**
+       * 外部通知回调（对齐 Codex 的 notify）：跑完 / 需要授权 / 自动化结果发生时，
+       * 把事件 JSON 交给用户自己的命令（最后一个参数 + OMNI_NOTIFY_PAYLOAD）。
+       */
+      getAgentNotify: {
+        params: undefined;
+        response: { command: string; configured: boolean };
+      };
+      setAgentNotify: {
+        params: { command: string };
+        response: { ok: boolean };
+      };
+      /**
+       * 生命周期 hooks（对齐 Codex 的 SessionStart / UserPromptSubmit）：
+       * 配置是 JSON 数组，返回时连带把解析错误带出来（设置页要能指出哪条写错了）。
+       */
+      getAgentHooks: {
+        params: undefined;
+        response: {
+          raw: string;
+          hooks: { event: string; command: string; timeoutMs: number }[];
+          errors: string[];
+          events: string[];
+        };
+      };
+      setAgentHooks: {
+        params: { raw: string };
+        response: { ok: boolean; errors?: string[] };
+      };
+      /** 手动压缩（对齐 Codex 的 `/compact`）：现在就把上下文收紧一次。 */
+      compactAgentConversation: {
+        params: { conversationId: number };
+        response: {
+          ok: boolean;
+          dropped: number;
+          tokensBefore: number;
+          tokensAfter: number;
+          budgetTokens: number;
+          reason?: string;
+        };
+      };
+      /** 会话配置速览（对齐 Codex 的 `/status`）。 */
+      getAgentSessionStatus: {
+        params: { conversationId: number };
+        response: {
+          model: string;
+          mode: string;
+          workspace: string;
+          serverMode: "local" | "remote";
+          contextWindow: number;
+          contextBudget: number;
+          usedTokens: number;
+          remainingTokens: number;
+          percent: number;
+          usageSource: "usage" | "estimate";
+          approvalMode: string;
+          thinkingLevel: string;
+          sandboxMode: string;
+          droppedSoFar: number;
+        };
+      };
+      /**
+       * 推理等级开关。与 `AGENT_MODE` 不同，这个值必须校验后才落库 ——
+       * 拼错的等级会被原样发进请求体，服务端只会回一个看不懂的 400。
+       */
+      setAgentThinkingLevel: {
+        params: { level: string };
+        response: { ok: boolean; level: string };
+      };
+      getAgentContextUsage: {
+        params: { conversationId: number };
+        response: {
+          windowTokens: number;
+          budgetTokens: number;
+          usedTokens: number;
+          remainingTokens: number;
+          percent: number;
+          source: "usage" | "estimate";
+        };
+      };
 
       // -----------------------------------------------------------------
       // 自动化（定时把 Agent 跑起来）
@@ -923,6 +1220,14 @@ export type AppRPC = {
       };
       clearNotifications: {
         params: undefined;
+        response: { ok: boolean };
+      };
+      /**
+       * webview 回报「用户在看什么」（当前会话 + 窗口是否聚焦）。
+       * 主进程据此决定后台跑完的回合要不要发通知 —— 它自己看不到界面状态。
+       */
+      setViewState: {
+        params: { conversationId?: number | null; focused?: boolean } | undefined;
         response: { ok: boolean };
       };
 
@@ -2215,10 +2520,25 @@ export type AppRPC = {
         /** 知识库引用溯源（挂了知识库的回答才有）。 */
         citations?: KbCitation[];
       };
+      /**
+       * 本轮助手消息的行刚建好（开跑瞬间，一个字还没出）。
+       *
+       * 从"按下发送"到"第一个 token"之间是建会话 / 起推理服务 / 模型加载 / 预填充 /
+       * 检索这些活儿，几秒到几十秒都可能。界面据此**立刻**把这条消息画出来
+       * （对话页「生成中…」、Agent 页「处理中 · N 秒」），而不是干等到第一个增量
+       * 才凭空冒出一个气泡 —— 那段没有任何反馈的等待看着就是"程序挂了"。
+       */
+      chatMessageStarted: { conversationId: number; messageId: number };
       /** 知识库数据变化（摄取进度/删除/向量补齐），前端据此刷新列表。 */
       knowledgeChanged: { kbId?: number; docId?: number };
       chatStats: ChatStats;
       agentEvent: AgentEventRow;
+      /**
+       * 会话的运行态（开跑 / 收尾各一次）。
+       * 为什么不能只靠前端自己记：刷新窗口、切走再切回、自动化起的运行都不经过
+       * 本窗口的"发送"按钮，只有后端推过来，界面才知道它还在干活。
+       */
+      agentRunState: { conversationId: number; running: boolean };
       /** 工具授权请求 / 已结束（弹窗的显示与收起）。 */
       agentPermissionRequest: PendingPermission;
       agentPermissionSettled: {
@@ -2233,6 +2553,10 @@ export type AppRPC = {
       agentQuestionSettled: { conversationId: number; id: string; answers: string[][] };
       /** 待办清单变化（全量覆盖）。 */
       agentTodos: { conversationId: number; todos: TodoItem[] };
+      /** 目标变化（Goal 模式）：立项 / 完成 / 暂停 / 撞预算都会推。 */
+      agentGoalChanged: { conversationId: number; goal: AgentGoalView | null };
+      /** 方案变化（Plan 模式）：写入 / 批准 / 清空都会推。 */
+      agentPlanChanged: { conversationId: number; plan: AgentPlan | null };
       /** 新产出物登记。 */
       agentArtifact: { conversationId: number; artifact: ArtifactItem };
       /** 终端输出（按帧批量推送）。 */
@@ -2313,44 +2637,43 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       updateSettings: async ({ settings }) => {
         updateSettings(settings);
+        // 代理设置改完立刻生效：重装环境变量与探测缓存，否则要等下一次启动。
+        if (Object.keys(settings).some((key) => key.startsWith("PROXY_"))) {
+          Proxy.applyProxySettings();
+        }
         return { ok: true };
       },
 
+      getProxyStatus: async () => Proxy.proxyStatus(),
+
+      testProxy: async (params) => Proxy.testProxyConnection(params),
+
       checkConnection: async (params) => {
-        try {
-          const baseUrl = params?.baseUrl ?? getSetting("VLLM_API_BASE");
-          const apiKey = params?.apiKey ?? getSetting("VLLM_API_KEY");
-          const res = await fetch(`${baseUrl}/models`, {
-            headers: apiKey !== "EMPTY" ? { Authorization: `Bearer ${apiKey}` } : {},
-            signal: AbortSignal.timeout(5000),
-          });
-          return { connected: res.ok };
-        } catch (e) {
-          return { connected: false, error: String(e) };
-        }
+        const baseUrl = (params?.baseUrl ?? getSetting("VLLM_API_BASE") ?? "").trim();
+        const apiKey = params?.apiKey ?? getSetting("VLLM_API_KEY");
+        if (!baseUrl) return { connected: false, error: "缺少服务地址" };
+        // 走模型清单探测而不是只看 res.ok：聚合站（New API 等）的根路径返回
+        // 200 + 前端首页 HTML，只看状态码会把「不是接口」报成连接成功。
+        const r = await CloudProviders.fetchRemoteModels({ baseUrl, apiKey, timeoutMs: 5000 });
+        return r.ok ? { connected: true } : { connected: false, error: r.error };
       },
 
       // 拉取该 Key 有权限的远程模型列表（OpenAI 兼容 GET /models）
       listRemoteModels: async (params) => {
-        try {
-          const baseUrl = (params?.baseUrl ?? getSetting("VLLM_API_BASE") ?? "").replace(/\/+$/, "");
-          const apiKey = params?.apiKey ?? getSetting("VLLM_API_KEY");
-          if (!baseUrl) return { ok: false, models: [], error: "缺少 Base URL" };
-          const res = await fetch(`${baseUrl}/models`, {
-            headers: apiKey && apiKey !== "EMPTY" ? { Authorization: `Bearer ${apiKey}` } : {},
-            signal: AbortSignal.timeout(15000),
+        const baseUrl = (params?.baseUrl ?? getSetting("VLLM_API_BASE") ?? "").trim();
+        const apiKey = params?.apiKey ?? getSetting("VLLM_API_KEY");
+        const r = await CloudProviders.fetchRemoteModels({ baseUrl, apiKey });
+        if (!r.ok) {
+          logEvent({
+            level: "warn",
+            source: "app",
+            event: "cloud-provider.models.failed",
+            message: `获取模型列表失败：${r.error ?? "未知原因"}`,
+            detail: { baseUrl: baseUrl || null, error: r.error ?? null },
           });
-          if (!res.ok) return { ok: false, models: [], error: `请求失败：HTTP ${res.status}` };
-          // OpenAI 兼容返回 { data: [{id}] }，个别厂商用 { models: [...] }
-          const data = (await res.json()) as { data?: { id?: unknown }[]; models?: { id?: unknown }[] };
-          const items = data.data ?? data.models ?? [];
-          const models = Array.from(
-            new Set(items.map((m) => (typeof m?.id === "string" ? m.id : "")).filter(Boolean)),
-          ).sort();
-          return { ok: true, models };
-        } catch (e) {
-          return { ok: false, models: [], error: String(e) };
+          return { ok: false, models: [], error: r.error };
         }
+        return { ok: true, models: [...r.models].sort() };
       },
 
       cloudProviderList: async () => CloudProviders.listCloudProviders(),
@@ -2413,6 +2736,10 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       getServerStats: async () => {
         return getServerStats();
+      },
+
+      getUsageStats: async ({ rangeDays } = {}) => {
+        return getUsageStats(rangeDays);
       },
 
       getLaunchCommand: async ({ path }) => {
@@ -2958,8 +3285,12 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return Agent.regenerateAgentMessage(conversationId, messageId);
       },
 
-      listAgentEvents: async ({ conversationId }) => {
-        return { events: Agent.listAgentEvents(conversationId) };
+      listAgentEvents: async ({ conversationId, afterId }) => {
+        return { events: Agent.listAgentEvents(conversationId, afterId ?? 0) };
+      },
+
+      getAgentRunState: async ({ conversationId }) => {
+        return Agent.getAgentRunState(conversationId);
       },
 
       listAgentTools: async (params) => {
@@ -3010,6 +3341,40 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
       listAgentTodos: async ({ conversationId }) => {
         return { todos: listAgentTodoItems(conversationId) };
+      },
+      getAgentGoal: async ({ conversationId }) => {
+        return { goal: goalView(conversationId) };
+      },
+      setAgentGoalStatus: async ({ conversationId, status, outcome }) => {
+        const goal = setAgentGoalStatus(conversationId, status, outcome ?? null);
+        return { ok: goal !== null, goal: goalView(conversationId) };
+      },
+      getAgentPlan: async ({ conversationId }) => {
+        const plan = getAgentPlan(conversationId);
+        return { plan, approved: Boolean(plan?.approvedAt) };
+      },
+      approveAgentPlan: async ({ conversationId }) => {
+        const result = approveAgentPlan(conversationId);
+        if (!result.ok) return { ok: false, error: result.error };
+        // 批准 = 立刻开始执行：切到 Agent 模式，把方案正文作为这一轮的开工说明。
+        Agent.setAgentMode("agent");
+        const content = [
+          "按下面这份**已经批准**的方案执行。",
+          "",
+          "要求：严格按方案走，不要顺手扩大范围；方案里没写、但执行中发现必须改的地方，",
+          "先在回复里说明再改。每完成一步，用方案里写的验证方式确认一次。",
+          "",
+          "--- 已批准的方案 ---",
+          result.plan!.content,
+        ].join("\n");
+        void Agent.runAgentTurn({ conversationId, content }).catch(() => {
+          // 执行轮失败会在会话里留下错误轨迹，界面能看到。
+        });
+        return { ok: true };
+      },
+      clearAgentPlan: async ({ conversationId }) => {
+        clearAgentPlan(conversationId);
+        return { ok: true };
       },
       listAgentArtifacts: async ({ conversationId }) => {
         return { artifacts: listAgentArtifactItems(conversationId) };
@@ -3130,6 +3495,142 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         Permissions.setAuthorizedFolders(folders);
         return { ok: true };
       },
+      getAgentCapabilities: async () => ({
+        visionTool: (getSetting("AGENT_VISION_TOOL") as "auto" | "on" | "off") || "auto",
+        visionAvailable: chatModelSupportsImages(),
+        modelName: getChatModelLabel(),
+      }),
+      setAgentCapabilities: async ({ visionTool }) => {
+        if (visionTool) updateSettings({ AGENT_VISION_TOOL: visionTool });
+        return { ok: true };
+      },
+      getAgentInstructions: async (params) => {
+        const workspace = params?.workspace?.trim() ? path.resolve(params.workspace) : Agent.getAgentWorkspace();
+        const loaded = loadProjectInstructions(workspace);
+        return {
+          enabled: projectDocEnabled(),
+          maxBytes: projectDocMaxBytes(),
+          workspace,
+          truncated: loaded.truncated,
+          files: loaded.files.map((file) => ({
+            path: file.path,
+            source: file.source,
+            bytes: Buffer.byteLength(file.contents, "utf8"),
+          })),
+          userPath: userInstructionsPath(),
+        };
+      },
+      setAgentInstructions: async ({ enabled, maxBytes }) => {
+        const patch: Record<string, string> = {};
+        if (enabled !== undefined) patch.AGENT_PROJECT_DOC = enabled ? "1" : "0";
+        if (maxBytes !== undefined) {
+          if (!Number.isFinite(maxBytes) || maxBytes < 512) return { ok: false };
+          patch.AGENT_PROJECT_DOC_MAX_BYTES = String(Math.floor(maxBytes));
+        }
+        if (Object.keys(patch).length) updateSettings(patch);
+        return { ok: true };
+      },
+      listAgentSnapshots: async (params) => {
+        const workspace = Agent.getAgentWorkspace();
+        const status = Snapshots.snapshotStatus(workspace);
+        return {
+          enabled: status.enabled,
+          gitAvailable: status.gitAvailable,
+          workspace,
+          turns: status.turns,
+          snapshots: Snapshots.listTurnSnapshots(params?.conversationId).map((snapshot) => ({
+            id: snapshot.id,
+            messageId: snapshot.messageId,
+            label: snapshot.label,
+            createdAt: snapshot.createdAt,
+            files: snapshot.files,
+          })),
+          usage: status.usage,
+          gcThresholds: status.gcThresholds,
+        };
+      },
+      gcAgentSnapshots: async () => {
+        const result = Snapshots.maybeGcSnapshotRepo(Agent.getAgentWorkspace(), { force: true });
+        return {
+          ok: result.ran,
+          ran: result.ran,
+          ...(result.reason ? { reason: result.reason } : {}),
+          freedBytes: result.freedBytes,
+          bytesBefore: result.bytesBefore,
+          bytesAfter: result.bytesAfter,
+        };
+      },
+      previewAgentSnapshot: async ({ id }) => Snapshots.previewSnapshotChanges(id),
+      revertAgentSnapshot: async ({ id }) => {
+        const result = Snapshots.revertToSnapshot(id);
+        if (!result.ok) return { ok: false, error: result.error };
+        // 回退是"工作区被改动"的大动作，通知中心留一条，用户离开界面也能看到发生了什么。
+        Notifications.notify({
+          kind: "info",
+          title: "已回退到回合快照",
+          body: `还原 ${result.restored.length} 个文件、删除 ${result.removed.length} 个`,
+        });
+        return { ok: true, restored: result.restored, removed: result.removed };
+      },
+      setAgentSnapshots: async ({ enabled }) => {
+        updateSettings({ AGENT_SNAPSHOTS: enabled ? "1" : "0" });
+        return { ok: true };
+      },
+      getAgentContextUsage: async ({ conversationId }) => Context.contextUsage(conversationId),
+      compactAgentConversation: async ({ conversationId }) =>
+        Agent.compactConversationNow(conversationId),
+      getAgentSessionStatus: async ({ conversationId }) => {
+        const status = Agent.describeAgentSession(conversationId);
+        return {
+          model: status.model,
+          mode: status.mode,
+          workspace: status.workspace,
+          serverMode: status.serverMode,
+          contextWindow: status.contextWindow,
+          contextBudget: status.contextBudget,
+          usedTokens: status.usedTokens,
+          remainingTokens: status.remainingTokens,
+          percent: status.percent,
+          usageSource: status.usageSource,
+          approvalMode: status.approvalMode,
+          thinkingLevel: status.thinkingLevel,
+          sandboxMode: status.sandboxMode,
+          droppedSoFar: status.droppedSoFar,
+        };
+      },
+      setAgentThinkingLevel: async ({ level }) => {
+        Agent.setAgentThinkingLevel(level as Agent.AgentThinkingLevel);
+        return { ok: true, level: Agent.getAgentThinkingLevel() };
+      },
+      getAgentSandbox: async () => Sandbox.sandboxStatus(),
+      getAgentNotify: async () => ({
+        command: NotifyHook.notifyCommand(),
+        configured: NotifyHook.externalNotifyConfigured(),
+      }),
+      setAgentNotify: async ({ command }) => {
+        updateSettings({ AGENT_NOTIFY_COMMAND: typeof command === "string" ? command.trim() : "" });
+        return { ok: true };
+      },
+      getAgentHooks: async () => {
+        const { hooks, errors } = Hooks.hooksStatus();
+        return { raw: getSetting("AGENT_HOOKS"), hooks, errors, events: Hooks.HOOK_EVENTS };
+      },
+      setAgentHooks: async ({ raw }) => {
+        const { errors } = Hooks.parseHookConfigs(raw);
+        // 有写错的条目也照样存下来（用户正在编辑），但把错误回给界面逐条显示。
+        updateSettings({ AGENT_HOOKS: typeof raw === "string" ? raw : "[]" });
+        return errors.length ? { ok: false, errors } : { ok: true };
+      },
+      setAgentSandbox: async ({ mode, allowNetwork }) => {
+        const patch: Record<string, string> = {};
+        if (mode) {
+          if (!Sandbox.isSandboxMode(mode)) return { ok: false };
+          patch.AGENT_SANDBOX_MODE = mode;
+        }
+        if (allowNetwork !== undefined) patch.AGENT_SANDBOX_NETWORK = allowNetwork ? "1" : "0";
+        if (Object.keys(patch).length) updateSettings(patch);
+        return { ok: true };
+      },
 
       // ---- 自动化 ----
       listAutomations: async () => ({ automations: Automations.listAutomations() }),
@@ -3177,6 +3678,10 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
       clearNotifications: async () => {
         Notifications.clearNotifications();
+        return { ok: true };
+      },
+      setViewState: async (params) => {
+        ViewState.setViewState(params ?? {});
         return { ok: true };
       },
 
@@ -4714,9 +5219,22 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
       win.webview.rpc?.send.chatStats(payload);
     } catch {}
   });
+  // 助手行一建好就推：界面立刻画出这条消息并开始走秒（见 chatMessageStarted 的说明）。
+  Chat.onChatMessageStarted((payload) => {
+    try {
+      win.webview.rpc?.send.chatMessageStarted(payload);
+    } catch {}
+  });
   Agent.onAgentEvent((payload) => {
     try {
       win.webview.rpc?.send.agentEvent(payload);
+    } catch {}
+  });
+  // 运行态（开跑 / 收尾）：界面据此显示"还在干活"的进度行与停止按钮，
+  // 刷新窗口、切会话、后台起的运行都靠这一条补齐状态。
+  Agent.onAgentRunState((payload) => {
+    try {
+      win.webview.rpc?.send.agentRunState(payload);
     } catch {}
   });
   // Agent 的文本流复用 chat 的 chunk / done / stats 通道，前端无需区分来源。
@@ -4733,6 +5251,12 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
   Agent.onAgentStats((payload) => {
     try {
       win.webview.rpc?.send.chatStats(payload);
+    } catch {}
+  });
+  // 同上：Agent 回合开跑时的"行已建好"也走同一条通道。
+  Agent.onAgentMessageStarted((payload) => {
+    try {
+      win.webview.rpc?.send.chatMessageStarted(payload);
     } catch {}
   });
   // Agent 交互：工具授权弹窗、ask_user 提问、待办清单、产出物登记。
@@ -4759,6 +5283,20 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
   Agent.onAgentTodos((payload) => {
     try {
       win.webview.rpc?.send.agentTodos(payload);
+    } catch {}
+  });
+  Agent.onAgentGoalChanged((payload) => {
+    try {
+      // 负载里补上续跑上限：界面要显示 "K/上限"，不该让前端自己去猜这个数。
+      win.webview.rpc?.send.agentGoalChanged({
+        conversationId: payload.conversationId,
+        goal: payload.goal ? { ...payload.goal, maxContinuations: maxGoalContinuations() } : null,
+      });
+    } catch {}
+  });
+  Agent.onAgentPlanChanged((payload) => {
+    try {
+      win.webview.rpc?.send.agentPlanChanged(payload);
     } catch {}
   });
   Agent.onAgentArtifact((payload) => {

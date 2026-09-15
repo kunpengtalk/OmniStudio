@@ -16,9 +16,7 @@ import {
 } from "../../shared/backup";
 import {
   createBackup,
-  currentBackupContext,
   defaultBackupDir,
-  deleteRemoteBackup,
   downloadRemoteBackup,
   inspectBackup,
   isRemoteConfigured,
@@ -115,8 +113,6 @@ async function readPassword(parsed: ParsedArgs): Promise<string | undefined> {
   }
   return optString(parsed.options, "password");
 }
-
-const t = (key: string, params?: Record<string, string>) => translate("zh", key, params);
 
 /** 需要密码时补一次交互输入（TTY 才有），避免用户重跑一遍长命令。 */
 async function askPassword(reason: string): Promise<string | undefined> {

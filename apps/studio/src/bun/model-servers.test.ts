@@ -3,6 +3,9 @@ import { mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
+import type { ServerStatus } from "./runtimes/types";
+import { mockModulePartial } from "./test-mocks";
+
 /**
  * 已启动模型注册表：多个模型同时驻留、各自端口、卸载即摘除条目。
  *
@@ -13,27 +16,29 @@ import { join } from "path";
  */
 
 const SETTINGS: Record<string, string> = {};
-mock.module("./db/settings", () => ({
-  getSetting: (key: string) => SETTINGS[key] ?? "",
-  getNumericSetting: (key: string) => Number(SETTINGS[key] ?? 0) || 0,
-  updateSettings: (values: Record<string, string>) => Object.assign(SETTINGS, values),
+await mockModulePartial<typeof import("./db/settings")>("./db/settings", {
+  getSetting: (key) => SETTINGS[key] ?? "",
+  getNumericSetting: (key) => Number(SETTINGS[key] ?? 0) || 0,
+  updateSettings: (values) => Object.assign(SETTINGS, values),
   getAllSettings: () => ({ ...SETTINGS }),
-  getServerPort: (engine: string) =>
-    engine === "llama.cpp" ? (SETTINGS.SERVER_PORT || "8080") : (SETTINGS.VLLM_PORT || "8081"),
-  setActiveServerPortOverride: (port: string | null) => {
+  getServerPort: (engine) =>
+    engine === "llama.cpp" ? SETTINGS.SERVER_PORT || "8080" : SETTINGS.VLLM_PORT || "8081",
+  setActiveServerPortOverride: (port) => {
     PORT_OVERRIDE = port;
   },
-}));
+});
 
 let PORT_OVERRIDE: string | null = null;
 
 /** 假的 runtime：记录被启动 / 停止，能手动推状态与日志。 */
 class FakeRuntime {
-  status = "stopped";
+  readonly id = "fake";
+  readonly label = "Fake Engine";
+  status: ServerStatus = "stopped";
   logs = "";
   pid = 4242;
   readonly logCbs = new Set<(text: string) => void>();
-  readonly statusCbs = new Set<(status: string) => void>();
+  readonly statusCbs = new Set<(status: ServerStatus) => void>();
 
   constructor(readonly overrides: Record<string, string | undefined> = {}) {}
 
@@ -65,9 +70,11 @@ class FakeRuntime {
     this.logCbs.add(cb);
     return () => this.logCbs.delete(cb);
   };
-  onStatusChange = (cb: (status: string) => void) => {
+  onStatusChange = (cb: (status: ServerStatus) => void) => {
     this.statusCbs.add(cb);
-    return () => this.statusCbs.delete(cb);
+    return () => {
+      this.statusCbs.delete(cb);
+    };
   };
   emitStatus() {
     for (const cb of this.statusCbs) cb(this.status);
@@ -79,29 +86,26 @@ class FakeRuntime {
 }
 
 let created: FakeRuntime[] = [];
-mock.module("./runtimes", () => ({
-  createRuntime: (
-    _engine: string,
-    overrides?: Record<string, string | undefined>,
-  ) => {
+await mockModulePartial<typeof import("./runtimes")>("./runtimes", {
+  createRuntime: (_engine, overrides) => {
     const runtime = new FakeRuntime(overrides);
     created.push(runtime);
     return runtime;
   },
-}));
+});
 
-mock.module("./runtimes/mlx", () => ({
-  mlxRequestModelId: (target: string) => `/abs/${target}`,
+await mockModulePartial<typeof import("./runtimes/mlx")>("./runtimes/mlx", {
+  mlxRequestModelId: (target) => `/abs/${target}`,
   isMlxActive: () => SETTINGS.INFERENCE_ENGINE === "mlx",
   resolveMlxModel: () => ({ model: "", requestModelId: "" }),
-}));
+});
 
-mock.module("./model-store", () => ({
+await mockModulePartial<typeof import("./model-store")>("./model-store", {
   listInstalledModels: () => [],
-  servedNameForModelPath: (path: string) =>
+  servedNameForModelPath: (path) =>
     (path.split("/").pop() ?? path).replace(/\.(gguf|safetensors)$/i, "").toLowerCase(),
-  slugModelFileName: (name: string) => name.replace(/\.(gguf|safetensors)$/i, "").toLowerCase(),
-}));
+  slugModelFileName: (name) => name.replace(/\.(gguf|safetensors)$/i, "").toLowerCase(),
+});
 
 const Registry = await import("./model-servers");
 

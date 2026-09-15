@@ -15,9 +15,12 @@ import { join } from "path";
 // 且 ESM 绑定在首次导入时固化——getSetting 覆盖而 updateSettings 留真实（写临时
 // DB）会让之后评估的 central-repo.test.ts 出现「写入丢失」假失败（读写分家）。
 // 形态对齐 model-servers.test.ts 那份在全量跑里验证过的桩：同一本地 store 读写。
+// 展开真实模块再覆盖（mock-hygiene.test.ts 规矩）：db/settings 新增导出后字面量替身会炸。
 const SETTINGS: Record<string, string> = {};
 let PORT_OVERRIDE: string | null = null;
+const realSettings = await import("../db/settings");
 mock.module("../db/settings", () => ({
+  ...realSettings,
   getSetting: (key: string) => SETTINGS[key] ?? "",
   getNumericSetting: (key: string) => Number(SETTINGS[key] ?? 0) || 0,
   updateSettings: (values: Record<string, string>) => Object.assign(SETTINGS, values),

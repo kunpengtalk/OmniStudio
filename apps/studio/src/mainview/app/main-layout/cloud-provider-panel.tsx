@@ -8,7 +8,6 @@ import {
   EyeIcon,
   EyeOffIcon,
   PlusIcon,
-  RefreshCwIcon,
   SearchIcon,
   StarIcon,
   Trash2Icon,
@@ -41,8 +40,21 @@ import {
   type CloudVideoApi,
 } from "@/shared/cloud-providers";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
-import { classifyModelName, MODEL_CATEGORIES, type ModelCategory } from "@/shared/modelscope";
-import { ModelCategoryBadge, ModelCategoryIcon } from "@components/model-category-badge";
+import {
+  classifyModelName,
+  MODEL_CATEGORIES,
+  MODEL_CATEGORY_OPTIONS,
+  type ModelCategory,
+} from "@/shared/modelscope";
+import {
+  ModelCategoryBadge,
+  ModelCategoryIcon,
+  MODEL_CATEGORY_SHORT_KEYS,
+} from "@components/model-category-badge";
+import {
+  ModelCategoryChips,
+  type CategoryChipValue,
+} from "@components/model-category-chips";
 import { PROVIDER_LOGOS, MONO_LOGO_PATHS } from "./provider-logos";
 
 /**
@@ -228,6 +240,7 @@ export function CloudProviderPanel() {
     setDraftBase(selected?.baseUrl ?? "");
     setDraftKey(selected?.apiKey ?? "");
     setShowKey(false);
+    setFetchFailed(false);
   }, [selected?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveMutation = useMutation({
@@ -248,11 +261,18 @@ export function CloudProviderPanel() {
 
   const commitBase = () => {
     if (!selected) return;
-    if (draftBase.trim() !== selected.baseUrl) saveMutation.mutate({ baseUrl: draftBase });
+    if (draftBase.trim() !== selected.baseUrl) {
+      saveMutation.mutate({ baseUrl: draftBase });
+      // 地址 / 密钥改过了，上一次「拉不到清单」的结论不再成立。
+      setFetchFailed(false);
+    }
   };
   const commitKey = () => {
     if (!selected) return;
-    if (draftKey.trim() !== selected.apiKey) saveMutation.mutate({ apiKey: draftKey });
+    if (draftKey.trim() !== selected.apiKey) {
+      saveMutation.mutate({ apiKey: draftKey });
+      setFetchFailed(false);
+    }
   };
 
   const checkMutation = useMutation({
@@ -316,11 +336,18 @@ export function CloudProviderPanel() {
       ? modelsWithCategory.length
       : modelsWithCategory.filter((m) => m.category === value).length;
   /** 只显示该服务商实际有的分类，避免一排 0 的 tab。 */
-  const modelTabs = MODEL_CATEGORIES.filter((c) => c.value === "all" || categoryCount(c.value) > 0);
+  const modelTabs = MODEL_CATEGORIES.filter(
+    (c) => c.value === "all" || categoryCount(c.value) > 0,
+  ).map((c) => c.value);
 
   // 「获取模型列表」只负责把服务商清单拉回来，弹框里让用户逐个挑：
   // 一个 /v1/models 动辄上百条，全量写进配置等于把模型列表塞爆。
+  //
+  // 拉不到（密钥不对 / 网络不通）时**不弹框**：空清单里挂一句上游报错原文，既解决不了
+  // 问题，又把「密钥过期」这种配置状态渲染成了页面错误。失败只在模型卡片里留一行结论
+  // （与旁边「检查」同一套文案），原始原因由主进程记进应用日志（cloud-provider.models.failed）。
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [fetchFailed, setFetchFailed] = useState(false);
   const fetchModelsMutation = useMutation({
     mutationFn: async () => {
       if (!selected) return { ok: false, models: [] as string[], error: undefined };
@@ -329,7 +356,11 @@ export function CloudProviderPanel() {
         apiKey: draftKey.trim() || "EMPTY",
       });
     },
-    onSuccess: () => setPickerOpen(true),
+    onSuccess: (res) => {
+      setFetchFailed(!res?.ok);
+      if (res?.ok) setPickerOpen(true);
+    },
+    onError: () => setFetchFailed(true),
   });
   const remoteIds = fetchModelsMutation.data?.models ?? [];
 
@@ -741,32 +772,23 @@ export function CloudProviderPanel() {
                 </div>
 
                 <div className="flex flex-col gap-2 p-3">
+                  {/* 拉不到清单只留这一行：与「检查」同一套结论，中性色，不写上游报错原文
+                      （401 / 超时的原文在 logs/app.log 的 cloud-provider.models.failed 里）。 */}
+                  {fetchFailed && !fetchModelsMutation.isPending && (
+                    <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                      <XCircleIcon className="size-3.5 shrink-0" />
+                      {t("cloud.checkFail")}
+                    </p>
+                  )}
                   {models.length > 0 && (
                     /* 分类筛选：模型带分类进场（云端清单里对话 / 嵌入 / 重排 / 语音…混在一起），
                        切 tab 只看一类，右侧标出该类模型数。 */
-                    <div className="flex flex-wrap items-center gap-1">
-                      {modelTabs.map((cat) => {
-                        const active = modelTab === cat.value;
-                        return (
-                          <button
-                            key={cat.value}
-                            type="button"
-                            onClick={() => setModelTab(cat.value)}
-                            className={cn(
-                              "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
-                              active
-                                ? "border-primary bg-primary/10 text-primary"
-                                : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-                            )}
-                          >
-                            {t(cat.labelKey)}
-                            <span className="ml-1 tabular-nums opacity-60">
-                              {categoryCount(cat.value)}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
+                    <ModelCategoryChips
+                      values={modelTabs}
+                      value={modelTab}
+                      countOf={categoryCount}
+                      onChange={setModelTab}
+                    />
                   )}
 
                   {models.length === 0 ? (
@@ -819,20 +841,27 @@ export function CloudProviderPanel() {
                                   <SelectTrigger
                                     size="sm"
                                     className="h-6 w-[7.5rem] gap-1 border-transparent bg-transparent px-1 text-[11px] hover:border-input"
-                                    title={t("cloud.modelTypeHint")}
+                                    title={`${t(`models.cat.${category}`)} · ${t("cloud.modelTypeHint")}`}
                                   >
+                                    {/* 窄列里放两字短名（与筛选条一致），完整分类名在悬浮提示里 */}
                                     <ModelCategoryBadge
                                       category={category}
-                                      label={t(`models.cat.${category}`)}
+                                      label={t(MODEL_CATEGORY_SHORT_KEYS[category])}
                                     />
                                   </SelectTrigger>
                                   <SelectContent>
                                     <SelectItem value="auto">
                                       <span className="text-[11px]">{t("cloud.modelTypeAuto")}</span>
                                     </SelectItem>
-                                    {MODEL_CATEGORIES.filter((c) => c.value !== "all").map((c) => (
+                                    {MODEL_CATEGORY_OPTIONS.map((c) => (
                                       <SelectItem key={c.value} value={c.value}>
-                                        <span className="text-[11px]">{t(c.labelKey)}</span>
+                                        <ModelCategoryIcon category={c.value} />
+                                        <span className="text-[11px]">
+                                          {t(MODEL_CATEGORY_SHORT_KEYS[c.value])}
+                                        </span>
+                                        <span className="text-[10px] text-muted-foreground/60">
+                                          {t(c.labelKey)}
+                                        </span>
                                       </SelectItem>
                                     ))}
                                   </SelectContent>
@@ -954,13 +983,32 @@ export function CloudProviderPanel() {
                 onValueChange={(v) => setDlgType(v as CloudModelType | "auto")}
               >
                 <SelectTrigger id="dlg-model-type" size="sm" className="h-8 min-w-0 flex-1 text-xs">
-                  <SelectValue />
+                  {/* 选中项自己画：分类显示「图标 + 两字短名」（完整名在后面小字里） */}
+                  <SelectValue>
+                    {dlgType === "auto" ? (
+                      t("cloud.modelTypeAuto")
+                    ) : (
+                      <span className="flex items-center gap-1.5">
+                        <ModelCategoryIcon category={dlgType} />
+                        {t(MODEL_CATEGORY_SHORT_KEYS[dlgType])}
+                        <span className="text-[10px] text-muted-foreground/60">
+                          {t(`models.cat.${dlgType}`)}
+                        </span>
+                      </span>
+                    )}
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="auto">{t("cloud.modelTypeAuto")}</SelectItem>
-                  {MODEL_CATEGORIES.filter((c) => c.value !== "all").map((c) => (
+                  {MODEL_CATEGORY_OPTIONS.map((c) => (
                     <SelectItem key={c.value} value={c.value}>
-                      {t(c.labelKey)}
+                      <ModelCategoryIcon category={c.value} />
+                      <span className="text-[11px]">
+                        {t(MODEL_CATEGORY_SHORT_KEYS[c.value])}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground/60">
+                        {t(c.labelKey)}
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -1021,23 +1069,17 @@ export function CloudProviderPanel() {
         </DialogContent>
       </Dialog>
 
-      {/* 获取模型列表 → 逐个挑模型 */}
+      {/* 获取模型列表 → 逐个挑模型（只在拉到了清单时打开） */}
       <RemoteModelsDialog
         open={pickerOpen}
         onOpenChange={setPickerOpen}
         providerName={selected?.name ?? ""}
         loading={fetchModelsMutation.isPending}
-        error={
-          fetchModelsMutation.data && !fetchModelsMutation.data.ok
-            ? fetchModelsMutation.data.error
-            : undefined
-        }
         remoteIds={remoteIds}
         models={models}
         busy={addModelsMutation.isPending || removeModelMutation.isPending}
         onAdd={(ids) => addModelsMutation.mutate(ids)}
         onRemove={(ids) => removeModelMutation.mutate(ids)}
-        onRetry={() => fetchModelsMutation.mutate()}
       />
 
       {/* 添加服务商弹窗 */}
@@ -1061,31 +1103,30 @@ type RemoteModelRow = { id: string; category: ModelCategory; added: boolean; sta
  * 「获取模型列表」结果弹框：服务商的 /v1/models 会把对话 / 嵌入 / 重排 / 语音 / 生图
  * 一起返回，动辄几十上百条。这里按 id 前缀分组列出来，用户逐个「+」添加；
  * 顺带把本地配了、服务商已经不再返回的模型标成「失效」，可一键清理。
+ *
+ * 拉取失败不会走到这里（弹框只在拿到清单时打开）：空清单 + 一句上游报错，用户看不出
+ * 该改什么，只会以为页面坏了。失败结论留在模型卡片上。
  */
 function RemoteModelsDialog({
   open,
   onOpenChange,
   providerName,
   loading,
-  error,
   remoteIds,
   models,
   busy,
   onAdd,
   onRemove,
-  onRetry,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   providerName: string;
   loading: boolean;
-  error?: string;
   remoteIds: string[];
   models: CloudModelEntry[];
   busy: boolean;
   onAdd: (ids: string[]) => void;
   onRemove: (ids: string[]) => void;
-  onRetry: () => void;
 }) {
   const t = useT();
   const [search, setSearch] = useState("");
@@ -1148,10 +1189,7 @@ function RemoteModelsDialog({
         : candidates.filter((c) => c.category === value).length;
   // 分类是固定的：云端有没有这一类、请求通不通，都照常展示（计数可能是 0），
   // 免得每次拉取回来 tab 条都在变，用户也分不清是自己没拉到还是这一类本来就没有。
-  const tabs: { value: ModelCategory | "all" | "stale"; label: string }[] = [
-    ...MODEL_CATEGORIES.map((c) => ({ value: c.value, label: t(c.labelKey) })),
-    { value: "stale" as const, label: t("cloud.tabStale") },
-  ];
+  const tabValues: CategoryChipValue[] = [...MODEL_CATEGORIES.map((c) => c.value), "stale"];
 
   const toggleGroup = (key: string) =>
     setCollapsed((prev) => {
@@ -1163,8 +1201,10 @@ function RemoteModelsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      {/* 只在 ≥640px 放宽：小于断点时仍用 DialogContent 的默认宽度 */}
-      <DialogContent className="sm:max-w-2xl">
+      {/* 只在 ≥640px 放宽：小于断点时仍用 DialogContent 的默认宽度。
+          宽度取 3xl 而不是 2xl：固定十颗分类条一行要 ~681px，2xl（内容宽 624px）会被
+          折成两行，3xl 的内容宽 720px 才放得下；清单里的模型 id 也跟着宽裕些。 */}
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {t("cloud.pickTitle")}
@@ -1215,28 +1255,13 @@ function RemoteModelsDialog({
             )}
           </div>
 
-          {/* 分类筛选：切 tab 只看一类，右边跟数量 */}
-          <div className="flex flex-wrap items-center gap-1">
-            {tabs.map((item) => {
-              const active = tab === item.value;
-              return (
-                <button
-                  key={item.value}
-                  type="button"
-                  onClick={() => setTab(item.value)}
-                  className={cn(
-                    "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
-                    active
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-                  )}
-                >
-                  {item.label}
-                  <span className="ml-1 tabular-nums opacity-60">{tabCount(item.value)}</span>
-                </button>
-              );
-            })}
-          </div>
+          {/* 分类筛选：切 tab 只看一类，右边跟数量。固定十个分类，一行排不下就换行 */}
+          <ModelCategoryChips
+            values={tabValues}
+            value={tab}
+            countOf={tabCount}
+            onChange={setTab}
+          />
 
           {tab === "stale" && (
             <p className="text-[11px] text-muted-foreground">{t("cloud.staleHint")}</p>
@@ -1335,7 +1360,7 @@ function RemoteModelsDialog({
                 </div>
               );
             })}
-            {/* 清单为空分三种：正在拉、没拉到（网络/密钥问题）、这一类本来就没有 */}
+            {/* 清单为空分两种：正在拉、这一类本来就没有（拉不到清单根本不会打开弹框） */}
             {loading && (
               <div className="flex items-center justify-center gap-2 px-3 py-8 text-xs text-muted-foreground">
                 <Spinner className="size-4" />
@@ -1344,32 +1369,13 @@ function RemoteModelsDialog({
             )}
             {!loading && visible.length === 0 && (
               <div className="flex flex-col items-center gap-2 px-3 py-8">
-                <p
-                  className={cn(
-                    "text-center text-xs",
-                    error ? "text-destructive" : "text-muted-foreground",
-                  )}
-                >
-                  {error
-                    ? `${t("cloud.fetchFailed")}：${error}`
-                    : needle
-                      ? t("cloud.noModelMatch")
-                      : tab === "stale"
-                        ? t("cloud.staleEmpty")
-                        : t("cloud.pickEmpty")}
+                <p className="text-center text-xs text-muted-foreground">
+                  {needle
+                    ? t("cloud.noModelMatch")
+                    : tab === "stale"
+                      ? t("cloud.staleEmpty")
+                      : t("cloud.pickEmpty")}
                 </p>
-                {error && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-xs"
-                    onClick={onRetry}
-                    disabled={busy}
-                  >
-                    <RefreshCwIcon data-icon="inline-start" className="size-3.5" />
-                    {t("common.retry")}
-                  </Button>
-                )}
               </div>
             )}
           </div>

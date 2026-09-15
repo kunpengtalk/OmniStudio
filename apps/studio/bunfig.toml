@@ -1,4 +1,12 @@
 # bun test 配置：预加载测试隔离脚本（临时数据目录 / 测试模式）。
 # 背景见 test-preload.ts —— 不隔离的话，单独跑测试会迁移真实用户数据库。
+#
+# 跑测试请用 `bun run test`（= `bun test --isolate`），不要直接 `bun test`：
+# `mock.module()` 的替换是**进程级**的，而默认模式下同一个 worker 会连跑多个文件、
+# 共享一份 module registry —— "谁先加载谁说了算"。本文件把 ./db/settings 换成 fake 之后，
+# 同 worker 里排在后面的 secrets.test.ts 拿到的就是那份 fake（updateSettings 成了空函数），
+# "落盘是密文"的断言只可能看到旧值；反过来也一样，手写的 ./cloud-providers fake 会盖住
+# 别的文件需要的真实实现。这个症状随 worker 数变化（32 核红 / 3 核绿 / 单跑某个文件又绿），
+# 排查一次的成本极高。`--isolate` 让每个测试文件各自一份 registry，文件之间互不影响。
 [test]
 preload = ["./test-preload.ts"]

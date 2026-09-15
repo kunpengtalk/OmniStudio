@@ -56,6 +56,7 @@ export type AppLogSource =
   | "automation" // 自动化
   | "update" // 版本更新
   | "notice" // 通知中心落下的条目
+  | "usage" // 用量账本（记录失败这类不影响业务的告警）
   | "cli"; // CLI 侧动作（备份内核等独立进程）
 
 export type AppLogEntry = {

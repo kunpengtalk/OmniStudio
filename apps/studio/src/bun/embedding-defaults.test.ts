@@ -26,7 +26,10 @@ const sqlite = new Database(tmpDb, { create: true });
 const db = drizzle({ client: sqlite });
 migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
 
-mock.module("./db", () => ({ db }));
+// 展开真实模块再覆盖（mock-hygiene.test.ts 规矩）：只给 db 的话，main 侧新增的
+// sqliteClient 等导出在别的模块 import "./db" 时会直接报缺导出。
+const realDb = await import("./db");
+mock.module("./db", () => ({ ...realDb, db }));
 
 /** 设置表：读写落在同一个 Map 上（不碰真实数据目录）。 */
 const SETTINGS: Record<string, string> = {};

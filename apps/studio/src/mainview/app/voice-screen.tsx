@@ -757,9 +757,14 @@ function TtsTab() {
         model: model.trim(),
       }),
     onSuccess: () => {
+      setPError(undefined);
       queryClient.invalidateQueries({ queryKey: ["tts-provider"] });
       queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
     },
+    // 保存失败必须说出来：下面那段 `{pError && …}` 就是为它留的位置，
+    // 没有 onError 的话点「保存」失败时界面上一点反应都没有（按钮转一下就恢复原样），
+    // 用户会以为已经保存好了。
+    onError: (error) => setPError(error instanceof Error ? error.message : String(error)),
   });
 
   // 参考音频能力：跟随自动检测，可被手动开关覆盖。base 用厂商地址（空则回退线上默认）。
@@ -1681,9 +1686,11 @@ function AsrTab() {
         model: pModel.trim(),
       }),
     onSuccess: () => {
+      setPError(undefined);
       queryClient.invalidateQueries({ queryKey: ["asr-provider"] });
       queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
     },
+    onError: (error) => setPError(error instanceof Error ? error.message : String(error)),
   });
 
   const handleResult = (r: {

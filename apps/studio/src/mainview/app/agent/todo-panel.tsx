@@ -4,36 +4,44 @@ import { CheckCircle2Icon, ChevronDownIcon, CircleIcon, CircleDotIcon, ListTodoI
 import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
-import type { TodoItem } from "../../../bun/agent-todos";
+import type { TodoItem, TodoStatus } from "../../../bun/agent-todos";
+
+/** 状态色只能取 --ds-*：卡片是浮层，跟消息流共用一套灰阶才不打架。 */
+const STATUS_TONE: Record<TodoStatus, string> = {
+  completed: "var(--ds-success)",
+  in_progress: "var(--ds-text-primary)",
+  cancelled: "var(--ds-text-faint)",
+  pending: "var(--ds-text-faint)",
+};
 
 function TodoRow({ todo }: { todo: TodoItem }) {
   const t = useT();
   const icon =
     todo.status === "completed" ? (
-      <CheckCircle2Icon className="size-3.5 text-emerald-600" />
+      <CheckCircle2Icon className="size-3.5" />
     ) : todo.status === "in_progress" ? (
-      <CircleDotIcon className="size-3.5 text-primary" />
+      <CircleDotIcon className="size-3.5" />
     ) : todo.status === "cancelled" ? (
-      <XCircleIcon className="size-3.5 text-muted-foreground/50" />
+      <XCircleIcon className="size-3.5" />
     ) : (
-      <CircleIcon className="size-3.5 text-muted-foreground/50" />
+      <CircleIcon className="size-3.5" />
     );
   return (
     <div className="flex items-start gap-1.5">
-      <span className="mt-0.5 shrink-0">{icon}</span>
+      <span className="mt-0.5 shrink-0" style={{ color: STATUS_TONE[todo.status] }} aria-hidden>
+        {icon}
+      </span>
       <span
         className={cn(
-          "min-w-0 flex-1 text-[11px] leading-4",
-          todo.status === "completed" && "text-muted-foreground line-through",
-          todo.status === "cancelled" && "text-muted-foreground/60 line-through",
+          "composer-panel-text",
+          todo.status === "completed" && "done",
+          todo.status === "cancelled" && "cancelled",
         )}
       >
         {todo.content}
       </span>
       {todo.priority === "high" && todo.status !== "completed" && (
-        <span className="shrink-0 rounded bg-destructive/10 px-1 text-[9px] text-destructive">
-          {t("agent.todo.high")}
-        </span>
+        <span className="composer-panel-pill error">{t("agent.todo.high")}</span>
       )}
     </div>
   );
@@ -53,30 +61,30 @@ export function AgentTodoPanel() {
   const completed = active.filter((todo) => todo.status === "completed").length;
 
   return (
-    <div className="overflow-hidden rounded-xl border bg-muted/30">
+    <div className="composer-panel collapsible">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+        aria-expanded={open}
+        className="composer-panel-head"
       >
-        <ListTodoIcon className="size-3.5" />
+        <ListTodoIcon className="size-3.5" aria-hidden />
         <span className="font-medium">{t("agent.todo.title")}</span>
         <span className="tabular-nums">
           {completed}/{active.length}
         </span>
-        <div className="ml-1 h-1 w-16 overflow-hidden rounded-full bg-muted">
-          <div
-            className="h-full rounded-full bg-primary transition-all"
-            style={{ width: `${active.length ? (completed / active.length) * 100 : 0}%` }}
-          />
-        </div>
-        <ChevronDownIcon className={cn("ml-auto size-3 transition-transform", open && "rotate-180")} />
+        <span className="composer-panel-bar">
+          <i style={{ width: `${active.length ? (completed / active.length) * 100 : 0}%` }} />
+        </span>
+        <ChevronDownIcon className={cn("ml-auto size-3 shrink-0 transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <div className="space-y-1 border-t px-3 py-2">
-          {todos.map((todo) => (
-            <TodoRow key={todo.id} todo={todo} />
-          ))}
+        <div className="composer-panel-body">
+          <div className="composer-panel-scroll space-y-1">
+            {todos.map((todo) => (
+              <TodoRow key={todo.id} todo={todo} />
+            ))}
+          </div>
         </div>
       )}
     </div>

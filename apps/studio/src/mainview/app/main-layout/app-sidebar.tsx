@@ -67,6 +67,7 @@ import { KbSidebar } from "../kb/sidebar";
 import type { PromptKind } from "@/bun/prompt-library";
 import type { TranslationRecordRow } from "@/bun/translate";
 import { translationLangShort } from "@/shared/translate";
+import { modelNameFromRef } from "@/shared/modelscope";
 import { Button } from "@ui/button";
 import {
   Dialog,
@@ -423,12 +424,15 @@ function BenchmarkRecordList() {
                     setActiveApp("benchmark");
                     setRoute({ path: "index" });
                   }}
-                  tooltip={r.model}
+                  tooltip={modelNameFromRef(r.model)}
                 >
                     <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                       <span className="flex min-w-0 items-center gap-1">
                         {r.kind === "eval" && <GaugeIcon className="size-3 shrink-0 text-muted-foreground" />}
-                        <span className="min-w-0 truncate text-xs font-medium leading-none">{r.model}</span>
+                        {/* 老记录里可能存着 MLX 的路径型请求 id：展示前收敛成模型名 */}
+                        <span className="min-w-0 truncate text-xs font-medium leading-none">
+                          {modelNameFromRef(r.model)}
+                        </span>
                       </span>
                       <span className="flex items-center gap-1 text-[10px] leading-none text-muted-foreground">
                         {r.kind === "eval" ? (

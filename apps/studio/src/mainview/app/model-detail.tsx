@@ -139,7 +139,6 @@ function FileRow({
   });
 
   const active = task?.status === "downloading" || task?.status === "queued";
-  const downloading = task?.status === "downloading";
 
   return (
     <div className="flex items-center gap-3 rounded-lg border px-3 py-2.5">
@@ -264,7 +263,7 @@ function FileRow({
 export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
   const t = useT();
   const queryClient = useQueryClient();
-  const { source, setSource } = useModelDetailStore();
+  const { source } = useModelDetailStore();
   const setRoute = useRouter((s) => s.setRoute);
   const goBack = () => (onBack ? onBack() : setRoute({ path: "settings", tab: "store" }));
   const { engine } = useEngine();

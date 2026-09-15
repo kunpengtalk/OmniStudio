@@ -5,44 +5,45 @@ import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { join } from "path";
 import * as fs from "fs";
 
+import * as schema from "./db/schema";
+import { mockModulePartial } from "./test-mocks";
+
 // ---------------------------------------------------------------------------
 // 独立的临时测试库（跑迁移，得到真实的 image_records 表）
 // ---------------------------------------------------------------------------
 const tmpDb = `/tmp/image-gen-test-${process.pid}.db`;
 fs.rmSync(tmpDb, { force: true });
 const sqlite = new Database(tmpDb, { create: true });
-const db = drizzle({ client: sqlite });
+const db = drizzle({ client: sqlite, schema });
 migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
 
-// 这些 mock 提供完整、兼容的形状（含 updateSettings），避免与其他测试文件的
-// mock 冲突导致「Export named 'updateSettings' not found」。
-mock.module("./db", () => ({ db }));
-mock.module("./db/settings", () => ({
+// 设置层用「真实导出 + 局部覆盖」：不用再手工补齐形状，真实模块新增导出时自动跟上
+// （缺导出会在 import 阶段直接报 "Export named ... not found"）。
+await mockModulePartial<typeof import("./db")>("./db", { db });
+await mockModulePartial<typeof import("./db/settings")>("./db/settings", {
   getSetting: () => "",
   updateSettings: () => {},
   getAllSettings: () => ({}),
-}));
-mock.module("./image-server", () => ({
+});
+await mockModulePartial<typeof import("./image-server")>("./image-server", {
   getImagesBaseDir: () => `/tmp/img-${process.pid}`,
   getPromptLibraryCacheBase: () => `/tmp/pl-cache-${process.pid}`,
-  promptLibraryLocalUrl: (rel: string) => `http://localhost:1/prompt-library/${rel}`,
-}));
-// 补全 server-info 的全部导出：replace mock 会在同进程内泄漏给其他测试文件
-// （如 prompt-library.test 的 IMAGE_SERVER_PORT 导入），缺导出会直接报错。
-mock.module("../shared/server-info", () => ({
-  IMAGE_SERVER_PORT: 19782,
-  DEFAULT_INFERENCE_PORT: "18080",
-  PROMPT_LIBRARY_MEDIA_ORIGIN: "https://kunpengtalk.com",
+  promptLibraryLocalUrl: (rel) => `http://localhost:1/prompt-library/${rel}`,
+});
+// server-info 用「真实导出 + 局部覆盖」：以前这里要手工把全部导出列一遍，否则
+// import 这个模块的其它文件（prompt-library.test 的 PROMPT_LIBRARY_MEDIA_ORIGIN 等）
+// 会直接报 "Export named ... not found"。
+await mockModulePartial<typeof import("../shared/server-info")>("../shared/server-info", {
   chatImageUrl: (ref: string) => `http://img.local/${ref}`,
-}));
-mock.module("./mlx-gen", () => ({
+});
+await mockModulePartial<typeof import("./mlx-gen")>("./mlx-gen", {
   MLX_MODELS: [],
   findMlxModel: () => null,
-}));
+});
 // 云端地址 / 密钥来自服务商行（页面只带 providerId）：mock 掉服务商查询，
 // 让"页面实时配置"这条回归测试仍然能验证实时值优先。
-mock.module("./cloud-providers", () => ({
-  resolveCloudProvider: (id: string | undefined | null) =>
+await mockModulePartial<typeof import("./cloud-providers")>("./cloud-providers", {
+  resolveCloudProvider: (id) =>
     (id ?? "").trim() === "live-provider"
       ? {
           id: "live-provider",
@@ -59,7 +60,7 @@ mock.module("./cloud-providers", () => ({
       : null,
   saveAppModelChoice: () => ({ ok: true }),
   ensureAppProvidersMigrated: () => {},
-}));
+});
 
 // ---------------------------------------------------------------------------
 // mock 远程 OpenAI 兼容 API 的 fetch：成功返回一张 b64 图片

@@ -1,9 +1,8 @@
 import { useState } from "react";
 import { ExternalLinkIcon, GlobeIcon, RefreshCwIcon } from "lucide-react";
 
-import { Button } from "@ui/button";
-import { Input } from "@ui/input";
 import { useT } from "@stores/ui-lang";
+import { PiTip } from "./pi-tip";
 
 /**
  * 浏览器页签：一个地址栏 + iframe。
@@ -33,46 +32,49 @@ export function BrowserTab({ url, onChange }: { url: string; onChange: (url: str
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex items-center gap-1 border-b bg-muted/20 px-2 py-1">
-        <GlobeIcon className="size-3.5 shrink-0 text-muted-foreground" />
-        <Input
+    <div className="wp-body">
+      <div className="wp-browser-bar">
+        <GlobeIcon size={13} aria-hidden style={{ flex: "none", color: "var(--ds-text-muted)" }} />
+        <input
           value={draft}
+          className="wp-browser-url"
+          placeholder={t("agent.browser.placeholder")}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") go(draft);
           }}
-          placeholder={t("agent.browser.placeholder")}
-          className="h-6 min-w-0 flex-1 rounded-md border-none bg-background/70 px-1.5 py-0 font-mono text-[10px] shadow-none focus-visible:ring-0"
         />
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="size-6 shrink-0 text-muted-foreground"
-          tooltip={t("agent.artifact.refresh")}
-          onClick={() => {
-            setVersion((v) => v + 1);
-            setLoaded(false);
-          }}
-          disabled={!url}
-        >
-          <RefreshCwIcon className="size-3.5" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          className="size-6 shrink-0 text-muted-foreground"
-          tooltip={t("agent.browser.openExternal")}
-          onClick={() => {
-            if (url) window.open(url, "_blank");
-          }}
-          disabled={!url}
-        >
-          <ExternalLinkIcon className="size-3.5" />
-        </Button>
+        <PiTip label={t("agent.artifact.refresh")}>
+          <button
+            type="button"
+            className="wp-action-btn"
+            aria-label={t("agent.artifact.refresh")}
+            disabled={!url}
+            onClick={() => {
+              setVersion((v) => v + 1);
+              setLoaded(false);
+            }}
+          >
+            <RefreshCwIcon size={13} aria-hidden />
+          </button>
+        </PiTip>
+        <PiTip label={t("agent.browser.openExternal")}>
+          <button
+            type="button"
+            className="wp-action-btn"
+            aria-label={t("agent.browser.openExternal")}
+            disabled={!url}
+            onClick={() => {
+              if (url) window.open(url, "_blank");
+            }}
+          >
+            <ExternalLinkIcon size={13} aria-hidden />
+          </button>
+        </PiTip>
       </div>
 
-      <div className="relative min-h-0 flex-1 bg-white">
+      {/* iframe 底下永远垫白：站点自己没设背景时，深色主题下会透出面板底色。 */}
+      <div style={{ position: "relative", display: "flex", minHeight: 0, flex: 1, background: "#ffffff" }}>
         {url ? (
           <>
             {/* eslint-disable-next-line react/iframe-missing-sandbox -- 同上：地址页要能正常跑脚本 */}
@@ -80,25 +82,27 @@ export function BrowserTab({ url, onChange }: { url: string; onChange: (url: str
               key={`${url}-${version}`}
               src={url}
               title={url}
-              className="size-full border-0 bg-white"
+              className="wp-browser-frame"
               onLoad={() => setLoaded(true)}
             />
-            {!loaded && (
-              <p className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-background text-center text-[11px] text-muted-foreground">
-                {t("agent.browser.loading")}
-                <span className="max-w-64 text-[10px] text-muted-foreground/70">
-                  {t("agent.browser.blockedHint")}
+            {!loaded ? (
+              <div className="wp-empty" style={{ position: "absolute", inset: 0, background: "var(--ds-bg-primary)" }}>
+                <span className="wp-empty-mark">
+                  <GlobeIcon size={18} aria-hidden />
                 </span>
-              </p>
-            )}
+                <p className="wp-empty-title">{t("agent.browser.loading")}</p>
+                <p className="wp-empty-body">{t("agent.browser.blockedHint")}</p>
+              </div>
+            ) : null}
           </>
         ) : (
-          <p className="flex h-full flex-col items-center justify-center gap-1 bg-background text-center text-[11px] text-muted-foreground">
-            {t("agent.browser.empty")}
-            <span className="max-w-64 text-[10px] text-muted-foreground/70">
-              {t("agent.browser.emptyHint")}
+          <div className="wp-empty" style={{ width: "100%" }}>
+            <span className="wp-empty-mark">
+              <GlobeIcon size={18} aria-hidden />
             </span>
-          </p>
+            <p className="wp-empty-title">{t("agent.browser.empty")}</p>
+            <p className="wp-empty-body">{t("agent.browser.emptyHint")}</p>
+          </div>
         )}
       </div>
     </div>

@@ -86,8 +86,9 @@ const rpc = Electroview.defineRPC<AppRPC>({
           reasoning,
           citations,
         );
-        // Agent 的文本流也走这个通道：收尾时一并解除运行态。
-        useAgentStore.getState().setRunning(false);
+        // Agent 的文本流也走这个通道：收尾时一并解除运行态（只解除本条会话的，
+        // 别的会话在这期间跑起来/跑完，不该动当前这一屏的状态）。
+        useAgentStore.getState().setRunningFor(conversationId, false);
         queryClient.invalidateQueries({ queryKey: ["conversations"] });
         queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
         queryClient.invalidateQueries({ queryKey: ["agent-sessions"] });
@@ -102,11 +103,20 @@ const rpc = Electroview.defineRPC<AppRPC>({
           stats,
         );
       },
+      // 助手行一建好就插进消息流：首 token 之前的等待（模型加载 / 预填充 / 检索）
+      // 由此立刻有"生成中 · N 秒"可看，而不是干等一个不动的屏幕。
+      chatMessageStarted: ({ conversationId, messageId }) => {
+        useChatStore.getState().beginAssistantMessage(conversationId, messageId);
+      },
       // Agent 运行轨迹：工具调用 / 状态 / 错误
       agentEvent: (event) => {
         // 产出物有专门的 agentArtifact 推送（主进程登记时就发），这里不再顺带失效查询：
         // 每个工具结果都触发一次重取，跑几轮就会白白重读整个产出物列表。
         useAgentStore.getState().appendEvent(event);
+      },
+      // 运行态（开跑 / 收尾）：刷新窗口、切走再切回、自动化起的运行都靠它点亮"还在干活"。
+      agentRunState: ({ conversationId, running }) => {
+        useAgentStore.getState().setRunningFor(conversationId, running);
       },
       // 工具授权：弹窗阻塞工具执行，用户选「允许一次 / 本会话总是 / 始终允许 / 拒绝」
       agentPermissionRequest: (request) => {
@@ -127,6 +137,17 @@ const rpc = Electroview.defineRPC<AppRPC>({
         if (useAgentStore.getState().conversationId !== conversationId) return;
         useAgentStore.getState().setTodos(todos);
       },
+      // 目标（Goal 模式）：立项 / 完成 / 暂停 / 撞预算都会推过来。
+      agentGoalChanged: ({ conversationId, goal }) => {
+        if (useAgentStore.getState().conversationId !== conversationId) return;
+        useAgentStore.getState().setGoal(goal);
+      },
+      // 方案（Plan 模式）：写入 / 批准 / 清空。
+      agentPlanChanged: ({ conversationId, plan }) => {
+        if (useAgentStore.getState().conversationId !== conversationId) return;
+        // 正文不进 store：面板只需要"有没有、多少字、批没批"，正文由产出物面板按需读文件。
+        useAgentStore.getState().setPlan(plan ? { approvedAt: plan.approvedAt, chars: plan.content.length } : null);
+      },
       // 新产出物：直接插到面板顶部并展开
       agentArtifact: ({ artifact }) => {
         useAgentStore.getState().appendArtifact(artifact);
@@ -144,6 +165,11 @@ const rpc = Electroview.defineRPC<AppRPC>({
       automationsChanged: () => {
         queryClient.invalidateQueries({ queryKey: ["automations"] });
         queryClient.invalidateQueries({ queryKey: ["automation-runs"] });
+      },
+      // 通知中心：后台发生的事（跑完 / 需要授权 / 自动化 / 出错）推过来 → 铃铛未读数与
+      // 列表立刻刷新。主进程一直在发这条，但此前 webview 没有 handler，只能靠 15 秒轮询。
+      notificationAdded: () => {
+        queryClient.invalidateQueries({ queryKey: ["notifications"] });
       },
       // Agent 生图前需要用户介入：弹出配置 / 选模型弹窗，确认后回传主进程
       mediaSetup: (payload) => {

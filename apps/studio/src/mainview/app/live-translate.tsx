@@ -223,9 +223,12 @@ export function LiveTranslateTab() {
     mutationFn: () =>
       rpcClient.saveASRProviderConfig({ providerId: pProviderId.trim(), model: pModel.trim() }),
     onSuccess: () => {
+      setPError(undefined);
       queryClient.invalidateQueries({ queryKey: ["asr-provider"] });
       queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
     },
+    // 保存失败必须说出来：下面那段 `{pError && …}` 就是为它留的位置。
+    onError: (error) => setPError(error instanceof Error ? error.message : String(error)),
   });
 
   const ready =

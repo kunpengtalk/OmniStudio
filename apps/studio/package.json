@@ -17,8 +17,9 @@
     "dev:hmr": "concurrently \"bun run hmr\" \"bun run start --watch\"",
     "db:generate": "drizzle-kit generate",
     "hmr": "vite --port 5173",
-    "test": "bun test",
-    "test:smoke": "bun scripts/migrations-smoke.ts && bun scripts/memory-smoke.ts && bun scripts/kb-smoke.ts && bun scripts/kb-chat-smoke.ts && bun scripts/kb-rerank-smoke.ts && bun scripts/kb-access-smoke.ts && bun scripts/kb-governance-smoke.ts && bun scripts/video-gen-smoke.ts && bun scripts/backup-smoke.ts && bun scripts/agent-capabilities-smoke.ts && bun scripts/agent-live-check.ts && bun scripts/omi-docs-smoke.ts && bun scripts/builtin-skills-smoke.ts",
+    "test": "bun test --isolate",
+    "test:landlock": "bun run scripts/landlock-e2e.ts",
+    "test:smoke": "bun scripts/migrations-smoke.ts && bun scripts/memory-smoke.ts && bun scripts/kb-smoke.ts && bun scripts/kb-chat-smoke.ts && bun scripts/kb-rerank-smoke.ts && bun scripts/kb-access-smoke.ts && bun scripts/kb-governance-smoke.ts && bun scripts/video-gen-smoke.ts && bun scripts/backup-smoke.ts && bun scripts/proxy-smoke.ts && bun scripts/agent-capabilities-smoke.ts && bun scripts/agent-live-check.ts && bun scripts/agent-resilience-smoke.ts && bun scripts/omi-docs-smoke.ts && bun scripts/builtin-skills-smoke.ts",
     "build:dev": "vite build && electrobun build",
     "build:canary": "vite build && electrobun build --env=canary",
     "build:stable": "vite build && electrobun build --env=stable"

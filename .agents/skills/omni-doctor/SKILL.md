@@ -1,6 +1,6 @@
 ---
 name: omni-doctor
-description: 诊断 OmniStudio 桌面应用（本仓库）在运行时出的问题 —— 生图 / 生视频 / 语音合成 / 语音识别 / OCR / 翻译失败、推理服务器起不来或中途挂掉、模型下载卡住、Agent 不干活或答非所问、聊天无响应、图片音频预览 404、网关不通、数据库迁移失败、应用闪退。当用户说「XX 功能不好使 / 报错了 / 没反应 / 帮我看看什么问题 / 排查一下 / 诊断 / 定位 bug」，或贴出一段应用里的报错、空白气泡、失败截图时使用。Diagnose any OmniStudio runtime failure from real evidence (logs, DB rows, control socket, CLI) and tell the user how to fix it — or that it needs a code fix / upgrade.
+description: 诊断 OmniStudio 桌面应用（本仓库）在运行时出的问题 —— 生图 / 生视频 / 语音合成 / 语音识别 / OCR / 翻译失败、推理服务器起不来或中途挂掉、模型 / 引擎下载卡住、Agent 不干活或答非所问、聊天无响应、图片音频预览 404、网关不通、数据库迁移失败、应用闪退。当用户说「XX 功能不好使 / 报错了 / 没反应 / 帮我看看什么问题 / 排查一下 / 诊断 / 定位 bug」，或贴出一段应用里的报错、空白气泡、失败截图时使用。Diagnose any OmniStudio runtime failure from real evidence (logs, DB rows, control socket, CLI) and tell the user how to fix it — or that it needs a code fix / upgrade.
 ---
 
 # OmniStudio 排障
@@ -52,6 +52,7 @@ bun run --cwd apps/studio scripts/omni-diag.ts --logs 80   # 多带点日志
 | OCR 识别不出来 / 文档解析失败 | `omi logs --source ocr --verbose`；`documents` + `pages.error` | [playbooks.md#ocr](reference/playbooks.md) |
 | 推理服务器起不来 / 自己挂了 | `omi status`、`omi server logs`、`served_model.crashed` | [playbooks.md#推理服务器](reference/playbooks.md) |
 | 模型下载卡住 / 失败 | `omi logs --source download`、`settings.MODEL_DOWNLOADS`、磁盘剩余 | [playbooks.md#模型下载](reference/playbooks.md) |
+| 引擎 / 语言包一直"正在下载" | `omi logs --event engine.download --verbose`、`DATA_DIR/engines` | [playbooks.md#推理引擎--语言包下载](reference/playbooks.md) |
 | Agent 不干活 / 空白气泡 / 答非所问 | `omi logs --source agent`、`agent_events`、`agent.turn.empty` | [playbooks.md#agent](reference/playbooks.md) |
 | 图片 / 音频预览加载不出来 | 报告里的"媒体服务"一节、`omi logs --source media-server` | [playbooks.md#媒体预览](reference/playbooks.md) |
 | 界面白屏 / 报错页 | `omi logs --source client` | [playbooks.md#界面](reference/playbooks.md) |

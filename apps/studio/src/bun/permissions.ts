@@ -21,6 +21,7 @@ import { and, asc, eq } from "drizzle-orm";
 import { db } from "./db";
 import { agentPermissions } from "./db/schema";
 import { getSetting, updateSettings } from "./db/settings";
+import { isSpillPath } from "./agent-spill";
 
 export type PermissionAction = "allow" | "ask" | "deny";
 
@@ -54,17 +55,29 @@ export type ToolCallShape = {
   workspace: string;
 };
 
-/** 不需要授权的工具：只读且无副作用（知识库 / 记忆 / 产出物检索 / 待办 / 提问）。 */
+/**
+ * 不需要授权的工具：只读且无副作用（知识库 / 记忆 / 媒体检索 / 待办 / 提问）。
+ *
+ * 这里**只列真实存在的工具名**。写错名字不会报错 —— 未列出的工具会走常规授权评估，
+ * 于是"本意是只读"变成"每次都弹窗"，出问题时很难联想到是名单写错了。
+ * 新增工具时同步 `agent.ts` 的 `READ_ONLY_TOOLS`（列表页分组用），两边保持一致。
+ */
 const UNGATED_TOOLS = new Set([
   "knowledge_search",
   "memory_search",
-  "memory_recall",
   "media_search",
-  "media_list",
+  "read_skill",
+  "think",
   "todo_write",
-  "todo_read",
   "ask_user",
-  "update_plan",
+  // 只读的窗口状态查询：不产生副作用，也不值得打扰用户。
+  "get_context_remaining",
+  // Goal 的目标登记：只写应用的库（目标 / 验收标准 / 用量），不碰文件系统。
+  // 和 todo_write 同类 —— 是模型在管理自己的执行状态，不是对外部世界动手。
+  "goal",
+  // 写方案：落到应用数据目录（plans/），**不碰工作区**。Plan 模式的价值就在于
+  // "先看方案再决定"，如果每写一次方案都弹一次授权，这条链路就没法用了。
+  "write_plan",
 ]);
 
 /** 危险命令：smart 模式下会拦下来问一句（破坏面大且几乎不可逆）。 */
@@ -109,14 +122,83 @@ export function winningRule(
   permission: string,
   pattern: string,
 ): PermissionRule | null {
+  return winningRuleFor(rules, permission, [pattern]);
+}
+
+/**
+ * 同一条命令的多种等价写法一起匹配（对齐 Codex 的 `command_canonicalization`）。
+ *
+ * 为什么必须有：规则表是按命令原文做通配匹配的，而 shell 允许大量等价写法 ——
+ * `rm  -rf /`（两个空格）、`rm\t-rf /`、`rm "-rf" /` 都能删掉目录，但都不匹配
+ * `*rm -rf*` 这条规则。也就是说，审批策略会被一个空格绕过。
+ * 这里把命令归一化后再匹配一次（**只用于匹配，绝不用于执行**）。
+ *
+ * 归一化做的事：按 shell 的引号 / 转义规则切成 token，再用单个空格拼回去
+ * （引号内的空白属于 token 内容，不动）。
+ */
+export function canonicalCommand(command: string): string {
+  const tokens: string[] = [];
+  let current = "";
+  let hasToken = false;
+  let quote: '"' | "'" | null = null;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+        continue;
+      }
+      // 双引号里的反斜杠仍然是转义（shell 语义），单引号里一律字面量。
+      if (quote === '"' && char === "\\" && index + 1 < command.length) {
+        current += command[index + 1];
+        index += 1;
+        continue;
+      }
+      current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      hasToken = true;
+      continue;
+    }
+    if (char === "\\" && index + 1 < command.length) {
+      current += command[index + 1];
+      index += 1;
+      hasToken = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (hasToken) {
+        tokens.push(current);
+        current = "";
+        hasToken = false;
+      }
+      continue;
+    }
+    current += char;
+    hasToken = true;
+  }
+  if (hasToken) tokens.push(current);
+  return tokens.join(" ");
+}
+
+/** 规则匹配用的候选写法：原文 + 归一化（相同就只留一个）。 */
+export function commandPatterns(command: string): string[] {
+  const canonical = canonicalCommand(command);
+  return canonical && canonical !== command ? [command, canonical] : [command];
+}
+
+/** 与 `winningRule` 同义，但同一权限下可以同时匹配多种写法（后者仍然覆盖前者）。 */
+export function winningRuleFor(
+  rules: PermissionRule[],
+  permission: string,
+  patterns: string[],
+): PermissionRule | null {
   let winner: PermissionRule | null = null;
   for (const rule of rules) {
-    if (
-      matchesPermissionPattern(permission, rule.permission) &&
-      matchesPermissionPattern(pattern, rule.pattern)
-    ) {
-      winner = rule;
-    }
+    if (!matchesPermissionPattern(permission, rule.permission)) continue;
+    if (patterns.some((pattern) => matchesPermissionPattern(pattern, rule.pattern))) winner = rule;
   }
   return winner;
 }
@@ -163,9 +245,20 @@ export function defaultRules(mode: ApprovalMode = approvalMode()): PermissionRul
     { permission: "external_directory", pattern: "*", action: "ask" },
   ];
 
+  /**
+   * 沙箱升级（命令被沙箱拦下后，带额外权限重跑一次）单独一档：
+   * `auto` / `strict` 下默认**拒绝**。理由是语义边界 ——
+   * `auto` 说的是"别为工具调用打扰我"，不是"悄悄关掉我特意开启的沙箱"；
+   * 想自动升级的人可以在设置页加一条 `sandbox_escalation * → allow` 的规则
+   * （Codex 的 granular.sandbox_approval 也是这个意思，只是它写死在配置里）。
+   */
+  const escalationAsk: PermissionRule[] = [{ permission: "sandbox_escalation", pattern: "*", action: "ask" }];
+  const escalationDeny: PermissionRule[] = [{ permission: "sandbox_escalation", pattern: "*", action: "deny" }];
+
   if (mode === "auto") {
     return [
       ...readAllow,
+      ...escalationDeny,
       { permission: "bash", pattern: "*", action: "allow" },
       { permission: "edit", pattern: "*", action: "allow" },
       { permission: "mcp", pattern: "*", action: "allow" },
@@ -175,6 +268,7 @@ export function defaultRules(mode: ApprovalMode = approvalMode()): PermissionRul
   if (mode === "manual") {
     return [
       ...readAllow,
+      ...escalationAsk,
       { permission: "bash", pattern: "*", action: "ask" },
       { permission: "edit", pattern: "*", action: "ask" },
       { permission: "mcp", pattern: "*", action: "ask" },
@@ -183,6 +277,7 @@ export function defaultRules(mode: ApprovalMode = approvalMode()): PermissionRul
   if (mode === "strict") {
     return [
       ...readAllow,
+      ...escalationDeny,
       { permission: "bash", pattern: "*", action: "deny" },
       { permission: "edit", pattern: "*", action: "deny" },
       { permission: "mcp", pattern: "*", action: "deny" },
@@ -193,6 +288,7 @@ export function defaultRules(mode: ApprovalMode = approvalMode()): PermissionRul
   // 危险命令写成数据（而不是代码里的 if），才能被用户在设置页看到并覆盖。
   return [
     ...readAllow,
+    ...escalationAsk,
     { permission: "bash", pattern: "*", action: "allow" },
     ...DANGEROUS_COMMAND_WILDCARDS.map(
       (pattern): PermissionRule => ({ permission: "bash", pattern, action: "ask" }),
@@ -316,10 +412,13 @@ export function evaluate(
   request: Pick<PermissionRequest, "permission" | "pattern">,
   rules: PermissionRule[],
 ): Decision {
-  const rule = winningRule(rules, request.permission, request.pattern);
+  // bash 的等价写法一起匹配：多一个空格不该绕过危险命令规则。
+  const patterns =
+    request.permission === "bash" ? commandPatterns(request.pattern) : [request.pattern];
+  const rule = winningRuleFor(rules, request.permission, patterns);
   if (rule) return { action: rule.action, rule };
   // 无匹配：交给内置默认表再算一次（smart 模式下依然能覆盖到 doom_loop 等）。
-  const fallback = winningRule(defaultRules("manual"), request.permission, request.pattern);
+  const fallback = winningRuleFor(defaultRules("manual"), request.permission, patterns);
   return fallback ? { action: fallback.action, rule: null } : { action: "ask", rule: null };
 }
 
@@ -338,7 +437,9 @@ export function displayPath(workspace: string, target: string): string {
 
 /** 危险的 shell 命令（smart 模式据此把 bash 升级成 ask）。 */
 export function isDangerousCommand(command: string): boolean {
-  return DANGEROUS_COMMAND_PATTERNS.some((re) => re.test(command));
+  return commandPatterns(command).some((pattern) =>
+    DANGEROUS_COMMAND_PATTERNS.some((re) => re.test(pattern)),
+  );
 }
 
 function stringArg(args: Record<string, unknown>, ...keys: string[]): string {
@@ -371,6 +472,48 @@ function externalMediaReference(
 }
 
 /**
+ * apply_patch 影响到的文件（含 Move to 目标）：只扫段落头，不做完整解析。
+ * 补丁格式见 `apply-patch.ts`。
+ */
+export function patchPathsIn(patch: string): string[] {
+  const paths: string[] = [];
+  for (const match of patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) {
+    const value = match[1]?.trim();
+    if (value) paths.push(value);
+  }
+  for (const match of patch.matchAll(/^\*\*\* Move to: (.+)$/gm)) {
+    const value = match[1]?.trim();
+    if (value) paths.push(value);
+  }
+  return [...new Set(paths)];
+}
+
+/**
+ * 多文件改动没法在规则表里逐个匹配，用它们的公共目录 + `/*` 当模式：
+ * 规则写 `src/*` 就能覆盖「改 src 下任意文件」，展示上也比一串路径好读。
+ */
+export function commonDirPattern(workspace: string, targets: string[]): string {
+  if (targets.length === 1) return displayPath(workspace, targets[0]!);
+  const dirs = targets.map((target) => path.dirname(path.resolve(target)));
+  const first = dirs[0];
+  if (!first) return "*";
+  let shared = first.split(path.sep);
+  for (const dir of dirs.slice(1)) {
+    const parts = dir.split(path.sep);
+    let index = 0;
+    while (index < shared.length && index < parts.length && shared[index] === parts[index]) index += 1;
+    shared = shared.slice(0, index);
+  }
+  const dir = shared.join(path.sep) || path.sep;
+  const relative = isInsideWorkspace(workspace, dir) ? path.relative(workspace, dir) : dir;
+  if (targets.every((target) => path.dirname(path.resolve(target)) === dir)) {
+    return relative ? `${relative}/*` : "*";
+  }
+  // 文件散落在不同层级的目录里，用递归通配覆盖它们的公共前缀。
+  return relative ? `${relative}/**` : "**";
+}
+
+/**
  * 把一次工具调用翻译成授权请求；返回 null 表示这个工具不需要授权。
  *
  * 注意：这里的 pattern 会同时用于「规则匹配」和「弹窗展示」，
@@ -386,17 +529,60 @@ export function permissionRequestForTool(call: ToolCallShape): PermissionRequest
     case "shell":
     case "run_command": {
       const command = stringArg(args, "command", "cmd") || "(empty command)";
+      // 展示用原文（用户要看到自己那条命令），写进规则的用归一化形式
+      // —— 之后 `rm  -rf` 这类等价写法也能命中同一条「总是允许 / 拒绝」。
+      const rulePattern = canonicalCommand(command) || command;
       return {
         permission: "bash",
         pattern: command,
         title: "运行 shell 命令",
         detail: { 命令: command, 目录: workspace },
-        always: [command],
+        always: [rulePattern],
+      };
+    }
+    case "escalate_sandbox": {
+      // 命令被沙箱拦下后申请"跳过沙箱重跑一次"：卡片上要能看到原文与沙箱的报错。
+      const command = stringArg(args, "command") || "(empty command)";
+      const sandboxOutput = stringArg(args, "output").trim().slice(0, 500);
+      return {
+        permission: "sandbox_escalation",
+        pattern: canonicalCommand(command) || command,
+        title: "命令被沙箱拦下，是否跳过沙箱重试？",
+        detail: {
+          命令: command,
+          ...(sandboxOutput ? { 沙箱输出: sandboxOutput } : {}),
+        },
+        always: [canonicalCommand(command) || command],
+      };
+    }
+    case "apply_patch": {
+      const patch = stringArg(args, "patch");
+      const rawPaths = patchPathsIn(patch);
+      // 解析不出文件（补丁本身有问题）时不弹窗：工具会带着明确报错回来，用户不用被白问一次。
+      if (!rawPaths.length) return null;
+      const targets = rawPaths.map((raw) => path.resolve(workspace, raw));
+      const outside = targets.filter((target) => !isInsideWorkspace(workspace, target));
+      if (outside.length) {
+        const dirs = [...new Set(outside.map((target) => path.dirname(target)))];
+        return {
+          permission: "external_directory",
+          pattern: dirs[0]!,
+          title: "在工作区之外应用补丁",
+          detail: { 文件: outside.join("\n"), 工作区: workspace },
+          always: dirs.flatMap((dir) => [dir, `${dir}/*`]),
+        };
+      }
+      const shown = targets.map((target) => displayPath(workspace, target));
+      return {
+        permission: "edit",
+        pattern: commonDirPattern(workspace, targets),
+        title: `应用补丁（${shown.length} 个文件）`,
+        detail: { 文件: shown.join("\n") },
+        always: shown,
       };
     }
     case "write_file":
-    case "edit_file":
-    case "apply_patch": {
+    case "edit_file": {
       const target = rawPath ? path.resolve(workspace, rawPath) : workspace;
       const inside = isInsideWorkspace(workspace, target);
       if (!inside) {
@@ -416,13 +602,37 @@ export function permissionRequestForTool(call: ToolCallShape): PermissionRequest
         always: [displayPath(workspace, target)],
       };
     }
+    case "request_permissions": {
+      // 翻译成"访问工作区之外"：模型主动申请时走的也是这条授权链路。
+      const target = rawPath ? path.resolve(workspace, rawPath) : workspace;
+      return {
+        permission: "external_directory",
+        pattern: isInsideWorkspace(workspace, target) ? path.dirname(target) : target,
+        title: "模型申请访问工作区之外的路径",
+        detail: {
+          路径: target,
+          ...(stringArg(args, "reason") ? { 原因: stringArg(args, "reason") } : {}),
+        },
+        always: [path.dirname(target), `${path.dirname(target)}/*`],
+      };
+    }
     case "read_file":
+    case "view_image":
     case "list_dir":
     case "glob":
     case "grep": {
       if (!rawPath) return null;
       const target = path.resolve(workspace, rawPath);
       if (isInsideWorkspace(workspace, target)) return null;
+      /**
+       * 工具输出的转存文件（`agent-spill.ts`）不算"工作区之外"。
+       *
+       * 它是应用自己从工具结果里写出来的：用户已经授权过产生它的那次工具调用，
+       * 内容模型本来也看过前半段。不放行的话，"截断之后用 read_file 读回原文"
+       * 会变成**每读一次弹一次授权窗** —— 提示词里那句建议就成了空话。
+       * 只认这个子目录，数据目录的其余部分（存着全部云端 Key）照旧要授权 / 拦死。
+       */
+      if (isSpillPath(target)) return null;
       return {
         permission: "external_directory",
         pattern: target,
@@ -529,6 +739,7 @@ export function humanPermissionLabel(permission: string): string {
     media: "生成媒体",
     task: "派发子任务",
     doom_loop: "重复调用保护",
+    sandbox_escalation: "跳过命令沙箱",
   };
   return map[permission] ?? permission;
 }
@@ -582,6 +793,7 @@ const PROBES: { permission: string; pattern: string }[] = [
   { permission: "webfetch", pattern: "*" },
   { permission: "mcp", pattern: "*" },
   { permission: "external_directory", pattern: "*" },
+  { permission: "sandbox_escalation", pattern: "*" },
   { permission: "doom_loop", pattern: "*" },
 ];
 

@@ -15,6 +15,7 @@ import {
   type ModelCategory,
 } from "../shared/modelscope";
 import { modelTypeOf } from "../shared/cloud-providers";
+import { ENGINE_SHORT_NAMES } from "../shared/engines";
 import * as ModelStore from "./model-store";
 import * as Served from "./model-servers";
 import { activateCloudProvider, activeProviderId, listCloudProviders } from "./cloud-providers";
@@ -120,6 +121,47 @@ export function getChatModelLabel(): string {
 export function getChatRequestModelId(): string {
   if (getSetting("SERVER_MODE") === "local") return getLocalRequestModelId();
   return getChatModelName();
+}
+
+/**
+ * 「这次推理由谁提供」的展示名：本地是引擎名（llama.cpp / vLLM / SGLang / MLX），
+ * 云端是激活厂商的展示名。
+ *
+ * 用途是消息详情的用量卡片 —— 本地与云端混用时，光看模型名分不出这条回答跑在哪。
+ * 云端拿不到厂商展示名（配置被删）时返回 null，让界面不显示这一行而不是瞎猜。
+ */
+export function getChatProviderLabel(): string | null {
+  if (getSetting("SERVER_MODE") === "local") {
+    const engine = (getSetting("INFERENCE_ENGINE") || "llama.cpp") as InferenceEngine;
+    return ENGINE_SHORT_NAMES[engine] ?? engine;
+  }
+  const id = activeProviderId();
+  if (!id) return null;
+  return listCloudProviders().providers.find((p) => p.id === id)?.name ?? null;
+}
+
+/**
+ * 模型名里能看出"它吃图片"的常见写法：qwen2.5-vl / llava / llama-3.2-vision /
+ * gemma-3 / minicpm-v / internvl / pixtral / glm-4v / qwen-omni …
+ * 只是启发式：判断错了用户可以在设置 → Agent 能力里强制开 / 关。
+ */
+const VISION_MODEL_HINTS =
+  /(?:^|[^a-z0-9])(?:vl|vlm|vision|llava|omni|minicpm-?v|internvl|pixtral|moondream|smolvlm|idefics|cogvlm|glm-?4-?v|gemma-?3|janus)/i;
+
+/**
+ * 当前模型能不能接受图片输入 —— 决定 Agent 是否拿到 view_image 工具。
+ *
+ * 纯文本模型收到图片内容块会被服务端直接 400（llama.cpp / vLLM 都如此），
+ * 所以默认按模型名猜；猜不准时用 AGENT_VISION_TOOL 强制：
+ *   auto（默认）/ on / off
+ * 云端厂商的主力模型基本都支持视觉，直接放行。
+ */
+export function chatModelSupportsImages(): boolean {
+  const mode = getSetting("AGENT_VISION_TOOL");
+  if (mode === "on") return true;
+  if (mode === "off") return false;
+  if (getSetting("SERVER_MODE") !== "local") return true;
+  return VISION_MODEL_HINTS.test(`${getChatModelLabel()} ${getChatModelName()}`);
 }
 
 export function getChatModel(): LanguageModel {

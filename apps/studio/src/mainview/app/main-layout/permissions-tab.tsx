@@ -18,7 +18,17 @@ import type { PermissionRule } from "../../../bun/permissions";
 
 type Action = "allow" | "ask" | "deny";
 
-const PERMISSION_NAMES = ["bash", "edit", "read", "external_directory", "webfetch", "mcp", "media", "task"];
+const PERMISSION_NAMES = [
+  "bash",
+  "edit",
+  "read",
+  "external_directory",
+  "sandbox_escalation",
+  "webfetch",
+  "mcp",
+  "media",
+  "task",
+];
 
 const ACTION_STYLE: Record<Action, string> = {
   allow: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",

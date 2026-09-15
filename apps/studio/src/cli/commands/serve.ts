@@ -20,6 +20,9 @@ export async function cmdServe(parsed: ParsedArgs) {
   const settingsMod = await import("../../bun/db/settings");
   const modelStore = await import("../../bun/model-store");
   const ServerManager = await import("../../bun/server-manager");
+  // 独立进程里同样要认代理设置：引擎启动时会自己去拉权重（见 bun/proxy.ts）。
+  const { installProxy } = await import("../../bun/proxy");
+  installProxy();
 
   const engine = optString(parsed.options, "engine");
   const port = optString(parsed.options, "port");

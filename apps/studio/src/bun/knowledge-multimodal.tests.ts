@@ -589,7 +589,7 @@ describe("迁移默认值", () => {
     const file = join(tmpdir(), `kb-mm-mig-${process.pid}-old.db`);
     rmSync(file, { force: true });
     const sqlite = new Database(file, { create: true });
-    // 重放到 0028（新迁移之前）→ 造「既有行」→ 应用 0029
+    // 重放到 0028（新迁移之前）→ 造「既有行」→ 应用末条（多模态六列，合并 main 后重编号为 0032）
     replayMigrations(sqlite, 28);
     sqlite.exec("INSERT INTO knowledge_bases (name) VALUES ('旧库')");
     sqlite.exec("INSERT INTO knowledge_docs (kb_id, name, kind, status) VALUES (1, '旧文档', 'file', 'ready')");
@@ -599,7 +599,10 @@ describe("迁移默认值", () => {
       readFileSync(join(import.meta.dir, "db/migrations/meta/_journal.json"), "utf8"),
     ) as { entries: { idx: number; tag: string }[] };
     const last = newMigration.entries[newMigration.entries.length - 1]!;
-    expect(last.idx).toBe(29);
+    // 多模态六列必须一直排在 journal 末位（合并 main 的 0029-0031 后由 0029 重编号为 0032）：
+    // 位置错了说明编号被别的迁移挤到前面，老库升级时会被时间戳比较静默跳过。
+    expect(last.tag).toBe("0032_tired_vanisher");
+    expect(last.idx).toBe(32);
     replayMigrations(sqlite, last.idx, last.idx);
 
     const kbRow = sqlite.query("SELECT embed_image, embed_audio, embed_video FROM knowledge_bases WHERE id = 1").get() as Record<string, number>;
@@ -618,7 +621,7 @@ describe("迁移默认值", () => {
     const file = join(tmpdir(), `kb-mm-mig-${process.pid}-new.db`);
     rmSync(file, { force: true });
     const sqlite = new Database(file, { create: true });
-    replayMigrations(sqlite, 29);
+    replayMigrations(sqlite, 32);
     sqlite.exec("INSERT INTO knowledge_bases (name) VALUES ('新库')");
     sqlite.exec("INSERT INTO knowledge_docs (kb_id, name, kind, status) VALUES (1, 'd', 'file', 'ready')");
     sqlite.exec("INSERT INTO knowledge_chunks (kb_id, doc_id, seq, content, char_count) VALUES (1, 1, 1, 'x', 1)");

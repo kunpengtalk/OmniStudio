@@ -5,6 +5,7 @@ import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
+import { decryptSecret, encryptSecret, isEncryptedSecret } from "../secrets";
 
 export type SettingsKey =
   | "SETUP_COMPLETE"
@@ -51,6 +52,13 @@ export type SettingsKey =
   | "CHAT_MODEL"
   | "UI_LANG"
   | "UI_THEME"
+  // 网络代理（设置 → 偏好 → 通用）：system = 跟随系统 / 环境变量，custom = 手填地址，
+  // none = 强制直连。生效范围见 bun/proxy.ts —— 云端模型、模型/引擎下载、联网检索都走它，
+  // 回环与（默认的）局域网地址直连。
+  | "PROXY_MODE"
+  | "PROXY_URL"
+  /** 「允许访问本地网络地址」：开（默认）= 局域网直连，关 = 连局域网也走代理。 */
+  | "PROXY_ALLOW_LOCAL_NETWORK"
   | "MAX_VLLM_RETRIES"
   | "MAX_VLLM_FAILURE_RETRIES"
   | "PAGE_CONCURRENCY"
@@ -138,6 +146,13 @@ export type SettingsKey =
   | "AGENT_WORKSPACE"
   | "AGENT_WORKSPACES"
   | "AGENT_MODE"
+  /**
+   * 推理等级：off（默认，请求里不带任何推理参数）/ minimal / low / medium / high / xhigh / max。
+   *
+   * 默认关是有意的：能不能吃 reasoning 由模型与服务端共同决定，猜错会被 400。
+   * 用户显式选了等级 = 他知道自己的模型支持，才把 `reasoning` 打开随请求带出去。
+   */
+  | "AGENT_THINKING_LEVEL"
   | "AGENT_MAX_STEPS"
   /** 子智能体（task 工具）的步数上限：多步调研要给它足够回合，但要防止失控。 */
   | "AGENT_SUBAGENT_MAX_STEPS"
@@ -148,6 +163,44 @@ export type SettingsKey =
   | "AGENT_PERMISSION_RULES"
   /** 已授权的工作区之外目录（JSON 字符串数组）。 */
   | "AGENT_AUTHORIZED_FOLDERS"
+  /** 项目指令（AGENTS.md）开关与体积上限。 */
+  | "AGENT_PROJECT_DOC"
+  | "AGENT_PROJECT_DOC_MAX_BYTES"
+  /**
+   * 上下文压缩方式：summary（默认，顶到阈值时先让模型把旧历史摘成摘要）/
+   * trim（只用确定性裁剪，不额外调模型）。摘要失败 / 超时都会自动退回裁剪。
+   */
+  | "AGENT_COMPACT_MODE"
+  /**
+   * 自动重试次数（默认 2，0 = 关掉全部自愈）：传输层的瞬时错误重试
+   * （408/409/429/5xx 与网络中断）、整轮失败后的重发、以及「空回合」提醒
+   * 共用这一个旋钮 —— 代价都是"多花一次推理"，不该拆成三个要理解的开关。
+   */
+  | "AGENT_RETRY_MAX"
+  /** 把已安装的 Skills 列进系统提示，让 Agent 按需读取（默认开）。 */
+  | "AGENT_SKILLS_PROMPT"
+  /** Goal 模式自动续跑的轮数上限（默认 6）：自主跑下去的兜底刹车。 */
+  | "AGENT_GOAL_MAX_CONTINUATIONS"
+  /** Goal 模式的 token 预算上限（0 / 空 = 不限制；只计 input+output，不计缓存命中）。 */
+  | "AGENT_GOAL_TOKEN_BUDGET"
+  /** 看图工具（view_image）开关：auto / on / off。 */
+  | "AGENT_VISION_TOOL"
+  /** 回合快照（影子 git 仓库，支持「撤销本轮」）开关。 */
+  | "AGENT_SNAPSHOTS"
+  /** 影子仓库自动整理的体积阈值（MB，默认 256）。 */
+  | "AGENT_SNAPSHOT_GC_MB"
+  /** 影子仓库自动整理的轮数阈值（默认与索引上限一致：200）。 */
+  | "AGENT_SNAPSHOT_GC_TURNS"
+  /** 命令沙箱模式：off（默认）/ workspace-write（写只能落在工作区与临时目录）。 */
+  | "AGENT_SANDBOX_MODE"
+  /** 沙箱内是否允许联网（默认允许；关掉后 curl / 装依赖都会被拦）。 */
+  | "AGENT_SANDBOX_NETWORK"
+  /** 后端偏好：auto（默认，Linux 上 bwrap 优先、Landlock 兜底）/ bwrap / landlock。 */
+  | "AGENT_SANDBOX_BACKEND"
+  /** 外部通知回调命令（对齐 Codex 的 notify）：事件 JSON 作为最后一个参数追加。 */
+  | "AGENT_NOTIFY_COMMAND"
+  /** 生命周期 hooks（对齐 Codex 的 SessionStart / UserPromptSubmit），JSON 数组。 */
+  | "AGENT_HOOKS"
   | "VOICE_CALL_PROVIDER"
   /** 实时通话（DashScope Realtime）选中的云厂商：API Key 从厂商行取，页面不再手填。 */
   | "VOICE_CALL_REALTIME_PROVIDER_ID"
@@ -247,6 +300,11 @@ const DEFAULTS: Record<SettingsKey, string> = {
   UI_LANG: "zh",
   /** 界面主题：system / light / dark，前端据此切换 <html> 的 .dark 类。 */
   UI_THEME: "system",
+  // 默认跟随系统：用户 shell 里的 HTTP(S)_PROXY 与 macOS / Windows 的系统代理本来就在生效，
+  // 默认值保持这个行为；没有配代理时解析结果为空 = 直连，与以前完全一致。
+  PROXY_MODE: "system",
+  PROXY_URL: "",
+  PROXY_ALLOW_LOCAL_NETWORK: "1",
   MAX_VLLM_RETRIES: "6",
   MAX_VLLM_FAILURE_RETRIES: "0",
   PAGE_CONCURRENCY: "3",
@@ -347,6 +405,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   /** 最近使用的工作区列表（JSON 数组），供输入框上方的工作区选择面板展示。 */
   AGENT_WORKSPACES: "[]",
   AGENT_MODE: "agent",
+  // 默认 off：不发推理参数，行为与加这个开关之前完全一致。
+  AGENT_THINKING_LEVEL: "off",
   AGENT_MAX_STEPS: "40",
   AGENT_SUBAGENT_MAX_STEPS: "12",
   AGENT_ALLOW_SHELL: "1",
@@ -354,6 +414,43 @@ const DEFAULTS: Record<SettingsKey, string> = {
   AGENT_APPROVAL_MODE: "smart",
   AGENT_PERMISSION_RULES: "[]",
   AGENT_AUTHORIZED_FOLDERS: "[]",
+  // 项目指令（AGENTS.md，对齐 Codex）：从工作区向上找到仓库根，逐级拼接注入系统提示。
+  AGENT_PROJECT_DOC: "1",
+  /** 项目指令的体积上限（字节）。本地模型上下文小，默认 8KB。 */
+  AGENT_PROJECT_DOC_MAX_BYTES: "8192",
+  /**
+   * 上下文压缩方式：summary = 顶到阈值时先让模型把旧历史摘成摘要（默认），
+   * trim = 只用确定性裁剪（不额外调模型，长任务里模型会重新读一遍文件）。
+   */
+  AGENT_COMPACT_MODE: "summary",
+  /**
+   * 瞬时失败自愈：传输层重试 + 整轮失败重发 + 空回合提醒，共用这一个次数上限。
+   * 默认 2 —— 本地推理服务"正在加载模型"的 503、云端偶发 429 都能被它吃掉。
+   */
+  AGENT_RETRY_MAX: "2",
+  /** 把已安装的 Skills 只列「名字 + 描述」进系统提示，正文由 read_skill 按需取。 */
+  AGENT_SKILLS_PROMPT: "1",
+  /** Goal 模式自动续跑上限：本地一轮几十秒到几分钟，6 轮够跑完绝大多数任务。 */
+  AGENT_GOAL_MAX_CONTINUATIONS: "6",
+  /** Goal 模式 token 预算：默认 0（不限制）。理由见 agent-goals.ts 的 defaultGoalTokenBudget。 */
+  AGENT_GOAL_TOKEN_BUDGET: "0",
+  /** 看图工具（view_image）：auto = 按模型名猜，on / off = 强制开或关。 */
+  AGENT_VISION_TOOL: "auto",
+  // 回合快照：影子 git 仓库记下每轮开始前的工作区状态，界面可一键「撤销本轮」。
+  AGENT_SNAPSHOTS: "1",
+  // 影子仓库维护：占用超过 256MB 或快照条数到顶时自动 git gc（设置页可手动清理）。
+  AGENT_SNAPSHOT_GC_MB: "256",
+  AGENT_SNAPSHOT_GC_TURNS: "200",
+  // 命令沙箱默认关闭：本地开发要装依赖 / 起 dev server，先让用户显式开启。
+  AGENT_SANDBOX_MODE: "off",
+  AGENT_SANDBOX_NETWORK: "1",
+  // 后端偏好：auto = Linux 上 bubblewrap 优先（能连凭据目录读取一起挡），Landlock 兜底。
+  AGENT_SANDBOX_BACKEND: "auto",
+  // 外部通知回调：留空 = 关闭（默认）。示例：notify-send OmniStudio / 自写脚本
+  AGENT_NOTIFY_COMMAND: "",
+  // 生命周期 hooks：留空 = 关闭（默认）。示例：
+  // [{"event":"user_prompt_submit","command":"scripts/context.sh"}]
+  AGENT_HOOKS: "[]",
   // 语音通话：local = 本地 ASR+LLM+TTS 三段管线；cloud = Qwen Realtime（DashScope）。
   // 默认空 = 首次进入时由前端引导二选一（getVoiceCallProvider 会把空值当 local）。
   VOICE_CALL_PROVIDER: "",
@@ -418,6 +515,32 @@ const DEFAULTS: Record<SettingsKey, string> = {
 const SETTINGS_CACHE_TTL_MS = 2000;
 const settingsCache = new Map<string, { value: string; at: number }>();
 
+/**
+ * 需要「存储加密」的设置槽位。
+ *
+ * 这些键落盘时存密文（AES-256-GCM，见 secrets.ts），读取时透明解密，消费方
+ * （网关 / chat / 翻译 / 嵌入等几十处 getSetting 调用点）零改动。这解决的是
+ * 「密钥明文躺 SQLite」的问题：拷走数据库读到的是密文，而密钥只在内存里解密。
+ *
+ * 目前有两类：模型云激活行回写的 VLLM_API_KEY，以及本地 API 网关自身的
+ * GATEWAY_API_KEY（网关是用户允许保留 Key 的两处之一，同样不该明文躺盘）。
+ * `EMPTY` 哨兵值不加密也不解密（它就是"无 key"的约定占位，解密会把它当成
+ * 普通明文透传）。
+ */
+const ENCRYPTED_KEYS = new Set<SettingsKey>(["VLLM_API_KEY", "GATEWAY_API_KEY"]);
+
+function maybeEncrypt(key: SettingsKey, value: string): string {
+  if (!ENCRYPTED_KEYS.has(key)) return value;
+  if (!value || value === "EMPTY") return value; // 哨兵 / 空：不制造密文
+  return encryptSecret(value);
+}
+
+function maybeDecrypt(key: SettingsKey, value: string): string {
+  if (!ENCRYPTED_KEYS.has(key)) return value;
+  if (!value || value === "EMPTY") return value;
+  return decryptSecret(value);
+}
+
 /** 清空设置缓存（跨进程写入后需要立即生效时手动调用）。 */
 export function invalidateSettingsCache() {
   settingsCache.clear();
@@ -428,7 +551,7 @@ export function getSetting(key: SettingsKey): string {
   const cached = settingsCache.get(key);
   if (cached && now - cached.at < SETTINGS_CACHE_TTL_MS) return cached.value;
   const row = db.select().from(settingsTable).where(eq(settingsTable.key, key)).get();
-  const value = row?.value ?? DEFAULTS[key];
+  const value = maybeDecrypt(key, row?.value ?? DEFAULTS[key]);
   settingsCache.set(key, { value, at: now });
   return value;
 }
@@ -441,8 +564,11 @@ export function getAllSettings(): Record<string, string> {
   const rows = db.select().from(settingsTable).all();
   const result: Record<string, string> = { ...DEFAULTS };
   for (const row of rows) {
-    result[row.key] = row.value;
-    settingsCache.set(row.key, { value: row.value, at: Date.now() });
+    // 敏感槽位解密后再交给调用方（RPC 会下发给渲染进程，落盘是密文，内存是明文 ——
+    // 与加密前行为一致，避免前端各处读 key 的逻辑崩掉）。
+    const plain = maybeDecrypt(row.key as SettingsKey, row.value);
+    result[row.key] = plain;
+    settingsCache.set(row.key, { value: plain, at: Date.now() });
   }
   return result;
 }
@@ -455,19 +581,41 @@ export const EMBEDDING_POOLING_VALUES = ["last", "mean", "none", "cls"] as const
 
 export function updateSettings(values: Record<string, string>) {
   for (const [key, value] of Object.entries(values)) {
-    // EMBEDDING_POOLING 只认枚举值：非法值直接跳过（静默拒掉，读侧回落默认 last）。
+// EMBEDDING_POOLING 只认枚举值：非法值直接跳过（静默拒掉，读侧回落默认 last）。
     if (
       key === "EMBEDDING_POOLING" &&
       !(EMBEDDING_POOLING_VALUES as readonly string[]).includes(value)
     ) {
       continue;
     }
+    const encrypted = maybeEncrypt(key as SettingsKey, value);
     db.insert(settingsTable)
-      .values({ key, value })
-      .onConflictDoUpdate({ target: settingsTable.key, set: { value } })
+      .values({ key, value: encrypted })
+      .onConflictDoUpdate({ target: settingsTable.key, set: { value: encrypted } })
       .run();
+    // 缓存内存的是解密后的明文（紧接的 getSetting 直接命中，行为一致）
     settingsCache.set(key, { value, at: Date.now() });
   }
+}
+
+/**
+ * 一次性把历史遗留的**明文**敏感设置加密落盘（幂等）。
+ *
+ * 升级前 `VLLM_API_KEY` / `GATEWAY_API_KEY` 是明文；读取侧能透传旧明文，但值仍
+ * 躺在盘上。本函数扫描 settings 表，把 `ENCRYPTED_KEYS` 里尚为明文的行交给
+ * `updateSettings` 统一加密写回；已在密文态的跳过，命中明文才写，日常开销可忽略。
+ */
+export function ensureSettingsEncrypted(): void {
+  const rows = db.select().from(settingsTable).all();
+  const patch: Record<string, string> = {};
+  for (const row of rows) {
+    const key = row.key as SettingsKey;
+    if (!ENCRYPTED_KEYS.has(key)) continue;
+    const raw = row.value;
+    if (!raw || raw === "EMPTY" || isEncryptedSecret(raw)) continue;
+    patch[key] = raw; // 明文 → 交给 updateSettings 统一加密
+  }
+  if (Object.keys(patch).length > 0) updateSettings(patch);
 }
 
 export function isConfigured(): boolean {

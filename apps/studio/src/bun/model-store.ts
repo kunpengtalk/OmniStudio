@@ -10,7 +10,7 @@ import {
   resolveRuntimeTarget,
   scanModelSources,
 } from "./model-scan";
-import type { InstalledModel, ModelOrigin } from "../shared/modelscope";
+import type { InstalledModel } from "../shared/modelscope";
 import { getSetting, updateSettings } from "./db/settings";
 import { isInsideDir } from "./path-safety";
 import {

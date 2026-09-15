@@ -89,7 +89,7 @@
 | `请先在本地引擎中选择一个已启动的 TTS 模型` | 引擎起了但没选模型 | 选模型并启动 |
 | `该模型需要参考音频，请先在「声音克隆」页创建一个克隆音色` / `找不到所选克隆音色的参考音频` | 用了克隆音色但参考音频丢了 | 重建克隆音色 |
 | `本地合成失败（退出码 N）` | 引擎进程报错 | `omi logs --source tts --verbose` 看上下文；换模型/重建引擎 |
-| `Edge TTS 连接失败，请检查网络` / `Edge TTS 合成超时` / `Edge TTS 未收到音频` | 需要公网访问 Edge 服务 | 检查网络/代理，或改用本地引擎 |
+| `Edge TTS 连接失败，请检查网络` / `Edge TTS 合成超时` / `Edge TTS 未收到音频` | 需要公网访问 Edge 服务 | 检查网络与**设置 → 偏好 → 通用**的代理（WebSocket 也走它），或改用本地引擎 |
 | `No inference server configured` / `TTS request failed` | 走了推理服务通道但服务没起 | `omi status`；没起就 `omi start --server` |
 
 ---
@@ -159,9 +159,30 @@
 | --- | --- | --- |
 | `download.failed` + 磁盘可用为 0 | 磁盘满 | 清理后 `omi` / 界面点「继续」（会从断点续传） |
 | 反复重试后失败，错误含 `404` / `not found` | 仓库或文件名变了（镜像同步延迟也常见） | 换下载源（ModelScope ↔ HuggingFace）或换同名仓库 |
-| 卡在 0% 或速度长期为 0 | 网络到镜像不通 | 检查代理；HuggingFace 源优先走 hf-mirror |
+| 卡在 0% 或速度长期为 0 | 网络到镜像不通 | 检查**设置 → 偏好 → 通用**的代理模式与地址（下载与云端调用共用这一份设置，回环地址永远直连）；HuggingFace 源优先走 hf-mirror |
 | `非法的下载路径：X` | 文件名含 `../` 或绝对路径（安全拦截） | 正常现象，换合法文件名 |
 | 任务"消失" | `MODEL_DOWNLOADS` 里的状态被清理 | 重新发起下载（已有 `.part` 会续传） |
+
+---
+
+## 推理引擎 / 语言包下载
+
+引擎二进制与语言包都挂在 GitHub 上（audio.cpp、whisper.cpp、tessdata），走
+`bun/mirror-download.ts` 的多链路下载：直连可达性探测 → 加速镜像 → jsDelivr → 直连兜底，
+链路之间还会**对冲**（当前这条跑超过 45s 就把下一条也开起来，谁先完成用谁）。
+事件名统一是 `engine.download.ok` / `engine.download.source-failed` / `engine.download.all-failed`。
+
+证据：`omi logs --event engine.download --verbose`（不看 --source，三条链路分属 tts / asr / ocr）；
+`DATA_DIR/engines/` 下有没有引擎目录、有没有 `.partN` 残留。
+
+| 事件 / 现象 | 原因 | 修复 |
+| --- | --- | --- |
+| `engine.download.ok` 里 `host` 不是 `github.com` | 直连不通，走了镜像（**正常**，不是故障） | 无需处理；日志里的 `ms` / `bytes` 能看出实际速度 |
+| `engine.download.source-failed`，error 含 `连接超时`/`传输停滞` | 那条链路连不上或传一半卡住（每条链路都是短预算，会自动换下一条） | 看后续有没有 `ok`；全失败再处理 |
+| `engine.download.all-failed` | 所有链路都不通 | 按 error 里逐条列出的原因判断：全是被墙特征 → 让用户配代理（**设置 → 偏好 → 通用**：模式选「系统代理」，或选「自定义代理」填 http 地址如 `http://127.0.0.1:7890`，填完点「测试代理」确认通）；镜像被限流 → 稍后重试 |
+| 点了「下载引擎」按钮一直转 | 历史行为是每源白等 10 分钟（已修）；现在最慢 budget ≈ 连接 8s / 停滞 15s / 单链路传输 180s | 若新版仍长转，用 `engine.download.*` 事件看卡在哪条链路 |
+| `当前平台暂不支持自动下载 audio.cpp 引擎` | audio.cpp 只有 macOS(arm64/x64) 与 Linux x64 资产 | 手动装 `audiocpp_cli` 并加入 PATH |
+| 下载成功但引擎仍显示「未检测到」 | 引擎按数据目录分开放（dev / canary / 正式版各一份） | 确认界面所在渠道与 `DATA_DIR/engines/<引擎>` 是同一份 |
 
 ---
 

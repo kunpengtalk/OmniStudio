@@ -46,7 +46,6 @@ import {
   type BackupProgress,
   type BackupRemoteConfig,
   type BackupRemoteEntry,
-  type BackupScopeGroup,
   type BackupScopeId,
   type BackupSummary,
 } from "@/shared/backup";

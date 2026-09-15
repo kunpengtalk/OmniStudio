@@ -9,6 +9,7 @@ import {
 } from "./modelscope";
 import { AUDIOCPP_REPO, AUDIOCPP_ENGINE_VERSION } from "../shared/audiocpp";
 import { logEvent } from "./app-log";
+import { fetchAssetFromSources, githubReleaseUrls } from "./mirror-download";
 import type { MediaSource } from "./db/schema";
 import {
   getAudioBaseDir,
@@ -405,7 +406,27 @@ export function listTtsLocalModels(): TtsLocalModelInfo[] {
   });
 }
 
-/** 下载 audio.cpp 推理引擎二进制（GitHub Release，多镜像回退）。 */
+/** 解压引擎包到目标目录；失败时清干净，避免留下半个引擎。返回错误串表示该链路不可用。 */
+function extractEngine(tgz: string, targetDir: string): string | null {
+  mkdirSync(targetDir, { recursive: true });
+  const tar = Bun.spawnSync(["tar", "-xzf", tgz, "-C", targetDir], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (tar.exitCode !== 0) {
+    rmSync(targetDir, { recursive: true, force: true });
+    return `解压失败：${tar.stderr.toString().slice(-200)}`;
+  }
+  const bin = path.join(targetDir, "audiocpp_cli");
+  if (!existsSync(bin)) {
+    rmSync(targetDir, { recursive: true, force: true });
+    return "解压后未找到 audiocpp_cli";
+  }
+  chmodSync(bin, 0o755);
+  return null;
+}
+
+/** 下载 audio.cpp 推理引擎二进制（GitHub Release，多链路回退）。 */
 export async function downloadTtsLocalEngine(): Promise<{ ok: boolean; error?: string }> {
   const existing = await resolveBinary();
   if (existing) return { ok: true };
@@ -418,45 +439,20 @@ export async function downloadTtsLocalEngine(): Promise<{ ok: boolean; error?: s
     };
   }
 
-  const gh = `https://github.com/0xShug0/audio.cpp/releases/download/${AUDIOCPP_ENGINE_VERSION}/${asset}`;
-  // 国内镜像（GitHub 加速），依次回退。
-  const mirrors = [
-    gh,
-    `https://gh-proxy.com/${gh}`,
-    `https://ghfast.top/${gh}`,
-  ];
-
-  mkdirSync(getEnginesDir(), { recursive: true });
-  const tmpTgz = path.join(getEnginesDir(), `.${asset}`);
   const targetDir = getEngineBinDir();
-  mkdirSync(targetDir, { recursive: true });
+  const tmpTgz = path.join(getEnginesDir(), `.${asset}`);
+  const urls = await githubReleaseUrls("0xShug0/audio.cpp", AUDIOCPP_ENGINE_VERSION, asset);
 
-  let lastError = "";
-  for (const url of mirrors) {
-    try {
-      const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(600_000) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      await Bun.write(tmpTgz, res);
-      const tar = Bun.spawnSync(["tar", "-xzf", tmpTgz, "-C", targetDir], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      if (tar.exitCode !== 0) throw new Error(tar.stderr.toString().slice(-200));
-      if (existsSync(path.join(targetDir, "audiocpp_cli"))) {
-        chmodSync(path.join(targetDir, "audiocpp_cli"), 0o755);
-        rmSync(tmpTgz, { force: true });
-        return { ok: true };
-      }
-      throw new Error("解压后未找到 audiocpp_cli");
-    } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e);
-      // 清掉可能的残留，换下一个镜像。
-      rmSync(tmpTgz, { force: true });
-      rmSync(targetDir, { recursive: true, force: true });
-      mkdirSync(targetDir, { recursive: true });
-    }
-  }
-  return { ok: false, error: `audio.cpp 引擎下载失败：${lastError}` };
+  const res = await fetchAssetFromSources({
+    urls,
+    dest: tmpTgz,
+    what: "audio.cpp 推理引擎",
+    source: "tts",
+    // 只有解压出 audiocpp_cli 才算这条链路可用：代理回错误页时解压会直接失败。
+    accept: (file) => extractEngine(file, targetDir),
+  });
+  rmSync(tmpTgz, { force: true });
+  return res.ok ? { ok: true } : { ok: false, error: res.error };
 }
 
 /** 启动/切换本地 TTS 引擎到指定模型（下载完成后即可点击启动）。 */
