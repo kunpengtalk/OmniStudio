@@ -412,8 +412,10 @@ updateSettings({
   SERVER_MODE: "remote",
   VLLM_API_BASE: base,
   VLLM_API_KEY: "EMPTY",
-  VLLM_MODEL_NAME: "stub-model",
-  CHAT_MODEL: "stub-model",
+  // 云端模式下窗口跟着模型 id 走（chat-context.ts）：`-8k` 后缀把窗口钉在 8192，
+  // 第 7 节"大输出把 8k 窗口顶穿"的压缩断言依赖这个数字。
+  VLLM_MODEL_NAME: "stub-model-8k",
+  CHAT_MODEL: "stub-model-8k",
   SERVER_CTX_SIZE: "8192",
   /** auto：这条任务不该被授权弹窗打断（授权链路由 live-check 专门验）。 */
   AGENT_APPROVAL_MODE: "auto",

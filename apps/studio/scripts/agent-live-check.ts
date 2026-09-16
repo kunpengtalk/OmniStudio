@@ -753,9 +753,11 @@ check(
 );
 
 // ---------------------------------------------------------------------------
-// 上下文压缩：把窗口设得极小，长任务必须触发压缩且仍然跑完
+// 上下文压缩：把窗口设得极小，长任务必须触发压缩且仍然跑完。
+// 云端模式下窗口跟着模型 id 走（chat-context.ts），用 `-1k` 后缀构造 1024 的小窗口；
+// 指向真实服务的 OMNI_LIVE_MODEL 需要服务端认这个带后缀的 id（桩服务不看模型名）。
 // ---------------------------------------------------------------------------
-updateSettings({ SERVER_CTX_SIZE: "1000" });
+updateSettings({ VLLM_MODEL_NAME: `${model}-1k` });
 const fourth = Chat.createConversation("live check compact", "agent");
 Agent.setConversationWorkspace(fourth.id, workspace);
 await Agent.runAgentTurn({
@@ -779,7 +781,7 @@ check(
         .find((message) => message.role === "assistant")?.content ?? ""
     ).length > 0,
 );
-updateSettings({ SERVER_CTX_SIZE: "8192" });
+updateSettings({ VLLM_MODEL_NAME: model });
 
 // ---------------------------------------------------------------------------
 // 提问（ask_user）：请求与答案都要落进会话流（界面据此在消息流里渲染，回看也在）
@@ -842,9 +844,10 @@ Agent.setConversationWorkspace(compacted.id, workspace);
 /**
  * 先塞一段有分量的历史再跑第一轮 —— 会话是在第一轮时从库里装载的，
  * 所以"长历史"必须在那之前就躺在库里（这就是真实用户跑了一下午的样子）。
- * 同时把窗口调小，否则 8k 窗口下这点内容根本够不到压缩线（测不出剪辑行为）。
+ * 同时把窗口调小（云端模式窗口跟着模型 id 走，`-2k` 后缀 = 2048），
+ * 否则 128k 兜底窗口下这点内容根本够不到压缩线（测不出剪辑行为）。
  */
-updateSettings({ SERVER_CTX_SIZE: "1500" });
+updateSettings({ VLLM_MODEL_NAME: `${model}-2k` });
 {
   const { db: liveDb } = await import("../src/bun/db");
   const { messages: liveMessages } = await import("../src/bun/db/schema");
@@ -872,8 +875,8 @@ const statusBefore = Agent.describeAgentSession(compacted.id);
 check(
   "/status：会话配置速览给出模型 / 窗口 / 预算 / 审批与沙箱档位",
   statusBefore.model.length > 0 &&
-    statusBefore.contextWindow === 1500 &&
-    statusBefore.contextBudget === Math.floor(1500 * 0.6) &&
+    statusBefore.contextWindow === 2048 &&
+    statusBefore.contextBudget === Math.floor(2048 * 0.6) &&
     ["smart", "manual", "auto", "strict"].includes(statusBefore.approvalMode) &&
     ["off", "workspace-write", "read-only"].includes(statusBefore.sandboxMode),
   JSON.stringify(statusBefore),
@@ -895,7 +898,7 @@ check(
 );
 check(
   "/compact：手动预算 = 自动预算的一半（买余量，而不是等顶到线才裁）",
-  compactResult.budgetTokens === Math.floor(Math.floor(1500 * 0.6) / 2),
+  compactResult.budgetTokens === Math.floor(Math.floor(2048 * 0.6) / 2),
   `${compactResult.budgetTokens}`,
 );
 check(
@@ -945,8 +948,8 @@ check(
   !emptyCompact.ok && (emptyCompact.reason ?? "").includes("还没跑过"),
   JSON.stringify(emptyCompact),
 );
-// 复位窗口，别影响后面的用例。
-updateSettings({ SERVER_CTX_SIZE: "8192" });
+// 复位模型 id（窗口跟着它走），别影响后面的用例。
+updateSettings({ VLLM_MODEL_NAME: model });
 
 // ---------------------------------------------------------------------------
 // 会话内换模型（对齐 Codex 的 /model）：换了要立刻对下一轮生效，且历史不能丢
