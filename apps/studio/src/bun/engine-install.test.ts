@@ -49,6 +49,10 @@ const RELEASE_ASSETS = [
   "llama-b10976-bin-win-cpu-x64.zip",
   "cudart-llama-bin-win-cuda-12.4-x64.zip",
   "llama-b10976-bin-win-cuda-12.4-x64.zip",
+  // 上游现在同时发 CUDA 13.4（新卡要它）与 Vulkan（不挑显卡）
+  "cudart-llama-bin-win-cuda-13.4-x64.zip",
+  "llama-b10976-bin-win-cuda-13.4-x64.zip",
+  "llama-b10976-bin-win-vulkan-x64.zip",
 ];
 
 function release(): LlamaRelease {
@@ -155,12 +159,29 @@ describe("planLlamaAsset", () => {
     expect(plan?.expectGpu).toBe(true);
   });
 
-  test("Windows：NVIDIA 用 CUDA 变体 + 配套 cudart，其余用 CPU 变体", () => {
+  test("Windows + NVIDIA：优先最新的 CUDA 构建（新卡要它），并带上配套 cudart", () => {
     const nvidia = planLlamaAsset(RELEASE_ASSETS, "win32", "x64", "nvidia");
-    expect(nvidia?.asset).toBe("llama-b10976-bin-win-cuda-12.4-x64.zip");
-    expect(nvidia?.companion).toBe("cudart-llama-bin-win-cuda-12.4-x64.zip");
+    expect(nvidia?.asset).toBe("llama-b10976-bin-win-cuda-13.4-x64.zip");
+    expect(nvidia?.companion).toBe("cudart-llama-bin-win-cuda-13.4-x64.zip");
     expect(nvidia?.archive).toBe("zip");
+    expect(nvidia?.expectGpu).toBe(true);
+  });
 
+  test("Windows + NVIDIA 但只有旧 CUDA：退到 12.4，而不是直接 CPU", () => {
+    const assets = RELEASE_ASSETS.filter((name) => !name.includes("cuda-13.4"));
+    const plan = planLlamaAsset(assets, "win32", "x64", "nvidia");
+    expect(plan?.asset).toBe("llama-b10976-bin-win-cuda-12.4-x64.zip");
+    expect(plan?.companion).toBe("cudart-llama-bin-win-cuda-12.4-x64.zip");
+  });
+
+  test("Windows + AMD/Intel 独显：走 Vulkan（以前只有 CPU 可退 —— issue #10 的同类机器）", () => {
+    const plan = planLlamaAsset(RELEASE_ASSETS, "win32", "x64", "amd");
+    expect(plan?.asset).toBe("llama-b10976-bin-win-vulkan-x64.zip");
+    expect(plan?.companion).toBeUndefined();
+    expect(plan?.expectGpu).toBe(true);
+  });
+
+  test("Windows：没探到独显时不去下 Vulkan（省一次没意义的下载）", () => {
     const cpu = planLlamaAsset(RELEASE_ASSETS, "win32", "x64", "none");
     expect(cpu?.asset).toBe("llama-b10976-bin-win-cpu-x64.zip");
     expect(cpu?.archive).toBe("zip");
@@ -168,6 +189,12 @@ describe("planLlamaAsset", () => {
     expect(planLlamaAsset(RELEASE_ASSETS, "win32", "arm64", "none")?.asset).toBe(
       "llama-b10976-bin-win-cpu-arm64.zip",
     );
+  });
+
+  test("exclude：把已经试过的变体排掉，自然落到下一档", () => {
+    const tried = new Set(["llama-b10976-bin-win-cuda-13.4-x64.zip"]);
+    const next = planLlamaAsset(RELEASE_ASSETS, "win32", "x64", "nvidia", tried);
+    expect(next?.asset).toBe("llama-b10976-bin-win-cuda-12.4-x64.zip");
   });
 
   test("上游改了命名（构建号变了）：仍然按模式匹配，不写死版本号", () => {
@@ -283,7 +310,40 @@ describe("installLlamaCpp", () => {
     ]);
     // CPU 构建仍要过 --list-devices？不 —— 方案本身没有 expectGpu
     expect(result.ok).toBe(true);
-    expect(report.lines.some((line) => line.includes("改用 CPU 构建重装"))).toBe(true);
+    expect(report.lines.some((line) => line.includes("改用 Linux x64（CPU）"))).toBe(true);
+  });
+
+  test("Windows + NVIDIA 的变体阶梯：CUDA 13.4 → 12.4 → Vulkan → CPU（issue #10 的回归）", async () => {
+    const rootDir = tempRoot("win-ladder");
+    const fetch = fakeFetcher();
+    const report = reporter();
+
+    const result = await installLlamaCpp({
+      reporter: report,
+      // 这张卡所有 GPU 变体都起不来（模拟"构建不支持这张卡"）：必须逐档往下换，
+      // 而不是像以前那样从第一个 CUDA 直接掉到 CPU。
+      runner: fakeRunner({ gpuWorks: false }),
+      platform: "win32",
+      arch: "x64",
+      gpuKind: "nvidia",
+      rootDir,
+      fetchRelease: async () => release(),
+      fetchAsset: fetch,
+    });
+
+    expect(fetch.fetched).toEqual([
+      "llama-b10976-bin-win-cuda-13.4-x64.zip",
+      "cudart-llama-bin-win-cuda-13.4-x64.zip",
+      "llama-b10976-bin-win-cuda-12.4-x64.zip",
+      "cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "llama-b10976-bin-win-vulkan-x64.zip",
+      "llama-b10976-bin-win-cpu-x64.zip",
+    ]);
+    expect(result.ok).toBe(true);
+    // 每一档换成了什么都写在日志里：用户看到"显存 0%"时能对上原因
+    expect(report.lines.some((line) => line.includes("改用 Windows x64（CUDA 12.4）"))).toBe(true);
+    expect(report.lines.some((line) => line.includes("改用 Windows x64（Vulkan）"))).toBe(true);
+    expect(report.lines.some((line) => line.includes("改用 Windows x64（CPU）"))).toBe(true);
   });
 
   test("下载失败：不留半个安装，日志与返回值都说明白", async () => {

@@ -124,12 +124,33 @@ function planRules(platform: string, arch: string, gpuKind: GpuKind): PlanRule[]
   if (platform === "win32") {
     const rules: PlanRule[] = [];
     if (gpuKind === "nvidia" && arch === "x64") {
+      // 新卡要新 CUDA：12.4 的构建在 Blackwell（RTX 50 系）上连后端都起不来，装完校验
+      // 一失败就会掉到 CPU 构建 —— 表现是「跑起来了，但显存占用 0%」（issue #10 的
+      // RTX 5090）。上游现在同时发 12.4 与 13.4，新的排前面；缺哪一份（或没有配套
+      // cudart）就自动落到下一条。
+      rules.push({
+        match: /^llama-b\d+-bin-win-cuda-13\.4-x64\.zip$/,
+        companionMatch: /^cudart-llama-bin-win-cuda-13\.4-x64\.zip$/,
+        archive: "zip",
+        expectGpu: true,
+        label: "Windows x64（CUDA 13.4）",
+      });
       rules.push({
         match: /^llama-b\d+-bin-win-cuda-12\.4-x64\.zip$/,
         companionMatch: /^cudart-llama-bin-win-cuda-12\.4-x64\.zip$/,
         archive: "zip",
         expectGpu: true,
         label: "Windows x64（CUDA 12.4）",
+      });
+    }
+    if (arch === "x64" && gpuKind !== "none") {
+      // Vulkan 不挑显卡：AMD / Intel 独显在 Windows 上以前只有 CPU 可退，NVIDIA 机器上
+      // CUDA 起不来时它也比 CPU 值得试。上游的 win-vulkan 构建不需要额外运行库。
+      rules.push({
+        match: /^llama-b\d+-bin-win-vulkan-x64\.zip$/,
+        archive: "zip",
+        expectGpu: true,
+        label: "Windows x64（Vulkan）",
       });
     }
     rules.push({
@@ -170,13 +191,15 @@ function planRules(platform: string, arch: string, gpuKind: GpuKind): PlanRule[]
   return rules;
 }
 
-/** 取规则在该发布里能凑出的方案（同名资产可能被上游改掉，凑不齐返回 null）。 */
+/** 取规则在该发布里能凑出的方案（同名资产可能被上游改掉，凑不齐返回 null）。
+ *  `exclude` 用于逐级重试：上一个变体验证失败后把它的资产排除掉，自然落到下一档。 */
 export function planFromRules(
   rules: readonly PlanRule[],
   assets: readonly string[],
+  exclude: ReadonlySet<string> = new Set(),
 ): LlamaAssetPlan | null {
   for (const rule of rules) {
-    const asset = assets.find((name) => rule.match.test(name));
+    const asset = assets.find((name) => rule.match.test(name) && !exclude.has(name));
     if (!asset) continue;
     const companion = rule.companionMatch ? assets.find((name) => rule.companionMatch!.test(name)) : undefined;
     // CUDA 构建缺了运行库包等于装了个跑不起来的东西：退到下一个（CPU）方案。
@@ -189,14 +212,16 @@ export function planFromRules(
 /**
  * 发布资产列表 → 装配方案。上游改过资产命名（`-bin-` 前缀与 `.tar.gz` 后缀都变过），
  * 所以逐条降级：GPU 变体拿不到就退 CPU；一个都拿不到返回 null（界面给手动安装提示）。
+ * `exclude` 给「上一个变体验证失败」的重试用（见 installLlamaCpp 里的阶梯）。
  */
 export function planLlamaAsset(
   assets: readonly string[],
   platform: string,
   arch: string,
   gpuKind: GpuKind = "none",
+  exclude: ReadonlySet<string> = new Set(),
 ): LlamaAssetPlan | null {
-  return planFromRules(planRules(platform, arch, gpuKind), assets);
+  return planFromRules(planRules(platform, arch, gpuKind), assets, exclude);
 }
 
 /** CPU 兜底方案（GPU 变体验证失败时重装用）。 */
@@ -424,8 +449,12 @@ export async function installLlamaCpp(deps: LlamaInstallDeps): Promise<EngineIns
     return finish({ ok: false, error }, "no-release");
   }
 
-  const plan = planLlamaAsset(release.assets, platform, arch, gpuKind);
-  if (!plan) {
+  // 变体阶梯：CUDA 最新 → CUDA 旧 → Vulkan → CPU（顺序见 planRules）。前一档装完
+  // 验证不过（驱动太旧 / 这份构建不支持这张卡）就换下一档，而不是直接掉到 CPU ——
+  // Windows 上 CUDA 12.4 的构建在 Blackwell（RTX 50 系）上就是这样一路退到 CPU 的
+  // （issue #10：进程跑起来了，但显存占用 0%，模型全在内存里）。
+  const firstPlan = planLlamaAsset(release.assets, platform, arch, gpuKind);
+  if (!firstPlan) {
     const error = `官方构建里没有匹配当前平台（${platform}/${arch}）的二进制，请手动安装`;
     reporter.log(`${error}\n`);
     return finish({ ok: false, error }, "no-asset");
@@ -440,28 +469,15 @@ export async function installLlamaCpp(deps: LlamaInstallDeps): Promise<EngineIns
     if (currentVersion) {
       reporter.log(`检测到已安装的 llama.cpp ${currentVersion}，将重新安装最新构建（升级）\n`);
     }
-    reporter.log(`准备安装 llama.cpp ${release.tag} · ${plan.label}\n`);
-    const attempt = await installLlamaPlan({
-      release,
-      plan,
-      staging,
-      rootDir,
-      reporter,
-      runner,
-      platform,
-      fetchAsset,
-    });
-    if (attempt.ok) return finish({ ok: true, version: release.tag });
 
-    // GPU 变体起不来（驱动不匹配 / 运行库缺失）：自动回退 CPU 构建。把跑不起来的
-    // 二进制留在托管目录里，用户只会看到"装好了但启动就报错"。
-    const cpuPlan = plan.expectGpu ? cpuLlamaPlan(release.assets, platform, arch) : null;
-    if (cpuPlan) {
-      reporter.log(`GPU 构建验证没通过（${attempt.error}），改用 CPU 构建重装…\n`);
-      rmSync(staging, { recursive: true, force: true });
-      const retry = await installLlamaPlan({
+    const tried = new Set<string>();
+    let plan: LlamaAssetPlan | null = firstPlan;
+    let lastError = "";
+    while (plan) {
+      reporter.log(`准备安装 llama.cpp ${release.tag} · ${plan.label}\n`);
+      const attempt = await installLlamaPlan({
         release,
-        plan: cpuPlan,
+        plan,
         staging,
         rootDir,
         reporter,
@@ -469,10 +485,23 @@ export async function installLlamaCpp(deps: LlamaInstallDeps): Promise<EngineIns
         platform,
         fetchAsset,
       });
-      if (retry.ok) return finish({ ok: true, version: release.tag }, "cpu-fallback");
-      return finish({ ok: false, error: retry.error }, "cpu-fallback-failed");
+      if (attempt.ok) {
+        // 是靠回退才装上的，就在日志里（why）留个记号：用户看到"显存 0%"时有据可查。
+        const fellBack = tried.size > 0;
+        const isCpu = plan.label.includes("（CPU）");
+        return finish({ ok: true, version: release.tag }, fellBack ? (isCpu ? "cpu-fallback" : "gpu-fallback") : undefined);
+      }
+      lastError = attempt.error ?? "安装失败";
+      // 只有 GPU 变体值得往下换：CPU 构建都起不来就是真装不上（缺 dll / 权限 / 杀软拦截）。
+      if (!plan.expectGpu) return finish({ ok: false, error: lastError }, "install-failed");
+      tried.add(plan.asset);
+      const next = planLlamaAsset(release.assets, platform, arch, gpuKind, tried);
+      if (!next) return finish({ ok: false, error: lastError }, "install-failed");
+      reporter.log(`${plan.label} 没通过验证（${lastError}），改用 ${next.label}…\n`);
+      rmSync(staging, { recursive: true, force: true });
+      plan = next;
     }
-    return finish({ ok: false, error: attempt.error }, "install-failed");
+    return finish({ ok: false, error: lastError }, "install-failed");
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     reporter.log(`${error}\n`);
