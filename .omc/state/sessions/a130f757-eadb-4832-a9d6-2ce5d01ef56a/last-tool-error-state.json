@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"python3 /Users/lishuhong/workspace/projects/research_projects/openviking_v0.4.19/.omc/bench/multimodal/25_build_cards_v2.py\",\"timeout\":120000,\"description\":\"Build v2 minimal cards\"}",
-  "error": "Exit code 1\nTraceback (most recent call last):\n  File \"/Users/lishuhong/workspace/projects/research_projects/openviking_v0.4.19/.omc/bench/multimodal/25_build_cards_v2.py\", line 11, in <module>\n    req = urllib.request.Request(Q, data=json.dumps(body).encode(),\n                                         ^^^^\nNameError: name 'json' is not defined. Did you forget to import 'json'?",
-  "timestamp": "2026-09-16T01:13:42.449Z",
-  "retry_count": 1
-}

@@ -22,5 +22,6 @@ describe("迁移时间戳自愈", () => {
     const output = `${proc.stdout.toString()}${proc.stderr.toString()}`;
     if (proc.exitCode !== 0) console.error(output);
     expect(proc.exitCode).toBe(0);
-  });
+    // 子进程要真启动一次应用（预加载 + 全量迁移），bun 默认 5s 在并行批次下会偶发踩线。
+  }, 30_000);
 });

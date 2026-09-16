@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"grep -aE \\\"Traceback|Error|error\\\" /tmp/wemm-serve.log | grep -av \\\"UserWarning\\\\|resource_tracker\\\" | tail -5; pkill -f \\\"wemm-serve/serve.py\\\"; sleep 2; nohup /Users/lishuhong/wemm-serve...",
-  "error": "Exit code 28\n  File \"/Users/lishuhong/.local/lib/python3.13/site-packages/starlette/middleware/errors.py\", line 186, in __call__\n  File \"/Users/lishuhong/.local/lib/python3.13/site-packages/starlette/middleware/errors.py\", line 164, in __call__\n    raise StrictDataclassFieldValidationError(field=name, cause=e) from e\nhuggingface_hub.errors.StrictDataclassFieldValidationError: Validation error for field 'video_metadata':\n    TypeError: Field 'video_metadata' with value ({'fps': 2.0, 'frames_indic...",
-  "timestamp": "2026-09-15T13:18:04.740Z",
-  "retry_count": 1
-}

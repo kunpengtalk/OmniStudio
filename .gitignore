@@ -84,3 +84,6 @@ __pycache__/
 *.pyc
 
 *.local.*
+
+# AI agent 工具的本机状态目录（会话 replay / checkpoint / plan），不属于仓库内容
+.omc/

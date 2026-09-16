@@ -200,7 +200,12 @@ try {
     check("审计记录检索", actions.has("recall"), [...actions].join(","));
 
     const exported = K.exportKb(kb.id, { includeEmbeddings: true });
-    check("导出载荷版本化", exported.payload.format === "omnistudio.kb" && exported.payload.version === 1);
+    // 版本跟 KB_EXPORT_VERSION 常量走：写死字面量会在下次升版时变成假红（v2 起载荷带模态/媒体字段）。
+    check(
+      "导出载荷版本化",
+      exported.payload.format === "omnistudio.kb" && exported.payload.version === K.KB_EXPORT_VERSION,
+      `version=${exported.payload.version} 期望=${K.KB_EXPORT_VERSION}`,
+    );
     const imported = K.importKb(JSON.parse(exported.json));
     check("导入文档数一致", imported.docs === K.listDocs(kb.id).docs.length, `${imported.docs}`);
     check("导入带向量（无需重新向量化）", imported.embedded > 0, JSON.stringify(imported));
