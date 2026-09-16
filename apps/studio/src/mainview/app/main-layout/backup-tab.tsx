@@ -49,7 +49,7 @@ import {
   type BackupScopeId,
   type BackupSummary,
 } from "@/shared/backup";
-import { PageHeader, SettingsSection, SettingRow } from "./setting-ui";
+import { PageHeader, SettingsSection, SettingRow } from "@components/setting-ui";
 
 /** 备份体积可能到 GB 级：format.ts 的 formatSize 只到 MB，这里单独补一层。 */
 function formatBytes(bytes: number | undefined | null): string {

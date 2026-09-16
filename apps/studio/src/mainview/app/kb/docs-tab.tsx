@@ -240,6 +240,14 @@ function ChunksDialog({ doc, onClose }: { doc: KbDocView | null; onClose: () => 
                     )}
                   </div>
                 ))}
+                {(data?.total ?? 0) > (data?.chunks.length ?? 0) && (
+                  <p className="pt-1 text-center text-[10px] text-muted-foreground">
+                    {t("kb.chunks.truncated", {
+                      shown: String(data?.chunks.length ?? 0),
+                      total: String(data?.total ?? 0),
+                    })}
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -476,6 +484,9 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
   // 行内缩略图查看器：容器层单实例受控（所有 DocRow 缩略图共用一个 KbImageViewer）。
   const [viewerChunkId, setViewerChunkId] = useState<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<KbDocView | null>(null);
+  // 导入结果 / 失败原因就地显示在工具条下方（此前 kbAddFiles 对不存在的路径直接跳过，
+  // 界面毫无反应，用户以为“点了没反应”）。
+  const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
 
   const docsQuery = useQuery({
     queryKey: ["kb-docs", kb.id],
@@ -492,10 +503,19 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
       // 与 bun 侧目录导入白名单（KB_FOLDER_FILE_RE）同一来源：shared/knowledge.ts 扩展名常量。
       const accept = [...KB_TEXT_EXT, ...KB_IMAGE_EXT, ...KB_AUDIO_EXT, ...KB_VIDEO_EXT].join(",");
       const { paths } = await rpcClient.openFileDialog({ allowedFileTypes: accept });
-      if (paths.length === 0) return;
-      await rpcClient.kbAddFiles({ kbId: kb.id, paths });
+      if (paths.length === 0) return null;
+      return rpcClient.kbAddFiles({ kbId: kb.id, paths });
     },
-    onSuccess: invalidate,
+    onSuccess: (res) => {
+      invalidate();
+      if (!res) return;
+      setNotice(
+        res.docs.length > 0
+          ? { kind: "ok", text: t("kb.docs.addedCount", { count: String(res.docs.length) }) }
+          : { kind: "error", text: t("kb.docs.addedNone") },
+      );
+    },
+    onError: (e) => setNotice({ kind: "error", text: t("kb.docs.addFailed", { error: String(e) }) }),
   });
 
   const addFolderMutation = useMutation({
@@ -506,10 +526,28 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
         allowsMultipleSelection: false,
       });
       const dir = paths[0];
-      if (!dir) return;
-      await rpcClient.kbAddFolder({ kbId: kb.id, path: dir });
+      if (!dir) return null;
+      return rpcClient.kbAddFolder({ kbId: kb.id, path: dir });
     },
-    onSuccess: invalidate,
+    onSuccess: (res) => {
+      invalidate();
+      if (!res) return;
+      const skipped = res.skipped ?? 0;
+      setNotice(
+        res.docs.length === 0 && skipped === 0
+          ? { kind: "error", text: t("kb.docs.addedNone") }
+          : skipped > 0
+            ? {
+                kind: "ok",
+                text: t("kb.docs.addedSkipped", {
+                  added: String(res.docs.length),
+                  skipped: String(skipped),
+                }),
+              }
+            : { kind: "ok", text: t("kb.docs.addedCount", { count: String(res.docs.length) }) },
+      );
+    },
+    onError: (e) => setNotice({ kind: "error", text: t("kb.docs.addFailed", { error: String(e) }) }),
   });
 
   const addNoteMutation = useMutation({
@@ -520,6 +558,7 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
       setNoteTitle("");
       setNoteContent("");
     },
+    onError: (e) => setNotice({ kind: "error", text: t("kb.docs.addFailed", { error: String(e) }) }),
   });
 
   const addWebMutation = useMutation({
@@ -529,6 +568,7 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
       setWebOpen(false);
       setWebUrl("");
     },
+    onError: (e) => setNotice({ kind: "error", text: t("kb.docs.addFailed", { error: String(e) }) }),
   });
 
   const reingestMutation = useMutation({
@@ -555,6 +595,7 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
   });
 
   const docs = docsQuery.data?.docs ?? [];
+  const totalDocs = docsQuery.data?.total ?? docs.length;
   const missingVectors = docs.reduce((s, d) => s + Math.max(0, d.chunkCount - d.embeddedCount), 0);
 
   const tilesProps = {
@@ -639,6 +680,24 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
           )}
         </div>
       )}
+
+      {/* 导入结果 / 失败原因 / 列表截断提示 */}
+      {notice ? (
+        <div
+          className={cn(
+            "mx-6 mb-1 shrink-0 rounded-md border px-3 py-1.5 text-xs",
+            notice.kind === "error"
+              ? "border-destructive/30 bg-destructive/10 text-destructive"
+              : "border-border bg-muted/50 text-muted-foreground",
+          )}
+        >
+          {notice.text}
+        </div>
+      ) : totalDocs > docs.length ? (
+        <div className="mx-6 mb-1 shrink-0 rounded-md border border-border bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground">
+          {t("kb.docs.truncated", { shown: String(docs.length), total: String(totalDocs) })}
+        </div>
+      ) : null}
 
       {/* 列表 / 空状态 */}
       <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">

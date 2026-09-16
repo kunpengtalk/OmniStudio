@@ -60,11 +60,12 @@ omi logs --clear                      # 清空（保留轮转历史）
 | `client` | webview 上报（渲染错误、未捕获异常、通话前端调试） | `client.render_error` `client.window_error` `client.unhandled_rejection` `voicecall` |
 | `agent` | Agent 回合收尾、工具失败 | `agent.turn.error` `agent.turn.empty` `agent.tool.failed` |
 | `image` | 生图 | `image.generate.failed` |
-| `video` | 生视频 | `video.submit.failed` `video.poll.failed` `video.poll.timeout` `video.poll.retry`(debug) |
+| `video` | 生视频 | `video.submit.failed` `video.poll.failed`（含鉴权被拒 / 地址填错这类不再重试的失败）`video.poll.http`(warn→error：可重试的查询失败，同一条记录按分钟节流) `video.poll.timeout` |
 | `tts` / `asr` | 语音合成 / 识别 | `tts.run.failed` `tts.local.failed` `asr.run.failed` `asr.transcribe.failed` `voicecall`(debug) |
 | `ocr` | OCR 三种引擎 | `ocr.run.failed`(tesseract) `ocr.vlm.failed` `ocr.ppocr.failed` |
 | `server` | 推理服务器 | `server.start.failed` `served_model.start.failed` `served_model.start.threw` `served_model.crashed` |
 | `gateway` | OpenAI 兼容网关 | `gateway.start.failed` |
+| `benchmark` | 基准测试（速度扫描 / 能力评测；长跑的失败也要有现场） | `benchmark.run.started` `benchmark.run.finished` `benchmark.run.failed` `benchmark.bucket.failed`(warn) |
 | `download` | 模型下载 | `download.failed` `download.invalid_path` |
 | `media-server` / `notice` | 媒体服务状态 / 通知中心落下的条目 | `notification.error` `notification.permission` `notification.run_finished` |
 | `memory` `kb` `backup` `skills` `mcp` `automation` `update` `translate` | 对应子系统的维护与失败 | `memory.maintenance.failed` `kb.maintenance.failed` … |

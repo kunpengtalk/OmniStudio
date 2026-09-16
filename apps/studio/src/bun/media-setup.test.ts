@@ -88,6 +88,7 @@ function addCloudProvider(input: {
     models: input.models.map((modelId) => ({ id: modelId })),
     enabled: input.enabled ?? true,
     videoApi: "",
+    musicApi: "",
     createdAt: 0,
     updatedAt: 0,
   });

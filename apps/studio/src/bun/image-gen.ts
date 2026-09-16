@@ -146,16 +146,64 @@ function normalizeComfyBase(base: string): string {
   return base.trim().replace(/\/+$/, "");
 }
 
+/**
+ * 上游报错取一句人话。
+ *
+ * 报错信封不止 OpenAI 那一种：除了 `{ error: { message } }`，国内不少聚合网关用的是
+ * `{ code, message }`（硅基流动 20012 那种）。只认第一种的后果是把整段 JSON 原样丢给
+ * 用户 —— 小应用里显示的就是 `{"code":20012,"message":"Model does not exist…"}`，
+ * 既不好看也没告诉人去哪儿改。
+ */
+export function upstreamErrorText(body: string): string {
+  const raw = (body ?? "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw) as {
+      error?: { message?: unknown } | string;
+      message?: unknown;
+    };
+    const nested = parsed?.error;
+    if (nested && typeof nested === "object" && typeof nested.message === "string") {
+      return nested.message;
+    }
+    if (typeof nested === "string" && nested) return nested;
+    if (typeof parsed?.message === "string" && parsed.message) return parsed.message;
+  } catch {
+    // 不是 JSON 就当纯文本
+  }
+  return raw.slice(0, 300);
+}
+
 async function errorMessage(res: Response, fallback: string): Promise<string> {
   const body = await res.text().catch(() => "");
-  if (body) {
-    try {
-      return JSON.parse(body)?.error?.message ?? body.slice(0, 300);
-    } catch {
-      return body.slice(0, 300);
-    }
-  }
-  return `${fallback} (${res.status})`;
+  const text = upstreamErrorText(body);
+  return text || `${fallback} (${res.status})`;
+}
+
+/**
+ * 「模型不存在」这类报错补一句能照着做的提示。
+ *
+ * 实测最常见的成因不是上游坏了：`IMG_MODEL` 是三个后端共用的一个槽位，从本地 MLX
+ * 切到云端时它不会被清掉，于是 `z-image-turbo`（MLX 的 preset id）被原样发给了
+ * 硅基流动 —— 上游只回一句 "Model does not exist"，用户没法从这句话看出问题在
+ * 自己的设置里，更看不出该改哪儿。
+ */
+export function modelNotFoundHint(
+  message: string,
+  model: string,
+  providerName?: string,
+): string {
+  const hit =
+    /model\s+(does not exist|not found|is not exist)|invalid\s+model|no such model|模型不存在|不存在的模型/i.test(
+      message,
+    );
+  if (!hit) return message;
+  const where = providerName?.trim() || "当前厂商";
+  return (
+    `${where} 没有这个模型：${model}。` +
+    `到「图像生成 → 云端」的模型选择器里换一个该厂商提供的生图模型` +
+    `（或把生图后端切回本地 MLX / ComfyUI）。上游原始报错：${message}`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +224,25 @@ export async function listImageApiModels(
   const r = await CloudProviders.fetchRemoteModels({ baseUrl: base, apiKey });
   if (!r.ok) throw new Error(r.error);
   return r.models;
+}
+
+/**
+ * 列出某个后端可用的模型 id（RPC 与 Agent 弹窗共用的入口）。
+ *
+ * 凭据只有一个来源：`IMG_PROVIDER_ID` 指向的服务商行。调用方**不能**传地址或密钥 ——
+ * 页面此前传的是 `apiKey: ""`，而空串不会被 `??` 拦下，需要鉴权的上游列模型必然 401。
+ * 唯一例外是 `comfyBaseOverride`：ComfyUI 地址是用户自己的服务地址（不是凭据），
+ * 且弹窗要用「还没落盘的表单值」探测。
+ */
+export async function listImageGenModelIds(
+  backend?: ImageGenBackend,
+  comfyBaseOverride?: string,
+): Promise<string[]> {
+  const cfg = getImageGenConfig();
+  const picked = backend ?? cfg.backend;
+  if (picked === "comfyui") return listComfyCheckpoints(comfyBaseOverride ?? cfg.comfyBase);
+  if (picked === "mlx") return MlxGen.MLX_MODELS.map((m) => m.id);
+  return listImageApiModels(cfg.apiBase, cfg.apiKey);
 }
 
 /** 从 ComfyUI /object_info 拉取可用 checkpoint 列表。 */
@@ -440,6 +507,9 @@ async function generateViaApi(
   const count = Math.max(1, Math.min(params.count ?? 1, 8));
   const size = `${params.width ?? 1024}x${params.height ?? 1024}`;
   const usageCtx = { provider: imageProviderLabel("api", cfg.providerId), model };
+  // 「模型不存在」时把厂商名写进报错：用户要照着它去改设置。
+  const hint = (message: string) =>
+    modelNotFoundHint(message, model, CloudProviders.resolveCloudProvider(cfg.providerId)?.name);
 
   // AI 修图：带参考图时走 /v1/images/edits（multipart 以图改图）；否则走纯文生图。
   if (params.referenceImageRef) {
@@ -466,7 +536,7 @@ async function generateViaApi(
       body: form,
       signal: AbortSignal.timeout(600_000),
     });
-    if (!res.ok) throw new Error(await errorMessage(res, "修图请求失败"));
+    if (!res.ok) throw new Error(hint(await errorMessage(res, "修图请求失败")));
     return saveApiItems(res, usageCtx);
   }
 
@@ -488,7 +558,7 @@ async function generateViaApi(
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(600_000),
   });
-  if (!res.ok) throw new Error(await errorMessage(res, "生图请求失败"));
+  if (!res.ok) throw new Error(hint(await errorMessage(res, "生图请求失败")));
   return saveApiItems(res, usageCtx);
 }
 

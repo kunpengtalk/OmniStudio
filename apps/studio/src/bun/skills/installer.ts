@@ -24,6 +24,7 @@ import { parseSkillMd, sanitizeSkillName, isSkillDir, hashSkillDir } from "./met
 import { resyncCopyTargets } from "./sync-engine";
 import { audit } from "./audit";
 import { writeSkillMeta } from "./meta-sync";
+import { logEvent } from "../app-log";
 
 // ---------------------------------------------------------------------------
 // 进度推送
@@ -284,6 +285,13 @@ export async function installFromSkillssh(
     }
     if (clone.code !== 0) {
       emitProgress({ ref, phase: "error", message: clone.stderr.slice(0, 300) });
+      logEvent({
+        level: "error",
+        source: "skills",
+        event: "skills.install.clone_failed",
+        message: clone.stderr.slice(0, 300) || "git clone 失败",
+        detail: { ref, skillId, repoUrl, exitCode: clone.code },
+      });
       return { ok: false, error: `git clone failed: ${clone.stderr.slice(0, 200)}` };
     }
     emitProgress({ ref, phase: "installing" });
@@ -416,7 +424,33 @@ export function installLocal(
     return importSkillDir(abs, { name, sourceType: "local" });
   }
   if (/\.(zip|skill)$/i.test(abs)) {
-    // zip / .skill（zip 变体）：系统 unzip 解包（防 Zip-Slip：解到临时目录后再校验路径）。
+    // zip / .skill（zip 变体）：先列条目校验、再解到临时目录。
+    const listing = Bun.spawnSync(["unzip", "-Z1", abs], { stdout: "pipe", stderr: "pipe" });
+    const entries = new TextDecoder()
+      .decode(listing.stdout)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const unsafe = entries.filter((e) => !isSafeArchiveEntry(e));
+    if (listing.exitCode !== 0 || unsafe.length > 0) {
+      logEvent({
+        level: "error",
+        source: "skills",
+        event: "skills.import.unsafe_archive",
+        message:
+          listing.exitCode !== 0
+            ? `无法读取归档清单（退出码 ${listing.exitCode}）`
+            : `归档含不安全路径：${unsafe.slice(0, 3).join(", ")}`,
+        detail: { path: abs, entryCount: entries.length, unsafe: unsafe.slice(0, 10) },
+      });
+      return {
+        ok: false,
+        error:
+          listing.exitCode !== 0
+            ? "无法读取压缩包内容（unzip 不可用？）"
+            : "压缩包里含不安全的路径（../ 或绝对路径），已拒绝导入",
+      };
+    }
     const tmp = join(getTmpDir(), `zip-${randomUUID().slice(0, 8)}`);
     mkdirSync(tmp, { recursive: true });
     const unzip = Bun.spawnSync(["unzip", "-q", "-o", abs, "-d", tmp], { stdout: "pipe", stderr: "pipe" });
@@ -441,6 +475,21 @@ export function installLocal(
     return result;
   }
   return { ok: false, error: "unsupported file type" };
+}
+
+/**
+ * zip / .skill 归档里的条目名是否安全。
+ *
+ * 系统 `unzip` 通常会自己跳过不安全的条目，但那是它的实现细节、各版本还不一致 ——
+ * 归档是外部输入，**必须先自己看一遍清单**再解包：绝对路径、`..` 段、盘符、NUL
+ * 一律拒绝（Zip-Slip 的经典写法就是把 `../../…` 塞进条目名）。
+ */
+export function isSafeArchiveEntry(name: string): boolean {
+  if (!name || name.includes("\0")) return false;
+  const normalized = name.replace(/\\/g, "/");
+  if (normalized.startsWith("/")) return false;
+  if (/^[a-zA-Z]:/.test(normalized)) return false;
+  return !normalized.split("/").some((seg) => seg === "..");
 }
 
 function findSkillRoot(dir: string, depth: number): string | null {

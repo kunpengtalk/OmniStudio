@@ -28,6 +28,8 @@ export function ToolsTab() {
   const [overridePath, setOverridePath] = useState("");
   const [adding, setAdding] = useState(false);
   const [customForm, setCustomForm] = useState({ key: "", name: "", skillsDir: "" });
+  /** 非法工具目录的拒绝原因（家目录 / 根目录 / 应用数据目录内），见 store.validateToolSkillsDir。 */
+  const [pathError, setPathError] = useState<string>();
 
   const toolsQuery = useQuery({
     queryKey: ["skills-tools"],
@@ -46,8 +48,15 @@ export function ToolsTab() {
     onSuccess: invalidate,
   });
   const setPath = useMutation({
-    mutationFn: () => rpcClient.skillsSetCustomToolPath({ tool: overrideTool!.key, path: overridePath.trim() || null }),
-    onSuccess: () => {
+    mutationFn: () =>
+      rpcClient.skillsSetCustomToolPath({ tool: overrideTool!.key, path: overridePath.trim() || null }),
+    onSuccess: (r) => {
+      // 非法路径（家目录 / 根目录 / 应用数据目录内）现在会被拒绝，界面要说清为什么。
+      if (r.ok === false) {
+        setPathError(r.error ?? t("skills.tools.pathRejected"));
+        return;
+      }
+      setPathError(undefined);
       setOverrideTool(null);
       invalidate();
     },
@@ -65,7 +74,9 @@ export function ToolsTab() {
         setAdding(false);
         setCustomForm({ key: "", name: "", skillsDir: "" });
         invalidate();
+        return;
       }
+      setPathError(data.error ?? t("skills.tools.pathRejected"));
     },
   });
   const removeCustom = useMutation({
@@ -192,6 +203,7 @@ export function ToolsTab() {
             value={overridePath}
             onChange={(e) => setOverridePath(e.target.value)}
           />
+          {pathError && <p className="text-[11px] text-destructive">{pathError}</p>}
           <DialogFooter>
             <Button variant="outline" size="sm" onClick={() => setOverrideTool(null)}>
               {t("common.cancel")}
@@ -224,6 +236,7 @@ export function ToolsTab() {
               value={customForm.name}
               onChange={(e) => setCustomForm((f) => ({ ...f, name: e.target.value }))}
             />
+            {pathError && <p className="text-[11px] text-destructive">{pathError}</p>}
             <Input
               className="h-9 font-mono text-xs"
               placeholder="~/.my-agent/skills"

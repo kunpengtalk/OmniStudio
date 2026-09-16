@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9c3f60a1-90b1-485f-80ff-adfda2977745",
+  "id": "0cdf24fa-dad2-4c69-a05d-16985794e4f8",
   "prevId": "7499ccb8-2b7b-4f1f-995b-4d7a62753dd4",
   "tables": {
     "agent_artifacts": {
@@ -1466,30 +1466,6 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
-        },
-        "embed_image": {
-          "name": "embed_image",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "embed_audio": {
-          "name": "embed_audio",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "embed_video": {
-          "name": "embed_video",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
         }
       },
       "indexes": {},
@@ -1580,27 +1556,6 @@
         },
         "created_at": {
           "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "modality": {
-          "name": "modality",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "media_path": {
-          "name": "media_path",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "media_index": {
-          "name": "media_index",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,
@@ -3274,6 +3229,13 @@
         },
         "provider_id": {
           "name": "provider_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "comfy_base": {
+          "name": "comfy_base",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

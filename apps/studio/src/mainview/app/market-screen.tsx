@@ -12,7 +12,9 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { formatBytes } from "@lib/format";
 import { SourceBadge } from "@components/source-badge";
+import { PageShell } from "@components/setting-ui";
 import { ModelCategoryBadge, ModelFormatBadge } from "@components/model-category-badge";
 import { useEngine } from "@lib/use-engine";
 import { Button } from "@ui/button";
@@ -36,13 +38,6 @@ import {
 } from "@/shared/modelscope";
 import { ModelCategoryChips } from "@/mainview/components/model-category-chips";
 import { cn } from "@/mainview/lib/utils";
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "—";
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
-  return `${Math.round(bytes / 1e3)} KB`;
-}
 
 function formatParams(params: number): string {
   if (!params) return "";
@@ -259,7 +254,7 @@ export function MarketScreen({
 
   return (
     <ScrollArea className="h-full">
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 px-6 pb-30 pt-2">
+      <PageShell>
         <div>
           <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
             <Link2Icon className="size-5" />
@@ -382,7 +377,7 @@ export function MarketScreen({
             </p>
           </div>
         )}
-      </div>
+      </PageShell>
     </ScrollArea>
   );
 }

@@ -29,6 +29,7 @@ import {
 } from "@ui/dialog";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { Switch } from "@ui/switch";
 import { useKbStore } from "@stores/kb";
 import { useServedStore } from "@stores/served";
@@ -36,6 +37,7 @@ import { useT } from "@stores/ui-lang";
 import { useServedModelsSync } from "@components/served-models-panel";
 import { cn } from "@/mainview/lib/utils";
 import type { KbView } from "@/bun/knowledge";
+import { providerModelsOfType, type CloudModelType } from "@/shared/cloud-providers";
 import { KbModelSelect, serviceLabelKey, useKbModelCandidates, type KbServiceKind } from "./model-select";
 
 type FormState = {
@@ -44,9 +46,11 @@ type FormState = {
   embeddingModel: string;
   embeddingBase: string;
   embeddingApiKey: string;
+  embeddingProviderId: string;
   rerankModel: string;
   rerankBase: string;
   rerankApiKey: string;
+  rerankProviderId: string;
   chunkSize: string;
   chunkOverlap: string;
   topK: string;
@@ -66,9 +70,11 @@ function formFromKb(kb: KbView): FormState {
     embeddingModel: kb.embeddingModel,
     embeddingBase: kb.embeddingBase,
     embeddingApiKey: kb.embeddingApiKey,
+    embeddingProviderId: kb.embeddingProviderId,
     rerankModel: kb.rerankModel,
     rerankBase: kb.rerankBase,
     rerankApiKey: kb.rerankApiKey,
+    rerankProviderId: kb.rerankProviderId,
     chunkSize: String(kb.chunkSize),
     chunkOverlap: String(kb.chunkOverlap),
     topK: String(kb.topK),
@@ -182,6 +188,75 @@ function ServiceLine({
         {service.kind === "local" ? t("kb.settings.serviceNoKey") : t("kb.settings.serviceKeyHint")}
       </span>
     </p>
+  );
+}
+
+/** Radix SelectItem 不收空字符串，用哨兵值代替再映射回空串。 */
+const NO_PROVIDER = "__none__";
+
+/**
+ * 云服务商选择器：只列已启用、且在该用途下有模型的厂商（连接信息统一在
+ * 设置→模型云服务里维护）。选中后地址/密钥由主进程从 cloud_providers 行解析，
+ * 知识库不再按库落盘密钥。
+ */
+function KbProviderSelect({
+  id,
+  value,
+  kind,
+  model,
+  onChange,
+}: {
+  id?: string;
+  value: string;
+  kind: CloudModelType;
+  model: string;
+  onChange: (providerId: string, nextModel: string) => void;
+}) {
+  const t = useT();
+  const query = useQuery({
+    queryKey: ["cloud-providers"],
+    queryFn: () => rpcClient.cloudProviderList(undefined),
+    staleTime: 60_000,
+  });
+  const all = query.data?.providers ?? [];
+  const usable = all.filter((p) => p.enabled && providerModelsOfType(p, kind).length > 0);
+  const selected = all.find((p) => p.id === value);
+  // 已选厂商被停用 / 模型被删时也列出来，否则选择器看起来是空的。
+  const options = selected && !usable.some((p) => p.id === selected.id) ? [selected, ...usable] : usable;
+
+  return (
+    <Select
+      value={value || NO_PROVIDER}
+      onValueChange={(v) => {
+        if (v === NO_PROVIDER) {
+          onChange("", model);
+          return;
+        }
+        const provider = all.find((p) => p.id === v);
+        const models = provider ? providerModelsOfType(provider, kind) : [];
+        // 该厂商只有一个候选模型时直接用上，少点一次。
+        const next = models.some((m) => m.id === model) ? model : (models[0]?.id ?? "");
+        onChange(v, next);
+      }}
+      disabled={query.isLoading}
+    >
+      <SelectTrigger id={id} size="sm" className="h-8 w-full min-w-0 text-xs">
+        <SelectValue placeholder={t("kb.settings.providerNone")} />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value={NO_PROVIDER} className="text-xs">
+          {t("kb.settings.providerNone")}
+        </SelectItem>
+        {options.map((p) => (
+          <SelectItem key={p.id} value={p.id} className="text-xs">
+            {p.name}
+            <span className="ml-1 text-[10px] text-muted-foreground tabular-nums">
+              {providerModelsOfType(p, kind).length}
+            </span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }
 
@@ -357,11 +432,20 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
   const dirty = JSON.stringify(form) !== JSON.stringify(formFromKb(kb));
 
   // 候选模型跟随「当前会用的地址」：重排地址留空时跟嵌入地址（与检索时的解析一致）。
-  const embedCandidates = useKbModelCandidates("embedding", form.embeddingBase, form.embeddingApiKey);
+  // 选了云服务商时地址/密钥/模型都取该厂商。
+  const embedCandidates = useKbModelCandidates(
+    "embedding",
+    form.embeddingBase,
+    form.embeddingApiKey,
+    true,
+    form.embeddingProviderId,
+  );
   const rerankCandidates = useKbModelCandidates(
     "rerank",
     form.rerankBase || form.embeddingBase,
     form.rerankApiKey,
+    true,
+    form.rerankProviderId || form.embeddingProviderId,
   );
 
   const saveMutation = useMutation({
@@ -374,9 +458,11 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
           embeddingModel: form.embeddingModel,
           embeddingBase: form.embeddingBase,
           embeddingApiKey: form.embeddingApiKey,
+          embeddingProviderId: form.embeddingProviderId,
           rerankModel: form.rerankModel,
           rerankBase: form.rerankBase,
           rerankApiKey: form.rerankApiKey,
+          rerankProviderId: form.rerankProviderId,
           chunkSize: Number(form.chunkSize) || 800,
           chunkOverlap: Number(form.chunkOverlap) || 120,
           topK: Number(form.topK) || 6,
@@ -399,6 +485,7 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
       rpcClient.kbTestEmbedding({
         base: form.embeddingBase || undefined,
         apiKey: form.embeddingApiKey || undefined,
+        providerId: form.embeddingProviderId || undefined,
         model: form.embeddingModel,
       }),
     onSuccess: (data) => setTestResult(data),
@@ -409,6 +496,7 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
       rpcClient.kbTestRerank({
         base: form.rerankBase || undefined,
         apiKey: form.rerankApiKey || undefined,
+        providerId: (form.rerankProviderId || form.embeddingProviderId) || undefined,
         model: form.rerankModel,
       }),
     onSuccess: (data) => setRerankTestResult(data),
@@ -451,6 +539,23 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
 
         <Section icon={<SparklesIcon className="size-3.5 text-muted-foreground" />} title={t("kb.settings.embedding")}>
           <p className="text-[11px] leading-4 text-muted-foreground">{t("kb.settings.embeddingHint")}</p>
+          <FormRow
+            label={t("kb.settings.provider")}
+            htmlFor="kb-embedding-provider"
+            hint={t("kb.settings.providerHint")}
+          >
+            <KbProviderSelect
+              id="kb-embedding-provider"
+              value={form.embeddingProviderId}
+              kind="embedding"
+              model={form.embeddingModel}
+              onChange={(providerId, nextModel) => {
+                set("embeddingProviderId", providerId);
+                if (providerId) set("embeddingModel", nextModel);
+                setTestResult(null);
+              }}
+            />
+          </FormRow>
           <FormRow
             label={t("kb.settings.model")}
             htmlFor="kb-settings-embedding-model"
@@ -508,29 +613,31 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
             )}
             <ServiceLine service={embedCandidates.data?.service} />
           </FormRow>
-          <AdvancedService
-            open={embedAdvanced ?? embedCustomized}
-            onOpenChange={setEmbedAdvanced}
-            customized={embedCustomized}
-          >
-            <FormRow label={t("kb.settings.embeddingBase")} hint={t("kb.settings.embeddingBaseHint")}>
-              <Input
-                value={form.embeddingBase}
-                onChange={(e) => set("embeddingBase", e.target.value)}
-                placeholder={t("kb.settings.embeddingBasePlaceholder")}
-                className="h-8 text-xs"
-              />
-            </FormRow>
-            <FormRow label={t("kb.settings.apiKey")} hint={t("kb.settings.keyHint")}>
-              <Input
-                type="password"
-                value={form.embeddingApiKey}
-                onChange={(e) => set("embeddingApiKey", e.target.value)}
-                placeholder={t("kb.settings.keyPlaceholder")}
-                className="h-8 text-xs"
-              />
-            </FormRow>
-          </AdvancedService>
+          {!form.embeddingProviderId && (
+            <AdvancedService
+              open={embedAdvanced ?? embedCustomized}
+              onOpenChange={setEmbedAdvanced}
+              customized={embedCustomized}
+            >
+              <FormRow label={t("kb.settings.embeddingBase")} hint={t("kb.settings.embeddingBaseHint")}>
+                <Input
+                  value={form.embeddingBase}
+                  onChange={(e) => set("embeddingBase", e.target.value)}
+                  placeholder={t("kb.settings.embeddingBasePlaceholder")}
+                  className="h-8 text-xs"
+                />
+              </FormRow>
+              <FormRow label={t("kb.settings.apiKey")} hint={t("kb.settings.keyHint")}>
+                <Input
+                  type="password"
+                  value={form.embeddingApiKey}
+                  onChange={(e) => set("embeddingApiKey", e.target.value)}
+                  placeholder={t("kb.settings.keyPlaceholder")}
+                  className="h-8 text-xs"
+                />
+              </FormRow>
+            </AdvancedService>
+          )}
           {!form.embeddingModel.trim() && (
             <p className="flex items-start gap-1.5 rounded-lg border border-foreground/10 bg-muted/40 px-2.5 py-1.5 text-[10px] leading-4 text-muted-foreground">
               <TriangleAlertIcon className="mt-0.5 size-3 shrink-0" />
@@ -588,6 +695,23 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
 
         <Section icon={<ArrowDownWideNarrowIcon className="size-3.5 text-muted-foreground" />} title={t("kb.settings.rerank")}>
           <p className="text-[11px] leading-4 text-muted-foreground">{t("kb.settings.rerankHint")}</p>
+          <FormRow
+            label={t("kb.settings.provider")}
+            htmlFor="kb-rerank-provider"
+            hint={t("kb.settings.providerHint")}
+          >
+            <KbProviderSelect
+              id="kb-rerank-provider"
+              value={form.rerankProviderId}
+              kind="rerank"
+              model={form.rerankModel}
+              onChange={(providerId, nextModel) => {
+                set("rerankProviderId", providerId);
+                if (providerId) set("rerankModel", nextModel);
+                setRerankTestResult(null);
+              }}
+            />
+          </FormRow>
           <FormRow label={t("kb.settings.model")} htmlFor="kb-settings-rerank-model">
             <div className="flex items-center gap-2">
               <KbModelSelect
@@ -641,29 +765,31 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
             )}
             <ServiceLine service={rerankCandidates.data?.service} />
           </FormRow>
-          <AdvancedService
-            open={rerankAdvanced ?? rerankCustomized}
-            onOpenChange={setRerankAdvanced}
-            customized={rerankCustomized}
-          >
-            <FormRow label={t("kb.settings.rerankBase")} hint={t("kb.settings.rerankBaseHint")}>
-              <Input
-                value={form.rerankBase}
-                onChange={(e) => set("rerankBase", e.target.value)}
-                placeholder={t("kb.settings.embeddingBasePlaceholder")}
-                className="h-8 text-xs"
-              />
-            </FormRow>
-            <FormRow label={t("kb.settings.apiKey")} hint={t("kb.settings.keyHint")}>
-              <Input
-                type="password"
-                value={form.rerankApiKey}
-                onChange={(e) => set("rerankApiKey", e.target.value)}
-                placeholder={t("kb.settings.keyPlaceholder")}
-                className="h-8 text-xs"
-              />
-            </FormRow>
-          </AdvancedService>
+          {!form.rerankProviderId && !form.embeddingProviderId && (
+            <AdvancedService
+              open={rerankAdvanced ?? rerankCustomized}
+              onOpenChange={setRerankAdvanced}
+              customized={rerankCustomized}
+            >
+              <FormRow label={t("kb.settings.rerankBase")} hint={t("kb.settings.rerankBaseHint")}>
+                <Input
+                  value={form.rerankBase}
+                  onChange={(e) => set("rerankBase", e.target.value)}
+                  placeholder={t("kb.settings.embeddingBasePlaceholder")}
+                  className="h-8 text-xs"
+                />
+              </FormRow>
+              <FormRow label={t("kb.settings.apiKey")} hint={t("kb.settings.keyHint")}>
+                <Input
+                  type="password"
+                  value={form.rerankApiKey}
+                  onChange={(e) => set("rerankApiKey", e.target.value)}
+                  placeholder={t("kb.settings.keyPlaceholder")}
+                  className="h-8 text-xs"
+                />
+              </FormRow>
+            </AdvancedService>
+          )}
         </Section>
 
         <Section icon={<SlidersHorizontalIcon className="size-3.5 text-muted-foreground" />} title={t("kb.settings.params")}>

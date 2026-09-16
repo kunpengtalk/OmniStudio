@@ -10,9 +10,11 @@ import {
   isLocalBaseUrl,
   modelTypeOf,
   parseCloudModels,
+  presetModelEntries,
   type CloudModelEntry,
   type CloudModelType,
   type CloudProviderInfo,
+  type CloudMusicApi,
   type CloudVideoApi,
 } from "../shared/cloud-providers";
 import { isChatModelCategory } from "../shared/modelscope";
@@ -44,6 +46,7 @@ function rowToInfo(row: typeof cloudProviders.$inferSelect): CloudProviderInfo {
     models: parseCloudModels(row.models),
     enabled: row.enabled === 1,
     videoApi: (row.videoApi ?? "") as CloudVideoApi,
+    musicApi: (row.musicApi ?? "") as CloudMusicApi,
     createdAt: row.createdAt ?? 0,
     updatedAt: row.updatedAt ?? 0,
   };
@@ -142,7 +145,7 @@ export function ensureMigrated(): void {
     if (preset) {
       const savedModels = parseCloudModels(legacy.CLOUD_MODELS);
       const merged = new Map(savedModels.map((m) => [m.id, m]));
-      for (const id of preset.models) if (!merged.has(id)) merged.set(id, { id });
+      for (const entry of presetModelEntries(preset)) if (!merged.has(entry.id)) merged.set(entry.id, entry);
       rows.push({
         id: preset.id,
         name: preset.name,
@@ -153,6 +156,7 @@ export function ensureMigrated(): void {
         // 迁移过来的激活厂商直接置为已启用：用户本来就在用它。
         enabled: 1,
         videoApi: preset.videoApi ?? "",
+        musicApi: preset.musicApi ?? "",
         createdAt: now,
         updatedAt: now,
       });
@@ -167,7 +171,7 @@ export function ensureMigrated(): void {
       vendor: preset.vendor,
       baseUrl: preset.baseUrl,
       apiKey: "",
-      models: JSON.stringify(preset.models.map((id) => ({ id }))),
+      models: JSON.stringify(presetModelEntries(preset)),
       createdAt: now,
       updatedAt: now,
     });
@@ -175,6 +179,45 @@ export function ensureMigrated(): void {
 
   for (const row of rows) {
     db.insert(cloudProviders).values(row).onConflictDoNothing().run();
+  }
+}
+
+/**
+ * 给存量的预设厂商补上预设里**新增**的模型与**新增的接口协议**（幂等，只在缺时写库）。
+ *
+ * 预设跟着版本走：厂商上了新模型（阶跃的 StepAudio 3 语音三件套）就写进
+ * `CLOUD_PRESETS`。可库里那一行是当初拷贝下来的快照，而 `mergeDiscoveredModels`
+ * 只在清单为空时才并 —— 老用户升级后在语音页 / 通话页看不到新模型，只能自己去
+ * 设置页点「获取模型列表」（几百条远程模型里挑），"接进应用"就等于没接。
+ *
+ * **协议同理，而且后果更隐蔽**：`videoApi` / `musicApi` 是后来才加到预设上的字段，
+ * 存量行里是空的。功能页按协议过滤厂商（`requireVideoApi` / `requireMusicApi`），
+ * 于是「设置里明明启用着 StepFun、音乐模型也在清单里，音乐页却一个厂商都选不到」——
+ * 模型补了、协议没补，两半拼不上。真踩过（v0.0.9 加音乐时）。
+ *
+ * 两条都只在**空**的时候补：用户自己选过的协议、自己加过的条目绝不动。
+ */
+function syncPresetModels(): void {
+  for (const row of db.select().from(cloudProviders).all()) {
+    const preset = getPreset(row.id);
+    if (!preset) continue;
+    const patch: {
+      models?: string;
+      videoApi?: CloudVideoApi;
+      musicApi?: CloudMusicApi;
+    } = {};
+    // 补协议：只有存量行为空、且预设声明了该协议时才写。
+    if (preset.videoApi && !(row.videoApi ?? "")) patch.videoApi = preset.videoApi;
+    if (preset.musicApi && !(row.musicApi ?? "")) patch.musicApi = preset.musicApi;
+    const existing = parseCloudModels(row.models);
+    const have = new Set(existing.map((m) => m.id));
+    const missing = presetModelEntries(preset).filter((m) => !have.has(m.id));
+    if (missing.length > 0) patch.models = JSON.stringify([...existing, ...missing]);
+    if (Object.keys(patch).length === 0) continue;
+    db.update(cloudProviders)
+      .set({ ...patch, updatedAt: Date.now() })
+      .where(eq(cloudProviders.id, row.id))
+      .run();
   }
 }
 
@@ -193,6 +236,7 @@ function syncActiveSlot(row: typeof cloudProviders.$inferSelect): void {
 export function listCloudProviders(): { providers: CloudProviderInfo[]; activeId: string | null } {
   ensureMigrated();
   ensureAppProvidersMigrated();
+  syncPresetModels();
   const rows = db.select().from(cloudProviders).all();
   // 激活的排最前，其余按创建时间
   const activeId = activeProviderId();
@@ -210,8 +254,18 @@ export function listCloudProviders(): { providers: CloudProviderInfo[]; activeId
 export function getCloudProviderInfo(id: string): CloudProviderInfo | null {
   ensureMigrated();
   ensureAppProvidersMigrated();
+  syncPresetModels();
   const row = getRow(id);
   return row ? rowToInfo(row) : null;
+}
+
+/**
+ * API 地址得像地址。真踩过：把 API Key 粘进「地址」栏（baseUrl = `sk-…`），
+ * 拉模型列表只回一句 `fetch() URL is invalid`，页面上完全看不出是地址填错了。
+ * 空值放行（地址允许后补），非空但不像 URL 的一律拒绝。
+ */
+function looksLikeUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value.trim());
 }
 
 export function createCloudProvider(input: {
@@ -233,23 +287,28 @@ export function createCloudProvider(input: {
       vendor: preset.vendor,
       baseUrl: preset.baseUrl,
       apiKey: "",
-      models: JSON.stringify(preset.models.map((id) => ({ id }))),
+      models: JSON.stringify(presetModelEntries(preset)),
       // 新加的厂商默认未启用：填好 Key 并通过校验后才「启动」。
       enabled: 0,
       videoApi: preset.videoApi ?? "",
+      musicApi: preset.musicApi ?? "",
       createdAt: now,
       updatedAt: now,
     };
   } else {
     const name = (input.name ?? "").trim();
     if (!name) return { ok: false, error: "缺少服务商名称" };
+    const baseUrl = (input.baseUrl ?? "").trim();
+    if (baseUrl && !looksLikeUrl(baseUrl)) {
+      return { ok: false, error: "API 地址要以 http:// 或 https:// 开头（这里填服务地址，不是 API Key）" };
+    }
     let id = `custom-${now}`;
     while (getRow(id)) id = `custom-${Date.now()}`;
     row = {
       id,
       name,
       vendor: "自定义",
-      baseUrl: (input.baseUrl ?? "").trim(),
+      baseUrl,
       apiKey: "",
       models: "[]",
       createdAt: now,
@@ -269,18 +328,25 @@ export function updateCloudProvider(
     apiKey?: string;
     models?: CloudModelEntry[];
     videoApi?: CloudVideoApi;
+    musicApi?: CloudMusicApi;
   },
 ): { ok: boolean; error?: string } {
   const row = getRow(id);
   if (!row) return { ok: false, error: "服务商不存在" };
 
+  const nextBaseUrl = patch.baseUrl !== undefined ? patch.baseUrl.trim() : row.baseUrl;
+  if (nextBaseUrl && !looksLikeUrl(nextBaseUrl)) {
+    return { ok: false, error: "API 地址要以 http:// 或 https:// 开头（这里填服务地址，不是 API Key）" };
+  }
+
   const next = {
     name: patch.name?.trim() || row.name,
-    baseUrl: patch.baseUrl !== undefined ? patch.baseUrl.trim() : row.baseUrl,
+    baseUrl: nextBaseUrl,
     // 新 key 前端传来的是明文，落盘前加密；未提供时保持库里既有值（已是密文，不再动）。
     apiKey: patch.apiKey !== undefined ? encryptSecret(patch.apiKey.trim()) : row.apiKey,
     models: patch.models !== undefined ? JSON.stringify(patch.models) : row.models,
     videoApi: patch.videoApi !== undefined ? patch.videoApi : (row.videoApi ?? ""),
+    musicApi: patch.musicApi !== undefined ? patch.musicApi : (row.musicApi ?? ""),
   };
   db.update(cloudProviders).set({ ...next, updatedAt: Date.now() }).where(eq(cloudProviders.id, id)).run();
 
@@ -645,6 +711,7 @@ export function ensureAppProvidersMigrated(): void {
     legacyModelKey?: string;
     type: CloudModelType;
     videoApi?: CloudVideoApi;
+    musicApi?: CloudMusicApi;
     /** 迁移后写回的后端值（视频从 minimax/seedance 归一成 cloud）。 */
     backendKey?: string;
     backendValue?: string;
@@ -726,6 +793,7 @@ export function ensureAppProvidersMigrated(): void {
         // 正在被使用的厂商直接启用：它已经被用户用了很久了。
         enabled: 1,
         videoApi: app.videoApi ?? "",
+        musicApi: app.musicApi ?? "",
         createdAt: now,
         updatedAt: now,
       };
@@ -736,6 +804,7 @@ export function ensureAppProvidersMigrated(): void {
       if (row.enabled !== 1) patch.enabled = 1;
       if (key && !row.apiKey.trim()) patch.apiKey = encryptSecret(key);
       if (app.videoApi && (row.videoApi ?? "") !== app.videoApi) patch.videoApi = app.videoApi;
+      if (app.musicApi && (row.musicApi ?? "") !== app.musicApi) patch.musicApi = app.musicApi;
       if (Object.keys(patch).length > 1) {
         db.update(cloudProviders).set(patch).where(eq(cloudProviders.id, row.id)).run();
         row = getRow(row.id)!;
@@ -785,7 +854,13 @@ export function ensureAppProvidersMigrated(): void {
  * 页面只挑模型，不再保存地址与密钥。
  */
 export function saveAppModelChoice(input: {
-  settingKey: "IMG_PROVIDER_ID" | "TTS_PROVIDER_ID" | "ASR_PROVIDER_ID" | "OCR_PROVIDER_ID" | "VIDEO_PROVIDER_ID";
+  settingKey:
+    | "IMG_PROVIDER_ID"
+    | "TTS_PROVIDER_ID"
+    | "ASR_PROVIDER_ID"
+    | "OCR_PROVIDER_ID"
+    | "VIDEO_PROVIDER_ID"
+    | "MUSIC_PROVIDER_ID";
   modelKey?: string;
   providerId: string;
   model?: string;

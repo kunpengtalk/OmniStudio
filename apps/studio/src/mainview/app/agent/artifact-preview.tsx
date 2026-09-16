@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ExternalLinkIcon, FolderSearchIcon, Loader2Icon, RefreshCwIcon, XIcon } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { reportClientError } from "@/mainview/lib/app-log";
 import { Button } from "@ui/button";
 import { Markdown } from "@components/markdown";
 import { useAgentStore, type AgentPreviewTarget } from "@stores/agent";
@@ -109,7 +110,13 @@ export function ArtifactPreviewView({
               className="size-6 shrink-0 text-muted-foreground"
               tooltip={t("agent.artifact.openExternal")}
               onClick={() =>
-                rpcClient.openAgentArtifactExternal({ artifactId: target.artifactId }).catch(() => {})
+                rpcClient
+                  .openAgentArtifactExternal({ artifactId: target.artifactId })
+                  .catch((e: unknown) =>
+                    reportClientError("client.artifact.open_external_failed", e, {
+                      artifactId: target.artifactId,
+                    }),
+                  )
               }
             >
               <ExternalLinkIcon className="size-3.5" />
@@ -119,7 +126,15 @@ export function ArtifactPreviewView({
               size="icon-sm"
               className="size-6 shrink-0 text-muted-foreground"
               tooltip={t("agent.artifact.reveal")}
-              onClick={() => rpcClient.revealAgentArtifact({ artifactId: target.artifactId }).catch(() => {})}
+              onClick={() =>
+                rpcClient
+                  .revealAgentArtifact({ artifactId: target.artifactId })
+                  .catch((e: unknown) =>
+                    reportClientError("client.artifact.reveal_failed", e, {
+                      artifactId: target.artifactId,
+                    }),
+                  )
+              }
             >
               <FolderSearchIcon className="size-3.5" />
             </Button>

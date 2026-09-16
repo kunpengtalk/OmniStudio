@@ -21,18 +21,31 @@ import type { PendingPermission, QuestionPrompt } from "../../../bun/agent-inter
 import type { PermissionRequest } from "../../../bun/permissions";
 import type { AgentEventRow } from "../../../bun/agent";
 
-const PERMISSION_LABEL: Record<string, string> = {
-  bash: "执行命令",
-  edit: "修改文件",
-  read: "读取文件",
-  external_directory: "访问工作区之外",
-  webfetch: "抓取网页",
-  websearch: "联网搜索",
-  mcp: "调用外部工具",
-  media: "生成媒体",
-  task: "派发子任务",
-  doom_loop: "重复调用保护",
+/**
+ * 权限类型 → 词条 key。取词走 i18n（以前是一张中文常量表，英文界面下这张卡片
+ * 会变成半英半中）；认不出的类型原样显示 `permission`，总比显示一个空标签好。
+ */
+const PERMISSION_LABEL_KEY: Record<string, string> = {
+  bash: "agent.permLabel.bash",
+  edit: "agent.permLabel.edit",
+  read: "agent.permLabel.read",
+  external_directory: "agent.permLabel.external_directory",
+  webfetch: "agent.permLabel.webfetch",
+  websearch: "agent.permLabel.websearch",
+  mcp: "agent.permLabel.mcp",
+  media: "agent.permLabel.media",
+  task: "agent.permLabel.task",
+  doom_loop: "agent.permLabel.doom_loop",
 };
+
+/** 授权卡片上的动作名。 */
+function permissionLabel(
+  t: (key: string, params?: Record<string, string>) => string,
+  permission: string,
+): string {
+  const key = PERMISSION_LABEL_KEY[permission];
+  return key ? t(key) : permission;
+}
 
 /** 从事件里解出授权请求（请求事件与结果事件都带 id）。 */
 type PermissionAsk = PermissionRequest & { id: string; tool?: string };
@@ -90,14 +103,19 @@ export function InlinePermissionCard({
 
   if (!asks) return null;
 
-  const label = PERMISSION_LABEL[asks.permission] ?? asks.permission;
+  const label = permissionLabel(t, asks.permission);
   const isDoomLoop = asks.permission === "doom_loop";
 
   // 已应答：收成一行，点开看详情。
   if (!isPending) {
     const reply = settled?.reply ?? "deny";
     const denied = reply === "deny";
-    const text = settleEvent?.output ?? `${denied ? "已拒绝" : "已允许"}：${asks.permission} · ${asks.pattern}`;
+    const text =
+      settleEvent?.output ??
+      t(denied ? "agent.permission.settledDenied" : "agent.permission.settledAllowed", {
+        name: permissionLabel(t, asks.permission),
+        pattern: asks.pattern,
+      });
     return (
       <div className={`perm-row ${denied ? "denied" : "allowed"}`}>
         <button type="button" className="perm-row-btn" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
@@ -251,7 +269,10 @@ export function InlineQuestionCard({
         >
           <MessageCircleQuestionIcon className="size-3 shrink-0 text-primary" />
           <span className="min-w-0 flex-1 truncate">
-            {settleEvent?.output ?? (answered.length > 0 ? `已回答：${answered.join(" / ")}` : "未作答")}
+            {settleEvent?.output ??
+              (answered.length > 0
+                ? t("agent.question.settled", { answers: answered.join(" / ") })
+                : t("agent.question.unanswered"))}
           </span>
           <ChevronDownIcon className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-180")} />
         </button>
@@ -259,9 +280,16 @@ export function InlineQuestionCard({
           <div className="space-y-1 border-t bg-background/40 px-3 py-2 text-[11px]">
             {parsed.questions.map((question, questionIndex) => (
               <p key={questionIndex} className="text-muted-foreground">
-                Q：{question.question}
+                <span className="text-muted-foreground/70" aria-hidden>
+                  Q:
+                </span>{" "}
+                {question.question}
                 <span className="ml-1 text-foreground">
-                  A：{(settled?.answers?.[questionIndex] ?? []).join("、") || "（未作答）"}
+                  <span className="text-muted-foreground/70" aria-hidden>
+                    A:
+                  </span>{" "}
+                  {(settled?.answers?.[questionIndex] ?? []).join(" / ") ||
+                    t("agent.question.settledEmpty")}
                 </span>
               </p>
             ))}

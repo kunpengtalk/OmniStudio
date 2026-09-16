@@ -5,6 +5,7 @@ import {
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
+  NotebookPenIcon,
   FilesIcon,
   GitBranchIcon,
   Loader2Icon,
@@ -17,6 +18,7 @@ import { rpcClient } from "@lib/rpc";
 import { Markdown } from "@components/markdown";
 import { usePiContextMenu, actionMenuItems, type MessageActionItem } from "@components/pi-menu";
 import { MessageTokenStats, formatDuration, useTokenStatsView } from "@components/token-stats";
+import { noteDraftFromMessage } from "@/mainview/lib/note-draft";
 import { useChatStore } from "@stores/chat";
 import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
@@ -239,6 +241,7 @@ function useMessageActions({
   const streaming = useChatStore((s) => s.streaming);
   const { copied, copy } = useCopyMessage(message.content);
   const [revertOpen, setRevertOpen] = useState(false);
+  const [noteSaved, setNoteSaved] = useState(false);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["conversations"] });
@@ -285,6 +288,36 @@ function useMessageActions({
     },
   });
 
+  /** 一键存进「笔记」小应用：草稿规则与聊天页同一份（`lib/note-draft.ts`）。 */
+  const handleSaveToNote = async () => {
+    const draft = noteDraftFromMessage(message.content, t("notes.tagAgent"));
+    if (!draft) return;
+    try {
+      const saved = await rpcClient.miniappNotesSave({
+        title: draft.title,
+        body: draft.body,
+        tags: draft.tags,
+        day: draft.day,
+      });
+      setNoteSaved(true);
+      window.setTimeout(() => setNoteSaved(false), 1500);
+      void rpcClient.miniappLog({
+        appId: "agent",
+        event: "note.saved",
+        message: saved?.note ? `note #${saved.note.id}` : "saved",
+        detail: { chars: draft.body.length, tag: draft.tags[0] },
+      });
+    } catch (e) {
+      // 失败不打断阅读（按钮不亮即已说明问题），但必须留下线索：
+      // 这是"点了没反应"里最难查的一类 —— 用户以为存进去了，其实没有。
+      void rpcClient.miniappLog({
+        appId: "agent",
+        event: "note.save_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
   const isAssistant = message.role === "assistant";
   // 生成中一律不可点：删到一半的消息、重新生成正在跑的那条都没有意义。
   const busy = streaming || isStreamingMessage;
@@ -302,6 +335,17 @@ function useMessageActions({
     },
     ...(isAssistant
       ? [
+          {
+            key: "save-to-note",
+            label: noteSaved ? t("chat.savedToNote") : t("chat.saveToNote"),
+            icon: noteSaved ? (
+              <CheckIcon size={14} style={{ color: "var(--ds-success)" }} />
+            ) : (
+              <NotebookPenIcon size={14} />
+            ),
+            onSelect: () => void handleSaveToNote(),
+            disabled: busy || !message.content,
+          },
           {
             key: "regenerate",
             label: t("chat.regenerate"),

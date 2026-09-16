@@ -58,8 +58,8 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   state goes to the top bar, and binding is retried every 5s so the app takes over once the
   other instance quits
 - **Every subsystem failure goes to one log**: `src/bun/app-log.ts` writes event-level records
-  (JSONL, `<dataDir>/logs/app.log`, 2MB rotation, secrets redacted) for image / video / TTS /
-  ASR / OCR, the inference server, downloads, the gateway, the Agent and webview-side errors.
+  (JSONL, `<dataDir>/logs/app.log`, 2MB rotation, secrets redacted) for image / video / music /
+  TTS / ASR / OCR, the inference server, downloads, the gateway, the Agent and webview-side errors.
   Read it with `omi logs` (falls back to the file when the app is down — crash triage),
   the control socket `logs` command, or RPC `getAppLogs`. Inference server stdout/stderr is
   deliberately **not** in there (per-instance 200k in-memory buffer, `omi server logs`).
@@ -75,9 +75,88 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   (`CloudModelEntry.type`: image / video / tts / asr / chat / …; inferred from the id when
   absent) and every picker filters by it — a new cloud model selector must go through
   `CloudModelSelect` + `providersForType` instead of listing all providers.
-  Video is the exception that proves the rule: video APIs are not standardized, so the
-  provider row also carries `videoApi` ("minimax" | "seedance") and polling looks the
-  submitter up by the record's `providerId`.
+  Video and music are the exceptions that prove the rule: those APIs are not standardized, so
+  the provider row also carries a protocol — `videoApi` ("minimax" | "seedance") and `musicApi`
+  ("stepfun" | "minimax") — and it is the *only* dispatch switch (`bun/music-gen.ts` never
+  branches on a vendor name). A new vendor = one protocol value + one submit/poll pair. Music
+  also shows why per-protocol dispatch is not cosmetic: `stepfun` is async (submit + poll) while
+  `minimax` is synchronous (one blocking request, so it runs in a background job and the record
+  is backfilled), and both live in the same `music_records` table. Adding a *local* engine is a
+  reserved slot already: settings (`MUSIC_LOCAL_*`), the record's `localBase`, and the UI toggle
+  exist, and `localUnavailable()` states plainly that no engine is wired up rather than faking
+  a result.
+- **Public exposure goes through `bun/tunnel.ts`, never through `GATEWAY_HOST=0.0.0.0`**:
+  Settings → Services → Remote Access runs a supervised `cloudflared` child process
+  (`bun/cloudflared.ts` downloads the official binary into `<dataDir>/engines/cloudflared/`;
+  `--no-autoupdate` and detached + process-group kill are required) so the gateway is
+  reachable from the internet over an outbound connection with no inbound port. Three
+  invariants must not be relaxed: a **gateway API key is mandatory** before a tunnel starts
+  (and is re-checked on every reconcile — a cleared key takes the tunnel offline), the
+  gateway only accepts the tunnel's own hostname via `setGatewayPublicExposure()`
+  (DNS-rebinding protection stays on, and `/` + `/health` additionally require the key while
+  exposed), and the tunnel target port is always the gateway's **actually bound** port.
+  Protocol fallback is the `TUNNEL_TRANSPORT_PROTOCOL` env var — cloudflared has no
+  `--protocol` flag. Details and the failure modes already hit: docs/architecture.md §5.
+- **Gateway API keys are a managed list, not a setting** (`bun/gateway-keys.ts`,
+  `gateway_keys` table): each key has a name and can be enabled / disabled / deleted from
+  Settings → Gateway, and the gateway checks every *enabled* key on each request, so
+  revoking one takes effect immediately without a restart. `settings.GATEWAY_API_KEY`
+  survives as a **mirror** of the oldest enabled key because tunnel gating, `/health`,
+  `/docs`, `omi launch` and the KB access page read that slot (all keys disabled = tunnel
+  goes offline); a value written there from outside (`omi serve --api-key`) is **adopted**
+  into the list on the next read, so no key can stay usable-but-invisible. With no enabled
+  key the historical behavior returns: open access for local processes, 401 while publicly
+  exposed. Key values are shown masked (`shared/gateway-key.ts`) — never plaintext by
+  default.
+- **The web pages (`/chat`, `/agent`) are the app's own frontend, never a second UI**: the gateway
+  serves the vite build of `mainview` as static files, and `mainview/lib/remote.ts` swaps the RPC
+  transport for HTTP + SSE when `window.__electrobun` is missing (`lib/rpc.ts` keeps everything above
+  the transport identical). Pushes reuse the existing `init*Broadcast(win)` wiring by feeding it a
+  **fake window** whose `webview.rpc.send.<name>` becomes an SSE frame — never hand-copy a push list.
+  Two rules when touching it: browser clients may only call `REMOTE_METHODS` in `bun/rpc/index.ts`
+  (host dialogs, disk writes, engine installs and approval-mode changes stay closed), and
+  `getSettings` must keep scrubbing credential fields (`REMOTE_SECRET_KEY`) before leaving the
+  process. Remote clients intentionally skip the right panel (terminal / browser / review), the
+  automations & plugins views, and the settings entry.
+- **Mini apps are sandboxed single-file HTML pages, and the host hands them capabilities one by
+  one** (app rail → 小应用 / `AppId = "apps"`): each one is `src/mainview/miniapps/<id>.html`
+  (self-contained, `?raw`-imported into an `<iframe sandbox srcdoc>` **without**
+  `allow-same-origin`, so it can never reach the host DOM / store / localStorage), plus one entry
+  in `shared/miniapps.ts`. The host injects base styles, a boot config and the `window.omni`
+  runtime (`mainview/lib/miniapp-bridge.ts`); every call comes back as a postMessage action that
+  `dispatchMiniAppRequest` translates into a specific RPC. Two rules: the action list in
+  `shared/miniapps.ts` is the *entire* surface (never add a "call RPC by name" pass-through — an
+  iframe script would then own the whole RPC surface), and parameters from the page are untrusted
+  (clamp lengths/ranges; `miniappReadFile` only accepts paths the user just picked in the system
+  dialog). Capability readiness (`getMiniAppCapabilities` in `bun/miniapps.ts`) is checked before a
+  card lets you in, mini-apps get the host language/theme via the `ready` event, and every failure
+  lands in `app.log` under source `miniapp` (the page's own console is invisible to the host).
+  Mini apps that must *keep* data go through host storage, not the iframe (an opaque origin has no
+  `localStorage`): the Notes mini app writes bodies to the `miniapp_notes` table and attachments to
+  `images/notes/<attachmentId>/` via the `notes.*` actions, so both travel with `omi backup`. Two
+  rules on that path: the notes page renders Markdown itself (no bundler, so no parser dependency —
+  it escapes the whole body first and only then applies markers, and allows http(s) links only, since
+  the body is user input), and an attachment ref is only accepted in the host-generated shape
+  `notes/<id>/<file>.<png|jpg|webp|gif>` (deleting a note removes that directory — a loose shape
+  means "delete anything"), and size is clamped host-side (12MB decoded, long edge compressed to 2048).
+  Notes are also the one mini-app that writes into the shared **memory** store: every save sinks an
+  index-level memory (`笔记《title》(date)：body excerpt`, `sourceRef = note:<id>`, ≤500 chars — memories
+  are single-line and get injected into every agent's context, so they carry a pointer, not the full
+  text). Same note id updates the same memory, deleting the note deletes the memory, secret-looking
+  notes are skipped while the body still saves, and `NOTES_AGENT_ACCESS` (on by default, shown in the
+  notes settings) is the kill switch — it also gates the three read-only agent tools
+  (`note_list` / `note_search` / `note_read` in `bun/notes-tools.ts`). Those exist because a 500-char
+  memory only lets the agent *remember* a note; without a read path it improvises (grepping the
+  workspace) and tells the user it cannot open the note. The memory text therefore ends with
+  `（完整正文：note_read #<id>）` so recall leads straight into the tool. Tools are read-only, capped
+  (8 items / 140-char excerpts / 12k chars of body) and given in plan mode too.
+  Mini-app data is also invisible to backups until it is registered: a new table needs a scope in
+  `shared/backup.ts`'s `BACKUP_SCOPES`, and new media needs a `BACKUP_FILE_ROOTS` entry — files that
+  match no root are silently skipped, and the `media` root is off by default (notes therefore have
+  their own default-on scope plus a `note-images` root under `images/notes`).
+  To look at a page without booting the desktop app: `bun run --cwd apps/studio miniapps:preview`
+  (the pages, with a stub host in a plain browser) and `miniapps:center` (the app center, rendered
+  against the built stylesheet).
 - **One proxy governs every outbound request** (Settings → Preferences → General):
   `bun/proxy.ts` wraps `globalThis.fetch` at startup, so cloud model calls (chat / image /
   video / TTS / ASR / OCR / translate), the model hubs, engine and weight downloads, web
@@ -146,10 +225,11 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
 All user data lives under `<userData>` (macOS: `~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>`):
 
 ```
-omni-studio.db          SQLite (WAL) — 33 tables, Drizzle ORM
+omni-studio.db          SQLite (WAL) — 44 tables, Drizzle ORM
 models/<repo>/...       Downloaded model weights
 engines/{paddleocr,mflux,whispercpp,audiocpp,tessdata}/   Local engine binaries/data
-images/{<docId>,chat,gen,edit,ocr,audio,videos}/          Media artifacts
+images/{<docId>,chat,gen,edit,ocr,audio,videos,music,notes}/   Media artifacts
+                        (notes/ = 笔记小应用的附件，目录名即附件 id，删笔记时整目录删掉)
 uploads/                Uploaded source files for OCR / translation
 backups/                *.omnibackup archives + temp restore dirs
 mlx-downloads/          MLX weight download progress (.part resume)
@@ -163,10 +243,17 @@ logs/app.log            JSONL app log (2MB rotation, secrets redacted)
 
 ## Frontend Conventions
 
-- **Navigation is explicit dual-state, no URL routing:** `stores/app.ts` manages `activeApp` (~18 apps: chat, agent, voicecall, voice, image, video, ocr, translate, prompt, skills, kb, memory, automations, benchmark, gateway, usage, dashboard); `stores/router.ts` manages routes within each app.
+- **Navigation is explicit dual-state, no URL routing:** `stores/app.ts` manages `activeApp` (~18 apps: chat, agent, voicecall, voice, image, video, music, ocr, translate, prompt, skills, kb, memory, automations, benchmark, gateway, usage, dashboard); `stores/router.ts` manages routes within each app.
 - **State management is dual-track:** TanStack Query for data fetched from main process; Zustand for UI state and streaming data. Main-process push events write stores directly in `lib/rpc.ts` message handler (bypassing React render cycle), only calling `queryClient.invalidateQueries()` on terminal events.
 - **RPC calls are direct:** ~220 call sites use `import { rpcClient }` then `rpcClient.xxx()` — no wrapper layer. Voice screen has the most (53+ calls). One light wrapper exists: `lib/use-engine.ts` for engine settings reads/writes.
 - **Adding a new Screen:** Create `app/<name>-screen.tsx`, register it in `main-layout/settings.tsx`'s `TAB_DEFS` / `TAB_GROUPS`, add an icon to `app-rail`, and define RPC methods in `src/bun/rpc/index.ts`.
+- **Model ids are shown in full, never as `…`:** the id is the only thing telling
+  `stepaudio-3-asr-max` from `stepaudio-2.5-asr`, and it is what a user retypes into an API call —
+  a column of `stepaudi…` makes the list useless. Let the id wrap when the column is narrow
+  (`wrap-anywhere`, which shrinks the column's min-content so auto table layout still fits the
+  card) and treat `title` as a bonus, not as the only way to read it. Ellipsis is for secondary
+  text only — a `name` alias or a remark. List / management surfaces must obey this; a narrow
+  fixed-height picker trigger (`CloudModelSelect`) cannot wrap, so the tooltip stays the fallback.
 
 ---
 
@@ -222,7 +309,7 @@ End-to-end integration tests that exercise real DB operations, media pipelines, 
 cd apps/studio && bun run test:smoke
 ```
 
-Runs: migrations-smoke, memory-smoke, kb-smoke, kb-chat-smoke, kb-rerank-smoke, kb-access-smoke, kb-governance-smoke, video-gen-smoke, backup-smoke, proxy-smoke, agent-capabilities-smoke, agent-live-check, agent-resilience-smoke, omi-docs-smoke, builtin-skills-smoke.
+Runs: migrations-smoke, memory-smoke, kb-smoke, kb-chat-smoke, kb-rerank-smoke, kb-access-smoke, kb-governance-smoke, video-gen-smoke, music-gen-smoke, backup-smoke, proxy-smoke, agent-capabilities-smoke, agent-live-check, agent-resilience-smoke, omi-docs-smoke, builtin-skills-smoke.
 
 ---
 

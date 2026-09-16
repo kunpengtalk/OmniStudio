@@ -21,6 +21,7 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { ServedModelsPanel } from "@components/served-models-panel";
+import { PageShell } from "@components/setting-ui";
 import { useRouter } from "@stores/router";
 import { Badge } from "@ui/badge";
 import { Button } from "@ui/button";
@@ -33,6 +34,8 @@ import type { ServerStatus } from "../../bun/server-manager";
 import type { ServerStats } from "../../bun/stats";
 import { ENGINE_PORT_KEYS, modelNameFromRef, type InferenceEngine } from "@/shared/modelscope";
 import { cn } from "@/mainview/lib/utils";
+import { formatBytes as formatBytesSi } from "@lib/format";
+import { StatCard as StatCardBase } from "@components/stat-card";
 
 function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0";
@@ -42,11 +45,9 @@ function formatTokens(n: number): string {
   return String(Math.round(n));
 }
 
+/** 概览页沿用「0 B」占位与 1 位 GB 小数，口径集中到 @lib/format。 */
 function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
-  return `${Math.round(bytes / 1e3)} KB`;
+  return formatBytesSi(bytes, { zero: "0 B", gbDecimals: 1 });
 }
 
 function formatRate(tokPerSec: number): string {
@@ -123,27 +124,9 @@ function UsageBar({ label, icon, used, total }: { label: string; icon: React.Rea
   );
 }
 
-function StatCard({
-  icon,
-  label,
-  value,
-  hint,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  hint?: string;
-}) {
-  return (
-    <div className="rounded-xl border bg-card p-4">
-      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        {icon}
-        {label}
-      </div>
-      <p className="mt-1.5 text-2xl font-semibold tracking-tight tabular-nums">{value}</p>
-      {hint && <p className="mt-0.5 text-[11px] text-muted-foreground">{hint}</p>}
-    </div>
-  );
+/** 概览页统计卡：竖排大卡，外观由共享 StatCard 的 stack 变体负责。 */
+function StatCard({ icon, label, value, hint }: { icon: React.ReactNode; label: string; value: string; hint?: string }) {
+  return <StatCardBase variant="stack" icon={icon} label={label} value={value} hint={hint} />;
 }
 
 type DashboardData = {
@@ -310,7 +293,7 @@ export function DashboardScreen() {
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-6 py-6">
+      <PageShell>
         {/* Header */}
         <div className="flex items-center gap-2">
           <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -555,7 +538,7 @@ export function DashboardScreen() {
             </div>
           )}
         </div>
-      </div>
+      </PageShell>
     </div>
   );
 }

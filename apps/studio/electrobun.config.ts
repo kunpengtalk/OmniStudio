@@ -99,10 +99,16 @@ function assertPathsFitTar(copy: Record<string, string>) {
     .map((path) => `  ${path.length}  ${path}`)
     .join("\n");
   if (process.platform === "darwin") {
-    // macOS 走 dmg 安装、不经过 tar 解包，历史上就一直带着超限路径（sharp 的 libvips
-    // dylib 与头文件最长 ~127），这里先只告警，不把 macOS 构建一并拦死。
+    // 为什么 macOS 只告警：这个 100 字符限制只卡 **Electrobun 的安装器**（Setup 用的是
+    // Zig std.tar，遇到长名记录直接 `error: TarUnsupportedFileType`），而 macOS 两边都不走它：
+    // 安装是 dmg（挂载复制，没有 tar 解包），自动更新是 `new Bun.Archive().extract()`
+    // —— Bun 自己的 tar 读取器，GNU long-name（`././@LongLink`）能正常还原（实测 124
+    // 字符条目名照常解出）。
+    // 而 macOS 包历史上就带着超限路径（sharp 的 libvips dylib 最长 ~127），要压到 100 以内
+    // 得改 sharp 的平台包布局 —— 收益是零，所以这里只告警，不把 macOS 构建一并拦死。
+    // 反过来：Windows / Linux 的安装器就是那个 Zig 解包器，超一条都装不上，必须失败。
     console.warn(
-      `[electrobun.config] 载荷里有 ${overlong.length} 条路径超过 ${MAX_TAR_PATH} 字符（macOS 走 dmg，暂不阻断）：\n${detail}`,
+      `[electrobun.config] 载荷里有 ${overlong.length} 条路径超过 ${MAX_TAR_PATH} 字符（macOS 走 dmg + Bun.Archive，暂不阻断）：\n${detail}`,
     );
     return;
   }
@@ -140,6 +146,13 @@ const copy: Record<string, string> = {
   // 同目录相对路径现编它（首次使用时 cc 一次，产物缓存在数据目录）。
   // 漏了它 → Linux 上永远"没有编译器"降级，Landlock 后端形同不存在。
   "src/bun/omni-landlock.c": "bun/omni-landlock.c",
+  // ONNX Runtime 的 WASM 运行时（本地抠图引擎，见 src/bun/bg-remove.ts）。
+  // 两个文件都要落在 `bun/`：主进程被合成单个 bun/index.js 后 import.meta.dir 就是
+  // 那里，而打包环境里没有 node_modules。glue .mjs 是 ort 在 Node 分支下唯一认的加载
+  // 入口（必须显式喂给 env.wasm.wasmPaths.mjs），.wasm 是 bg-remove 自己读字节传进去的。
+  // 漏掉任一个 → 抠图一打开就报「缺少 ONNX 运行时文件」。
+  "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs": "bun/ort-wasm-simd-threaded.mjs",
+  "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm": "bun/ort-wasm-simd-threaded.wasm",
   // 提示词库内置素材（scripts/bundle-prompt-library-assets.ts 生成）：
   // 有则打进 webview，作为远程封面加载失败时的离线兜底。
   ...(existsSync("dist/prompt-library")

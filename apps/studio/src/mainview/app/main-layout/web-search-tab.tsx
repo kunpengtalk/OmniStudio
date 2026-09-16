@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Spinner } from "@ui/spinner";
 import { Switch } from "@ui/switch";
 import { useT } from "@stores/ui-lang";
-import { SettingsSection, SettingRow, PageHeader } from "./setting-ui";
+import { SettingsSection, SettingRow, PageHeader } from "@components/setting-ui";
 
 const WEB_SEARCH_PROVIDERS = ["bing", "duckduckgo", "tavily", "brave"] as const;
 

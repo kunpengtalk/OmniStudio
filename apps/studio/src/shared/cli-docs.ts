@@ -226,8 +226,8 @@ export const CLI_SECTIONS: CliSection[] = [
     entries: [
       {
         cmd: "omi models",
-        zh: "一次列出本地已装模型（名称 / 大小 / 类型 / 是否活动）与云端模型。",
-        en: "List installed local models (name, size, kind, active flag) together with cloud models.",
+        zh: "一次列出本地已装模型（名称 / 大小 / 类型 / 是否活动）与云端模型。云端段按厂商分组，列出**所有已启用**厂商的模型（不限默认那家），默认厂商带 `● 默认` 标记 —— 这些 id 都能直接喂给 `omi launch --model`。",
+        en: "List installed local models (name, size, kind, active flag) together with cloud models. The cloud section is grouped by provider and covers **every enabled** provider (not just the default one), with the default one marked — all of these ids work with `omi launch --model`.",
         examples: [{ cmd: "omi models", zh: "脚本里取模型名：与 omi model --list 等价。", en: "Same data as omi model --list, handy in scripts." }],
       },
       {
@@ -302,14 +302,24 @@ export const CLI_SECTIONS: CliSection[] = [
     descEn: "Run a throughput benchmark for the active model (or a cloud provider model); results land in the app's benchmark history.",
     entries: [
       {
-        cmd: "omi benchmark [model] [--contexts 1024,4096] [--gen 128] [--batch 1]",
-        zh: "跑基准测速：默认测当前活动模型，给个模型名 / 服务名换目标；--contexts 选要测的上下文档位，--gen / --batch 调生成长度与并发。应用没运行时在本进程直接跑（结果写同一份库），Ctrl+C 取消本次测试。",
-        en: "Run a benchmark: the active model by default, or the given model / served name; --contexts picks the context sizes, --gen / --batch tune generation length and concurrency. Runs in-process when the app isn't running (same database); Ctrl+C cancels the current run.",
+        cmd: "omi benchmark [model] [--contexts 1024,4096] [--gen 128] [--batch 1] [--cache cold,partial,warm]",
+        zh: "跑基准测速：默认测当前活动模型，给个模型名 / 服务名换目标；--contexts 选要测的上下文档位（128 ~ 1M，认 8k / 1m 这种后缀），--gen / --batch 调生成长度与并发，--cache 选缓存场景（cold 冷启不命中 / partial 部分命中 / warm 完全命中，默认三种都测）。应用没运行时在本进程直接跑（结果写同一份库），Ctrl+C 取消本次测试。",
+        en: "Run a benchmark: the active model by default, or the given model / served name; --contexts picks the context sizes (128 to 1M, k / m suffixes accepted), --gen / --batch tune generation length and concurrency, --cache picks the prompt-cache scenarios (cold miss / partial hit / warm hit; all three by default). Runs in-process when the app isn't running (same database); Ctrl+C cancels the current run.",
         examples: [
           {
             cmd: "omi benchmark --contexts 1024,4096,8192 --gen 128",
             zh: "只测 1K / 4K / 8K 三档，每次生成 128 token。",
             en: "Benchmark 1K / 4K / 8K only, generating 128 tokens per request.",
+          },
+          {
+            cmd: "omi benchmark --contexts 8k,32k,128k,1m --gen 64",
+            zh: "长上下文扫描：一路测到 1M（档位越大单档越久，本地机器上 1M 档要几十分钟）；超出服务端窗口的档位会被拒绝，之后更大的档位自动跳过。",
+            en: "Long-context sweep up to 1M (later steps take far longer — a 1M step runs for tens of minutes locally). Steps beyond the server's window are rejected, and the remaining larger steps are then skipped.",
+          },
+          {
+            cmd: "omi benchmark --contexts 32k --cache cold,warm",
+            zh: "只比缓存：同一档位冷启与完全命中各测一遍，末尾给出倍数与服务端自报的复用比例（×1 附近 = 服务端根本没吃到前缀缓存）。",
+            en: "Cache comparison only: measure 32k cold and warm, then print the speedup and the server-reported reuse ratio (near ×1 means the server never hit its prefix cache).",
           },
         ],
       },
@@ -465,6 +475,16 @@ export const CLI_SECTIONS: CliSection[] = [
         notes: [
           { zh: "工具参数用 `--` 透传，例如 omi launch claude -- --resume。", en: "Pass tool arguments after `--`, e.g. omi launch claude -- --resume." },
           { zh: "本地模型走本地推理服务器，云端 id 走云端 API；网关负责 Anthropic ↔ OpenAI 协议翻译。", en: "Local models go to the local server, cloud ids to the cloud API; the gateway translates Anthropic ↔ OpenAI." },
+          {
+            zh:
+              "`--model` 的云端 id 按「模型云服务」里**所有已启用**厂商匹配（与 GUI 模型选择器同一份清单）。" +
+              "模型不属于当前默认厂商时，会自动把默认厂商切过去并打印一行提示 —— 网关只往默认厂商发云端请求；" +
+              "厂商没启用时直接指出是哪一家，而不是报一句「未找到模型」。",
+            en:
+              "A cloud id is matched against every **enabled** provider (the same list the GUI picker shows). " +
+              "When the model belongs to another provider, omi switches the default provider and says so — the gateway only sends cloud traffic to the default provider. " +
+              "A model on a disabled provider is named explicitly instead of a bare \"model not found\".",
+          },
         ],
         examples: [
           { cmd: "omi launch --list", zh: "列出支持的工具与各自的协议。", en: "List supported tools and their protocols." },

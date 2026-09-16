@@ -111,9 +111,18 @@ export function KbAccessTab({ kb }: { kb: KbView }) {
     mutationFn: () => rpcClient.stopGateway(undefined),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["gateway-status"] }),
   });
+  // 新建一把网关 API Key（与 设置 → 网关 里那份列表同一个来源）。这里显示的是
+  // 最早启用的那把 —— 主进程会把 GATEWAY_API_KEY 镜像成它，页面下方生成的客户端
+  // 配置才会是一把当前有效的 Key；新建之后可以回网关页停用 / 删除。
   const regenKeyMutation = useMutation({
-    mutationFn: () => rpcClient.generateGatewayKey(undefined),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
+    mutationFn: async () => {
+      const res = await rpcClient.createGatewayKey({ name: t("kb.access.mcp.keyName") });
+      if (!res.ok) throw new Error(res.error || "Failed to create API key");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+      queryClient.invalidateQueries({ queryKey: ["gateway-keys"] });
+    },
   });
 
   const gw = gatewayQuery.data;

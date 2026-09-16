@@ -39,6 +39,7 @@ import {
 } from "./agent-tools";
 import { loadProjectInstructions } from "./agent-instructions";
 import { buildMediaGenTools, buildMediaReadTools } from "./media-tools";
+import { buildNotesAgentTools } from "./notes-tools";
 import { cancelMediaSetup } from "./media-setup";
 import { buildMcpAgentTools } from "./mcp";
 import { buildMemoryAgentTools, memoryEnabled, memoryPromptSection, memoryRecallSection } from "./memory";
@@ -71,7 +72,9 @@ import {
 } from "./agent-goals";
 import { onPlanChanged, planHandoffSection, savePlan } from "./agent-plans";
 import { estimateMessagesTokens } from "../shared/token-estimate";
-import { buildHistoryMessages, dropCurrentPrompt } from "./agent-history";
+import { buildHistoryMessages, dropCurrentPrompt, planRegenerate } from "./agent-history";
+import { currentTime } from "./current-time";
+import { createChunkFlusher } from "./chunk-flusher";
 import { findSummaryCut, summarizeHistory, summaryMessageText } from "./agent-summary";
 import { skillsPromptSection } from "./agent-skills";
 import { approvalMode, type ApprovalMode } from "./permissions";
@@ -185,7 +188,6 @@ type DoneListener = (payload: {
  * 都发生在第一个 token 之前，界面要等到那时才建得出消息行的话，干等的那几十秒
  * 屏幕上什么都没有 —— 用户看到的就是"程序挂了"。
  */
-type StartedListener = (payload: { conversationId: number; messageId: number }) => void;
 
 /**
  * 回合用量统计的推送负载：与聊天路径共用 `chat-stats.ts` 的 `MessageStats`
@@ -206,7 +208,6 @@ const chunkListeners = new Set<ChunkListener>();
 const doneListeners = new Set<DoneListener>();
 const statsListeners = new Set<StatsListener>();
 const eventListeners = new Set<EventListener>();
-const startedListeners = new Set<StartedListener>();
 
 export function onAgentChunk(cb: ChunkListener): () => void {
   chunkListeners.add(cb);
@@ -223,10 +224,6 @@ export function onAgentStats(cb: StatsListener): () => void {
 export function onAgentEvent(cb: EventListener): () => void {
   eventListeners.add(cb);
   return () => eventListeners.delete(cb);
-}
-export function onAgentMessageStarted(cb: StartedListener): () => void {
-  startedListeners.add(cb);
-  return () => startedListeners.delete(cb);
 }
 
 // 待办 / 产出物 / 交互（授权、提问）四类推送：直接转给 RPC 层，UI 各自订阅。
@@ -336,9 +333,6 @@ function emitStats(payload: Parameters<StatsListener>[0]) {
 function emitEvent(payload: AgentEventRow) {
   for (const cb of eventListeners) cb(payload);
 }
-function emitStarted(payload: Parameters<StartedListener>[0]) {
-  for (const cb of startedListeners) cb(payload);
-}
 
 /** 记录一条轨迹事件：落库后立刻推送给 UI。 */
 function recordEvent(row: {
@@ -374,7 +368,7 @@ function recordEvent(row: {
  *
  * 为什么要增量：轨迹在界面上主要靠 `agentEvent` 推送逐条追加，而推送不是可靠的
  * 账本 —— 窗口被系统节流、webview 刷新过、消息在信道里丢了，都会让界面停在某一刻，
- * 库里却还在继续写。界面于是在跑动中按 `afterId` 定期追平一次（见 agent-screen 的
+ * 库里却还在继续写。界面于是在跑动中按 `afterId` 定期追平一次（见 app/agent/conversation.tsx 的
  * tail 轮询）：正常情况下每次返回空数组，几乎不花钱；真丢了推送时就把缺的那几条补上。
  * `afterId = 0` 就是"整份列表"（打开会话时用）。
  */
@@ -681,21 +675,7 @@ async function sleepWithStop(conversationId: number, ms: number): Promise<void> 
  * 整段历史全部重算。改挂在「本轮用户消息」上：一轮之内是常量，跨轮变化也只动尾部。
  */
 function currentTimeLine(): string {
-  const now = new Date();
-  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const date = now.toLocaleDateString("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    weekday: "long",
-    timeZone: tz,
-  });
-  const time = now.toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: tz,
-  });
+  const { date, time, tz } = currentTime();
   return `当前日期时间是 ${date} ${time}（时区 ${tz}）。涉及"今天/最新/最近"的内容必须以此为据。`;
 }
 
@@ -933,9 +913,12 @@ async function toolsForMode(
   const base = mode === "plan" ? buildReadOnlyTools(ctx) : buildAgentTools(ctx);
   // 素材检索是只读的（看看用户和 Agent 都生成过什么），三模式都给。
   const mediaRead = buildMediaReadTools();
+  // 笔记三件套（list / search / read）同样是只读：Plan 模式分析需求时也该读得到
+  // 用户之前写下的东西。开关关掉时它返回空数组（工具直接不出现）。
+  const notesRead = buildNotesAgentTools();
   // Plan 模式只多一个 write_plan：方案要能留痕（否则切回 Agent 模式后模型手里没有那份方案）。
   // 它写的是数据目录，不碰工作区，所以"Plan 模式不改任何东西"这条仍然成立。
-  if (mode === "plan") return [...base, ...mediaRead, createWritePlan(ctx)];
+  if (mode === "plan") return [...base, ...mediaRead, ...notesRead, createWritePlan(ctx)];
   // 记忆工具带上下文：写入记项目作用域（按工作区隔离）与审计来源（哪个会话写的）。
   const extras = memoryEnabled()
     ? buildMemoryAgentTools({
@@ -944,7 +927,7 @@ async function toolsForMode(
       })
     : [];
   const mcpTools = await buildMcpAgentTools();
-  return [...base, ...mediaRead, ...buildMediaGenTools(ctx), ...extras, ...mcpTools];
+  return [...base, ...mediaRead, ...notesRead, ...buildMediaGenTools(ctx), ...extras, ...mcpTools];
 }
 
 /**
@@ -2358,15 +2341,50 @@ export async function runAgentTurn(opts: {
   const imagePaths = (opts.imagePaths ?? []).filter((p) => p && p.trim());
 
   const conv = db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
-  if (!conv) return { ok: false, error: "Conversation not found" };
-  if (!content.trim()) return { ok: false, error: "Empty message" };
+  if (!conv) {
+    // 早退也要发终态事件：前端靠 `chatDone` 解除运行态，漏一条就是"发了没反应"。
+    logEvent({
+      level: "warn",
+      source: "agent",
+      event: "agent.turn.rejected",
+      message: "会话不存在，回合被拒绝",
+      detail: { conversationId },
+    });
+    emitDone({ conversationId, messageId: Date.now(), content: "", error: "Conversation not found" });
+    return { ok: false, error: "Conversation not found" };
+  }
+  if (!content.trim()) {
+    logEvent({
+      level: "debug",
+      source: "agent",
+      event: "agent.turn.rejected",
+      message: "空任务，回合被拒绝",
+      detail: { conversationId },
+    });
+    emitDone({ conversationId, messageId: Date.now(), content: "", error: "Empty message" });
+    return { ok: false, error: "Empty message" };
+  }
 
   const modelName = getChatModelLabel();
   if (!modelName) {
+    logEvent({
+      level: "warn",
+      source: "agent",
+      event: "agent.turn.no_model",
+      message: "没有可用的模型，回合被拒绝",
+      detail: { conversationId },
+    });
     emitDone({ conversationId, messageId: Date.now(), content: "", error: "No model configured" });
     return { ok: false, error: "No model configured" };
   }
   if (!getChatBaseUrl()) {
+    logEvent({
+      level: "warn",
+      source: "agent",
+      event: "agent.turn.no_server",
+      message: "没有可用的推理服务地址，回合被拒绝",
+      detail: { conversationId },
+    });
     emitDone({
       conversationId,
       messageId: Date.now(),
@@ -2381,6 +2399,13 @@ export async function runAgentTurn(opts: {
     const ready = await ensureServerReady();
     if (!ready.ok) {
       const error = ready.error || "Inference server not ready";
+      logEvent({
+        level: "error",
+        source: "agent",
+        event: "agent.turn.server_not_ready",
+        message: `推理服务未就绪：${error}`,
+        detail: { conversationId },
+      });
       emitDone({ conversationId, messageId: Date.now(), content: "", error });
       return { ok: false, error };
     }
@@ -2411,15 +2436,10 @@ export async function runAgentTurn(opts: {
       .run();
   }
 
-  const assistant = db
-    .insert(messages)
-    .values({ conversationId, role: "assistant", content: "" })
-    .returning({ id: messages.id })
-    .get();
-  const assistantId = assistant.id;
-  // 建行就报备：下面建会话 / 起服务 / 等模型加载都是秒级到几十秒级的活儿，
-  // 界面上那条「处理中 · N 秒」从这里开始有落点（否则要等第一个 token）。
-  emitStarted({ conversationId, messageId: assistantId });
+  // 建行就报备（`insertAssistantMessage` 里成对做了）：下面建会话 / 起服务 / 等模型
+  // 加载都是秒级到几十秒级的活儿，界面上那条「处理中 · N 秒」从这里开始有落点
+  // （否则要等第一个 token）。
+  const assistantId = Chat.insertAssistantMessage(conversationId);
 
   const session = await getOrCreateSession(conversationId, mode, workspace, opts.headless === true);
   const { agent } = session;
@@ -2493,33 +2513,15 @@ export async function runAgentTurn(opts: {
   setAgentRunning(conversationId, true);
 
   /**
-   * 增量按帧批量下发（与对话一致）：模型每个 token 一次 RPC 会让 webview
-   * 每秒重建几十次消息数组、并整段重解析 Markdown。40ms 一批（≈25fps）
-   * 保持"逐字"观感，同时把 IPC 与前端重渲染次数降一个数量级。
+   * 增量按帧批量下发（与对话同一份实现与同一个 40ms 常量，见 chunk-flusher.ts）。
    * 思考增量同样下发：界面上就是「思考中…」那一行的实时内容，不再只有一圈转圈。
    */
-  const FLUSH_INTERVAL_MS = 40;
-  let pendingContent = "";
-  let pendingReasoning = "";
-  let flushTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const flushChunks = () => {
-    if (flushTimer) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
-    if (pendingContent) {
-      emitChunk({ conversationId, messageId: assistantId, delta: pendingContent, kind: "content" });
-      pendingContent = "";
-    }
-    if (pendingReasoning) {
-      emitChunk({ conversationId, messageId: assistantId, delta: pendingReasoning, kind: "reasoning" });
-      pendingReasoning = "";
-    }
-  };
-  const scheduleFlush = () => {
-    if (!flushTimer) flushTimer = setTimeout(flushChunks, FLUSH_INTERVAL_MS);
-  };
+  const flusher = createChunkFlusher({
+    conversationId,
+    messageId: assistantId,
+    emit: emitChunk,
+  });
+  const flushChunks = () => flusher.flushNow();
 
   /**
    * 当前步骤的正文缓冲 —— 冲出去就是时间轴上的一段「它说的话」。
@@ -2547,15 +2549,13 @@ export async function runAgentTurn(opts: {
         markDelta();
         if (delta.kind === "reasoning") {
           reasoning += delta.text;
-          pendingReasoning += delta.text;
-          scheduleFlush();
+          flusher.pushReasoning(delta.text);
         } else {
           fullText += delta.text;
-          pendingContent += delta.text;
           pendingStepText += delta.text;
+          flusher.pushContent(delta.text);
           // 即时消费方（通话边生成边合成）仍按 token 回调，不走批量缓冲。
           opts.onDelta?.(delta.text, "content", assistantId);
-          scheduleFlush();
         }
         return;
       }
@@ -2746,12 +2746,7 @@ export async function runAgentTurn(opts: {
            * 于是"半截旧文本 + 新回答"一起出现在同一个气泡里。
            * （已经流到界面的那几个字撤不回来 —— 收尾时 emitDone 会用最终正文整条覆盖。）
            */
-          if (flushTimer) {
-            clearTimeout(flushTimer);
-            flushTimer = null;
-          }
-          pendingContent = "";
-          pendingReasoning = "";
+          flusher.discard();
           // 失败那一步的正文同样作废：它已经被 fullText 回退掉了，落成事件就会让
           // 时间轴上多出一段正文里并不存在的话（尾巴切片也会因此对不上）。
           pendingStepText = "";
@@ -2874,8 +2869,10 @@ export async function runAgentTurn(opts: {
     }
   } finally {
     unsubscribe();
-    // 收尾前先把缓冲里的增量冲出去，避免 chatDone 先到、尾巴几个字后到。
+    // 收尾前先把缓冲里的增量冲出去，避免 chatDone 先到、尾巴几个字后到；
+    // 再收掉定时器（冲完它已经清空了，这里只是防残留 timer 让进程多活一拍）。
     flushChunks();
+    flusher.dispose();
     setAgentRunning(conversationId, false);
     activeMessageIds.delete(conversationId);
     stopRequests.delete(conversationId);
@@ -3187,6 +3184,9 @@ export function getAgentRunState(conversationId: number): AgentRunState {
 
 /**
  * 重新运行最后一条回答：删掉它及其之后的消息与轨迹，再用同样的上文跑一次。
+ *
+ * 「删哪些、拿谁的正文当 prompt」由 `planRegenerate` 决定（纯函数，有单测）；
+ * 这里只负责落库与重跑。
  */
 export async function regenerateAgentMessage(
   conversationId: number,
@@ -3196,12 +3196,11 @@ export async function regenerateAgentMessage(
   if (!target || target.role !== "assistant") return { ok: false, error: "Message not found" };
 
   const history = getHistory(conversationId);
-  const context = history.filter((m) => m.id < messageId);
-  const lastUser = [...context].reverse().find((m) => m.role === "user");
-  if (!lastUser) return { ok: false, error: "Nothing to regenerate" };
+  const plan = planRegenerate(history, messageId);
+  if (!plan.ok) return { ok: false, error: plan.error };
 
   for (const m of history) {
-    if (m.id >= messageId) {
+    if (m.id >= plan.deleteFromId) {
       db.delete(agentEvents).where(eq(agentEvents.messageId, m.id)).run();
       Chat.deleteMessage(conversationId, m.id);
     }
@@ -3209,5 +3208,12 @@ export async function regenerateAgentMessage(
   // 丢弃旧实例，避免残留的工具调用轨迹影响新一轮。
   resetAgentSession(conversationId);
 
-  return runAgentTurn({ conversationId, content: lastUser.content });
+  // `insertUserMessage: false`：那条用户消息排在目标回答之前、不在删除区间内，
+  // 库里已经有了。不传这句 `runAgentTurn` 会默认再插一条 —— 每次重新生成都会多出
+  // 一个一模一样的用户气泡，模型侧还会在历史与 prompt 里各看到它一遍。
+  return runAgentTurn({
+    conversationId,
+    content: plan.prompt,
+    insertUserMessage: false,
+  });
 }

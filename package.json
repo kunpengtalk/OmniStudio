@@ -1,6 +1,6 @@
 {
   "name": "@omni-studio/monorepo",
-  "version": "0.0.9-canary.0",
+  "version": "0.1.0",
   "private": true,
   "description": "OmniStudio — 本地大模型一体化桌面工作台 | A desktop workstation for local LLMs: models, servers, and apps (chat, voice, image, video, OCR, translate), with knowledge base, shared memory, and MCP.",
   "repository": {
@@ -47,5 +47,5 @@
     "oxlint": "^1.56.0",
     "turbo": "^2.8.17"
   },
-  "packageManager": "bun@1.3.9"
+  "packageManager": "bun@1.4.2"
 }

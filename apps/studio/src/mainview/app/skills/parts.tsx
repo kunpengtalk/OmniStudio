@@ -35,22 +35,12 @@ import {
 } from "@/shared/skills";
 import { cn } from "@/mainview/lib/utils";
 
-export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "—";
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
-  return `${Math.round(bytes / 1e3)} KB`;
-}
+import { formatBytes as formatBytesSi } from "@lib/format";
 
-/** 与提示词页 PlazaView 相同的筛选 chip 样式。 */
-export function chipClass(active: boolean): string {
-  return cn(
-    "shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors",
-    active
-      ? "bg-primary text-primary-foreground"
-      : "border text-muted-foreground hover:border-muted-foreground/40 hover:text-foreground",
-  );
-}
+/** Skills 文件体积沿用 1 位小数（MB），与 @lib/format 默认口径只差一个小数位。 */
+export const formatBytes = (bytes: number) => formatBytesSi(bytes, { mbDecimals: 1 });
+
+export { chipClass } from "@components/filter-chip";
 
 /** 各区顶部固定工具栏：左侧图标 + 标题 + 统计，右侧操作区。 */
 export function Toolbar({
@@ -76,37 +66,7 @@ export function Toolbar({
   );
 }
 
-/** 与 OCR 页 parts 相同样式的分段切换。 */
-export function SegmentedControl<T extends string>({
-  value,
-  onChange,
-  options,
-}: {
-  value: T;
-  onChange: (v: T) => void;
-  options: readonly { value: T; label: string; icon?: React.ReactNode }[];
-}) {
-  return (
-    <div className="flex gap-0.5 rounded-lg border bg-background p-0.5">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          onClick={() => onChange(o.value)}
-          className={cn(
-            "flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors",
-            value === o.value
-              ? "bg-primary text-primary-foreground"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground",
-          )}
-        >
-          {o.icon}
-          <span className="truncate">{o.label}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
+export { SegmentedControl } from "@components/segmented-control";
 
 const SYNC_BADGE: Record<SyncStatus, { key: string; cls: string }> = {
   synced: { key: "skills.sync.synced", cls: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400" },
@@ -379,7 +339,7 @@ export function SkillCard({
           <button
             type="button"
             title={t("skills.openFolder")}
-            onClick={() => rpcClient.skillsOpenFolder({ path: "central", skillId: skill.id })}
+            onClick={() => rpcClient.skillsOpenFolder({ skillId: skill.id })}
             className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
             <FolderOpenIcon className="size-3.5" />

@@ -28,7 +28,7 @@ import {
 } from "@ui/select";
 import { useRouter } from "@stores/router";
 import { useServerStore } from "@stores/server";
-import { useT } from "@stores/ui-lang";
+import { useT, useTOptional } from "@stores/ui-lang";
 import { CloudModelSelect } from "@components/cloud-model-select";
 import { fileKind, engineSupports, type InferenceEngine } from "../../../shared/modelscope";
 import { MODEL_PROFILES } from "../../../shared/model-profiles";
@@ -59,6 +59,7 @@ export function VlmTab({
   engineSwitcher?: React.ReactNode;
 }) {
   const t = useT();
+  const tOptional = useTOptional();
   const queryClient = useQueryClient();
   const router = useRouter();
   const serverStatus = useServerStore((s) => s.status);
@@ -259,7 +260,8 @@ export function VlmTab({
                   {t("ocr.vlm.remote.cloudProvider")}
                 </Label>
                 <CloudModelSelect
-                  // VLM 属于对话类模型：OCR 只列已启动厂商里的对话 / 视觉模型。
+                  // 用途分类里没有单独的"视觉"维度：VLM 与对话模型同属 `chat`，
+                  // 所以这里只按 chat 过滤（`CloudModelType` 见 shared/cloud-providers.ts）。
                   kind="chat"
                   providerId={pProviderId}
                   model={pModel}
@@ -383,7 +385,7 @@ export function VlmTab({
                     <span className="truncate">{p.label}</span>
                     {p.badge ? (
                       <Badge variant="secondary" className="shrink-0 text-[9px]">
-                        {p.badge}
+                        {tOptional(`modelProfile.${p.id}.badge`, p.badge)}
                       </Badge>
                     ) : null}
                   </span>
@@ -393,8 +395,12 @@ export function VlmTab({
           </SelectContent>
         </Select>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {MODEL_PROFILES.find((p) => p.id === profileId)?.description ??
-            t("ocr.vlm.profile")}
+          {/* 档案说明来自 shared/model-profiles.ts（英文），词条里备了中英两份：
+              英文界面下不再硬塞英文说明，中文界面下也不再是英文。 */}
+          {tOptional(
+            `modelProfile.${profileId}.description`,
+            MODEL_PROFILES.find((p) => p.id === profileId)?.description ?? t("ocr.vlm.profile"),
+          )}
         </p>
       </PanelSection>
 

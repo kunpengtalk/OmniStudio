@@ -1,0 +1,66 @@
+{
+  "task": "执行共识计划 .omc/plans/ralplan-kb-image-viewing.md：知识库与问答召回的图片查看（共享查看器 + kbChunkMedia 尺寸档位 + 三处接入）",
+  "createdAt": "2026-09-15",
+  "stories": [
+    {
+      "id": "US-001",
+      "title": "后端：kbChunkMedia 尺寸档位 + 视图补字段",
+      "priority": 1,
+      "passes": true,
+      "acceptanceCriteria": [
+        "chunkMediaForRpc 接受第二参数 size: \"thumb\" | \"full\"（缺省 \"thumb\"），full 档 resize 最长边 2048 / jpeg q85，thumb 档行为与现状逐字节一致（512/q80）",
+        "KbChunkMediaView 新增 mediaPath: string | null 与 text: string | null；SELECT 补 content 列；文件缺失/超 64MB/非图片/PDF 解码失败仍降级 dataUrl null 且元信息返回",
+        "RPC 契约（rpc/index.ts kbChunkMedia）params 加 size?: \"thumb\" | \"full\" 且转发透传",
+        "kb-media.test.ts / kb-media.tests.ts 增补用例全绿：full 档更大边长、thumb 档不变、mediaPath/text 正确、空串 text、PDF 输入 → null"
+      ]
+    },
+    {
+      "id": "US-002",
+      "title": "前端：共享图片查看器组件 kb-image-viewer",
+      "priority": 2,
+      "passes": true,
+      "acceptanceCriteria": [
+        "新建 apps/studio/src/mainview/components/kb-image-viewer.tsx：KbImageViewer({ chunkId, open, onClose })，Dialog + useQuery kbChunkMedia size full，enabled: open, staleTime 10min, gcTime 5min",
+        "isError || dataUrl == null → 图标 + 文件名兜底；加载中 Spinner；wheel 缩放经 ref + 原生 addEventListener({ passive: false })，scale clamp 0.5-4，transform-origin 跟随光标",
+        "单击 250ms 定时器切 1x/2x，onDoubleClick 取消定时器并复位；scale>1 拖拽平移（pointer 事件）",
+        "底部文件名 + OCR 文本（text 非空才渲染）+「用系统程序打开」按钮（mediaPath 为空禁用，调 openPath）",
+        "i18n zh+en 新增 kb.viewer.title / kb.viewer.openExternal / kb.viewer.zoomHint（i18n.ts 用 Edit 增量改，不得覆盖既有内容）"
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "KB 文档列表：firstImageChunkId + 行内缩略图 + 分块弹窗升级",
+      "priority": 3,
+      "passes": true,
+      "acceptanceCriteria": [
+        "KbDocView 加 firstImageChunkId: number | null；listDocs 用单条分组 SQL（where kb_id = ? and modality = 'image' group by doc_id, min(id)）填充，toDocView 单点收口补默认",
+        "DocRow：firstImageChunkId 非空渲染 40px 圆角缩略图（useQuery [\"kb-chunk-media\", chunkId] 512 档，isError 兜底），点击缩略图 stopPropagation 打开 KbImageViewer（docs-tab 容器层单实例）；行其余点击行为不变",
+        "MediaChunkBlock 图片缩略图点击改为打开 KbImageViewer（不再直接 openPath）；音视频块维持 openPath",
+        "knowledge-multimodal.tests.ts 新增 listDocs 用例：多图取 min(id) / 无图 null / 纯音视频 null",
+        "docs-tab.test.tsx 更新 :256 行为断言（点击缩略图出现查看器）+ 新增行缩略图渲染/非图片无缩略图断言"
+      ]
+    },
+    {
+      "id": "US-004",
+      "title": "聊天引用：CitationBar 抽取 + 图片胶囊缩略图",
+      "priority": 4,
+      "passes": true,
+      "acceptanceCriteria": [
+        "CitationBar + MODALITY_ICONS 从 chat-screen.tsx:272-305 抽到 apps/studio/src/mainview/app/chat/citation-bar.tsx，chat-screen 改 import，胶囊既有行为不变",
+        "modality === \"image\" 且 chunkId 存在 → 胶囊内 24px 缩略图（[\"kb-chunk-media\", chunkId] 缓存共享，isError 兜底），点击 stopPropagation 打开 KbImageViewer（CitationBar 容器层单实例）",
+        "chunkId 缺失的旧引用 → 无缩略图、零请求",
+        "新建 chat/citation-bar.test.tsx：图片引用渲染缩略图并打开查看器；文本/音视频引用无缩略图请求；旧引用零请求断言"
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "全量回归",
+      "priority": 5,
+      "passes": true,
+      "acceptanceCriteria": [
+        "apps/studio 下 bun test 全量 0 失败",
+        "bun run typecheck（tsc --noEmit）无报错"
+      ]
+    }
+  ]
+}

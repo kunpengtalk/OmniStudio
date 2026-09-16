@@ -10,6 +10,7 @@ import {
   LayersIcon,
   MessageSquareIcon,
   MicIcon,
+  MusicIcon,
   TagIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -37,6 +38,7 @@ export const MODEL_CATEGORY_ICONS: Record<ModelCategory, LucideIcon> = {
   asr: MicIcon,
   image: ImageIcon,
   video: FilmIcon,
+  music: MusicIcon,
   other: TagIcon,
 };
 
@@ -55,6 +57,7 @@ export const MODEL_CATEGORY_SHORT_KEYS: Record<ModelCategory | "all", string> = 
   asr: "models.catShort.asr",
   image: "models.catShort.image",
   video: "models.catShort.video",
+  music: "models.catShort.music",
   other: "models.catShort.other",
 };
 

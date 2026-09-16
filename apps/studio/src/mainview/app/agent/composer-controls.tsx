@@ -9,6 +9,8 @@ import {
   CircleIcon,
   ClipboardListIcon,
   CpuIcon,
+  HandIcon,
+  LockIcon,
   SparklesIcon,
   TargetIcon,
   ZapIcon,
@@ -37,11 +39,15 @@ const MODE_ICON: Record<AgentMode, typeof SparklesIcon> = {
 /** 授权模式在界面上的顺序：从严到宽再回到只读，常用的三档排前面。 */
 const APPROVAL_ORDER: ApprovalMode[] = ["manual", "smart", "auto", "strict"];
 
+/**
+ * 四档各自的图标。以前 `manual` 与 `strict` 都是 `CircleIcon` —— 同一个下拉里两个条目
+ * 图标一样，只能靠读文字分辨，扫一眼分不出来。
+ */
 const APPROVAL_ICON: Record<ApprovalMode, typeof CircleIcon> = {
-  manual: CircleIcon,
+  manual: HandIcon,
   smart: CheckIcon,
   auto: ZapIcon,
-  strict: CircleIcon,
+  strict: LockIcon,
 };
 
 /**

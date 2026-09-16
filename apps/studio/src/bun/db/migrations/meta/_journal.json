@@ -229,9 +229,43 @@
     {
       "idx": 32,
       "version": "6",
-      "when": 1789399122175,
-      "tag": "0032_tired_vanisher",
+      "when": 1789433336000,
+      "tag": "0032_pale_thundra",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1789436647000,
+      "tag": "0033_warm_sabretooth",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1789471307000,
+      "tag": "0034_rapid_bloodaxe",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "6",
+      "when": 1789471307001,
+      "tag": "0035_miniapp_notes",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1789471307002,
+      "tag": "0036_add_music_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1789471307003,
+      "tag": "0037_tired_vanisher"
     }
   ]
 }

@@ -298,6 +298,7 @@ export type ModelCategory =
   | "asr"
   | "image"
   | "video"
+  | "music"
   | "other";
 
 export const MODEL_CATEGORIES: { value: ModelCategory | "all"; labelKey: string }[] = [
@@ -309,6 +310,7 @@ export const MODEL_CATEGORIES: { value: ModelCategory | "all"; labelKey: string 
   { value: "asr", labelKey: "models.cat.asr" },
   { value: "image", labelKey: "models.cat.image" },
   { value: "video", labelKey: "models.cat.video" },
+  { value: "music", labelKey: "models.cat.music" },
   { value: "other", labelKey: "models.cat.other" },
 ];
 
@@ -330,7 +332,8 @@ export type ModelCategorySet =
   | "tts"
   | "asr"
   | "image"
-  | "video";
+  | "video"
+  | "music";
 
 export const MODEL_CATEGORY_SETS: Record<ModelCategorySet, readonly ModelCategory[]> = {
   chat: ["chat"],
@@ -340,6 +343,7 @@ export const MODEL_CATEGORY_SETS: Record<ModelCategorySet, readonly ModelCategor
   asr: ["asr"],
   image: ["image"],
   video: ["video"],
+  music: ["music"],
 };
 
 /**
@@ -437,6 +441,22 @@ export function classifyModelName(rawName: string): ModelCategory {
     return "asr";
   }
 
+  // 音乐生成：`music` 几乎总在名字里（stepaudio-3-music-preview / music-3.0 /
+  // musicgen / text-to-music），其余是各家开源型号。放在视频 / 生图之前判：
+  // 音乐模型名与它们没有交集，早判只是为了让"下一步要加的音乐型号"不必再回来看顺序。
+  //
+  // 带连字符的家族名必须用 `hasWord`（子串匹配）：`token` 是按非字母数字切出来的，
+  // `ACE-Step` 会变成 `ace` + `step`、`stable-audio` 变成 `stable` + `audio` ——
+  // 用 `has` 判会全部落空（真踩过）。`audio` 单独一条不能收：`qwen-audio` 那类
+  // 语音模型会被误判成音乐。
+  if (
+    hasWord("music") ||
+    has("musicgen", "suno", "udio", "mureka", "acestep", "diffrhythm", "audioldm") ||
+    hasWord("ace-step", "stable-audio", "text-to-music", "text2music")
+  ) {
+    return "music";
+  }
+
   // 文生视频：`t2v` / `i2v` 这类任务后缀最可靠，其次是厂商型号名。
   if (
     hasWord(
@@ -464,7 +484,6 @@ export function classifyModelName(rawName: string): ModelCategory {
   ) {
     return "video";
   }
-
   // 文生图。
   if (
     hasWord(

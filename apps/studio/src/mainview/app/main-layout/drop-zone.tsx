@@ -6,11 +6,26 @@ import { rpcClient } from "@lib/rpc";
 import { Spinner } from "@ui/spinner";
 import { useRouter } from "@/mainview/stores/router";
 import { useT } from "@/mainview/stores/ui-lang";
+import { MAX_UPLOAD_BYTES, formatUploadLimit } from "@/shared/uploads";
+
+/** `File` → 纯 base64（去掉 data URL 前缀）。 */
+function readAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? "");
+      resolve(result.slice(result.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("读取文件失败"));
+    reader.readAsDataURL(file);
+  });
+}
 
 export function DropZone() {
   const t = useT();
   const setRoute = useRouter((s) => s.setRoute);
   const [isDragging, setIsDragging] = useState(false);
+  const [uploadError, setUploadError] = useState<string>();
   const queryClient = useQueryClient();
   const navigatedRef = useRef(false);
 
@@ -38,27 +53,39 @@ export function DropZone() {
 
   const addByPath = useMutation({
     mutationFn: async (filePath: string) => {
-      const { id } = await rpcClient.addDocument({ filePath });
+      const { id, error } = await rpcClient.addDocument({ filePath });
+      // 主进程只会接受"用户刚在对话框里选过"的路径（bun/dialog-paths.ts）：
+      // 被拒时 id 是 -1，不能拿着它去跑后续处理。
+      if (id < 0) throw new Error(error ?? t("ocr.drop.uploadFailed"));
       await processAfterAdd(id);
       return id;
     },
+    onError: (e) => setUploadError(e instanceof Error ? e.message : String(e)),
+    onSuccess: () => setUploadError(undefined),
   });
 
   const addByUpload = useMutation({
     mutationFn: async (file: File) => {
-      const buffer = await file.arrayBuffer();
-      const bytes = new Uint8Array(buffer);
-      let binary = "";
-      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
-      const data = btoa(binary);
-      const { id } = await rpcClient.addDocumentByUpload({
+      // 体积先判、再读文件：RPC 是整条在内存里编解码 base64 的，超限时连编码都不该开始
+      // （几百 MB 的逐字节拼串能把界面卡死几十秒，最后才失败）。上限见 shared/uploads.ts。
+      if (file.size > MAX_UPLOAD_BYTES) {
+        throw new Error(t("ocr.drop.tooLarge", { limit: formatUploadLimit() }));
+      }
+      // 用 FileReader 拿 base64：它是浏览器原生实现，比在主线程逐字节拼串 + btoa 快得多。
+      const data = await readAsBase64(file);
+      const { id, error } = await rpcClient.addDocumentByUpload({
         data,
         name: file.name,
         type: file.type,
       });
+      if (id < 0 || (error && !id)) {
+        throw new Error(error ?? t("ocr.drop.uploadFailed"));
+      }
       await processAfterAdd(id);
       return id;
     },
+    onError: (e) => setUploadError(e instanceof Error ? e.message : String(e)),
+    onSuccess: () => setUploadError(undefined),
   });
 
   const openDialog = useMutation({
@@ -106,7 +133,7 @@ export function DropZone() {
   const isProcessing = addByPath.isPending || addByUpload.isPending;
 
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+    <div className="relative flex min-h-0 flex-1 items-center justify-center p-6">
       <div
         onDrop={handleDrop}
         onDragOver={handleDragOver}
@@ -151,6 +178,13 @@ export function DropZone() {
           </>
         )}
       </div>
+
+      {/* 上传失败此前是"点了/拖了没反应"：`addByUpload` 没有 onError，也不显示 error。 */}
+      {uploadError && (
+        <p className="absolute bottom-6 max-w-sm text-center text-[11px] text-destructive">
+          {uploadError}
+        </p>
+      )}
     </div>
   );
 }

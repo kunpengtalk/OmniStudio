@@ -1,5 +1,6 @@
 import type { Subprocess } from "bun";
 import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/settings";
+import { resolveManagedPython } from "../python-engine";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
 import { MAX_LOG_CHARS, killProcessTree, pumpServerOutput, spawnServerProcess, waitExit } from "./proc";
@@ -80,6 +81,10 @@ export class SglangRuntime implements Runtime {
   }
 
   async checkBinary(): Promise<BinaryCheckResult> {
+    // 应用自己装的托管 venv 优先（引导页 / 设置里的「一键安装」）。
+    const managed = resolveManagedPython("sglang", "sglang");
+    if (managed) return { found: true, path: managed, mode: "python" };
+
     // Check for python3 with sglang installed
     const pythonPath = Bun.which("python3") ?? Bun.which("python");
     if (!pythonPath) return { found: false };
@@ -90,7 +95,7 @@ export class SglangRuntime implements Runtime {
         stderr: "pipe",
       });
       const exited = await waitExit(proc, 5000);
-      if (exited) return { found: true, path: pythonPath };
+      if (exited) return { found: true, path: pythonPath, mode: "python" };
     } catch {
       // not available
     }
@@ -175,7 +180,12 @@ export class SglangRuntime implements Runtime {
       model = resolved.model;
       servedName = resolved.servedName;
     }
-    const python = Bun.which("python3") ?? Bun.which("python") ?? "python3";
+    // 复制的命令要和实际启动的一致：托管 venv 的 python 优先（见 checkBinary）。
+    const python =
+      resolveManagedPython("sglang", "sglang") ??
+      Bun.which("python3") ??
+      Bun.which("python") ??
+      "python3";
     return [python, ...this.buildArgs(model, servedName)].join(" ");
   }
 
@@ -191,7 +201,7 @@ export class SglangRuntime implements Runtime {
 
     const binary = await this.checkBinary();
     if (!binary.found) {
-      return { ok: false, error: "SGLang not found. Install with: pip install sglang" };
+      return { ok: false, error: "SGLang 未安装。可在引导页 / 设置里点「一键安装」（仅 Linux），或手动执行 pip install sglang" };
     }
 
     const args = this.buildArgs(model, servedName);

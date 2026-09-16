@@ -44,6 +44,7 @@ export function CloudModelSelect({
   onChange,
   disabled,
   requireVideoApi,
+  requireMusicApi,
   size = "default",
   className,
 }: {
@@ -55,6 +56,8 @@ export function CloudModelSelect({
   disabled?: boolean;
   /** 生视频：只列配置了生视频接口（MiniMax / Seedance）的厂商。 */
   requireVideoApi?: boolean;
+  /** 生音乐：只列配置了生音乐接口（StepFun / MiniMax）的厂商。 */
+  requireMusicApi?: boolean;
   size?: "sm" | "default";
   className?: string;
 }) {
@@ -69,16 +72,18 @@ export function CloudModelSelect({
   });
   const all = useMemo(() => providersQuery.data?.providers ?? [], [providersQuery.data]);
 
-  // 可选厂商：已启用 + 该用途下有模型（生视频还要有生视频协议）。
+  // 可选厂商：已启用 + 该用途下有模型（生视频 / 生音乐还要有各自的接口协议 ——
+  // 这两类 API 没有统一标准，协议缺失时选它也调不通）。
   const candidates = useMemo(
     () =>
       all.filter(
         (p) =>
           p.enabled &&
           (!requireVideoApi || Boolean(p.videoApi)) &&
+          (!requireMusicApi || Boolean(p.musicApi)) &&
           providerModelsOfType(p, kind).length > 0,
       ),
-    [all, kind, requireVideoApi],
+    [all, kind, requireVideoApi, requireMusicApi],
   );
 
   // 当前选中的厂商不在候选里（已停用 / 模型被删）时也要显示出来，

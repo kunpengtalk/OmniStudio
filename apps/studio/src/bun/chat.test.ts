@@ -21,15 +21,31 @@ const sqlite = new Database(tmpDb, { create: true });
 const db = drizzle({ client: sqlite, schema });
 migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
 
-/** 假设置：只有对话链路真正会读的三个键有值，其余一律空串。 */
-const fakeGetSetting = (key: string) =>
-  key === "SERVER_MODE"
+/** 临时改写某个设置（用 `withSetting`），默认值见下。 */
+const SETTING_OVERRIDES: Record<string, string> = {};
+
+/** 假设置：只有对话链路真正会读的键有值，其余一律空串。 */
+const fakeGetSetting = (key: string) => {
+  const override = SETTING_OVERRIDES[key];
+  if (override !== undefined) return override;
+  return key === "SERVER_MODE"
     ? "remote"
     : key === "VLLM_API_BASE"
       ? "http://fake:8000"
       : key === "CHAT_MODEL"
         ? "test-model"
         : "";
+};
+
+/** 在指定设置下跑一段（跑完还原），用于驱动"界面语言"这类影响输出的键。 */
+async function withSetting(key: string, value: string, fn: () => void | Promise<void>) {
+  SETTING_OVERRIDES[key] = value;
+  try {
+    await fn();
+  } finally {
+    delete SETTING_OVERRIDES[key];
+  }
+}
 
 await mockModulePartial<typeof import("./db")>("./db", { db });
 await mockModulePartial<typeof import("./db/settings")>("./db/settings", {
@@ -42,7 +58,17 @@ await mockModulePartial<typeof import("./db/settings")>("./db/settings", {
   getServerPort: () => "18080",
 });
 const realChatModel = await import("./chat-model");
-mock.module("./chat-model", () => ({ ...realChatModel, getChatModelName: () => "test-model" }));
+/**
+ * 请求侧模型 id：真实实现读设置，而本文件的设置是桩（`updateSettings` 是空函数），
+ * 改设置驱动不了它。用一个可变的桩把它变成可测的开关 —— 否则"没配模型"这条早退路径
+ * 永远跑不到。
+ */
+let stubRequestModelId = "test-model";
+mock.module("./chat-model", () => ({
+  ...realChatModel,
+  getChatModelName: () => "test-model",
+  getChatRequestModelId: () => stubRequestModelId,
+}));
 // 不 mock ./image-server：bun 的 mock.module 会跨文件泄漏、且 mock.restore() 撤不掉，
 // 别的文件（image-server.route.test）拿到被换掉的模块就只能无声跳过——media 403 正是
 // 从"本地从没跑到"的路由漏出去的。本文件只用到目录工具函数，真实实现（数据目录已由
@@ -88,6 +114,8 @@ globalThis.fetch = mock(async (_url: unknown, init: unknown) => {
 }) as never;
 
 const { createConversation, sendMessage, deleteMessage, regenerateMessage, translateMessage, getConversation, onChatChunk, onChatDone, onChatStats, onChatMessageStarted, titleFromMessage } = await import("./chat");
+const { clearAppLog, readAppLogsInMemory } = await import("./app-log");
+const { forkConversation, stopChatGeneration } = await import("./chat");
 
 afterAll(() => {
   // 恢复全局 fetch，避免把 mock 泄漏给同一批次运行的其他测试文件。
@@ -262,8 +290,7 @@ test("translateMessage appends a streamed translation", async () => {
   expect(translated.content).toBe("你好世界");
 });
 
-test("会话标题取首条消息开头：压平空白、超长补省略号", () => {
-  expect(titleFromMessage("你好")).toBe("你好");
+test("会话标题取首条消息开头：压平空白、超长补省略号", () => {  expect(titleFromMessage("你好")).toBe("你好");
   // 换行与连续空格归一成单个空格：标题里不该出现换行，也不该丢掉第二行
   expect(titleFromMessage("\n\n  帮我分析日志  \n\n顺便看看磁盘")).toBe("帮我分析日志 顺便看看磁盘");
   expect(titleFromMessage("帮我把这段代码\n改成 TypeScript")).toBe("帮我把这段代码 改成 TypeScript");
@@ -278,4 +305,149 @@ test("会话标题取首条消息开头：压平空白、超长补省略号", ()
 
   // 空白 / 只有图片时退回默认标题（与调用方约定一致）
   expect(titleFromMessage("   \n  ")).toBe("New conversation");
+});
+
+// ---------------------------------------------------------------------------
+// 失败路径：必须有终态事件（否则输入框锁死）+ 必须进统一日志（否则没法诊断）。
+// 这两件事此前都没有：早退分支只 `return { ok:false }`，前端等不到 chatDone 就停在
+// 「生成中」；chat.ts 整个文件没有一处 logEvent，`omi logs` 里查不到任何对话故障。
+// ---------------------------------------------------------------------------
+
+/** 收一条 done 事件（没有超时保护：真收不到就让它挂到测试超时，比静默通过好）。 */
+function nextDone(): Promise<Parameters<Parameters<typeof onChatDone>[0]>[0]> {
+  return new Promise((resolve) => {
+    const off = onChatDone((payload) => {
+      off();
+      resolve(payload);
+    });
+  });
+}
+
+test("会话不存在时发送：既回 ok:false，也发一条带错误的终态事件（输入框不能锁死）", async () => {
+  clearAppLog();
+  const done = nextDone();
+  const res = await sendMessage(999_999, "在吗");
+
+  expect(res.ok).toBe(false);
+  expect(res.error).toBe("Conversation not found");
+  // 之前这条路径不发终态事件 → 前端的 setStreaming(true) 再也没人解除。
+  const payload = await done;
+  expect(payload.error).toBe("Conversation not found");
+
+  const logged = readAppLogsInMemory({ source: "chat" });
+  expect(logged.map((e) => e.event)).toContain("chat.send.rejected");
+});
+
+test("空消息被拒：同样发终态事件", async () => {
+  const conv = createConversation(undefined, "chat");
+  const done = nextDone();
+  const res = await sendMessage(conv.id, "   ");
+  expect(res.ok).toBe(false);
+  expect((await done).error).toBe("Empty message");
+});
+
+test("模型没配时发送：终态事件 + chat.send.no_model 日志", async () => {
+  clearAppLog();
+  stubRequestModelId = "";
+  try {
+    const conv = createConversation(undefined, "chat");
+    const done = nextDone();
+    const res = await sendMessage(conv.id, "你好");
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe("No model configured");
+    expect((await done).error).toBe("No model configured");
+    const logged = readAppLogsInMemory({ source: "chat" });
+    expect(logged.map((e) => e.event)).toContain("chat.send.no_model");
+  } finally {
+    stubRequestModelId = "test-model";
+  }
+});
+
+test("流式过程中失败：写 chat.stream.failed，并带上上游地址与已生成字数", async () => {  clearAppLog();
+  const conv = createConversation(undefined, "chat");
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = mock(async () => {
+    throw new Error("连接被重置");
+  }) as never;
+  try {
+    const res = await sendMessage(conv.id, "写点什么");
+    expect(res.ok).toBe(false);
+    const failures = readAppLogsInMemory({ source: "chat" }).filter(
+      (e) => e.event === "chat.stream.failed",
+    );
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.level).toBe("error");
+    const detail = failures[0]!.detail as Record<string, unknown>;
+    expect(detail.conversationId).toBe(conv.id);
+    expect(detail.charsStreamed).toBe(0);
+    expect(typeof detail.base).toBe("string");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("分叉会话的标题后缀跟随界面语言（标题是落库数据，不能写死中文）", async () => {
+  const conv = createConversation(undefined, "chat");
+  await sendMessage(conv.id, "帮我写个落地页");
+
+  const firstMessageId = getConversation(conv.id).messages[0]!.id;
+
+  const zh = forkConversation(conv.id, firstMessageId);
+  expect(getConversation(zh.conversationId!).conversation!.title.endsWith(" · 分支")).toBe(true);
+
+  await withSetting("UI_LANG", "en", () => {
+    const en = forkConversation(conv.id, firstMessageId);
+    expect(getConversation(en.conversationId!).conversation!.title.endsWith(" · branch")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 停止生成：本地模型一轮能跑几分钟，用户必须能中途叫停（此前只能等 600s 超时）。
+// 叫停后已生成的部分要保留、要落库、要标上「已停止」——丢掉半截回答比不让停更糟。
+// ---------------------------------------------------------------------------
+
+test("停止生成：保留已生成的部分、标上「已停止」，不当作错误", async () => {
+  const conv = createConversation(undefined, "chat");
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = mock(async (_url: unknown, init: unknown) => {
+    const signal = (init as { signal?: AbortSignal }).signal;
+    const enc = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          enc.encode(
+            `data: ${JSON.stringify({ choices: [{ delta: { content: "半截回答" } }] })}\n\n`,
+          ),
+        );
+        // 之后一直挂着不动（模拟还在生成），直到请求被 abort。
+        signal?.addEventListener("abort", () => {
+          controller.error(new Error("The operation was aborted."));
+        });
+      },
+    });
+    return new Response(stream, { status: 200 });
+  }) as never;
+
+  try {
+    const pending = sendMessage(conv.id, "讲个长故事");
+    // 等第一个增量真的读进来（`full` 在读取时就累积，不等 40ms 的批量下发展示）
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(stopChatGeneration(conv.id).ok).toBe(true);
+    const res = await pending;
+
+    expect(res.ok).toBe(true);
+    // 落库内容 = 已生成的部分 + 停止标记（刷新会话后还在）
+    const messages = getConversation(conv.id).messages;
+    const last = messages[messages.length - 1]!;
+    expect(last.content).toContain("半截回答");
+    expect(last.content).toContain("已停止");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("没有在生成时按停止：如实回 ok:false，不报错", () => {
+  const conv = createConversation(undefined, "chat");
+  expect(stopChatGeneration(conv.id)).toEqual({ ok: false });
 });

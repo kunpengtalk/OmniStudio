@@ -126,11 +126,27 @@ export type SettingsKey =
   | "VIDEO_COMFY_CKPT"
   | "VIDEO_COMFY_CLIP"
   | "VIDEO_COMFY_VAE"
+  // AI 音乐生成（music-gen.ts）
+  | "MUSIC_BACKEND"
+  | "MUSIC_PROVIDER_ID"
+  | "MUSIC_MODEL"
+  | "MUSIC_LOCAL_API"
+  | "MUSIC_LOCAL_BASE"
+  | "MUSIC_LOCAL_MODEL"
   | "MODEL_DOWNLOADS"
   | "GATEWAY_ENABLED"
   | "GATEWAY_HOST"
   | "GATEWAY_PORT"
   | "GATEWAY_API_KEY"
+  /** 内网穿透：把上面的网关经 Cloudflare 隧道暴露到公网（见 bun/tunnel.ts）。 */
+  | "TUNNEL_ENABLED"
+  /** quick = 免账号的临时隧道（域名随机、重启即变）；token = 命名隧道（自己的域名）。 */
+  | "TUNNEL_MODE"
+  /** 命名隧道的 Token（加密存储）与公网域名（Host 白名单 + 拼接访问地址）。 */
+  | "TUNNEL_TOKEN"
+  | "TUNNEL_PUBLIC_HOST"
+  /** 出站协议：auto / http2（UDP 7844 被封时用）/ quic。 */
+  | "TUNNEL_PROTOCOL"
   | "WEB_SEARCH_ENABLED"
   | "WEB_SEARCH_PROVIDER"
   | "WEB_SEARCH_API_KEY"
@@ -142,6 +158,11 @@ export type SettingsKey =
   | "MEMORY_EMBEDDING_BASE"
   | "MEMORY_EMBEDDING_API_KEY"
   | "MEMORY_SCOPE_ENABLED"
+  /**
+   * 小应用「笔记」是否对 Agent 可见：开启时每条笔记沉淀一条索引级记忆，
+   * 且 Agent 拿到 note_list / note_search / note_read 三个只读工具（0=只是用户的私人笔记）。
+   */
+  | "NOTES_AGENT_ACCESS"
   | "TRANSLATION_ENGINE"
   | "AGENT_WORKSPACE"
   | "AGENT_WORKSPACES"
@@ -382,11 +403,27 @@ const DEFAULTS: Record<SettingsKey, string> = {
   VIDEO_COMFY_CKPT: "",
   VIDEO_COMFY_CLIP: "",
   VIDEO_COMFY_VAE: "",
+  // 云端生音乐：与生视频同一套做法 —— 厂商与模型在「设置 → 模型云服务」里配
+  // （MUSIC_PROVIDER_ID / MUSIC_MODEL），地址与密钥都来自厂商行。
+  MUSIC_BACKEND: "cloud",
+  MUSIC_PROVIDER_ID: "",
+  MUSIC_MODEL: "",
+  // 本地生音乐：**已预留、尚未接入引擎**。三把键先占好位，接入时只需补一个
+  // MUSIC_LOCAL_API 取值 + 一个 submit/poll 实现，不必再动设置面与界面。
+  MUSIC_LOCAL_API: "",
+  MUSIC_LOCAL_BASE: "",
+  MUSIC_LOCAL_MODEL: "",
   MODEL_DOWNLOADS: "[]",
   GATEWAY_ENABLED: "1",
   GATEWAY_HOST: "127.0.0.1",
   GATEWAY_PORT: "10000",
   GATEWAY_API_KEY: "",
+  // 隧道默认关：它把网关推到公网，必须是用户显式开启的能力（且要求先配 GATEWAY_API_KEY）。
+  TUNNEL_ENABLED: "0",
+  TUNNEL_MODE: "quick",
+  TUNNEL_TOKEN: "",
+  TUNNEL_PUBLIC_HOST: "",
+  TUNNEL_PROTOCOL: "auto",
   WEB_SEARCH_ENABLED: "1",
   WEB_SEARCH_PROVIDER: "bing",
   WEB_SEARCH_API_KEY: "",
@@ -400,6 +437,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   MEMORY_EMBEDDING_API_KEY: "",
   /** 是否把 Agent 写入记为项目记忆（按工作区隔离，1=开启）。 */
   MEMORY_SCOPE_ENABLED: "1",
+  /** 笔记对 Agent 可见（沉淀记忆 + 可读正文）：默认开，开关在笔记小应用的设置里。 */
+  NOTES_AGENT_ACCESS: "1",
   TRANSLATION_ENGINE: "model",
   AGENT_WORKSPACE: "",
   /** 最近使用的工作区列表（JSON 数组），供输入框上方的工作区选择面板展示。 */
@@ -522,12 +561,13 @@ const settingsCache = new Map<string, { value: string; at: number }>();
  * （网关 / chat / 翻译 / 嵌入等几十处 getSetting 调用点）零改动。这解决的是
  * 「密钥明文躺 SQLite」的问题：拷走数据库读到的是密文，而密钥只在内存里解密。
  *
- * 目前有两类：模型云激活行回写的 VLLM_API_KEY，以及本地 API 网关自身的
- * GATEWAY_API_KEY（网关是用户允许保留 Key 的两处之一，同样不该明文躺盘）。
+ * 目前有三类：模型云激活行回写的 VLLM_API_KEY、本地 API 网关自身的
+ * GATEWAY_API_KEY（网关是用户允许保留 Key 的两处之一，同样不该明文躺盘），
+ * 以及内网穿透用的隧道 Token（它等价于"在这条隧道上运行 cloudflared"的凭据）。
  * `EMPTY` 哨兵值不加密也不解密（它就是"无 key"的约定占位，解密会把它当成
  * 普通明文透传）。
  */
-const ENCRYPTED_KEYS = new Set<SettingsKey>(["VLLM_API_KEY", "GATEWAY_API_KEY"]);
+const ENCRYPTED_KEYS = new Set<SettingsKey>(["VLLM_API_KEY", "GATEWAY_API_KEY", "TUNNEL_TOKEN"]);
 
 function maybeEncrypt(key: SettingsKey, value: string): string {
   if (!ENCRYPTED_KEYS.has(key)) return value;

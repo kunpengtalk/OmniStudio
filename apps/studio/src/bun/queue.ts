@@ -8,6 +8,7 @@ import { getNumericSetting } from "./db/settings";
 import { getImagesBaseDir, imageUrl } from "./image-server";
 import { convertFileToImages, generate } from "./vllm";
 import { getWindowRef } from "./window";
+import { logEvent } from "./app-log";
 
 function notifyDocumentChanged(id: number) {
   getWindowRef().webview.rpc?.send.documentChanged({ id });
@@ -113,8 +114,17 @@ export async function processDocumentPages(id: number): Promise<void> {
 
           if (result.error) {
             hasError = true;
+            const message = result.errorMessage ?? "Unknown VLM error";
+            // 单页失败此前只写进 pages.error —— 界面看到某一页红着，日志里查不到为什么。
+            logEvent({
+              level: "error",
+              source: "ocr",
+              event: "ocr.document.page_failed",
+              message,
+              detail: { documentId: id, page: i + 1, error: result.error },
+            });
             db.update(pages)
-              .set({ status: "failed", failedAt: Date.now(), error: result.errorMessage ?? "Unknown VLM error" })
+              .set({ status: "failed", failedAt: Date.now(), error: message })
               .where(pageWhere)
               .run();
           } else {
@@ -169,7 +179,15 @@ export async function processDocumentPages(id: number): Promise<void> {
     notifyDocumentChanged(id);
   } catch (e) {
     const errorMsg = e instanceof Error ? (e.stack ?? String(e)) : String(e);
-    console.error(`Document ${id} processing failed:`, e);
+    // 这里原来只有 console.error：打包后 stderr 没人接，整个文档管线的顶层失败
+    // 在 app.log 里一个字都没有（"文档一直处理中/直接失败"无法事后定位）。
+    logEvent({
+      level: "error",
+      source: "ocr",
+      event: "ocr.document.failed",
+      message: e instanceof Error ? e.message : String(e),
+      detail: { documentId: id, error: e },
+    });
     db.update(documents)
       .set({ status: "failed", failedAt: Date.now(), error: errorMsg, updatedAt: Date.now() })
       .where(eq(documents.id, id))

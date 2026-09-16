@@ -727,21 +727,28 @@ export function permissionRequestForTool(call: ToolCallShape): PermissionRequest
  * 授权弹窗里的「本会话总是」默认会写成 allow；deny 记进会话规则则表现为
  * 「这会话别再问这个了，直接拒」。两者都只影响当前会话（用户显式选择）。
  */
+/**
+ * 用户可在设置页手写规则的权限名（含中文说明）。
+ * 这里是**唯一权威清单**：设置页的下拉选项通过 `getAgentPermissions` 拿的就是它，
+ * 避免前端再维护一份会漂移的副本（曾漏掉 websearch / doom_loop）。
+ * 内部的 knowledge / memory / ask / todo 不面向用户，不在此列。
+ */
+export const HUMAN_PERMISSION_LABELS: Record<string, string> = {
+  bash: "执行命令",
+  edit: "修改文件",
+  read: "读取文件",
+  external_directory: "访问工作区之外",
+  webfetch: "抓取网页",
+  websearch: "联网搜索",
+  mcp: "外部工具",
+  media: "生成媒体",
+  task: "派发子任务",
+  doom_loop: "重复调用保护",
+  sandbox_escalation: "跳过命令沙箱",
+};
+
 export function humanPermissionLabel(permission: string): string {
-  const map: Record<string, string> = {
-    bash: "执行命令",
-    edit: "修改文件",
-    read: "读取文件",
-    external_directory: "访问工作区之外",
-    webfetch: "抓取网页",
-    websearch: "联网搜索",
-    mcp: "外部工具",
-    media: "生成媒体",
-    task: "派发子任务",
-    doom_loop: "重复调用保护",
-    sandbox_escalation: "跳过命令沙箱",
-  };
-  return map[permission] ?? permission;
+  return HUMAN_PERMISSION_LABELS[permission] ?? permission;
 }
 
 /** 已授权的工作区之外目录（设置项，权限弹窗与设置页都会写）。 */

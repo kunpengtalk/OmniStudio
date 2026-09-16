@@ -18,18 +18,6 @@ import type { PermissionRule } from "../../../bun/permissions";
 
 type Action = "allow" | "ask" | "deny";
 
-const PERMISSION_NAMES = [
-  "bash",
-  "edit",
-  "read",
-  "external_directory",
-  "sandbox_escalation",
-  "webfetch",
-  "mcp",
-  "media",
-  "task",
-];
-
 const ACTION_STYLE: Record<Action, string> = {
   allow: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
   ask: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
@@ -182,7 +170,7 @@ export function PermissionsTab() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {PERMISSION_NAMES.map((name) => (
+              {(data?.permissionNames ?? []).map((name) => (
                 <SelectItem key={name} value={name}>
                   {name}
                 </SelectItem>

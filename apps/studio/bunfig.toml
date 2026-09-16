@@ -1,12 +1,23 @@
 # bun test 配置：预加载测试隔离脚本（临时数据目录 / 测试模式）。
 # 背景见 test-preload.ts —— 不隔离的话，单独跑测试会迁移真实用户数据库。
 #
-# 跑测试请用 `bun run test`（= `bun test --isolate`），不要直接 `bun test`：
+# 跑测试请用 `bun run test`（= `bun test --parallel`），不要直接 `bun test`，也别退回
+# `--isolate`：
 # `mock.module()` 的替换是**进程级**的，而默认模式下同一个 worker 会连跑多个文件、
 # 共享一份 module registry —— "谁先加载谁说了算"。本文件把 ./db/settings 换成 fake 之后，
 # 同 worker 里排在后面的 secrets.test.ts 拿到的就是那份 fake（updateSettings 成了空函数），
 # "落盘是密文"的断言只可能看到旧值；反过来也一样，手写的 ./cloud-providers fake 会盖住
 # 别的文件需要的真实实现。这个症状随 worker 数变化（32 核红 / 3 核绿 / 单跑某个文件又绿），
-# 排查一次的成本极高。`--isolate` 让每个测试文件各自一份 registry，文件之间互不影响。
+# 排查一次的成本极高。
+#
+# **`--isolate` 不够**：它给的是「每个文件一份全局对象」，module registry 仍在同一个
+# worker 里共享 —— 实测同一批用例 `--isolate` 会红 23 条（safeJoin / 备份 / 密钥加密 /
+# 厂商列表…全在毫不相干的文件里），换成 `--parallel`（每个文件一个独立进程）立刻全绿，
+# 而且更快（9.7s vs 25.9s，119 个文件）。所以这里用 --parallel。
+#
+# **需要 bun ≥ 1.4**：`--parallel` 是 1.4 才有的开关，1.3.x 上它会**被静默忽略**（不报
+# 未知参数），于是又回到"共享 worker + mock 泄漏"的老样子 —— CI 曾因此从绿变红：同一个
+# 提交本地 0 红、CI 80 红（runner 装的 1.3.9，来自 package.json 的 packageManager）。
+# 版本因此钉在 1.4.x；升级运行时时先确认 `bun test --help` 里还有 --parallel。
 [test]
 preload = ["./test-preload.ts"]

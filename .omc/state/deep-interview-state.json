@@ -1,0 +1,19 @@
+{
+  "active": false,
+  "current_phase": "consensus-plan-complete-pending-approval",
+  "task_description": "KB 图片查看功能（文档列表 + 问答召回两处）需求访谈",
+  "current_ambiguity": "0.11",
+  "interview_id": "kb-image-viewing-20260915",
+  "plan_path": ".omc/plans/ralplan-kb-image-viewing.md",
+  "plan_status": "pending approval",
+  "spec_path": ".omc/specs/deep-interview-kb-image-viewing.md",
+  "threshold": "0.2",
+  "threshold_source": "default",
+  "type": "brownfield",
+  "_meta": {
+    "mode": "deep-interview",
+    "sessionId": null,
+    "updatedAt": "2026-09-15T07:15:08.988Z",
+    "updatedBy": "state_write_tool"
+  }
+}

@@ -80,6 +80,8 @@ function kbFixture(overrides: Partial<KbFixture> = {}): KbFixture {
     embeddingModel: "BAAI/bge-m3",
     embeddingBase: "",
     embeddingApiKey: "",
+    embeddingProviderId: "",
+    rerankProviderId: "",
     embeddingDim: 1024,
     rerankModel: "",
     rerankBase: "",

@@ -92,10 +92,10 @@ try {
   check("添加数据源", files.length === 1);
 
   const docsReady = await waitFor(() => {
-    const docs = K.listDocs(kb.id);
+    const docs = K.listDocs(kb.id).docs;
     return docs.length === 2 && docs.every((d) => d.status === "ready");
   }, 15_000);
-  check("摄取完成（笔记+文件）", docsReady, JSON.stringify(K.listDocs(kb.id).map((d) => [d.name, d.status, d.error])));
+  check("摄取完成（笔记+文件）", docsReady, JSON.stringify(K.listDocs(kb.id).docs.map((d) => [d.name, d.status, d.error])));
 
   const kw = await K.recall([kb.id], "退款政策是怎样的");
   check("关键词召回有结果", kw.hits.length > 0, JSON.stringify(kw));

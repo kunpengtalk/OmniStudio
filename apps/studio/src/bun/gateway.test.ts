@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
@@ -205,7 +205,8 @@ mock.module("./model-servers", () => ({
 }));
 
 // 在所有 mock 注册后动态加载被测模块（静态 import 会被提升到 mock 之前执行）。
-const { startGateway, stopGateway, getGatewayStatus, generateGatewayApiKey, resetModelRouteCaches } = await import("./gateway");
+const { startGateway, stopGateway, getGatewayStatus, resetModelRouteCaches } = await import("./gateway");
+const GatewayKeys = await import("./gateway-keys");
 const { db } = await import("./db");
 const { usageRecords } = await import("./db/schema");
 
@@ -1157,6 +1158,17 @@ describe("OpenAI Responses tool calling (/v1/responses)", () => {
 });
 
 describe("API key auth", () => {
+  /**
+   * 每轮开始 / 结束都把 Key 清空：这些用例会让"当前有 Key"成为网关状态，
+   * 用例中途失败时若留在库里，后面的用例（不带鉴权的请求）会莫名 401。
+   */
+  const clearKeys = () => {
+    SETTINGS.GATEWAY_API_KEY = "";
+    for (const k of GatewayKeys.listGatewayKeys()) GatewayKeys.deleteGatewayKey(k.id);
+  };
+  beforeEach(clearKeys);
+  afterEach(clearKeys);
+
   test("open access when no key is configured", async () => {
     const res = await fetch(`${GATEWAY_BASE}/v1/models`);
     expect(res.status).toBe(200);
@@ -1196,15 +1208,52 @@ describe("API key auth", () => {
     }
   });
 
-  test("generateGatewayApiKey persists a key that works immediately", async () => {
-    const key = generateGatewayApiKey();
-    try {
-      expect(key).toMatch(/^osk-/);
-      const res = await fetch(`${GATEWAY_BASE}/v1/models`, authed(key));
-      expect(res.status).toBe(200);
-    } finally {
-      SETTINGS.GATEWAY_API_KEY = "";
-    }
+  /**
+   * 多 Key：列表里每一把（启用中）都能过闸，停用 / 删除立即失效。
+   *
+   * 关键是"立即"：网关不缓存 Key 集合，改动落库后下一个请求就该按新状态判 —— 否则
+   * 用户以为已经吊销，旧 Key 却还在放行。
+   */
+  test("新建的 Key 立即生效；停用 / 删除立即失效；没有启用的 Key 时回到开放访问", async () => {
+    const created = GatewayKeys.createGatewayKey("测试机");
+    expect(created.ok).toBe(true);
+    const first = created.ok ? created.key! : null;
+    expect(first?.key).toMatch(/^osk-/);
+    // 投影：settings 槽位指向这把 Key（/health、/docs、omi launch 读的都是它）
+    expect(SETTINGS.GATEWAY_API_KEY).toBe(first!.key);
+    expect((await fetch(`${GATEWAY_BASE}/v1/models`, authed(first!.key))).status).toBe(200);
+
+    const second = GatewayKeys.createGatewayKey("第二台");
+    const secondKey = second.ok ? second.key! : null;
+    // 两把同时有效，且镜像仍指向最早启用的那一把
+    expect((await fetch(`${GATEWAY_BASE}/v1/models`, authed(secondKey!.key))).status).toBe(200);
+    expect((await fetch(`${GATEWAY_BASE}/v1/models`, authed(first!.key))).status).toBe(200);
+    expect(SETTINGS.GATEWAY_API_KEY).toBe(first!.key);
+
+    GatewayKeys.setGatewayKeyEnabled(first!.id, false);
+    expect((await fetch(`${GATEWAY_BASE}/v1/models`, authed(first!.key))).status).toBe(401);
+    expect((await fetch(`${GATEWAY_BASE}/v1/models`, authed(secondKey!.key))).status).toBe(200);
+    // 停用后镜像切到仍然启用的那一把（隧道侧"有 Key 才允许开启"跟着走）
+    expect(SETTINGS.GATEWAY_API_KEY).toBe(secondKey!.key);
+
+    GatewayKeys.deleteGatewayKey(secondKey!.id);
+    // 没有任何启用的 Key = 历史行为：对本机进程开放访问
+    expect(SETTINGS.GATEWAY_API_KEY).toBe("");
+    expect((await fetch(`${GATEWAY_BASE}/v1/models`)).status).toBe(200);
+
+    GatewayKeys.deleteGatewayKey(first!.id);
+  });
+
+  test("列表会采纳直接写进设置槽位的 Key，不会留下看不见却能用的 Key", async () => {
+    SETTINGS.GATEWAY_API_KEY = "cli-written-key";
+    const keys = GatewayKeys.listGatewayKeys();
+    const adopted = keys.find((k) => k.key === "cli-written-key");
+    expect(adopted).toBeDefined();
+
+    // 采纳后能被正常吊销：删掉它 = 没有启用的 Key，槽位清空。
+    GatewayKeys.deleteGatewayKey(adopted!.id);
+    expect(SETTINGS.GATEWAY_API_KEY).toBe("");
+    expect(GatewayKeys.gatewayAuthTokens()).toEqual([]);
   });
 });
 

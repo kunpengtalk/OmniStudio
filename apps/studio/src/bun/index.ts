@@ -7,7 +7,8 @@ import "./db";
 import { startImageServer, onMediaServerStatusChange } from "./image-server";
 import { closeAllTerminals } from "./terminal-sessions";
 import { setWindowRef } from "./window";
-import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initMediaSetupBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast, initBackupBroadcast, broadcastCurrentStatus } from "./rpc";
+import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initTunnelBroadcast, initEngineInstallBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initMediaSetupBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast, initBackupBroadcast, broadcastCurrentStatus, dispatchRemoteRpc, initRemoteBroadcast, replayRemoteStatus } from "./rpc";
+import { installWebBridge } from "./gateway-web";
 import { seedIfNeeded } from "./prompt-library";
 import { initSkills, shutdownSkills } from "./skills";
 import { APP_NAME } from "./config";
@@ -18,6 +19,7 @@ import * as ServerManager from "./server-manager";
 import { stopAllServed } from "./model-servers";
 import { healDriftedChatConfig } from "./model-store";
 import * as Gateway from "./gateway";
+import * as Tunnel from "./tunnel";
 import { stopAsr } from "./asr";
 import { stopPpOcr } from "./ppocr";
 import { startControlServer, stopControlServer } from "./control-server";
@@ -140,6 +142,8 @@ initServerBroadcast(mainWindow);
 initModelDownloadBroadcast(mainWindow);
 initTTSModelDownloadBroadcast(mainWindow);
 initGatewayBroadcast(mainWindow);
+initTunnelBroadcast(mainWindow);
+initEngineInstallBroadcast(mainWindow);
 initMlxInstallBroadcast(mainWindow);
 initMlxModelDownloadBroadcast(mainWindow);
 initMediaSetupBroadcast(mainWindow);
@@ -152,6 +156,14 @@ mainWindow.webview.on("dom-ready", () => {
   broadcastUpdateStatus();
   // 刷新 / HMR 后 store 会重置，这里补推一次服务器与网关的当前状态。
   broadcastCurrentStatus(mainWindow);
+});
+
+// 网页端（/chat、/agent）：把 RPC 处理器表与推送总线接到网关上。
+// 界面是同一份前端产物，所以这里注入的也是同一批实现（白名单在 rpc/index.ts）。
+installWebBridge({
+  dispatch: dispatchRemoteRpc,
+  initBroadcast: initRemoteBroadcast,
+  replayStatus: replayRemoteStatus,
 });
 
 // CLI 控制通道（Unix socket），供 `omi` 命令唤醒/导航/管理。
@@ -214,6 +226,12 @@ if (Gateway.isGatewayEnabled()) {
   });
 }
 
+// 内网穿透（可选，默认关）：按用户的期望状态恢复上次开着的隧道。
+// 上一次进程被强杀时可能留下一条**没人管的公开隧道**，先清残留再对账。
+Tunnel.cleanupStaleTunnel();
+Tunnel.initTunnelGatewayBinding();
+void Tunnel.reconcileTunnel("startup");
+
 // 记忆库维护（启动后台跑一次）：补内容哈希、归档过期/长期未用的低价值记忆、补向量。
 // 知识库维护：恢复上次进程遗留的摄取作业、对账分块计数、修剪审计流水。
 // 都不阻塞窗口显示，也不影响首屏；失败只记日志。
@@ -241,6 +259,8 @@ void Promise.resolve()
 // Handle window close
 mainWindow.on("close", async () => {
   // 停掉**全部**已启动模型：推理进程是 detached 的，漏一个就留下占显存的孤儿。
+  // 隧道同理：漏掉就是留一条公开入口，所以先同步掐掉它（不等 cloudflared 优雅退出）。
+  Tunnel.stopTunnelSync();
   await Promise.all([stopAllServed(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
   // 侧边面板里的终端 shell：跟着窗口一起收掉，别留下没人管的会话。
   closeAllTerminals();
@@ -251,6 +271,7 @@ mainWindow.on("close", async () => {
 
 // Cleanup on quit
 Electrobun.events.on("before-quit", async () => {
+  Tunnel.stopTunnelSync();
   await Promise.all([stopAllServed(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
   closeAllTerminals();
   shutdownSkills();
@@ -266,6 +287,7 @@ process.on("SIGTERM", () => {
     message: "收到 SIGTERM，正在停止推理服务与子进程",
   });
   ServerManager.forceKill();
+  Tunnel.stopTunnelSync();
   void Gateway.stopGateway();
   stopControlServer();
 });
@@ -280,6 +302,7 @@ process.on("uncaughtException", (err) => {
   });
   console.error("Uncaught exception:", err);
   ServerManager.forceKill();
+  Tunnel.stopTunnelSync();
   void Gateway.stopGateway();
   stopControlServer();
 });
@@ -295,6 +318,7 @@ process.on("unhandledRejection", (reason) => {
   });
   console.error("Unhandled rejection:", reason);
   ServerManager.forceKill();
+  Tunnel.stopTunnelSync();
   void Gateway.stopGateway();
   stopControlServer();
   process.exit(1);

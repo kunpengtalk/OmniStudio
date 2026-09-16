@@ -12,6 +12,7 @@
  * 结果可以直接对比。
  */
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
+import { logEvent } from "./app-log";
 import { tmpdir } from "os";
 import { join } from "path";
 import { getDataDir } from "./paths";
@@ -174,9 +175,25 @@ export async function ensureEvalData(
 
 function readJsonl(name: string): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
+  let bad = 0;
+  // 逐行解析：数据集是从公网下载的，个别损坏行不该让整次评测直接失败。
   for (const line of readFileSync(dataFilePath(name), "utf-8").split("\n")) {
     const trimmed = line.trim();
-    if (trimmed) out.push(JSON.parse(trimmed));
+    if (!trimmed) continue;
+    try {
+      out.push(JSON.parse(trimmed));
+    } catch {
+      bad += 1;
+    }
+  }
+  if (bad > 0) {
+    logEvent({
+      level: "warn",
+      source: "benchmark",
+      event: "eval.dataset.bad_lines",
+      message: `${name}: 跳过 ${bad} 行无法解析的 JSON`, 
+      detail: { file: name, badLines: bad },
+    });
   }
   return out;
 }

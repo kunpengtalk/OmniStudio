@@ -1,6 +1,7 @@
 // skills.sh 市场：榜单（HTML 解析）+ 搜索（JSON API）+ 结果缓存。
 import type { SkillsShSkill, SkillsLeaderboard } from "../../shared/skills";
 import { getCache, setCache } from "./store";
+import { logEvent } from "../app-log";
 
 const BASE = "https://skills.sh";
 const UA = "omnistudio-skills";
@@ -90,10 +91,29 @@ export async function fetchLeaderboard(board: SkillsLeaderboard): Promise<Skills
   if (cached) return cached;
   const url = board === "alltime" ? `${BASE}/` : `${BASE}/${board}`;
   const res = await fetchWithTimeout(url);
-  if (!res.ok) throw new Error(`skills.sh ${board} HTTP ${res.status}`);
+  if (!res.ok) {
+    logEvent({
+      level: "warn",
+      source: "skills",
+      event: "skills.market.fetch_failed",
+      message: `skills.sh ${board} HTTP ${res.status}`,
+      detail: { board, url, status: res.status },
+    });
+    throw new Error(`skills.sh ${board} HTTP ${res.status}`);
+  }
   const html = await res.text();
   const items = parseLeaderboardHtml(html);
-  if (items.length === 0) throw new Error("skills.sh parse empty");
+  if (items.length === 0) {
+    // 站点改版 / 被挡时的表现是"榜单永远空的"，这是唯一能看出"页面结构变了"的信号。
+    logEvent({
+      level: "warn",
+      source: "skills",
+      event: "skills.market.parse_empty",
+      message: `skills.sh ${board} 解析不到条目（页面结构可能变了）`,
+      detail: { board, url, htmlLength: html.length },
+    });
+    throw new Error("skills.sh parse empty");
+  }
   setCache(key, items);
   return items;
 }
@@ -106,7 +126,16 @@ export async function searchSkillssh(query: string, limit = 60): Promise<SkillsS
   const res = await fetchWithTimeout(
     `${BASE}/api/search?q=${encodeURIComponent(q)}&limit=${effective}`,
   );
-  if (!res.ok) throw new Error(`skills.sh search HTTP ${res.status}`);
+  if (!res.ok) {
+    logEvent({
+      level: "warn",
+      source: "skills",
+      event: "skills.market.search_failed",
+      message: `skills.sh search HTTP ${res.status}`,
+      detail: { query: q, status: res.status },
+    });
+    throw new Error(`skills.sh search HTTP ${res.status}`);
+  }
   const json = await res.json();
   const items: unknown[] = Array.isArray(json) ? json : (json?.skills ?? []);
   const out: SkillsShSkill[] = [];

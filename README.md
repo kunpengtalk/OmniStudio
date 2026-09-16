@@ -177,7 +177,7 @@ apps/
 │       │   ├── db/         #   Drizzle schema, migrations, settings 数据库
 │       │   ├── skills/     #   Skills manager: central repo, sync, presets, backup 技能管理
 │       │   ├── control-server.ts  #   `omi` CLI ↔ 应用控制通道（Unix socket）
-│       │   └── ...         #   chat / voice / image / video / OCR / translation / knowledge (RAG) /
+│       │   └── ...         #   chat / voice / image / video / music / OCR / translation / knowledge (RAG) /
 │       │                   #   memory / MCP (client + server) / model hub / downloads / stats / updates
 │       │                   #   对话、语音、图片、视频、OCR、翻译、知识库、记忆、MCP、模型市集、下载、统计、更新
 │       ├── cli/            # `omi` 命令行（bin/omi.ts 入口，复用 bun 数据层与运行时）
@@ -197,6 +197,7 @@ apps/
 - [x] Image generation loop for the Image app 图片应用生图闭环
 - [x] `omi` CLI: launch app / server / cloud, model picking, launcher tools, status & logs 命令行 omi（启动应用/服务器/云端、选模型、拉起编码工具、状态与日志）
 - [x] AI video generation (MiniMax / Seedance / ComfyUI) with task polling and history AI 视频生成（三后端 + 任务轮询 + 历史库）
+- [x] AI music generation (StepFun / MiniMax, local engine reserved) — song / cover / vocal scoring AI 音乐生成（StepFun / MiniMax 双协议，本地引擎已预留：歌曲 / 翻唱 / 干声配乐）
 - [x] Local RAG knowledge base (hybrid BM25 + vector recall) with chat citations 本地知识库（混合检索 + 对话引用溯源）
 - [x] Shared memory across agents (built-in tools, gateway REST / MCP, `omi memory`) 跨 Agent 共享记忆（内置工具 / 网关 / CLI 三通道）
 - [x] Skills manager: central repo, 53 tool adapters, presets, Git backup Skills 管理与中央库同步

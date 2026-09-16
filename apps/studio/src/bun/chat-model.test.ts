@@ -146,6 +146,7 @@ type FakeProvider = {
 const asProviderInfo = (p: FakeProvider): CloudProviderInfo => ({
   vendor: "",
   videoApi: "",
+  musicApi: "",
   createdAt: 0,
   updatedAt: 0,
   enabled: false,
@@ -402,6 +403,11 @@ describe("listChatModels 的云端条目", () => {
           { id: "doubao-seedance-1-0-lite-t2v-250428" },
           // 显式标了用途的以标注为准：名字像对话的生视频模型也不能进对话列表。
           { id: "omni-chat-video-edition", type: "video" },
+          // 实时语音（`*-realtime-*`）自动识别落在 other，而 other 是**保留**的：
+          // 它在对话页被选中后只会在发消息时被上游拒掉。实时语音在通话页选。
+          { id: "stepaudio-3-realtime-preview", type: "other" },
+          { id: "stepaudio-2.5-realtime" },
+          { id: "qwen-audio-3.0-realtime-plus" },
           // 反过来，明确标成对话的照常保留（自建 / 微调的模型名往往认不出来）。
           { id: "my-private-llm", type: "chat" },
           { id: "my-model-7b" },

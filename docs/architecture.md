@@ -5,6 +5,7 @@
 - 功能与用法见 [README.md](../README.md)
 - 迭代计划与未完成任务见 [ROADMAP.md](../ROADMAP.md)
 - 命令行手册见 [omi-cli.md](./omi-cli.md)
+- 基准测试的缓存场景（命中 / 不命中的判定与常见坑）见 [benchmark-caching.md](./benchmark-caching.md)
 - 给 AI 编码助手的精简版约定见 [AGENTS.md](../AGENTS.md)
 
 ---
@@ -125,6 +126,25 @@ apps/
 `server-manager.ts` 是 facade：持有 listener 集合，引擎切换时把外部订阅重挂到新 runtime 上，对外暴露稳定的 `startServer` / `stopServer` / `getLogs` 等。所有消费者（RPC、chat、OCR、gateway、应用启停）都只认这一层。
 
 **引擎选择的真源是 `shared/engines.ts`**：每个引擎声明自己的端口设置键、额外参数键、支持的权重格式、是否 macOnly。加引擎只需改这里 + 写一个 Runtime 实现。
+
+**引擎可以一键安装，用户不必复制安装命令**（`bun/engine-install.ts` 是入口，`bun/python-engine.ts` 是 venv 内核，`bun/engine-paths.ts` 是落盘位置的唯一真源）。两条路径，对界面是一件事：
+
+- **llama.cpp**：下载官方预编译二进制。上游**没有可用的「latest」**（`releases/latest` 指向一个只放 `nightly-tag.txt` 的稳定标签），所以安装时读 releases 列表挑最新的 `b<构建号>`，再按平台 / 显卡在资产名里匹配（`llama-b10976-bin-macos-arm64.tar.gz`）—— 构建号每次都在变，写死必坏；上游改过 `-bin-` 前缀与 `.tar.gz` 后缀，规则逐条降级：GPU 变体拿不到就退 CPU。有 NVIDIA 的 Linux / Windows 会连配套的 `cudart-*` 包一起下（缺了它 CUDA 构建根本起不来），装完用 `--list-devices` 验证 GPU 后端真的能起来，起不来就自动回退 CPU 构建重装；AMD / Intel 独显走 Vulkan（不需要额外运行库）。解包 → 补执行位 → `--version` 自证 → 原子 rename 到 `<dataDir>/engines/llama.cpp/current`，macOS 上跑不起来先兜一次 ad-hoc 重签名再判失败。
+- **mlx-lm / vLLM / SGLang**：在 `<dataDir>/engines/<id>` 建独立 venv 装 pip 包（uv 优先、回退 `python -m venv`；默认 PyPI 源失败自动换清华镜像重试）；装完以「模块导得进来」为准验证，导不进来就把这半个环境删掉 —— 下次不会再被判成"已安装"。平台能力判定在 `shared/engines.ts` 的 `engineInstallSupport`（vLLM / SGLang 官方只发 Linux 的 CUDA 轮子，macOS / Windows 上界面只给手动提示），界面按钮与主进程行为读的是同一份，不会出现"点下去必然失败"的按钮。
+
+**托管安装优先于 PATH**：四个 runtime 的 `checkBinary` 都先看托管目录（llama.cpp 的 `current/llama-server`、Python 引擎的 venv 解释器），再回落到 `Bun.which` / 常见安装路径 —— 用户自己装过的照旧能用（不接管、不删除），应用自己装的那份是版本可查、与启动参数对得上的一份。安装过程经 `initEngineInstallBroadcast` 推送（日志 80ms 合批、阶段 `throttleLatest` 合并），`getSetupEnvironment` 一并下发 `installSupport` / `installedVersions` / `installing`（`installing` 让界面在**重载之后**仍显示"安装中"，而不是让用户以为没反应又点一次）。
+
+**机器画像决定首屏推荐什么**：探测在 `bun/hardware.ts`，纯计算在 `shared/hardware.ts`，界面在 `mainview/app/setup-screen/`。探测只用系统自带命令 —— macOS 走 `sysctl -n machdep.cpu.brand_string`（Apple 芯片直接回 `Apple M3 Ultra`）与 `hw.physicalcpu/logicalcpu`，**只有 Intel Mac 才跑 `system_profiler SPDisplaysDataType`** 拿独显型号与显存（秒级命令；Apple 芯片的 GPU 就是芯片本身，不必再跑）；Linux / Windows 用 `nvidia-smi` 查显存，其余走 `node:os`。结果缓存在进程里（芯片和内存不会在运行期变），随 `getSetupEnvironment` 一起下发 —— 引导页没有新增 RPC。命令与系统信息都可注入，四条平台路径在 `bun/hardware.test.ts` 里用假 runner 各走一遍（CI 上没有 Apple 芯片，本地是 Apple 芯片，两边都要能断言）。
+
+内存预算有三个口径，界面上的「推理可用预算」是后面所有"约占多少内存"的比较基准：Apple 统一内存取物理内存的 **75%**（macOS 默认的 GPU wired 上限）、独显取显存的 **90%**、纯 CPU / 核显取内存的 **60%**。模型占用 = 权重（量化的真实体积）+ KV 缓存（层数 × KV 头 × head_dim × 2(K/V) × 2B × 上下文，引导页按 8K 估）+ 运行期开销（权重的 5%，下限 512MB）；占用 / 预算的比例分四档：≤60% 流畅、≤80% 可用、≤100% 偏紧、超过即装不下。
+
+推荐规则全在 `shared/hardware.ts`（引擎推荐只回理由代号，文案在界面侧）：
+
+- **引擎**：装了 mlx-lm 的 Apple 芯片 → MLX，≥48GB 显存的 NVIDIA 且装了 vLLM → vLLM，其余 → llama.cpp。vLLM 的门槛偏高是刻意的：它的预设只有 bf16 权重（没有量化档），显存不够大时"上 vLLM"反而把能跑的模型砍小一档（24GB 卡上 llama.cpp + 量化能装下 27B，vLLM 只装得下 4B）。
+- **模型**：先看跑得舒服（流畅 / 可用）的那批，挑参数最大的（MoE 按总参数记）；一个都不舒服才在"装得下"的范围里挑；全都装不下就返回 null，界面保留原选择并标「超出内存」。
+- **量化档**：先认目录里的默认档（Q4_K_M 这类质量 / 体积甜点档），机器很宽裕就往上抬一档，默认档偏紧或装不下就退到装得下的最大档。
+
+用户点过任意模型或档位之后，推荐不再覆盖他的选择（`modelTouched` / `touchedQuants`）。
 
 几个关键实现细节：
 
@@ -249,6 +269,18 @@ kb-events  审计流水：导入 / 删除 / 重新处理 / 配置变更 / 检索
 - **审计与观测**：`memory_events` 记录写入/合并/取代/归档/删除（删除只留 60 字摘要），`memory_metrics`
   累计检索次数、命中率、合并与拦截次数 —— 记忆页与 `omi memory stats` 都读它。
 
+**笔记也往记忆里沉淀**（`memory.ts` 的 `syncNoteMemory`）：小应用「笔记」每保存一条就写一条
+**索引级**记忆（`笔记《标题》（日期）：正文压缩，≤500 字`，`sourceRef = note:<id>`），于是 Agent 靠
+既有三条通路（常驻核心块 / 每轮召回 / `memory_search`）就能"想起"用户写过什么。三个刻意的边界：
+记忆是**单行短句**，正文细节仍以笔记为准（笔记 2 万字、记忆 500 字，用途本来就不同）；同一条笔记
+反复保存只更新同一条记忆（按 `sourceRef` 幂等），删笔记时连记忆一起删（否则 Agent 会记得一条打不开的笔记）；
+疑似凭据的笔记**不进记忆库**（记忆会被注入所有 Agent 的上下文，凭据只能放密钥管理），正文照常落库。
+**Agent 还能读正文**：`note_list` / `note_search` / `note_read` 三个只读工具（`bun/notes-tools.ts`，Plan 模式也给）——
+只沉淀记忆是不够的：模型能"想起"一篇日记却读不到正文时，用户问「看看我的日记」它只能去 grep 工作区，
+最后回一句"这只是记忆里的内容"。所以记忆摘要末尾会挂一句 `（完整正文：note_read #<id>）`，
+让"想得起"直接接上"读得到"。开关是一把 `NOTES_AGENT_ACCESS`（笔记小应用设置里，默认开）：
+同时管沉淀与可读——用户脑子里的问题是同一个"要不要让 Agent 看到我的笔记"，拆成两个开关只是拆成两道题。
+
 对外四条通道（网关 REST `/v1/memories`、网关 MCP、`omi memory mcp` stdio、`omi memory add/search/export/import`）
 共用 `memory-api.ts` / `memory.ts` 里的同一份实现，行为一致；`memory-sync.ts` 把「该常驻的那批」写进
 CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `memory_search`）。
@@ -259,7 +291,16 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 
 文档管线是 `上传 → pdfjs/canvas 逐页渲染（或 sharp 归一化）→ 信号量并发（默认 3）→ VLM 识别 → HTML/Markdown 解析 → 按 bbox 裁图存 WebP`。裁剪出的图片文件名用**内容 md5**，保证同一张图跨页去重后名字一致。
 
-**语音**：ASR 三条路径（audio.cpp / whisper.cpp / 远端 OpenAI 兼容），TTS 三条（本地 audio.cpp GGUF / vLLM 兼容端点 / Edge TTS 兜底）。通话有两种模式——本地半双工（增量转写 + 句切分 + 逐句合成，支持抢话打断）和云端全双工（DashScope Realtime WebSocket）。
+**语音**：ASR 三条路径（audio.cpp / whisper.cpp / 远端），TTS 三条（本地 audio.cpp GGUF / vLLM 兼容端点 / Edge TTS 兜底）。通话有两种模式——本地半双工（增量转写 + 句切分 + 逐句合成，支持抢话打断）和云端全双工（Realtime WebSocket）。
+
+云端语音的**厂商差异只写在两处**：TTS 走 OpenAI 兼容的 `/v1/audio/speech`（各家形状一致，差别只有音色名 —— `shared/tts-voices.ts` 收官方音色清单，以及"别家留下的占位音色换成这一家的默认值"这条规则）；ASR 与实时语音各有一层方言，由 `realtimeDialectFor`（地址为主、模型名为辅）判出：
+
+| 厂商 | ASR | 实时语音 | 上行音频 |
+| --- | --- | --- | --- |
+| 百炼（DashScope） | OpenAI 兼容 `/v1/audio/transcriptions`（multipart） | `wss://…/api-ws/v1/realtime`，格式 `pcm`、断句 `smart_turn` / `semantic_vad` | 16k |
+| 阶跃星辰（StepFun） | `/v1/audio/asr/sse`（base64 + SSE 增量文本：StepAudio 3 ASR 只在这个端点，带时间戳的文件接口要公网可下载的 URL） | `wss://api.stepfun.com/v1/realtime`，格式 `pcm16`、只认 `server_vad`、不能发手工 commit | 24k |
+
+`realtimeBaseUrlForProvider` 把厂商的 HTTP 地址推成实时端点，所以换厂商时地址、模型、音色会一起跟着换（手填的中转地址除外）。
 
 **Bun ↔ Python worker 协议**是这层最值得记住的设计：**stdin/stdout 逐行 JSON（JSON-lines），stderr 留给 Python 侧的进度输出**（mflux 的 tqdm、paddle 的日志）。命令一般是 `load` / `generate|recognize` / `quit`，事件是 `phase` / `loaded` / `done` / `error`。常驻 worker 的价值是模型只加载一次、反复生成；MLX worker 空闲 10 分钟自动卸载，PP-OCR worker 加载有 5 分钟、识别有 3 分钟超时兜底（防"无限识别中"）。
 
@@ -269,7 +310,9 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 | --- | --- | --- | --- |
 | RPC | 进程内 | — | webview ↔ 主进程 |
 | 控制 socket | `<userData>/omni-control.sock` | 文件权限 0600 | `omi` CLI 用，HTTP over Unix socket |
-| API 网关 | `127.0.0.1:10000` | `GATEWAY_API_KEY`（可选） | 见下 |
+| API 网关 | `127.0.0.1:10000` | 网关 API Key（可多把，`gateway_keys` 表） | 见下 |
+| 网页版对话 / Agent | 同上 `/chat`、`/agent` | 页面本身公开，数据接口要 API Key | 见下 |
+| 内网穿透 | 出站到 Cloudflare 边缘 | 同上（**强制**，至少要有一把启用的） | 见下 |
 | 图片/媒体服务 | `127.0.0.1:19782` | **无** | 所有媒体产物出口 |
 | 推理服务 | 18080（llama）/ 8081（vLLM）/ 8082（SGLang）/ 18010（MLX） | — | 由 server-manager 管理 |
 | 嵌入服务 | 18190 起（`EMBEDDING_PORT`，段宽 100 顺延；实际端口以应用注册表为准） | — | 嵌入类模型经 llama-server `--embeddings` 服务，不接管聊天活动状态 |
@@ -286,6 +329,29 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 - 文档：`/health`、`/openapi.json`、`/docs`、`/redoc`
 
 网关端口被占时自动 +1..+19 顺延。**鉴权之前**先做 Origin 白名单与 Host 回环校验（防 DNS rebinding），并有 `isSelfBase` 检测防止把上游配成网关自己导致无限递归。
+
+**API Key 是一份列表，不是一个设置项**（`bun/gateway-keys.ts` + `gateway_keys` 表）：每把 Key 带名字，可单独停用 / 删除，网关**每个请求现读**启用的那些 Key，所以改动立即生效、不需要重启，也不用担心"吊销了旧 Key 还在放行"。列表之外还有两件事要知道：`settings.GATEWAY_API_KEY` 保留为**镜像**（= 最早启用的那把，没有则为空串），隧道判定、`/health`、`/docs`、`omi launch`、KB 接入页读的都是它；外部直接写进这个槽位的值（`omi serve --api-key`）会在下一次读列表时被**采纳**成一行，否则会出现"不在列表里却一直能用"的隐形 Key。没有启用的 Key（且槽位为空）时回到历史行为：对本机进程开放访问，公网暴露期间一律 401。
+
+**网页版对话 / Agent**（`bun/gateway-web.ts` + `mainview/remote-shell.tsx` + `mainview/lib/remote.ts`）把桌面端的**同一份前端**搬到浏览器里，只留这两个窗口：
+
+- **不是重画一套页面**：`/chat`、`/agent` 发出去的就是 vite 构建出来的那份 webview 产物（`Resources/app/views/mainview/`），组件、样式、stores 全部是应用自己的；浏览器里 `main.tsx` 检测不到 Electrobun 桥时改挂 `RemoteShell`（关键闸门 + 两个入口）而不是整套 `MainLayout`。
+- **换的只有传输层**：`lib/rpc.ts` 在浏览器里 `rpc.setTransport(createHttpTransport())` —— 请求 POST `/v1/web/rpc`，推送走 **WebSocket `/v1/web/ws`**（帧名就是桌面端 `send.<名字>`）。RPC 之上的东西一行没改。
+  事件流**必须走 WS，不能用 SSE**：Cloudflare 隧道会把 SSE 响应整段缓冲（实测隧道域名下 40 秒 0 字节，心跳与 2KB 开场填充都无效，而回环直连正常），后果是界面永远收不到 `chatDone`、停在"处理中"。`/v1/web/rpc/events` 的 SSE 版本保留给 curl / 脚本（只在回环可靠）。WS 握手指不了 Authorization 头，所以它认 RPC 桥下发的那枚票据 Cookie。
+- **布局照抄 MainLayout 的层级**：`SidebarProvider > AppSidebar + SidebarInset`，顶栏作为 inset 里的 header。少一层 `SidebarInset` 就断掉对话窗口的 flex 链条 —— 表现是消息浮在顶部、输入框悬在页面中间。
+- **推送零清单**：`init*Broadcast(win)` 只用到 `win.webview.rpc?.send.<名字>(payload)`，于是给它们喂一个**假窗口**（Proxy 接住每个名字转 WS 帧）就复用了全部几十种推送；新客户端连上时还要 `broadcastCurrentStatus` 补一次快照（推送是"变化时发"）。
+- **暴露面收口在两处**：`REMOTE_METHODS` 白名单（只放对话 / Agent 用得到的方法；宿主弹窗、落盘、装引擎、改审批模式一律拒绝）、`getSettings` 出站前按 `REMOTE_SECRET_KEY` 抹掉所有凭据字段。被拒的方法写 `web.rpc.denied` 进 app.log。
+- **远程不渲染**：右侧工作面板（终端 / 内置浏览器 / 评审）、自动化 / 插件子视图、设置页入口。
+- **媒体走代理**：`<img>`/`<video>` 带不了 Authorization 头，所以 RPC 鉴权通过时下发一枚 HMAC 签名的 Cookie（`omni_media`，进程重启即失效），`/media/*` 认 Cookie 或 Key，并透传 Range（视频拖动依赖）。前端用 `setMediaBaseOverride()` 把媒体基址指向 `<站点>/media`。
+- **vite `base: "./"`** 是这套方案的前提：同一份产物既要被 `views://mainview/index.html` 加载，又要被网关当作 `/chat` 下的静态站点（绝对 `/assets/...` 在子路径下会 404）。
+
+**内网穿透**（`bun/tunnel.ts` + `bun/cloudflared.ts`）把网关经 Cloudflare 隧道暴露到公网，让远程客户端 / Agent 用同一套端点（含上面那两个网页）。几个不能丢的约束：
+
+- **出站连接，不开入站端口**：不要求公网 IP、不动路由器，TLS 与域名由 Cloudflare 边缘负责。目标端口永远取网关**实际**绑定的端口（配置端口被占时会顺延）。
+- **强制 API Key**：一把启用的网关 Key 都没有（`gateway_keys` 为空 / 全被停用）就不许开隧道 —— 公网 URL 泄漏等于把模型算力、共享记忆、素材库一起送人。隧道期间 Key 被停用 / 删除会立刻下线隧道（主进程在密钥增删改后重新对账）。
+- **Host 白名单而不是改绑定**：隧道期间把公网域名交给 `setGatewayPublicExposure()`，`hostHeaderAllowed` 放行这一个域名；同时 `/`、`/health` 也要求 Key（`/docs`、`/redoc`、`/openapi.json` 是静态内容，保持开放）。比让用户改 `GATEWAY_HOST=0.0.0.0` 安全：后者会同时关掉 DNS-rebinding 防护并真的监听所有网卡。
+- **二进制由应用自己装**：`<dataDir>/engines/cloudflared/current`（多镜像下载 + 跑一次 `--version` 验证 + 原子 rename），PATH 上已有则直接用用户的；`--no-autoupdate` 必须带，否则 cloudflared 自己重启会让我们失去进程生命周期控制。
+- **进程托管**：detached + 进程组 kill，退出路径用 `stopTunnelSync()`；`<dataDir>/tunnel/cloudflared.pid` 用于下次启动清理被强杀遗留的公开隧道（只杀命令行里带 cloudflared 的进程）。
+- 快速隧道（免账号、域名随机）与命名隧道（`--token`，自己的域名 + 可叠 Cloudflare Access）两种模式；协议回退用环境变量 `TUNNEL_TRANSPORT_PROTOCOL`（UDP 7844 被封时切 HTTP/2），cloudflared **没有** `--protocol` 参数。
 
 **图片服务**无鉴权且提供文档图片、音频、视频，因此**必须只绑回环** —— 绑全网卡等于把用户文档和录音公开。它支持 HTTP Range（视频拖动播放必需），并给视频容器补了 MIME。
 
@@ -335,7 +401,7 @@ SERVER_MODE=remote 的 VLLM_API_BASE > 聊天活动端口** 依次解析（embed
 
 **导航是显式的双层状态，没有 URL 路由**：
 
-- `stores/app.ts` 管 `activeApp`（13 个应用：chat / agent / voicecall / voice / image / video / ocr / translate / prompt / skills / kb / memory / automations）
+- `stores/app.ts` 管 `activeApp`（14 个应用：chat / agent / voicecall / voice / image / video / music / ocr / translate / prompt / skills / kb / memory / automations）
 - `stores/router.ts` 管 8 种路由（index / settings / server / stats / models / model-detail / chat / document）
 - `AppRail`（左侧 48px 图标栏）切应用并把路由重置为 index；`AppSidebar` 按 `activeApp` 渲染不同的列表；`main-layout/index.tsx` 的 Outlet 里，settings / models / model-detail / document 这类覆盖整个内容区，其余兜底 `renderActiveApp(activeApp)`
 
@@ -351,6 +417,22 @@ SERVER_MODE=remote 的 VLLM_API_BASE > 聊天活动端口** 依次解析（embed
 组件调主进程**没有封装层**：直接 `import { rpcClient }` 然后 `rpcClient.xxx()`。全项目约 220 处调用，语音页最多（53 处）。只有一处轻封装：`lib/use-engine.ts`（读写引擎设置）。
 
 **i18n** 是单文件双语词典 `shared/i18n.ts`（3000+ 键）+ 简单的 `{name}` 插值，运行时语言存 `stores/ui-lang.ts`，默认中文、回落链 zh → en → key。设置页的 tab 结构、屏幕与路由的映射关系见 `main-layout/settings.tsx` 的 `TAB_DEFS` / `TAB_GROUPS`。
+
+### 6.1 小应用中心（Mini Apps）
+
+`activeApp = "apps"` 是一页**装小应用的容器**，不是又一个工具页：外面是应用中心（卡片墙 + 搜索 + 分类），点进去是运行容器（`app/apps/runner.tsx`）。
+
+**小应用就是一份自包含 HTML**，放在 `src/mainview/miniapps/<id>.html`，用 `?raw` 取原文塞进 `<iframe sandbox srcDoc>`。它不参与主前端构建：新增一个小应用 = 加一个 HTML + 在 `shared/miniapps.ts` 登记一条，不用改 vite 入口，也不会因为新页面把主包顶大。宿主在页面 `<head>` 里注入三样东西 —— 基础样式（`MINIAPP_BASE_STYLE`，主题变量与按钮/输入/卡片这套"组件库"）、启动配置、以及 `window.omni` 运行时。
+
+**沙箱不给 `allow-same-origin`**：小应用与宿主必须跨源，它碰不到宿主的 DOM / store / localStorage —— 那里面 `window.localStorage` 连读都会抛 SecurityError。想留住数据只有两条路：交给用户（`omni.files.save` 落到系统下载目录），或交给宿主存储（见下）。
+
+**「笔记」是第一个需要落库的小应用，也是"小应用数据"这条路径的样板**（`bun/notes.ts` + `miniapp_notes` 表 + `images/notes/`）：正文进主库、附件进数据目录，于是笔记跟着 `omi backup` 一起走、重装不丢、CLI 也读得到 —— 这三件事是"存成文件"给不了的。为此新加了四个动作（`notes.list` / `notes.save` / `notes.remove` / `notes.attach`）与对应的四个 RPC（`miniappNotes*`）。两条必须守住的规则：**附件 ref 只认宿主自己生成的形状** `notes/<附件 id>/<文件名>.<图片后缀>`（删笔记要按 ref 反推目录并整目录删掉，形状放松一点就等于给沙箱开了"删数据目录里的任意目录"），以及**尺寸 / 体积在宿主侧再夹一次**（长边超 2048 压到 2048 并转 webp，单张上限 12MB）；被放弃的新建草稿会留下无引用附件，由 `listNotes` 的一次性回收（只删 24 小时以前、无引用的目录）兜底。界面侧是一套"窄栏 + 内容区"的应用壳（日记 / 日历 / 标签 / 设置四项），不做组件复用，全在同一个 HTML 里 —— 与其它小应用一致的取舍：多一行配置不如多一份自包含的文件。**正文是 Markdown**：编辑就在内容区里做（不是弹窗抽屉），顶部标题、底部一条格式工具栏、右上 ✓ 保存并返回，编辑 / 分栏 / 预览三档；图片以 `![](媒体地址)` 的形式写在正文里（同时登记在附件列表中，保存时正文里已删掉的那些会被连文件一起回收），列表卡片上的摘要是剥掉语法后的纯文本。渲染器是本页自带的一小段（`mdToHtml`）—— 小应用引不进依赖，而正文是用户输入，**先整段转义、再套标记**、链接只放行 http(s) 是这里唯一需要自己把关的安全点（顺序颠倒就等于自己开了一个 XSS 口子）。「AI 助手」（润色 / 续写 / 起标题，走 `text.complete`）钉在同一条工具栏上，没配模型只禁用那几个按钮，写正文不受影响。**对话与 Agent 的助手消息上有「保存到笔记」**（草稿规则抽在 `mainview/lib/note-draft.ts`：`# 标题` 优先、否则短首行当标题并从正文里取走，两边共用一份）；保存成功后只把按钮改成 ✓，**不把用户从正在读的回答里拽走**。
+
+**能力走宿主转发，没有任意方法透传**：小应用能说的动作全都列在 `shared/miniapps.ts` 的 `MINIAPP_ACTIONS` 里（生图 / 以图改图 / 本地抠图的状态、下载与执行 / 麦克风录音 / 转写 / 一次性补全 / 笔记的读写与附件 / 选文件 / 读回文件 / 存文件 / 跳设置 / 记日志 / 读能力），**要加能力必须在那张表里加一条**。`lib/miniapp-bridge.ts` 的 `dispatchMiniAppRequest` 逐个翻译成具体 RPC，**参数一律当不可信输入**（长度、范围、枚举都夹一遍），认不出的动作直接拒绝并写 `miniapp.*` 日志 —— 一旦这里退化成"按名字透传 RPC"，iframe 里的一段脚本就等于拿到了整个 RPC 面。同理，跨源读文件（`miniappReadFile`）只认用户刚在系统对话框里亲手选过的路径（`bun/dialog-paths.ts` 那一份凭据）。
+
+**能力探测是前置的**（`bun/miniapps.ts` 的 `getMiniAppCapabilities`）：生图 / AI 修图 / 对话 / ASR / 本地抠图 / 纯本机，每一类各自 ready 与否，判定口径与各功能页"未配置"的提示同源。卡片上直接标「需配置」，容器里再给一条"去设置"的路，而不是让用户点进去撞错误墙。两类是**永远 ready** 的：本地抠图的权重能在小应用里自己下（拦在门外就够不着那个下载按钮）、纯本机处理（马赛克）不依赖任何模型或厂商，它们的 label 只回答"模型在不在本地"。
+
+小应用跑在 iframe 里，宿主读不到它的 console —— 所以失败必须有出口：`miniappLog`（每分钟配额，防止一个死循环的小应用把 2MB 的 app.log 刷爆）与运行时自己挂的 `window.onerror` 转发。**新增小应用能力时，两处一起改**：`shared/miniapps.ts` 的动作清单 + `lib/miniapp-bridge.ts` 的分发分支。
 
 ## 7. CLI（`omi`）
 
@@ -436,6 +518,7 @@ omni-control.sock       CLI 控制通道
 6. **图片服务无鉴权，只能绑回环。**
 7. **新引擎只改 `shared/engines.ts` + 写一个 Runtime 实现**，别在别处硬编码引擎判断。
 8. **出站 HTTP 走全局 `fetch`**（`bun/proxy.ts` 装的代理包装）**或显式 `proxy` 参数**；不要为远端主机另开 socket 或旁路 HTTP 客户端，否则那条请求会绕过用户的代理设置。本机 IPC（控制套接字的 `unix:` 请求）例外，包装层主动放行。
+9. **小应用只能调用宿主放行的动作**（`shared/miniapps.ts` 的 `MINIAPP_ACTIONS`），转发层（`lib/miniapp-bridge.ts`）不得出现"按方法名透传 RPC"的写法；小应用页面必须保持在 `sandbox`（无 `allow-same-origin`）的 iframe 里。
 
 ## 11. 已知架构债
 

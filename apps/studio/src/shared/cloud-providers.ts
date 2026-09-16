@@ -32,6 +32,20 @@ export type CloudModelEntry = {
  */
 export type CloudVideoApi = "" | "minimax" | "seedance";
 
+/**
+ * 生音乐接口协议：与生视频同理 —— 音乐 API 也没有统一标准，各家是各家的形状。
+ *
+ * - `stepfun`：StepFun 阶跃星辰，**异步**（`/v1/audio/music/submit` 拿 task_id，
+ *   `/v1/audio/music/query` 轮询，成片以 Base64 返回）。
+ * - `minimax`：MiniMax，**同步**（`/v1/music_generation` 一次阻塞请求直接出音频，
+ *   默认 hex 编码，`output_format: "url"` 时返回 24 小时有效的下载地址）。
+ *
+ * 两者一个是"提交 + 轮询"、一个是"长请求直接返回"，执行模型都不同 ——
+ * 这正是必须按协议分派、而不能按厂商名硬编码的原因（见 bun/music-gen.ts）。
+ * `""` = 这家不具备生音乐能力。
+ */
+export type CloudMusicApi = "" | "stepfun" | "minimax";
+
 /** 服务商预设元信息。 */
 export type CloudPreset = {
   id: string;
@@ -43,16 +57,40 @@ export type CloudPreset = {
   baseUrl: string;
   /** 该服务商常见对话模型 ID（预填模型列表用） */
   models: string[];
+  /**
+   * 预设模型的用途分类覆盖表（`models` 里按名字认不出用途的那些）。
+   *
+   * 自动识别只认命名特征：`stepaudio-3-realtime-preview` 既不含 `tts` 也不含 `asr`，
+   * 会被归到 `other` —— 而 `other` 在对话选择器里是保留的（"认不出来的宁可多给"），
+   * 用户会在一堆聊天模型里看到它。预设知道这些模型是干什么的，就在这里写死。
+   */
+  modelTypes?: Record<string, CloudModelType>;
   /** 简短备注（免费额度 / 需要额外操作等） */
   note?: string;
   /** 品牌主色（#rrggbb），列表徽章底色。 */
   color: string;
   /** 生视频接口协议（只有提供生视频能力的厂商才有）。 */
   videoApi?: CloudVideoApi;
+  /** 生音乐接口协议（只有提供生音乐能力的厂商才有）。 */
+  musicApi?: CloudMusicApi;
 };
 
-/** MiniMax 生视频模型（video-gen 与预设共用，避免两处写死两份）。 */
-export const MINIMAX_VIDEO_MODELS = ["MiniMax-H3", "MiniMax-H3-Max"];
+/**
+ * MiniMax 生视频模型（video-gen 与预设共用，避免两处写死两份）。
+ *
+ * 用的是 MiniMax 公开接口里的真实模型 id：Hailuo 系（2.3 / 02）支持
+ * duration 6/10 秒与 resolution 档位；T2V-01 / I2V-01 那代没有这两个参数，
+ * 且 I2V-* 必须带首帧图（video-gen 里按模型名决定发不发这些字段）。
+ * 以前这里写的 "MiniMax-H3" 是 OmniLabs 那边自造的名字，MiniMax 侧不认。
+ */
+export const MINIMAX_VIDEO_MODELS = [
+  "MiniMax-Hailuo-2.3",
+  "MiniMax-Hailuo-02",
+  "T2V-01",
+  "T2V-01-Director",
+  "I2V-01",
+  "I2V-01-Director",
+];
 
 /** 火山方舟 Seedance 生视频模型。 */
 export const SEEDANCE_VIDEO_MODELS = [
@@ -61,6 +99,22 @@ export const SEEDANCE_VIDEO_MODELS = [
   "doubao-seedance-1-0-pro-t2v-250528",
   "doubao-seedance-1-0-pro-i2v-250528",
 ];
+
+/**
+ * StepFun 阶跃星辰生音乐模型（stepfun 协议）。
+ *
+ * `stepaudio-3-music-preview` 是官方文档里唯一给出的 model_id，且是**固定值** ——
+ * 提交时它不接受别的取值，所以这里也只放这一个，用户不必去猜。
+ */
+export const STEPFUN_MUSIC_MODELS = ["stepaudio-3-music-preview"];
+
+/**
+ * MiniMax 生音乐模型（minimax 协议）。
+ *
+ * 当前文档的枚举：`music-3.0` / `music-2.6` / `music-cover`（另有已下线的 -free 档）。
+ * `music-cover` 是「参考歌曲 → 翻唱」，需要额外的音频输入。
+ */
+export const MINIMAX_MUSIC_MODELS = ["music-3.0", "music-2.6", "music-cover"];
 
 /**
  * 云服务商预设：国内主流原厂 + 国外三大原厂（OpenAI / Anthropic / Google）
@@ -147,10 +201,12 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "MiniMax",
     vendor: "MiniMax 稀宇科技",
     baseUrl: "https://api.minimax.chat/v1",
-    models: ["MiniMax-M1", "MiniMax-Text-01", ...MINIMAX_VIDEO_MODELS],
-    note: "对话走 OpenAI 兼容接口；生视频用 MiniMax 自己的 /v2/video_generation",
+    models: ["MiniMax-M1", "MiniMax-Text-01", ...MINIMAX_VIDEO_MODELS, ...MINIMAX_MUSIC_MODELS],
+    modelTypes: Object.fromEntries(MINIMAX_MUSIC_MODELS.map((id) => [id, "music" as const])),
+    note: "对话走 OpenAI 兼容接口；生视频走 MiniMax 自己的 /v1/video_generation 与 /v1/query/video_generation（海外站把地址换成 https://api.minimax.io/v1）；生音乐走 /v1/music_generation。音乐接口对 2026-08-20 之后的新账号已停售，老账号与转售方仍可用",
     color: "#e11d48",
     videoApi: "minimax",
+    musicApi: "minimax",
   },
   {
     id: "spark",
@@ -201,8 +257,39 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "阶跃星辰",
     vendor: "StepFun",
     baseUrl: "https://api.stepfun.com/v1",
-    models: ["step-1-8k", "step-1-flash"],
+    /**
+     * 对话 + 语音两条线：StepAudio 3 的 TTS / ASR / 实时语音三件套都挂在这一个厂商行下，
+     * 语音页、ASR 页、通话页各自按用途取自己的模型（`providerModelsOfType`）。
+     * 实时语音模型不在 OpenAI 兼容面上（`/v1/realtime` WebSocket），选它时地址由
+     * `realtimeBaseUrlForProvider` 从 baseUrl 推导，不需要用户手填。
+     */
+    models: [
+      "step-1-8k",
+      "step-1-flash",
+      "stepaudio-3-tts",
+      "stepaudio-3-asr-max",
+      "stepaudio-3-realtime-preview",
+      "stepaudio-2.5-tts",
+      "stepaudio-2.5-asr",
+      "stepaudio-2.5-realtime",
+      ...STEPFUN_MUSIC_MODELS,
+    ],
+    modelTypes: {
+      // 对话（这几个名字里没有任何可识别的用途特征）
+      "step-1-8k": "chat",
+      "step-1-flash": "chat",
+      // 实时语音不属于 TTS / ASR 任何一类（它自己就是一条双向语音会话），标 other。
+      // other 在本地模型里是"认不出、按能用处理"，对话列表那边另有 realtime 过滤
+      // （chat-model.ts：实时语音模型不进对话选择器）。
+      "stepaudio-3-realtime-preview": "other",
+      "stepaudio-2.5-realtime": "other",
+      // 生音乐：`stepaudio-3-music-preview` 里的 `music` 分类器能认出来，
+      // 但显式写死更稳 —— 预设知道它是什么，就不该让分类器的规则变动影响到它。
+      "stepaudio-3-music-preview": "music",
+    },
+    note: "语音线含 StepAudio 3 TTS / ASR / 实时对话，实时语音有免费预览版；生音乐走 /v1/audio/music 的提交 + 轮询",
     color: "#a855f7",
+    musicApi: "stepfun",
   },
   {
     id: "openai",
@@ -255,6 +342,19 @@ export function getPreset(id: string): CloudPreset | undefined {
   return CLOUD_PRESETS.find((p) => p.id === id);
 }
 
+/**
+ * 预设的模型清单 → 落库用的模型条目（把 `modelTypes` 里的显式用途带上）。
+ *
+ * 单一真源：新建厂商、迁移旧激活厂商、给存量厂商补新预设模型三处都走这里 ——
+ * 各写一份的话，同一份预设会随入口不同而带上 / 丢掉用途分类。
+ */
+export function presetModelEntries(preset: CloudPreset): CloudModelEntry[] {
+  return preset.models.map((id) => {
+    const type = preset.modelTypes?.[id];
+    return type ? { id, type } : { id };
+  });
+}
+
 /** RPC 返回的服务商行（cloud_providers 表的脱壳）。 */
 export type CloudProviderInfo = {
   id: string;
@@ -270,6 +370,8 @@ export type CloudProviderInfo = {
   enabled: boolean;
   /** 生视频接口协议（""=不具备生视频能力）。 */
   videoApi: CloudVideoApi;
+  /** 生音乐接口协议（""=不具备生音乐能力）。 */
+  musicApi: CloudMusicApi;
   createdAt: number;
   updatedAt: number;
 };
@@ -284,12 +386,17 @@ export function isCloudModelType(value: unknown): value is CloudModelType {
     value === "asr" ||
     value === "image" ||
     value === "video" ||
+    value === "music" ||
     value === "other"
   );
 }
 
 export function isCloudVideoApi(value: unknown): value is CloudVideoApi {
   return value === "" || value === "minimax" || value === "seedance";
+}
+
+export function isCloudMusicApi(value: unknown): value is CloudMusicApi {
+  return value === "" || value === "stepfun" || value === "minimax";
 }
 
 /**
@@ -339,6 +446,20 @@ export function providerModelsOfType(
 }
 
 /**
+ * 把服务商地址规整成"带版本段"的形式（`https://host/v1`），用于拼 OpenAI 兼容端点。
+ *
+ * 服务商的 baseUrl 有的带 `/v1`（预设都是这样），有的只有域名，还有的自建网关把
+ * 版本段写成别的（`/api/paas/v4`）。直接 `base + "/v1/audio/..."` 会在前两种上分别
+ * 得到正确结果和 `/v1/v1/audio/...` —— 后者是稳定 404，且报错来自上游网关，看不出
+ * 是地址拼错了。这里只在**没有版本段**时才补 `/v1`。
+ */
+export function normalizeApiBase(base: string): string {
+  let b = base.trim().replace(/\/+$/, "");
+  if (b && !/\/v\d+$/i.test(b)) b = `${b}/v1`;
+  return b;
+}
+
+/**
  * 本机地址（localhost / 127.0.0.1 / 局域网 IP）：这类 OpenAI 兼容端点
  * （Ollama、LM Studio、自建网关）通常不需要密钥，校验时不做「必须有 Key」的要求。
  */
@@ -361,16 +482,21 @@ export function isLocalBaseUrl(baseUrl: string): boolean {
 
 /**
  * 某个用途下可用的服务商：已启用（设置页里"启动"过）+ 至少有一个该用途的模型。
- * 功能页（生图 / TTS / ASR / 生视频 / OCR）用它决定下拉框里出现哪些厂商。
+ * 功能页（生图 / TTS / ASR / 生视频 / OCR / 生音乐）用它决定下拉框里出现哪些厂商。
+ *
+ * `requireVideoApi` / `requireMusicApi` 是额外的一道门：光有该用途的模型还不够，
+ * 厂商行上必须记着对应的接口协议 —— 生视频与生音乐都没有统一标准，协议缺失时
+ * 选它也调不通（见 shared/cloud-providers.ts 顶部的 CloudMusicApi 说明）。
  */
 export function providersForType(
   providers: readonly CloudProviderInfo[],
   type: CloudModelType,
-  opts: { requireVideoApi?: boolean } = {},
+  opts: { requireVideoApi?: boolean; requireMusicApi?: boolean } = {},
 ): CloudProviderInfo[] {
   return providers.filter((p) => {
     if (!p.enabled) return false;
     if (opts.requireVideoApi && !p.videoApi) return false;
+    if (opts.requireMusicApi && !p.musicApi) return false;
     return providerModelsOfType(p, type).length > 0;
   });
 }

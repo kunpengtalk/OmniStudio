@@ -243,8 +243,8 @@ Agent 等子系统的失败与关键事件都记在同一份 app.log 里。
 选项：
   --limit <n>       显示最近 n 条（默认 50）
   --level <l>       只看该级别及以上：debug | info | warn | error
-  --source <s>      只看某个子系统：image | video | tts | asr | ocr | server |
-                    agent | download | gateway | media-server | client | app ...
+  --source <s>      只看某个子系统：image | video | music | tts | asr | ocr |
+                    server | agent | download | gateway | media-server | client | app ...
   --search <text>   消息 / 事件名 / 上下文包含该文本（报错原文、builtin…）
   --event <name>    事件名包含该子串（如 generate.failed）
   --verbose         额外打印结构化上下文（detail）；注意 -v 是全局的 --version

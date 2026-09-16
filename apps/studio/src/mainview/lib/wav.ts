@@ -44,6 +44,37 @@ function pcm16ToBase64(pcm: Int16Array): string {
 }
 
 /**
+ * 已经采成 16 位 PCM 的样本包成 WAV（不再重采样）。
+ *
+ * 给"边录边降位"的录音用：长会议录一小时就是几亿个采样，全都以 float32 攒在内存里
+ * （48k 立体声级 ≈ 700MB/小时）不现实，所以宿主录音器按块就转成 PCM16 —— 一个采样
+ * 2 字节。这里只负责补 WAV 头，采样率由调用方保证（`rate` 写进头里）。
+ */
+export function wavBase64FromPcm16(pcm: Int16Array, rate = 16000): string {
+  const bytes = new Uint8Array(44 + pcm.length * 2);
+  const dv = new DataView(bytes.buffer);
+  writeAscii(dv, 0, "RIFF");
+  dv.setUint32(4, 36 + pcm.length * 2, true);
+  writeAscii(dv, 8, "WAVE");
+  writeAscii(dv, 12, "fmt ");
+  dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); // PCM
+  dv.setUint16(22, 1, true); // mono
+  dv.setUint32(24, rate, true);
+  dv.setUint32(28, rate * 2, true); // byte rate
+  dv.setUint16(32, 2, true); // block align
+  dv.setUint16(34, 16, true); // bits per sample
+  writeAscii(dv, 36, "data");
+  dv.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) {
+    const v16 = pcm[i] ?? 0;
+    bytes[44 + i * 2] = v16 & 0xff;
+    bytes[45 + i * 2] = (v16 >> 8) & 0xff;
+  }
+  return bytesToBase64(bytes);
+}
+
+/**
  * Encode mono float32 PCM samples (from AudioContext, typically 48 kHz) as a
  * base64 16-bit PCM WAV at 16 kHz — the format whisper.cpp expects.
  */

@@ -226,7 +226,9 @@ function ChatModelCard() {
   const currentLabel = currentOption?.label ?? modelNameFromRef(current);
 
   const selectMutation = useMutation({
-    mutationFn: (opt: { type: "local" | "api"; value: string }) => rpcClient.selectChatModel(opt),
+    // providerId 要一路带下去：换了厂商时一并把默认厂商切过去（网关只认默认厂商）。
+    mutationFn: (opt: { type: "local" | "api"; value: string; providerId?: string }) =>
+      rpcClient.selectChatModel(opt),
     onSettled: () => setPending(false),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });

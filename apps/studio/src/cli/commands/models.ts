@@ -1,7 +1,12 @@
 import type { ParsedArgs } from "../args";
 import { optBool } from "../args";
 import { controlRequest, ensureAppRunning } from "../client";
-import { getAllSettingsFallback, listInstalledModelsFallback, setActiveModelFallback } from "../db";
+import {
+  cloudProvidersFallback,
+  getAllSettingsFallback,
+  listInstalledModelsFallback,
+  setActiveModelFallback,
+} from "../db";
 import { formatBytes, printTable, slugModelFileName } from "../format";
 import { pickNumbered } from "../tui";
 import { CMD_HELP } from "../help";
@@ -37,6 +42,60 @@ export async function getInstalledModels(): Promise<InstalledModel[]> {
     ...(m as InstalledModel),
     servedName: slugModelFileName((m as InstalledModel).fileName),
   }));
+}
+
+/** 云端模型 + 它所属的服务商（同名模型可能出现在多家，靠 active / enabled 区分优先）。 */
+export type CloudModelRef = {
+  id: string;
+  providerId: string;
+  providerName: string;
+  enabled: boolean;
+  active: boolean;
+  hasKey: boolean;
+};
+
+/** 控制通道 / 离线兜底拿到的 `{ providers, activeId }` → 扁平模型清单。 */
+export function cloudModelRefsFromProviders(data: unknown): CloudModelRef[] {
+  const list = (data as { providers?: unknown } | null | undefined)?.providers;
+  if (!Array.isArray(list)) return [];
+  const activeId = (data as { activeId?: unknown }).activeId;
+  const refs: CloudModelRef[] = [];
+  for (const raw of list as Array<Record<string, unknown>>) {
+    const providerId = typeof raw?.id === "string" ? raw.id : "";
+    if (!providerId) continue;
+    const providerName = typeof raw?.name === "string" && raw.name ? raw.name : providerId;
+    const enabled = raw?.enabled === true;
+    const active = providerId === activeId;
+    const hasKey = typeof raw?.apiKey === "string" && raw.apiKey.length > 0;
+    for (const entry of Array.isArray(raw?.models) ? (raw.models as unknown[]) : []) {
+      const id = typeof (entry as { id?: unknown })?.id === "string" ? (entry as { id: string }).id : "";
+      if (id) refs.push({ id, providerId, providerName, enabled, active, hasKey });
+    }
+  }
+  return refs;
+}
+
+/**
+ * 所有云服务商的模型清单（含未启用 / 非默认的）。
+ *
+ * 为什么不看 CLOUD_MODELS 那个旧槽位：它只镜像**激活**厂商一家，而 GUI 的模型选择器
+ * 是按「全部已启用厂商」聚合的（chat-model.ts 的 enabledCloudProviders）。只认激活
+ * 厂商会出现"应用里明明能用、`omi launch --model` 却说找不到"。控制通道拿不到
+ * （旧版实例 / 应用没跑）时直接读同一张表 —— CLI 与应用共用一份 SQLite。
+ */
+export async function getCloudModelRefs(): Promise<CloudModelRef[]> {
+  const r = await controlRequest("cloudProviders", undefined, 15_000);
+  if (r.connected && r.ok) {
+    const refs = cloudModelRefsFromProviders(r.data);
+    if (refs.length > 0) return refs;
+  }
+  const fb = await cloudProvidersFallback().catch((err: unknown) => {
+    // 读不出厂商表（secrets.key 丢了 / 库损坏）时别静默当成"没有云模型"：
+    // 那只会让用户再看到一句莫名其妙的"未找到模型"。
+    console.error(`读取云服务商配置失败：${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  });
+  return fb ? cloudModelRefsFromProviders(fb) : [];
 }
 
 async function getCloudModels(): Promise<{ cloud: CloudModelEntry[]; provider: string; mode: string }> {
@@ -80,7 +139,6 @@ async function setActiveModel(path: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function cmdModels() {
-  const { cloud, provider } = await getCloudModels();
   const installed = await getInstalledModels();
 
   if (installed.length === 0) {
@@ -98,6 +156,20 @@ export async function cmdModels() {
     );
   }
 
+  // 云端段按厂商列出**所有已启用**的（不是只有默认那家）：GUI 的模型选择器就是这个
+  // 口径，`omi launch --model <id>` 也认这些 id —— 两边清单不一致会让人以为模型丢了。
+  const refs = await getCloudModelRefs().catch(() => []);
+  const rows = refs
+    .filter((m) => m.enabled || m.active)
+    .map((m) => [m.active ? `${m.providerName} ● 默认` : m.providerName, m.id]);
+  if (rows.length) {
+    const vendors = new Set(refs.filter((m) => m.enabled || m.active).map((m) => m.providerId)).size;
+    console.log(`\n云端模型（${vendors} 个已启用厂商）：`);
+    printTable(["厂商", "ID"], rows);
+    return;
+  }
+  // 厂商表读不出来时的退路：老样式只显示默认厂商那一家的模型。
+  const { cloud, provider } = await getCloudModels();
   if (cloud.length) {
     console.log(`\n云端模型（${provider || "未配置服务商"}）：`);
     printTable(

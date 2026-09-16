@@ -8,6 +8,8 @@ import { tmpdir } from "os";
 
 import {
   BACKUP_DB_ENTRY,
+  BACKUP_FILE_ROOTS,
+  BACKUP_SCOPES,
   BACKUP_FILES_PREFIX,
   BACKUP_FORMAT,
   BACKUP_MANIFEST_ENTRY,
@@ -18,6 +20,7 @@ import {
   classifyBackupPath,
   isSecretSettingKey,
   sanitizeScopes,
+  tablesForScopes,
 } from "../../shared/backup";
 import {
   createBackup,
@@ -129,10 +132,24 @@ describe("作用域归置", () => {
     expect(classifyBackupPath("images/chat/1/a.png")).toMatchObject({ rootId: "chat-images", scope: "chats" });
     expect(classifyBackupPath("images/gen/cat.png")).toMatchObject({ rootId: "images", scope: "media" });
     expect(classifyBackupPath("images/1/page.webp")).toMatchObject({ rootId: "images", scope: "media" });
+    // 笔记附件自己一条根：它们在 images/ 下，但必须跟着"笔记"作用域（默认开），
+    // 而不是跟着体积巨大、默认关掉的 media
+    expect(classifyBackupPath("images/notes/abc123/a.webp")).toMatchObject({
+      rootId: "note-images",
+      scope: "notes",
+    });
     expect(classifyBackupPath("uploads/doc.pdf")).toMatchObject({ rootId: "uploads", scope: "media" });
     expect(classifyBackupPath("models/x.gguf")).toBeNull();
     expect(classifyBackupPath("engines/paddleocr/bin")).toBeNull();
     expect(classifyBackupPath("logs/app.log")).toBeNull();
+  });
+
+  test("默认备份带上笔记的表与附件（少一样就是「恢复后只剩半条笔记」）", () => {
+    const defaults = BACKUP_SCOPES.filter((s) => s.defaultOn).map((s) => s.id);
+    expect(tablesForScopes(defaults)).toContain("miniapp_notes");
+    const root = BACKUP_FILE_ROOTS.find((r) => r.id === "note-images");
+    expect(root?.defaultOn).toBe(true);
+    expect(defaults).toContain(root!.scope);
   });
 
   test("归档条目反推归属，技能仓库的 .git 被排除", () => {

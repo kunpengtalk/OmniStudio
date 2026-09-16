@@ -22,6 +22,7 @@ import {
 import { rpcClient } from "@lib/rpc";
 import { reportClientError } from "@lib/app-log";
 import { parseWorkspaceRecents, withRecentWorkspace, workspaceLabel } from "@lib/workspace";
+import { isRemoteClient } from "@lib/remote";
 import { useAgentStore, type AgentSubView } from "@stores/agent";
 import { useChatStore } from "@stores/chat";
 import { useT } from "@stores/ui-lang";
@@ -99,7 +100,8 @@ function SidebarActions({
       hint: `${MOD_KEY}K`,
       onClick: onOpenSearch,
     },
-    ...SIDE_VIEW_ACTIONS.map((item) => {
+    // 网页端只跑会话本身：自动化 / 插件在那边没有主区可切（也不该把宿主机的配置入口露出去）。
+    ...(isRemoteClient() ? [] : SIDE_VIEW_ACTIONS).map((item) => {
       const Icon = item.icon;
       const active = subView === item.view;
       return {
@@ -716,21 +718,25 @@ export function AgentSessionSidebar({
           <SectionHeader
             label={t("agent.sidebar.projectsSection")}
             action={
-              <PiTip label={t("agent.sidebar.addProject")}>
-                <button
-                  type="button"
-                  className="pi-icon-btn"
-                  aria-label={t("agent.sidebar.addProject")}
-                  disabled={openingWorkspace}
-                  onClick={() => void openWorkspace()}
-                >
-                  {openingWorkspace ? (
-                    <Loader2Icon size={13} className="animate-spin" aria-hidden />
-                  ) : (
-                    <FolderPlusIcon size={13} aria-hidden />
-                  )}
-                </button>
-              </PiTip>
+              // 「打开工作区」要开宿主机的目录选择框；网页端没有这条通道，
+              // 工作区跟随会话本身的设置，入口先不显示。
+              isRemoteClient() ? undefined : (
+                <PiTip label={t("agent.sidebar.addProject")}>
+                  <button
+                    type="button"
+                    className="pi-icon-btn"
+                    aria-label={t("agent.sidebar.addProject")}
+                    disabled={openingWorkspace}
+                    onClick={() => void openWorkspace()}
+                  >
+                    {openingWorkspace ? (
+                      <Loader2Icon size={13} className="animate-spin" aria-hidden />
+                    ) : (
+                      <FolderPlusIcon size={13} aria-hidden />
+                    )}
+                  </button>
+                </PiTip>
+              )
             }
           />
           {projects.map(([workspace, items]) => {

@@ -117,6 +117,18 @@ mock.module("@lib/rpc", () => ({
       embedMissingCalls.push(params);
       return { ok: true, embedded: 12 };
     },
+    cloudProviderList: async () => ({
+      providers: [
+        {
+          id: "p1",
+          name: "云端一号",
+          enabled: true,
+          baseUrl: "https://cloud.example.com/v1",
+          apiKey: "",
+          models: [{ id: "cloud-embed", type: "embedding" }],
+        },
+      ],
+    }),
   },
 }));
 
@@ -141,10 +153,12 @@ function kbFixture(overrides: Partial<KbFixture> = {}): KbFixture {
     embeddingModel: "BAAI/bge-m3",
     embeddingBase: "",
     embeddingApiKey: "",
+    embeddingProviderId: "",
     embeddingDim: 1024,
     rerankModel: "",
     rerankBase: "",
     rerankApiKey: "",
+    rerankProviderId: "",
     chunkSize: 800,
     chunkOverlap: 120,
     topK: 6,
@@ -244,6 +258,41 @@ test("切片与检索三个参数在同一网格里（不再横向溢出卡片�
   expect(grid?.className).toContain("grid");
   expect(grid).toBe(chunkOverlap!.parentElement?.parentElement);
   expect(grid).toBe(topK!.parentElement?.parentElement);
+  await view.unmount();
+});
+
+test("选了云服务商：不再出现地址/密钥输入，服务行指向该厂商，保存带上 providerId", async () => {
+  updates.length = 0;
+  const view = await renderSettings(
+    kbFixture({ embeddingProviderId: "p1", embeddingModel: "cloud-embed" }),
+  );
+  expect(view.errors).toEqual([]);
+  // 有了云服务商就不该再让用户填地址 / 密钥
+  expect(view.container.querySelectorAll('input[type="password"]').length).toBe(0);
+  expect(view.container.querySelector("#kb-embedding-provider")).not.toBeNull();
+  expect(view.text).not.toContain("kb.settings.");
+
+  // 先把表单改脏，保存按钮才会启用
+  const nameInput = view.container.querySelector<HTMLInputElement>("#kb-settings-name");
+  const setValue = Object.getOwnPropertyDescriptor(
+    dom.HTMLInputElement.prototype,
+    "value",
+  )!.set!;
+  await act(async () => {
+    setValue.call(nameInput, "Test 2");
+    nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+
+  const save = [...view.container.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes(zh("common.save")),
+  );
+  expect(save).toBeDefined();
+  await act(async () => {
+    save!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(updates.length).toBe(1);
+  expect(updates[0]!.patch.embeddingProviderId).toBe("p1");
   await view.unmount();
 });
 

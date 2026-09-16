@@ -94,7 +94,7 @@ omi serve [--port 8080] [--host 127.0.0.1] [--engine llama.cpp] [--model <路径
 omi models
 ```
 
-一次列出本地已装模型（名称 / 大小 / 类型 / 是否活动）与云端模型。
+一次列出本地已装模型（名称 / 大小 / 类型 / 是否活动）与云端模型。云端段按厂商分组，列出**所有已启用**厂商的模型（不限默认那家），默认厂商带 `● 默认` 标记 —— 这些 id 都能直接喂给 `omi launch --model`。
 
 `omi models` — 脚本里取模型名：与 omi model --list 等价。
 
@@ -144,12 +144,14 @@ POST /v1/embeddings
 给当前模型（或云端服务商的模型）跑吞吐测速，结果写进应用里的「基准测试」记录。
 
 ```bash
-omi benchmark [model] [--contexts 1024,4096] [--gen 128] [--batch 1]
+omi benchmark [model] [--contexts 1024,4096] [--gen 128] [--batch 1] [--cache cold,partial,warm]
 ```
 
-跑基准测速：默认测当前活动模型，给个模型名 / 服务名换目标；--contexts 选要测的上下文档位，--gen / --batch 调生成长度与并发。应用没运行时在本进程直接跑（结果写同一份库），Ctrl+C 取消本次测试。
+跑基准测速：默认测当前活动模型，给个模型名 / 服务名换目标；--contexts 选要测的上下文档位（128 ~ 1M，认 8k / 1m 这种后缀），--gen / --batch 调生成长度与并发，--cache 选缓存场景（cold 冷启不命中 / partial 部分命中 / warm 完全命中，默认三种都测）。应用没运行时在本进程直接跑（结果写同一份库），Ctrl+C 取消本次测试。
 
 `omi benchmark --contexts 1024,4096,8192 --gen 128` — 只测 1K / 4K / 8K 三档，每次生成 128 token。
+`omi benchmark --contexts 8k,32k,128k,1m --gen 64` — 长上下文扫描：一路测到 1M（档位越大单档越久，本地机器上 1M 档要几十分钟）；超出服务端窗口的档位会被拒绝，之后更大的档位自动跳过。
+`omi benchmark --contexts 32k --cache cold,warm` — 只比缓存：同一档位冷启与完全命中各测一遍，末尾给出倍数与服务端自报的复用比例（×1 附近 = 服务端根本没吃到前缀缓存）。
 
 ```bash
 omi benchmark --cloud [provider]
@@ -262,6 +264,7 @@ omi launch <工具> [--model <名称|路径|云端 id>] [-- 工具参数...]
 启动编码工具并接入当前模型。执行顺序：确认应用在运行 → 选模型 → 需要时启动 / 重启本地推理服务器 → 确保 API 网关在线 → 写各工具自己的配置（保留用户原有配置）→ 注入共享记忆 → 前台拉起工具。
 - 工具参数用 `--` 透传，例如 omi launch claude -- --resume。
 - 本地模型走本地推理服务器，云端 id 走云端 API；网关负责 Anthropic ↔ OpenAI 协议翻译。
+- `--model` 的云端 id 按「模型云服务」里**所有已启用**厂商匹配（与 GUI 模型选择器同一份清单）。模型不属于当前默认厂商时，会自动把默认厂商切过去并打印一行提示 —— 网关只往默认厂商发云端请求；厂商没启用时直接指出是哪一家，而不是报一句「未找到模型」。
 
 `omi launch --list` — 列出支持的工具与各自的协议。
 `omi launch claude` — 唯一模型时自动选中并启动 Claude Code。

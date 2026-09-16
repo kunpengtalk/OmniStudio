@@ -27,6 +27,8 @@ import {
 } from "../../shared/skills";
 import { getCentralRepoDir } from "./central-repo";
 import { audit } from "./audit";
+import { logEvent } from "../app-log";
+import { getDataDir } from "../paths";
 
 // ---------------------------------------------------------------------------
 // 工具适配器解析
@@ -67,16 +69,72 @@ export function getPathOverrides(): Record<string, string> {
   }
 }
 
-export function setCustomToolPath(tool: string, path: string | null) {
+/**
+ * 用户填写的工具 skills 目录能不能用。
+ *
+ * 这些路径最终参与 `<目录>/<技能名>` 的**写入与递归删除**（`sync-engine.deploySkillDir`
+ * / `removeRecordedTarget`），所以不能是"什么都行"：家目录本身、文件系统根目录、
+ * 应用数据目录（设置与数据库所在处）必须拒绝 —— 填错一个字符就可能把别的东西算成
+ * 技能目录。允许家目录下的任意子目录（`~/.claude/skills` 这类正是要支持的用法）。
+ */
+export function validateToolSkillsDir(raw: string): { ok: true; path: string } | { ok: false; error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: false, error: "路径不能为空" };
+  const home = homedir();
+  const abs = trimmed.startsWith("~") ? join(home, trimmed.slice(2)) : resolve(trimmed);
+  if (abs === "/" || abs === resolve(home)) {
+    return { ok: false, error: "请填具体的 skills 目录，不要填家目录或根目录" };
+  }
+  const dataDir = resolve(getDataDir());
+  if (abs === dataDir || abs.startsWith(dataDir + "/")) {
+    return { ok: false, error: "不能把工具目录设在应用数据目录内" };
+  }
+  return { ok: true, path: trimmed };
+}
+
+/** 设置工具目录覆盖。非法路径拒绝并如实回错（此前一律回 ok:true）。 */
+export function setCustomToolPath(
+  tool: string,
+  path: string | null,
+): { ok: boolean; error?: string } {
+  if (path) {
+    const valid = validateToolSkillsDir(path);
+    if (!valid.ok) {
+      logEvent({
+        level: "warn",
+        source: "skills",
+        event: "skills.tool_path.rejected",
+        message: valid.error,
+        detail: { tool, path },
+      });
+      return { ok: false, error: valid.error };
+    }
+    const overrides = getPathOverrides();
+    overrides[tool] = valid.path;
+    updateSettings({ SKILLS_TOOL_PATH_OVERRIDES: JSON.stringify(overrides) });
+    return { ok: true };
+  }
   const overrides = getPathOverrides();
-  if (path) overrides[tool] = path;
-  else delete overrides[tool];
+  delete overrides[tool];
   updateSettings({ SKILLS_TOOL_PATH_OVERRIDES: JSON.stringify(overrides) });
+  return { ok: true };
 }
 
 export function addCustomTool(def: CustomToolDef): { ok: boolean; error?: string } {
   const key = def.key.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "-");
   if (!key) return { ok: false, error: "invalid key" };
+  // 自定义工具的目录同样会参与写入 / 递归删除，走同一道校验。
+  const valid = validateToolSkillsDir(def.skillsDir ?? "");
+  if (!valid.ok) {
+    logEvent({
+      level: "warn",
+      source: "skills",
+      event: "skills.tool_path.rejected",
+      message: valid.error,
+      detail: { tool: key, path: def.skillsDir },
+    });
+    return { ok: false, error: valid.error };
+  }
   if (TOOL_ADAPTERS.some((t) => t.key === key)) return { ok: false, error: "key exists" };
   const custom = getCustomTools();
   if (custom.some((t) => t.key === key)) return { ok: false, error: "key exists" };

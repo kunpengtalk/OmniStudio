@@ -18,15 +18,8 @@ import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
 import { PiTip } from "./pi-tip";
 import { useDismiss } from "./composer-controls";
+import { useRelativeTime } from "@/mainview/lib/relative-time";
 import type { AppNotification } from "../../../bun/notifications";
-
-function relativeTime(ts: number): string {
-  const diff = Date.now() - ts;
-  if (diff < 60_000) return "刚刚";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
-  return new Date(ts).toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" });
-}
 
 /** 每类通知一个图标与颜色：列表里一眼能分出"跑完了"和"要你授权"。 */
 function kindIcon(kind: AppNotification["kind"]) {
@@ -58,6 +51,7 @@ type Filter = "all" | "unread";
  */
 export function NotificationBell() {
   const t = useT();
+  const relativeTime = useRelativeTime();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");

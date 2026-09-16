@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>文案助手</title>
+<!--
+  小应用：文案助手（一次性文本补全）。
+  只有"用途 + 语气 + 主题"三个输入，产出 N 条候选文案，可保存成 md。
+  走 omni.text.complete（宿主用当前对话模型做一次非流式补全），不需要额外配置。
+-->
+<style>
+  .item { display: flex; gap: 10px; padding: 10px 0; border-bottom: 1px dashed var(--line); }
+  .item:last-child { border-bottom: 0; }
+  .item .idx { color: var(--muted); font-size: 11px; min-width: 18px; padding-top: 2px; }
+  .item .body { white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="hd">
+    <h1 data-i18n="title"></h1>
+    <span class="sub" data-i18n="sub"></span>
+  </div>
+
+  <div id="gate" class="card hidden">
+    <div class="row">
+      <span class="grow err" id="gate-text"></span>
+      <button class="btn sm" id="gate-btn" data-i18n="toSettings"></button>
+    </div>
+  </div>
+
+  <div class="card col">
+    <span class="lb" data-i18n="useLabel"></span>
+    <div class="row" id="uses"></div>
+    <span class="lb" data-i18n="toneLabel"></span>
+    <div class="row" id="tones"></div>
+    <span class="lb" data-i18n="topicLabel"></span>
+    <textarea class="field" id="topic" data-i18n-ph="topicPh"></textarea>
+  </div>
+
+  <div class="row">
+    <button class="btn primary" id="run" disabled data-i18n="run"></button>
+    <span class="lb" data-i18n="countLabel"></span>
+    <div class="row" id="counts"></div>
+    <span class="busy hidden" id="busy"><span class="spin"></span><span data-i18n="writing"></span></span>
+    <span class="err grow" id="err"></span>
+    <span class="ok grow hidden" id="ok"></span>
+  </div>
+
+  <div class="card col hidden" id="result">
+    <div class="row">
+      <span class="lb grow" data-i18n="resultLabel"></span>
+      <button class="btn sm" id="save" data-i18n="save"></button>
+    </div>
+    <div id="list"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var DICT = {
+    zh: {
+      title: '文案助手',
+      sub: '按用途和语气一次生成多条候选文案',
+      useLabel: '用途',
+      toneLabel: '语气',
+      topicLabel: '主题 / 产品',
+      topicPh: '例如：新出的便携咖啡机，一键出浓缩，支持车载供电',
+      countLabel: '条数',
+      run: '生成文案',
+      writing: '模型正在写…',
+      resultLabel: '候选文案',
+      save: '保存',
+      saved: '已保存到「{name}」',
+      toSettings: '去配置模型',
+      needModel: '文案需要对话模型：去「设置 → 模型云服务」启用一个厂商',
+      needTopic: '先写一下主题 / 产品',
+      tooMany: '一次最多 6 条',
+      empty: '模型没有返回内容，换个说法再试',
+    },
+    en: {
+      title: 'Copywriter',
+      sub: 'Draft several candidate copies by use case and tone',
+      useLabel: 'Use case',
+      toneLabel: 'Tone',
+      topicLabel: 'Topic / product',
+      topicPh: 'e.g. a new portable espresso machine, one-button shots, 12V car power',
+      countLabel: 'Count',
+      run: 'Write copy',
+      writing: 'Model is writing…',
+      resultLabel: 'Candidates',
+      save: 'Save',
+      saved: 'Saved to “{name}”',
+      toSettings: 'Configure a model',
+      needModel: 'Copywriting needs a chat model — enable a provider in Settings → Cloud providers',
+      needTopic: 'Describe the topic first',
+      tooMany: 'Six at most',
+      empty: 'The model returned nothing; try rephrasing',
+    },
+  };
+
+  var USES = [
+    { id: 'xhs', zh: '小红书标题', en: 'Rednote title',
+      zhTask: '写小红书标题，带 1-2 个 emoji，突出痛点与结果，不超过 20 字',
+      enTask: 'write a social post title with 1-2 emoji, under 60 characters, promise a clear outcome' },
+    { id: 'moment', zh: '朋友圈', en: 'Social feed',
+      zhTask: '写朋友圈文案，口语化，2-3 句，不要标签',
+      enTask: 'write a casual social feed post, 2-3 sentences, no hashtags' },
+    { id: 'ecom', zh: '电商卖点', en: 'Product bullets',
+      zhTask: '写电商卖点，每条以「·」开头，突出材质、功能、使用场景',
+      enTask: 'write product selling points, each starting with "·", covering material, function, scenario' },
+    { id: 'video', zh: '短视频口播', en: 'Short-video script',
+      zhTask: '写短视频口播稿，前 3 秒抓注意力，30 秒内讲完，口语短句',
+      enTask: 'write a short-video script that hooks in the first 3 seconds and fits 30 seconds, short spoken sentences' },
+    { id: 'mail', zh: '邮件开场', en: 'Email opener',
+      zhTask: '写商务邮件开场白，礼貌简洁，一句话说明来意',
+      enTask: 'write a business email opener: polite, concise, states the purpose in one line' },
+    { id: 'slogan', zh: '品牌标语', en: 'Slogan',
+      zhTask: '写品牌标语，8 字以内，押韵或有节奏',
+      enTask: 'write a brand slogan, under 8 words, rhythmic' },
+  ];
+  var TONES = [
+    { id: 'pro', zh: '专业', en: 'Professional', zhText: '专业、可信、不夸张', enText: 'professional, credible, no hype' },
+    { id: 'casual', zh: '轻松', en: 'Casual', zhText: '轻松、像朋友聊天', enText: 'casual, like talking to a friend' },
+    { id: 'warm', zh: '温暖', en: 'Warm', zhText: '温暖、有共情', enText: 'warm and empathetic' },
+    { id: 'punchy', zh: '有冲击', en: 'Punchy', zhText: '短促有力、有冲击感', enText: 'short, punchy, high impact' },
+  ];
+  var COUNTS = [3, 5];
+
+  var t = function (key, params) {
+    var table = DICT[omni.lang] || DICT.zh;
+    var text = table[key] || DICT.zh[key] || key;
+    if (params) Object.keys(params).forEach(function (k) { text = text.split('{' + k + '}').join(params[k]); });
+    return text;
+  };
+  var pickLabel = function (item) { return omni.lang === 'en' ? item.en : item.zh; };
+  var $ = function (sel) { return document.querySelector(sel); };
+
+  var state = { use: USES[0], tone: TONES[0], count: 3, items: [], busy: false };
+  var chatReady = false;
+
+  function paint() {
+    document.querySelectorAll('[data-i18n]').forEach(function (el) { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll('[data-i18n-ph]').forEach(function (el) { el.placeholder = t(el.dataset.i18nPh); });
+    document.querySelectorAll('#uses .chip').forEach(function (el) {
+      el.textContent = pickLabel(USES.filter(function (u) { return u.id === el.dataset.id; })[0]);
+    });
+    document.querySelectorAll('#tones .chip').forEach(function (el) {
+      el.textContent = pickLabel(TONES.filter(function (u) { return u.id === el.dataset.id; })[0]);
+    });
+  }
+  function showError(message) { $('#err').textContent = message || ''; }
+  function showOk(message) {
+    var el = $('#ok');
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+  }
+  function setBusy(on) {
+    state.busy = on;
+    $('#busy').classList.toggle('hidden', !on);
+    $('#run').disabled = on || !chatReady;
+  }
+  function checkGate() {
+    chatReady = Boolean(omni.capabilities && omni.capabilities.chat && omni.capabilities.chat.ready);
+    $('#gate').classList.toggle('hidden', chatReady);
+    if (!chatReady) $('#gate-text').textContent = t('needModel');
+    $('#run').disabled = state.busy || !chatReady;
+  }
+
+  function buildChips(host, items, current, onPick) {
+    items.forEach(function (item) {
+      var chip = document.createElement('button');
+      chip.className = 'chip';
+      chip.dataset.id = item.id;
+      chip.textContent = pickLabel(item);
+      chip.setAttribute('aria-pressed', item.id === current().id ? 'true' : 'false');
+      chip.addEventListener('click', function () {
+        onPick(item);
+        Array.prototype.forEach.call(host.querySelectorAll('.chip'), function (el) {
+          el.setAttribute('aria-pressed', el.dataset.id === item.id ? 'true' : 'false');
+        });
+      });
+      host.appendChild(chip);
+    });
+  }
+
+  buildChips($('#uses'), USES, function () { return state.use; }, function (item) { state.use = item; });
+  buildChips($('#tones'), TONES, function () { return state.tone; }, function (item) { state.tone = item; });
+  buildChips($('#counts'), COUNTS.map(function (n) { return { id: String(n), zh: String(n) + ' 条', en: String(n) }; }),
+    function () { return { id: String(state.count) }; },
+    function (item) { state.count = Number(item.id); });
+  // 条数走的是数字，chip 文案单独设一次
+  document.querySelectorAll('#counts .chip').forEach(function (el) {
+    el.textContent = omni.lang === 'en' ? (el.dataset.id + ' items') : (el.dataset.id + ' 条');
+  });
+
+  function systemPrompt() {
+    var task = omni.lang === 'en' ? state.use.enTask : state.use.zhTask;
+    var tone = omni.lang === 'en' ? state.tone.enText : state.tone.zhText;
+    if (omni.lang === 'en') {
+      return 'You are a copywriter. ' + 'Task: ' + task + '. Tone: ' + tone + '. ' +
+        'Write exactly ' + state.count + ' independent candidates, numbered "1. ", one per line. ' +
+        'Output only the candidates — no preamble, no explanation, no headings.';
+    }
+    return '你是文案写手。任务：' + task + '。语气：' + tone + '。' +
+      '写 ' + state.count + ' 条各自独立的候选，每条一行，用「1. 」编号。' +
+      '只输出候选文案本身：不要前言、不要解释、不要小标题。';
+  }
+
+  function parseItems(text) {
+    return text
+      .split('\n')
+      .map(function (line) { return line.replace(/^\s*(?:\d+[.、)]|[-*·])\s*/, '').trim(); })
+      .filter(function (line) { return line.length > 0; });
+  }
+
+  function render() {
+    var host = $('#list');
+    host.innerHTML = '';
+    state.items.forEach(function (text, index) {
+      var row = document.createElement('div');
+      row.className = 'item';
+      var idx = document.createElement('span');
+      idx.className = 'idx';
+      idx.textContent = String(index + 1);
+      var body = document.createElement('div');
+      body.className = 'body grow';
+      body.textContent = text;
+      row.appendChild(idx);
+      row.appendChild(body);
+      host.appendChild(row);
+    });
+  }
+
+  $('#run').addEventListener('click', function () {
+    var topic = $('#topic').value.trim();
+    if (!chatReady || state.busy) return;
+    if (!topic) { showError(t('needTopic')); return; }
+    showError('');
+    showOk('');
+    setBusy(true);
+    omni.text.complete({
+      system: systemPrompt(),
+      messages: [{ role: 'user', content: topic }],
+      maxTokens: 1024,
+    }).then(function (result) {
+      var items = parseItems(result.text || '');
+      if (items.length === 0) throw new Error(t('empty'));
+      state.items = items;
+      render();
+      $('#result').classList.remove('hidden');
+      return omni.log('generated', 'copy generated', { count: items.length, use: state.use.id });
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('generate.failed', e.message || String(e), {});
+    }).then(function () { setBusy(false); });
+  });
+
+  $('#gate-btn').addEventListener('click', function () { omni.openSettings('network'); });
+
+  $('#save').addEventListener('click', function () {
+    if (state.items.length === 0) return;
+    var header = (omni.lang === 'en' ? 'Use case: ' : '用途：') + pickLabel(state.use) + '\n' +
+      (omni.lang === 'en' ? 'Tone: ' : '语气：') + pickLabel(state.tone) + '\n\n';
+    var body = header + state.items.map(function (text, i) { return (i + 1) + '. ' + text; }).join('\n');
+    var bytes = new TextEncoder().encode(body);
+    var binary = '';
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    var name = 'copy-' + state.use.id + '-' + Date.now().toString().slice(-6) + '.md';
+    omni.files.save({ name: name, dataUrl: 'data:text/markdown;base64,' + btoa(binary) }).then(function (res) {
+      showOk(t('saved', { name: (res.path || name).split('/').pop() }));
+    }).catch(function (e) { showError(e.message || String(e)); });
+  });
+
+  omni.ready.then(function () {
+    paint();
+    checkGate();
+  });
+  omni.onCapabilities = function () { checkGate(); };
+})();
+</script>
+</body>
+</html>

@@ -15,6 +15,7 @@ import {
   type ModelCategory,
 } from "../shared/modelscope";
 import { modelTypeOf } from "../shared/cloud-providers";
+import { isRealtimeModelId } from "../shared/realtime-voice";
 import { ENGINE_SHORT_NAMES } from "../shared/engines";
 import * as ModelStore from "./model-store";
 import * as Served from "./model-servers";
@@ -345,6 +346,9 @@ export async function listChatModels(): Promise<{ models: ChatModelOption[] }> {
       // 漏掉它们比多列一条更糟；生图 / 视频 / 语音这些认得出的一律不进对话列表。
       const category = modelTypeOf(entry);
       if (!isChatCategory(category)) continue;
+      // 实时语音（`*-realtime-*`）自动识别落在 other，而 other 是保留的：选它只会在
+      // 发消息时被上游拒掉（它不是对话模型）。实时语音在通话页选，这里挡掉。
+      if (isRealtimeModelId(id)) continue;
       models.push({
         type: "api",
         value: id,

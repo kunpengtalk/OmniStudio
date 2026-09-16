@@ -6,6 +6,7 @@ import type { ParsedArgs } from "../args";
 import { optBool, optString } from "../args";
 import { controlRequest, ensureAppRunning } from "../client";
 import {
+  activateCloudProviderFallback,
   getAllSettingsFallback,
   servedNameForModelPathFallback,
   setActiveModelFallback,
@@ -13,7 +14,7 @@ import {
 } from "../db";
 import { formatBytes } from "../format";
 import { pickNumbered } from "../tui";
-import { getInstalledModels } from "./models";
+import { getCloudModelRefs, getInstalledModels, type CloudModelRef } from "./models";
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
 import { resolveDataDir } from "../data-dir";
 
@@ -123,13 +124,15 @@ export async function cmdLaunch(parsed: ParsedArgs) {
   // 1. 确保应用在运行（读配置 / 起服务器都要走控制通道）。
   const connected = await ensureAppRunning({ appPath: optString(parsed.options, "app-path") });
 
-  // 2. 读取设置（网关地址 / 鉴权）。
+  // 2. 选模型（可能改活动模型 → 变更会触发本地服务器重启；选了别的云厂商的模型
+  //    还要把默认厂商切过去）。
+  const model = await resolveModel(parsed, connected);
+
+  // 3. 读取设置（网关地址 / 鉴权）。必须在上一步之后读：切换默认云厂商会重写
+  //    VLLM_API_BASE / VLLM_API_KEY，先读会拿着上一家的地址和密钥去配工具。
   const settings = connected
     ? (await controlRequest("getSettings", undefined, 15_000)).data ?? {}
     : await getAllSettingsFallback();
-
-  // 3. 选模型（可能改活动模型 → 变更会触发本地服务器重启）。
-  const model = await resolveModel(parsed, connected);
 
   // 端点由「选中的模型」决定而不是 SERVER_MODE：本地模型 → 本地推理服务器，
   // 云端模型 ID → 云端 API。集成页选的就是模型名，本地模型绝不该发到云端。
@@ -838,10 +841,21 @@ async function resolveModel(
         changed: !match.isActive,
       };
     }
-    // 云端模型 ID 透传
-    const cloud = await cloudModelIds();
-    if (cloud.includes(flag)) return { name: flag, changed: false };
-    fail(`未找到模型「${flag}」。运行 \`omi models\` 查看已装模型。`);
+    // 云端模型 ID：按「所有已启用厂商」匹配，不只激活那一家（见 getCloudModelRefs 注释）。
+    const picked = pickCloudModelFor(await getCloudModelRefs(), flag);
+    if (picked.hit) {
+      await ensureCloudProviderActive(picked.hit);
+      return { name: flag, changed: false };
+    }
+    if (picked.disabled) {
+      fail(
+        `模型「${flag}」属于云服务商「${picked.disabled.providerName}」，但它还没有启用。\n` +
+          `去「设置 → 模型云服务」里启动它（启动时会校验密钥），或用 \`omi models\` 看有哪些可用。`,
+      );
+    }
+    fail(
+      `未找到模型「${flag}」。本地模型看 \`omi models\`；云端模型要先在「设置 → 模型云服务」里启用对应厂商。`,
+    );
   }
 
   // 只有一个模型时自动选中
@@ -887,16 +901,36 @@ async function setActive(connected: boolean, path: string): Promise<void> {
   if (!fb.ok) fail(fb.error ?? "设置活动模型失败");
 }
 
-async function cloudModelIds(): Promise<string[]> {
-  const r = await controlRequest("models", undefined, 15_000);
-  if (r.connected && r.ok && Array.isArray(r.data?.cloud)) {
-    return r.data.cloud.map((m: { id?: unknown }) => (typeof m?.id === "string" ? m.id : ""));
+/**
+ * 挑出 `--model` 指定的云模型：默认厂商优先，然后是已启用厂商，最后才考虑已停用的
+ * （留给报错时告诉用户"模型在，但厂商没启用"）。纯函数，便于钉住决策表。
+ */
+export function pickCloudModelFor(
+  refs: CloudModelRef[],
+  wanted: string,
+): { hit?: CloudModelRef; disabled?: CloudModelRef } {
+  const same = refs.filter((m) => m.id === wanted);
+  const hit = same.find((m) => m.active) ?? same.find((m) => m.enabled);
+  return { hit, disabled: hit ? undefined : same[0] };
+}
+
+/**
+ * 网关只把云端请求发往**默认（激活）厂商**，所以模型不属于它时得先切过去 ——
+ * 否则请求会拿着这个模型去问另一家，回来的是一句莫名其妙的「模型不存在」。
+ * GUI 的模型选择器做的是同一件事（chat-model.ts 的 selectChatModel）。
+ */
+async function ensureCloudProviderActive(ref: CloudModelRef): Promise<void> {
+  if (ref.active) return;
+  // 首选让应用自己切（顺带刷新界面状态）。控制通道不通就退回直接写库：应用没跑、
+  // 应用还是改动前的旧实例（"unknown command: …"）、或这条命令在应用侧抛了错 ——
+  // 三种情况都用同一份 SQLite，而 activateCloudProvider 本身幂等，重复执行无害。
+  const r = await controlRequest("cloudProviderActivate", { id: ref.providerId }, 15_000);
+  if (!r.ok) {
+    const fb = await activateCloudProviderFallback(ref.providerId);
+    if (!fb.ok) fail(fb.error ?? r.error ?? `切换默认云厂商「${ref.providerName}」失败`);
   }
-  const settings = await getAllSettingsFallback().catch(() => ({} as Record<string, string>));
-  try {
-    const raw = JSON.parse(settings.CLOUD_MODELS ?? "[]");
-    return Array.isArray(raw) ? raw.map((m: { id?: unknown }) => String((m as { id?: unknown })?.id ?? "")) : [];
-  } catch {
-    return [];
+  console.log(`「${ref.id}」属于云服务商「${ref.providerName}」，已把它切为默认厂商。`);
+  if (!ref.hasKey) {
+    console.log(`提示：该服务商还没配 API Key，去「设置 → 模型云服务」补齐后再发起请求。`);
   }
 }

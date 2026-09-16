@@ -9,7 +9,7 @@
  *   2. 应用是否在运行（控制 socket ping），推理服务器与网关状态、最后的错误；
  *   3. 统一日志 logs/app.log 里的 warn / error（按子系统归类）+ 日志文件清单；
  *   4. 媒体服务端口占用者的身份（serving / shared / blocked）；
- *   5. 数据库里最近失败的记录：生图 / 生视频 / 语音 / 文档 / 基准 / 自动化 / Agent 事件；
+ *   5. 数据库里最近失败的记录：生图 / 生视频 / 生音乐 / 语音 / 文档 / 基准 / 自动化 / Agent 事件；
  *   6. 相关配置是否就位（密钥只报"有没有"，不打印值）；
  *   7. 数据目录磁盘剩余空间（下载失败的常见原因）。
  *
@@ -166,6 +166,9 @@ function readDb(): { sections: Section[]; warnings: string[] } {
   const videos = query(
     "select id, backend, substr(coalesce(prompt,''),1,60) as prompt, error, datetime(created_at/1000,'unixepoch','localtime') as at from video_records where status='failed' order by id desc limit 5",
   );
+  const musics = query(
+    "select id, backend, music_api, substr(coalesce(caption,''),1,60) as caption, error, datetime(created_at/1000,'unixepoch','localtime') as at from music_records where status='failed' order by id desc limit 5",
+  );
   const docs = query(
     "select id, path, status, error from documents where status='failed' order by id desc limit 5",
   );
@@ -195,6 +198,12 @@ function readDb(): { sections: Section[]; warnings: string[] } {
   sections.push({
     title: "最近失败：生视频（video_records）",
     lines: show(videos, (r) => `#${r.id} [${r.backend}] ${r.at}\n    ${r.error}`),
+  });
+  sections.push({
+    title: "最近失败：生音乐（music_records）",
+    // music_api 要一起打出来：同一张表里躺着两种执行模型（stepfun 异步 / minimax 同步），
+    // 排查时第一件事就是确认这条走的是哪条协议。
+    lines: show(musics, (r) => `#${r.id} [${r.backend}/${r.music_api ?? "-"}] ${r.at}\n    ${r.error}`),
   });
   sections.push({
     title: "最近失败：文档解析（documents）",
@@ -242,6 +251,10 @@ function readDb(): { sections: Section[]; warnings: string[] } {
     ["VIDEO_BACKEND", "生视频后端（cloud / comfyui）"],
     ["VIDEO_PROVIDER_ID", "生视频云厂商"],
     ["VIDEO_MODEL", "生视频模型"],
+    ["MUSIC_BACKEND", "生音乐后端（cloud / local 预留）"],
+    ["MUSIC_PROVIDER_ID", "生音乐云厂商"],
+    ["MUSIC_MODEL", "生音乐模型"],
+    ["MUSIC_LOCAL_API", "本地生音乐协议（预留）"],
     ["TTS_LOCAL_ENGINE", "本地 TTS 引擎"],
     ["TTS_PROVIDER_ID", "三方 TTS 云厂商"],
     ["ASR_ENGINE", "ASR 引擎"],
@@ -291,6 +304,7 @@ function readDb(): { sections: Section[]; warnings: string[] } {
     ["消息", "messages"],
     ["生图记录", "image_records"],
     ["视频记录", "video_records"],
+    ["音乐记录", "music_records"],
     ["语音记录", "voice_records"],
     ["文档", "documents"],
     ["技能", "skills"],
@@ -444,7 +458,7 @@ async function main(): Promise<void> {
   }
   console.log("\n" + "=".repeat(72));
   console.log("下一步：omi logs --level error --limit 50 -v 看完整现场；");
-  console.log("       生图 / 生视频 / 语音等问题见技能 .agents/skills/omni-doctor/。");
+  console.log("       生图 / 生视频 / 生音乐 / 语音等问题见技能 .agents/skills/omni-doctor/。");
   console.log("=".repeat(72));
 }
 

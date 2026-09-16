@@ -132,7 +132,8 @@ describe("listChunks 媒体列透传", () => {
       ])
       .run();
 
-    const chunks = listChunks(doc.id);
+    // main 侧给 listChunks 加了分页信封 { chunks, total }，这里取内层数组
+    const chunks = listChunks(doc.id).chunks;
     expect(chunks).toHaveLength(3);
     const text = chunks.find((c) => c.seq === 1)!;
     const image = chunks.find((c) => c.seq === 2)!;
@@ -203,14 +204,14 @@ describe("listDocs firstImageChunkId 派生", () => {
 
   test("多图片块文档 = min(图片块 id)（文本块 id 更小也不误选）", () => {
     const { kbId, docA, firstImageChunkId } = setupThumbKb("首图库A");
-    const docs = listDocs(kbId);
+    const docs = listDocs(kbId).docs;
     const byId = new Map(docs.map((d) => [d.id, d]));
     expect(byId.get(docA)!.firstImageChunkId).toBe(firstImageChunkId);
   });
 
   test("纯文本/无块文档 → null；纯音视频块文档 → null（modality 过滤不误选）", () => {
     const { kbId, docB, docC } = setupThumbKb("首图库BC");
-    const docs = listDocs(kbId);
+    const docs = listDocs(kbId).docs;
     const byId = new Map(docs.map((d) => [d.id, d]));
     expect(byId.get(docB)!.firstImageChunkId).toBeNull();
     expect(byId.get(docC)!.firstImageChunkId).toBeNull();
@@ -230,12 +231,12 @@ describe("listDocs firstImageChunkId 派生", () => {
       .run();
 
     // 本库结果不受他库影响
-    const docs = listDocs(kbId);
+    const docs = listDocs(kbId).docs;
     const byId = new Map(docs.map((d) => [d.id, d]));
     expect(byId.get(docA)!.firstImageChunkId).toBe(firstImageChunkId);
 
     // 他库自己的文档能取到首图
-    const docs2 = listDocs(kb2.id);
+    const docs2 = listDocs(kb2.id).docs;
     expect(docs2).toHaveLength(1);
     expect(docs2[0]!.firstImageChunkId).not.toBeNull();
     expect(docs2[0]!.firstImageChunkId).not.toBe(firstImageChunkId);
@@ -599,10 +600,11 @@ describe("迁移默认值", () => {
       readFileSync(join(import.meta.dir, "db/migrations/meta/_journal.json"), "utf8"),
     ) as { entries: { idx: number; tag: string }[] };
     const last = newMigration.entries[newMigration.entries.length - 1]!;
-    // 多模态六列必须一直排在 journal 末位（合并 main 的 0029-0031 后由 0029 重编号为 0032）：
-    // 位置错了说明编号被别的迁移挤到前面，老库升级时会被时间戳比较静默跳过。
-    expect(last.tag).toBe("0032_tired_vanisher");
-    expect(last.idx).toBe(32);
+    // 多模态六列必须一直排在 journal 末位（合并 main 的 0029-0031 后由 0029 重编号为
+    // 0032，再合并 v0.1.0 的 0032-0036 后重编号为 0037）：位置错了说明编号被别的迁移
+    // 挤到前面，老库升级时会被时间戳比较静默跳过。
+    expect(last.tag).toBe("0037_tired_vanisher");
+    expect(last.idx).toBe(37);
     replayMigrations(sqlite, last.idx, last.idx);
 
     const kbRow = sqlite.query("SELECT embed_image, embed_audio, embed_video FROM knowledge_bases WHERE id = 1").get() as Record<string, number>;
@@ -621,7 +623,7 @@ describe("迁移默认值", () => {
     const file = join(tmpdir(), `kb-mm-mig-${process.pid}-new.db`);
     rmSync(file, { force: true });
     const sqlite = new Database(file, { create: true });
-    replayMigrations(sqlite, 32);
+    replayMigrations(sqlite, 37);
     sqlite.exec("INSERT INTO knowledge_bases (name) VALUES ('新库')");
     sqlite.exec("INSERT INTO knowledge_docs (kb_id, name, kind, status) VALUES (1, 'd', 'file', 'ready')");
     sqlite.exec("INSERT INTO knowledge_chunks (kb_id, doc_id, seq, content, char_count) VALUES (1, 1, 1, 'x', 1)");

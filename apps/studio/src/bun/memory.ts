@@ -8,6 +8,9 @@ import type { BuiltTool } from "./agent-tools";
 import { getSetting } from "./db/settings";
 import { callEmbeddings, cosine, decodeEmbedding, encodeEmbedding, globalEmbeddingDefaults, type EmbeddingConfig } from "./embeddings";
 import { bm25Rank, buildBm25Index, normalizeText, tokenContainment, tokenSet, type Bm25Index } from "./text-search";
+import { containsLikePattern } from "../shared/sql-like";
+import { logEvent } from "./app-log";
+import { mainT } from "./i18n";
 import {
   MEMORY_LIMITS,
   type MemoryCategory,
@@ -389,6 +392,174 @@ export async function saveAgentMemory(input: SaveAgentMemoryInput): Promise<Save
   };
 }
 
+// ---------------------------------------------------------------------------
+// 笔记 → 记忆（小应用「笔记」沉淀进 Agent 的通路）
+// ---------------------------------------------------------------------------
+
+/**
+ * 笔记记忆的来源标记。
+ *
+ * 记忆条目是**单行、≤500 字、疑似凭据直接拒**的（见 `validateMemoryContent`），
+ * 而且会被注入所有 Agent 的上下文 —— 所以这里不搬正文，只写"索引级"的一句：
+ * 标题 + 日期 + 压缩后的正文（超长截断）。笔记有 2 万字，记忆有 500 字，
+ * 两者的用途本来就不一样：记忆负责让模型**想起有这么一条**，细节由用户或笔记本体提供。
+ *
+ * `note:<id>` 同时是幂等键：同一条笔记反复保存只会更新同一条记忆，不会堆积；
+ * 删除笔记时也按它反查清理（见 `forgetNoteMemory`）。
+ */
+export function noteMemoryRef(noteId: number): string {
+  return `note:${noteId}`;
+}
+
+/**
+ * 笔记是否对 Agent 可见（小应用设置里的开关，默认开）。
+ *
+ * 一把开关管两件事：**沉淀记忆**与**Agent 读正文**（`note_*` 工具）。分成两个开关
+ * 只是把"要不要让 Agent 知道我的笔记"这个决定拆成两道题 —— 用户脑子里的问题是同一个。
+ * 记忆总开关关闭时，沉淀这一半让路（工具仍然可用，那只是读）。
+ */
+export function noteAgentAccessEnabled(): boolean {
+  return getSetting("NOTES_AGENT_ACCESS") !== "0";
+}
+
+/** 记忆沉淀是否生效：可见性开关 + 记忆总开关。 */
+export function noteMemorySyncEnabled(): boolean {
+  return noteAgentAccessEnabled() && memoryEnabled();
+}
+
+export interface NoteMemoryInput {
+  noteId: number;
+  title: string;
+  body: string;
+  /** 归属日期 `YYYY-MM-DD`。 */
+  day: string;
+  tags: string[];
+  /** 置顶的笔记重要度更高（用户明确表示过在意它）。 */
+  pinned?: boolean;
+}
+
+export type NoteMemoryOutcome = {
+  ok: boolean;
+  action: "created" | "updated" | "unchanged" | "skipped";
+  memoryId?: number;
+  /** skipped 的原因（给 app.log 与界面提示用）。 */
+  reason?: string;
+};
+
+/** 把标题 / 日期 / 正文拼成一条记忆；正文按剩余预算截断，保证总量不超上限。 */
+export function buildNoteMemoryContent(input: NoteMemoryInput): string {
+  const title = input.title.trim() || mainT("notes.memory.untitled");
+  const head = mainT("notes.memory.head", { title, day: input.day });
+  // 摘要后面挂一句"全文怎么读"：这是模型顺着记忆去调 note_read 的钩子 ——
+  // 没有它，模型只知道"有这么一条笔记"，然后把这句话原样转述给用户。
+  const hint = mainT("notes.memory.readHint", { id: String(input.noteId) });
+  const body = input.body.replace(/\s+/g, " ").trim();
+  if (!body) return head;
+  const budget = MEMORY_LIMITS.maxContentChars - head.length - hint.length - 2;
+  if (budget <= 0) return head.slice(0, MEMORY_LIMITS.maxContentChars);
+  const excerpt = body.length > budget ? `${body.slice(0, Math.max(0, budget - 1)).trimEnd()}…` : body;
+  return `${head}：${excerpt}${hint}`;
+}
+
+/**
+ * 保存 / 更新一条笔记对应的记忆。**不抛异常**：记忆失败不该让笔记保存失败
+ *（正文已经落库了，那是用户真正在乎的东西），调用方把 outcome 记进 app.log 即可。
+ */
+export function syncNoteMemory(input: NoteMemoryInput): NoteMemoryOutcome {
+  if (!noteMemorySyncEnabled()) {
+    return { ok: true, action: "skipped", reason: memoryEnabled() ? "notes-sync-off" : "memory-off" };
+  }
+  const content = buildNoteMemoryContent(input);
+  const valid = validateMemoryContent(content);
+  if (!valid.ok) {
+    // 最常见的是"疑似凭据"：笔记里贴了一段带 token 的配置。跳过并留痕，不写进会被注入上下文的记忆库。
+    recordEvent(null, "blocked", { reason: valid.error, source: noteMemoryRef(input.noteId) });
+    return { ok: true, action: "skipped", reason: valid.error };
+  }
+
+  const ref = noteMemoryRef(input.noteId);
+  const category: MemoryCategory = "fact";
+  const tags = sanitizeTags([mainT("notes.memory.tag"), ...(input.tags ?? [])]);
+  const importance = clampImportance(input.pinned ? 0.8 : undefined, category);
+
+  try {
+    const existing = db.select().from(memories).where(eq(memories.sourceRef, ref)).get();
+    if (existing) {
+      if (normalizeText(existing.content) === normalizeText(valid.content)) {
+        return { ok: true, action: "unchanged", memoryId: existing.id };
+      }
+      const row = db
+        .update(memories)
+        .set({
+          content: valid.content,
+          contentHash: contentHash(valid.content),
+          tags: JSON.stringify(tags),
+          importance,
+          // 笔记改了就重新有效：用户没有"归档这条笔记的记忆"这个动作，归档只可能是维护任务干的。
+          status: existing.status === "archived" ? "active" : existing.status,
+          embedding: null,
+          embeddingModel: null,
+        })
+        .where(eq(memories.id, existing.id))
+        .returning()
+        .get()!;
+      recordEvent(row.id, "updated", { source: ref });
+      scheduleEmbedding();
+      touchRevision();
+      return { ok: true, action: "updated", memoryId: row.id };
+    }
+
+    const row = db
+      .insert(memories)
+      .values({
+        content: valid.content,
+        contentHash: contentHash(valid.content),
+        category,
+        tags: JSON.stringify(tags),
+        pinned: 0,
+        importance,
+        // 用户在笔记里亲手写的东西，不是 Agent 的推断 —— 不走「写入需确认」队列。
+        status: "active",
+        scope: null,
+        source: "manual",
+        sourceRef: ref,
+      })
+      .returning()
+      .get()!;
+    recordEvent(row.id, "created", { source: ref, category });
+    scheduleEmbedding();
+    touchRevision();
+    return { ok: true, action: "created", memoryId: row.id };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    logEvent({
+      level: "warn",
+      source: "memory",
+      event: "memory.note.sync_failed",
+      message,
+      detail: { noteId: input.noteId, error: e },
+    });
+    return { ok: false, action: "skipped", reason: message };
+  }
+}
+
+/** 笔记被删掉时清掉它的记忆（否则 Agent 会一直"记得"一条已经不存在、也读不到的笔记）。 */
+export function forgetNoteMemory(noteId: number): boolean {
+  const ref = noteMemoryRef(noteId);
+  const row = db.select().from(memories).where(eq(memories.sourceRef, ref)).get();
+  if (!row) return false;
+  db.delete(memories).where(eq(memories.id, row.id)).run();
+  recordEvent(row.id, "forgotten", { source: ref, reason: "note-deleted" });
+  touchRevision();
+  return true;
+}
+
+/** 查询某条笔记当前的记忆（界面显示"已沉淀"用）。 */
+export function noteMemory(noteId: number): MemoryEntry | null {
+  const row = db.select().from(memories).where(eq(memories.sourceRef, noteMemoryRef(noteId))).get();
+  return row ? rowToEntry(row) : null;
+}
+
 export interface DuplicateMatch {
   row: MemoryRow;
   similarity: number;
@@ -443,8 +614,16 @@ async function findDuplicate(content: string, scope: string | null): Promise<Dup
           }
         }
       }
-    } catch {
-      // 嵌入服务不可用：退化为前两级判重
+    } catch (e) {
+      // 嵌入服务不可用：退化为前两级判重。这是“明明存了两条几乎一样的记忆”的根因之一，
+      // 统一日志里要能看见（此前完全静默）。
+      logEvent({
+        level: "warn",
+        source: "memory",
+        event: "memory.dedupe.embed_failed",
+        message: e instanceof Error ? e.message : String(e),
+        detail: { model: cfg.embeddingModel },
+      });
     }
   }
 
@@ -743,6 +922,8 @@ export interface ListOptions {
   status?: MemoryStatus | "all" | "open";
   scope?: string | null | "all";
   limit?: number;
+  /** 只看置顶：服务端过滤，不再依赖「前 N 条里恰好包含置顶」这个脆弱契约。 */
+  pinned?: boolean;
 }
 
 /** 界面 / CLI 列表：同步轻量查询（关键词 LIKE + 排序），不做打分与热度累计。 */
@@ -750,13 +931,15 @@ export function listMemories(opts: ListOptions = {}): MemoryEntry[] {
   const filters = [];
   // 默认口径是 open：已被取代的旧事实不该出现在任何默认视图里，要看得显式要 all。
   const status = opts.status ?? "open";
+  if (opts.pinned) filters.push(eq(memories.pinned, 1));
   if (opts.category) filters.push(eq(memories.category, opts.category));
   if (status !== "all" && status !== "open") filters.push(eq(memories.status, status));
   else if (status === "open") filters.push(ne(memories.status, "superseded"));
   if (opts.scope !== "all" && typeof opts.scope === "string") filters.push(eq(memories.scope, opts.scope));
   if (opts.query?.trim()) {
-    const q = `%${opts.query.trim()}%`;
-    filters.push(or(sql`${memories.content} like ${q}`, sql`${memories.tags} like ${q}`));
+    // 转义 LIKE 通配符：搜「100%」不再命中全库（同提示词广场 / 我的提示词）。
+    const q = containsLikePattern(opts.query.trim());
+    filters.push(or(sql`${memories.content} like ${q} escape '\\'`, sql`${memories.tags} like ${q} escape '\\'`));
   }
   const rows = db
     .select()
@@ -1040,8 +1223,14 @@ export async function runMemoryMaintenance(): Promise<MaintenanceResult> {
   // 6. 补向量（配置了嵌入模型才有意义）
   try {
     result.embedded = await embedMissingMemories();
-  } catch {
-    // 嵌入服务不可用：下次维护再补
+  } catch (e) {
+    // 嵌入服务不可用：下次维护再补。用户只看到统计里 embedded 不涨，日志里要留线索。
+    logEvent({
+      level: "warn",
+      source: "memory",
+      event: "memory.maintain.embed_failed",
+      message: e instanceof Error ? e.message : String(e),
+    });
   }
 
   if (result.archived + result.expired > 0) bumpMetric("archived", result.archived + result.expired);

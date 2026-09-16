@@ -6,6 +6,7 @@ import { printTable } from "../format";
 import { pickNumbered } from "../tui";
 import { resolveDataDir } from "../data-dir";
 import { modelNameFromRef } from "../../shared/modelscope";
+import { cacheComparison, fmtCtx, parseCacheModes, parseContexts, type BenchmarkCacheMode } from "../../shared/benchmark";
 import type {
   BenchmarkRecordRow,
   BenchmarkRunState,
@@ -29,10 +30,6 @@ type RunHandle = {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const isTTY = process.stdout.isTTY === true;
-
-function fmtCtx(c: number): string {
-  return c >= 1000 ? `${(c / 1000).toFixed(c % 1000 === 0 ? 0 : 1)}k` : String(c);
-}
 
 function fmtTime(ms: number): string {
   const d = new Date(ms);
@@ -117,11 +114,54 @@ async function resolveProvider(arg: string | boolean): Promise<ProviderLite | nu
   return null;
 }
 
+/** 终端里的场景名（COLUMNS 有限，用短标签）。 */
+const CACHE_LABEL: Record<BenchmarkCacheMode, string> = {
+  cold: "冷启",
+  partial: "部分",
+  warm: "命中",
+};
+
 function printRowLine(r: SpeedBenchRow) {
+  const cache = r.cache ? `${CACHE_LABEL[r.cache]} ` : "";
+  // 没测出来的档位也打一行（红字 + 原因）：档位扫描的结论常常就在"墙在哪一档"。
+  if (r.ok === 0) {
+    console.log(`  \x1b[31m✗ ${fmtCtx(r.contextLength)} ${cache} 失败\x1b[0m  ${r.error ?? ""}`);
+    return;
+  }
   const fails = r.fails > 0 ? ` \x1b[31m失败 ${r.fails}\x1b[0m` : "";
+  const truncated = r.truncated ? ` \x1b[33m输入被截断（${r.promptTokens} tok）\x1b[0m` : "";
   console.log(
-    `  ✓ ${fmtCtx(r.contextLength)}  ttft ${r.ttftMs}ms  tpot ${r.tpotMs}ms  tps \x1b[36m${r.tps}\x1b[0m  聚合 ${r.aggTps}  prefill ${r.prefillTps}${fails}`,
+    `  ✓ ${fmtCtx(r.contextLength)} ${cache} ttft ${r.ttftMs}ms  tpot ${r.tpotMs}ms  tps \x1b[36m${r.tps}\x1b[0m  聚合 ${r.aggTps}  prefill ${r.prefillTps}${fails}${truncated}`,
   );
+}
+
+/** 缓存对比：同档位下"冷启 → 部分命中 → 完全命中"的 TTFT 变化。 */
+function printCacheComparison(rows: SpeedBenchRow[]) {
+  const entries = cacheComparison(rows).filter(
+    (c) => (c.cold ? 1 : 0) + (c.partial ? 1 : 0) + (c.warm ? 1 : 0) > 1,
+  );
+  if (entries.length === 0) return;
+  console.log("\n缓存命中对比（倍数 = 冷启 TTFT ÷ 命中 TTFT）");
+  printTable(
+    ["上下文", "冷启(ms)", "部分命中(ms)", "完全命中(ms)", "部分×", "命中×", "服务端复用"],
+    entries.map((c) => [
+      fmtCtx(c.contextLength),
+      c.cold ? String(c.cold.ttftMs) : "-",
+      c.partial ? String(c.partial.ttftMs) : "-",
+      c.warm ? String(c.warm.ttftMs) : "-",
+      c.partialSpeedup != null ? String(c.partialSpeedup) : "-",
+      c.warmSpeedup != null ? String(c.warmSpeedup) : "-",
+      c.warmReuseRatio != null ? `${Math.round(c.warmReuseRatio * 100)}%` : "引擎未上报",
+    ]),
+  );
+  // ×1 附近 = 服务端压根没吃到缓存，这是排查配置的第一步，值得单独点出来。
+  for (const c of entries) {
+    if (c.warmSpeedup != null && c.warmSpeedup < 1.2) {
+      console.log(
+        `\x1b[33m注意\x1b[0m：${fmtCtx(c.contextLength)} 档完全命中只快 ${c.warmSpeedup}× —— 服务端没吃到前缀缓存（并发槽位各自的 KV / 前缀里有每次都变的内容 / 引擎没开缓存）。`,
+      );
+    }
+  }
 }
 
 function printResult(state: BenchmarkRunState) {
@@ -132,18 +172,28 @@ function printResult(state: BenchmarkRunState) {
     `\n${statusText}  ${modelNameFromRef(state.model)}  [${targetLabel(state)}]  ${state.params.genLength} tok × 并发 ${state.params.batchSize}`,
   );
   if (state.error) console.log(`错误：${state.error}`);
+  if (state.stopped) {
+    console.log(
+      state.stopped.reason === "context-overflow"
+        ? `注意：${fmtCtx(state.stopped.contextLength)} 档超出服务端上下文窗口，更大的档位已跳过。`
+        : `注意：${fmtCtx(state.stopped.contextLength)} 档请求超时，更大的档位只会更慢，已跳过。`,
+    );
+  }
 
   const s = state.summary;
   if (s) {
+    // 平均取自哪种缓存场景要说清：冷启和命中混着看会得出完全不同的结论。
+    const basis = s.basis ? `（取「${CACHE_LABEL[s.basis]}」档）` : "";
     console.log(
-      `平均 ${s.avgTps} tok/s · 峰值 ${s.peakTps} · 最佳 TTFT ${s.bestTtftMs}ms · 峰值并发 ${s.peakAggTps} · 峰值 prefill ${s.peakPrefillTps} · 共 ${s.totalTokens.toLocaleString()} tok`,
+      `平均 ${s.avgTps} tok/s · 峰值 ${s.peakTps} · 最佳 TTFT ${s.bestTtftMs}ms · 峰值并发 ${s.peakAggTps} · 峰值 prefill ${s.peakPrefillTps} · 共 ${s.totalTokens.toLocaleString()} tok${basis}`,
     );
   }
   if (state.rows.length > 0) {
     printTable(
-      ["上下文", "输入tok", "TTFT(ms)", "TPOT(ms)", "TPS", "聚合TPS", "Prefill", "输出tok", "成功"],
+      ["上下文", "缓存", "输入tok", "TTFT(ms)", "TPOT(ms)", "TPS", "聚合TPS", "Prefill", "输出tok", "成功"],
       state.rows.map((r) => [
         fmtCtx(r.contextLength),
+        r.cache ? CACHE_LABEL[r.cache] : "-",
         String(r.promptTokens),
         String(r.ttftMs),
         String(r.tpotMs),
@@ -154,6 +204,7 @@ function printResult(state: BenchmarkRunState) {
         r.fails > 0 ? `${r.ok}/${r.fails}` : String(r.ok),
       ]),
     );
+    printCacheComparison(state.rows);
   }
   const durS = state.durationMs ? (state.durationMs / 1000).toFixed(1) : "?";
   console.log(`耗时 ${durS}s${state.recordId ? ` · 已存历史记录 #${state.recordId}` : ""}`);
@@ -191,6 +242,7 @@ async function startRun(params: {
   genLength?: number;
   batchSize?: number;
   contexts?: number[];
+  cacheModes?: BenchmarkCacheMode[];
 }): Promise<RunHandle | { error: string }> {
   // 应用在运行：走 socket（UI 同步显示；全局只允许一个运行中任务）。
   if (await isAppRunning()) {
@@ -257,13 +309,16 @@ export async function cmdBenchmark(parsed: ParsedArgs): Promise<void> {
 
   const genLength = Number(optString(parsed.options, "gen")) || undefined;
   const batchSize = Number(optString(parsed.options, "batch")) || undefined;
-  const contexts = optString(parsed.options, "contexts")
-    ?.split(",")
-    .map((s) => Number(s.trim()))
-    .filter((n) => Number.isFinite(n) && n > 0);
+  // --contexts 接受裸数字与 k / m 后缀：`--contexts 8k,32k,1m`（上限 1M，超了会被夹住）。
+  const contextsRaw = optString(parsed.options, "contexts");
+  const contexts = contextsRaw ? parseContexts(contextsRaw) : undefined;
+  // --cache 选缓存场景（cold / partial / warm）；不传就三种都测一遍。
+  const cacheRaw = optString(parsed.options, "cache");
+  const cacheModes = cacheRaw !== undefined ? parseCacheModes(cacheRaw) : undefined;
 
   const target = provider ? `${provider.name} · ${model || "默认模型"}` : model || "当前活动模型";
-  console.log(`基准测速 → ${target}${contexts ? `（${contexts.map(fmtCtx).join(" / ")}）` : ""}`);
+  const cacheLabel = cacheModes ? `，缓存 ${cacheModes.map((m) => CACHE_LABEL[m]).join("/")}` : "";
+  console.log(`基准测速 → ${target}${contexts ? `（${contexts.map(fmtCtx).join(" / ")}）` : ""}${cacheLabel}`);
 
   const started = await startRun({
     model,
@@ -271,6 +326,7 @@ export async function cmdBenchmark(parsed: ParsedArgs): Promise<void> {
     genLength,
     batchSize,
     contexts,
+    cacheModes,
   });
   if ("error" in started) {
     console.error(started.error === "benchmark_already_running" ? "已有基准测试在进行中（应用内或另一个 omi benchmark）。" : started.error);

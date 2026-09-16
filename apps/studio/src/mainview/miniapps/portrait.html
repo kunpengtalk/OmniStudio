@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>形象照</title>
+<!--
+  小应用：形象照（文生图）。
+  与"抠图换底/证件照"不同，这一支是**生成**而不是修图：没有原图，靠风格预设 + 描述生图。
+  因此它只需要生图能力（本地 MLX / ComfyUI / 云端都行），不需要图像编辑能力。
+-->
+<style>
+  .preview { display: flex; justify-content: center; background: var(--soft); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  .preview img { max-width: 100%; max-height: 420px; border-radius: 10px; display: block; }
+  .sizes { display: flex; gap: 8px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="hd">
+    <h1 data-i18n="title"></h1>
+    <span class="sub" data-i18n="sub"></span>
+  </div>
+
+  <div id="gate" class="card hidden">
+    <div class="row">
+      <span class="grow err" id="gate-text"></span>
+      <button class="btn sm" id="gate-btn" data-i18n="toSettings"></button>
+    </div>
+  </div>
+
+  <div class="card col">
+    <span class="lb" data-i18n="styleLabel"></span>
+    <div class="row" id="styles"></div>
+    <span class="lb" data-i18n="extraLabel"></span>
+    <textarea class="field" id="extra" data-i18n-ph="extraPh"></textarea>
+    <span class="lb" data-i18n="sizeLabel"></span>
+    <div class="sizes" id="sizes"></div>
+  </div>
+
+  <div class="row">
+    <button class="btn primary" id="run" disabled data-i18n="run"></button>
+    <span class="busy hidden" id="busy"><span class="spin"></span><span id="busy-text"></span></span>
+    <span class="err grow" id="err"></span>
+    <span class="ok grow hidden" id="ok"></span>
+  </div>
+
+  <div class="col hidden" id="result">
+    <div class="preview"><img id="out" alt="result" /></div>
+    <div class="row">
+      <button class="btn primary" id="save" data-i18n="save"></button>
+      <button class="btn" id="again" data-i18n="again"></button>
+    </div>
+    <!-- 提示词可能很长：单独一行并允许折行，别把按钮挤到屏幕外 -->
+    <span class="hint" id="out-prompt" style="word-break:break-word"></span>
+  </div>
+</div>
+
+<script>
+(function () {
+  var DICT = {
+    zh: {
+      title: '形象照',
+      sub: '按风格预设生成立绘 / 职业形象照',
+      styleLabel: '风格',
+      extraLabel: '补充描述（可选）',
+      extraPh: '例如：短发女性，深色西装，看向镜头，浅灰影棚背景',
+      sizeLabel: '尺寸',
+      run: '生成',
+      again: '换一张',
+      save: '保存图片',
+      toSettings: '去配置模型',
+      working: '正在生成，本地模型可能要一两分钟…',
+      saved: '已保存到「{name}」',
+      promptLabel: '本次提示词：',
+      needModel: '还没配置生图模型：去「设置 → 模型云服务」启用厂商并选择模型，或改用本地 MLX / ComfyUI',
+    },
+    en: {
+      title: 'Portrait',
+      sub: 'Generate headshots and character art from style presets',
+      styleLabel: 'Style',
+      extraLabel: 'Extra description (optional)',
+      extraPh: 'e.g. short-haired, dark suit, looking at the camera, light grey studio backdrop',
+      sizeLabel: 'Size',
+      run: 'Generate',
+      again: 'Another one',
+      save: 'Save image',
+      toSettings: 'Configure a model',
+      working: 'Generating — local models can take a minute or two…',
+      saved: 'Saved to “{name}”',
+      promptLabel: 'Prompt: ',
+      needModel: 'No image model configured — enable a provider in Settings → Cloud providers, or use local MLX / ComfyUI',
+    },
+  };
+
+  var STYLES = [
+    { id: 'pro', zh: '职业形象照', en: 'Corporate headshot',
+      zhText: '专业职业形象照，人物半身正面，深色西装，柔和影棚布光，浅灰背景',
+      enText: 'professional corporate headshot, half-body, dark suit, soft studio lighting, light grey backdrop' },
+    { id: 'business', zh: '商务正装', en: 'Business portrait',
+      zhText: '商务正装人像，白衬衫领带，办公室虚化背景，自然光',
+      enText: 'business portrait, white shirt and tie, blurred office background, natural light' },
+    { id: 'fresh', zh: '清新自然', en: 'Natural & fresh',
+      zhText: '清新自然人像，浅色毛衣，窗边自然光，柔和虚化背景',
+      enText: 'fresh natural portrait, light knit sweater, window light, softly blurred background' },
+    { id: 'guofeng', zh: '中式古风', en: 'Chinese classical',
+      zhText: '中式古风人像，汉服，发簪，柔和侧光，水墨画风格背景',
+      enText: 'Chinese classical portrait, hanfu, hairpin, soft side light, ink-painting style background' },
+    { id: 'cyber', zh: '赛博未来', en: 'Cyber future',
+      zhText: '赛博朋克人像，霓虹灯牌背景，青紫对比光，高对比度',
+      enText: 'cyberpunk portrait, neon sign background, teal-magenta rim light, high contrast' },
+    { id: 'id2', zh: '证件风', en: 'ID style',
+      zhText: '证件照风格人像，正面免冠，纯色背景，光线均匀，无阴影',
+      enText: 'ID-photo style portrait, front facing, plain background, even lighting, no shadow' },
+  ];
+  var SIZES = [
+    { id: 'sq', zh: '1:1', w: 1024, h: 1024 },
+    { id: 'p34', zh: '3:4', w: 896, h: 1152 },
+    { id: 'l43', zh: '4:3', w: 1152, h: 896 },
+    { id: 'w169', zh: '16:9', w: 1152, h: 648 },
+  ];
+
+  var t = function (key, params) {
+    var table = DICT[omni.lang] || DICT.zh;
+    var text = table[key] || DICT.zh[key] || key;
+    if (params) Object.keys(params).forEach(function (k) { text = text.split('{' + k + '}').join(params[k]); });
+    return text;
+  };
+  var pickLabel = function (item) { return omni.lang === 'en' ? item.en : item.zh; };
+  var $ = function (sel) { return document.querySelector(sel); };
+
+  var state = { style: STYLES[0], size: SIZES[0], busy: false, url: '' };
+  var imageReady = false;
+
+  function paint() {
+    document.querySelectorAll('[data-i18n]').forEach(function (el) { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll('[data-i18n-ph]').forEach(function (el) { el.placeholder = t(el.dataset.i18nPh); });
+    document.querySelectorAll('#styles .chip').forEach(function (el) {
+      el.textContent = pickLabel(STYLES.filter(function (s) { return s.id === el.dataset.id; })[0]);
+    });
+  }
+  function showError(message) { $('#err').textContent = message || ''; }
+  function showOk(message) {
+    var el = $('#ok');
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+  }
+  function setBusy(on, text) {
+    state.busy = on;
+    $('#busy').classList.toggle('hidden', !on);
+    if (text) $('#busy-text').textContent = text;
+    $('#run').disabled = on || !imageReady;
+  }
+  function checkGate() {
+    imageReady = Boolean(omni.capabilities && omni.capabilities.image && omni.capabilities.image.ready);
+    $('#gate').classList.toggle('hidden', imageReady);
+    if (!imageReady) $('#gate-text').textContent = t('needModel');
+    $('#run').disabled = state.busy || !imageReady;
+  }
+
+  STYLES.forEach(function (style) {
+    var chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.dataset.id = style.id;
+    chip.textContent = style.zh;
+    chip.setAttribute('aria-pressed', style.id === state.style.id ? 'true' : 'false');
+    chip.addEventListener('click', function () {
+      state.style = style;
+      document.querySelectorAll('#styles .chip').forEach(function (el) {
+        el.setAttribute('aria-pressed', el.dataset.id === style.id ? 'true' : 'false');
+      });
+    });
+    $('#styles').appendChild(chip);
+  });
+  SIZES.forEach(function (size) {
+    var chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.dataset.id = size.id;
+    chip.textContent = size.zh + '  ' + size.w + '×' + size.h;
+    chip.setAttribute('aria-pressed', size.id === state.size.id ? 'true' : 'false');
+    chip.addEventListener('click', function () {
+      state.size = size;
+      document.querySelectorAll('#sizes .chip').forEach(function (el) {
+        el.setAttribute('aria-pressed', el.dataset.id === size.id ? 'true' : 'false');
+      });
+    });
+    $('#sizes').appendChild(chip);
+  });
+
+  function buildPrompt() {
+    var styleText = omni.lang === 'en' ? state.style.enText : state.style.zhText;
+    var extra = $('#extra').value.trim();
+    var tail = omni.lang === 'en'
+      ? 'photorealistic, high detail, sharp focus, professional photography, no text, no watermark'
+      : '照片级真实，高细节，焦点清晰，专业摄影，不要文字和水印';
+    return [styleText, extra, tail].filter(Boolean).join('，');
+  }
+
+  function generate() {
+    if (state.busy || !imageReady) return;
+    showError('');
+    showOk('');
+    setBusy(true, t('working'));
+    var prompt = buildPrompt();
+    omni.image.generate({
+      prompt: prompt,
+      width: state.size.w,
+      height: state.size.h,
+      // 每次换一张：固定种子的话"再生成"会得到同一张图。
+      seed: Math.floor(Math.random() * 2147483000),
+    }).then(function (image) {
+      state.url = image.url;
+      $('#out').src = image.url;
+      $('#result').classList.remove('hidden');
+      $('#out-prompt').textContent = t('promptLabel') + prompt;
+      return omni.log('generated', 'portrait generated', { size: state.size.id, style: state.style.id });
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('generate.failed', e.message || String(e), {});
+    }).then(function () { setBusy(false); });
+  }
+
+  $('#run').addEventListener('click', generate);
+  $('#again').addEventListener('click', generate);
+  $('#gate-btn').addEventListener('click', function () { omni.openSettings('network'); });
+
+  $('#save').addEventListener('click', function () {
+    if (!state.url) return;
+    showError('');
+    fetch(state.url)
+      .then(function (res) { return res.blob(); })
+      .then(function (blob) {
+        return new Promise(function (resolve) {
+          var reader = new FileReader();
+          reader.onload = function () { resolve(String(reader.result)); };
+          reader.readAsDataURL(blob);
+        });
+      })
+      .then(function (dataUrl) {
+        var name = 'portrait-' + state.style.id + '-' + Date.now().toString().slice(-6) + '.png';
+        return omni.files.save({ name: name, dataUrl: dataUrl }).then(function (res) {
+          showOk(t('saved', { name: (res.path || name).split('/').pop() }));
+        });
+      })
+      .catch(function (e) { showError(e.message || String(e)); });
+  });
+
+  omni.ready.then(function () {
+    paint();
+    checkGate();
+  });
+  omni.onCapabilities = function () { checkGate(); };
+})();
+</script>
+</body>
+</html>

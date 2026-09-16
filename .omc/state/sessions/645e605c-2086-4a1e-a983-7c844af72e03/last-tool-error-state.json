@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"python3 << 'EOF'\\nimport json, subprocess\\n\\nmain_json = subprocess.run(\\n    [\\\"git\\\", \\\"show\\\", \\\"origin/main:apps/studio/src/bun/db/migrations/meta/_journal.json\\\"],\\n    capture_output...",
+  "error": "Exit code 1\nTraceback (most recent call last):\n  File \"<stdin>\", line 35, in <module>\nAssertionError: [1773921733892, 1788858617005, 1789200000000, 1789473600000, 1789563600000, 1789646400000, 1788948595026, 1788957798073, 1789819200000, 1789905600000, 1789992000000, 1790078400000, 1790082000000, 1790082500000, 1790083000000, 1790084000000, 1790085000000, 1790086000000, 1790087000000, 1790088000000, 1790089000000, 1790090000000, 1790091000000, 1790092000000, 1790093000000, 1790094000000, 1790095...",
+  "timestamp": "2026-09-16T02:30:57.665Z",
+  "retry_count": 4
+}

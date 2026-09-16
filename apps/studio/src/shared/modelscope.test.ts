@@ -75,6 +75,16 @@ describe("classifyModelName", () => {
     ["Wan-AI/Wan2.2-T2V-A14B", "video"],
     ["kling-v1", "video"],
     ["veo-3", "video"],
+    // 生音乐：云端两家的型号 + 常见开源系列。
+    // 判定排在视频 / 生图之前，音乐模型名与它们没有交集（见 classifyModelName 里的说明）。
+    ["stepaudio-3-music-preview", "music"],
+    ["music-3.0", "music"],
+    ["music-2.6", "music"],
+    ["music-cover", "music"],
+    ["facebook/musicgen-large", "music"],
+    ["ACE-Step/ACE-Step-v1-3.5B", "music"],
+    ["stabilityai/stable-audio-open-1.0", "music"],
+    ["ASLP-lab/DiffRhythm-1_2", "music"],
     // 认不出来 —— 保持 other（对话选择器仍然保留，不能藏掉）。
     // MiniMax 的对话模型（M1 / Text-01）就在这一类里：名字里没有可识别的对话特征，
     // 判成 other 才不会把它从对话选择器里误伤掉。

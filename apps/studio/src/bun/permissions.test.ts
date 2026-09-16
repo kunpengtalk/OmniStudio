@@ -12,6 +12,8 @@ import {
   defaultRules,
   displayPath,
   evaluate,
+  HUMAN_PERMISSION_LABELS,
+  humanPermissionLabel,
   isDangerousCommand,
   isInsideWorkspace,
   matchesPermissionPattern,
@@ -375,5 +377,19 @@ describe("路径工具", () => {
     expect(isInsideWorkspace("/tmp/ws", "/tmp/ws-other/a.ts")).toBe(false);
     expect(displayPath("/tmp/ws", "/tmp/ws/src/a.ts")).toBe("src/a.ts");
     expect(displayPath("/tmp/ws", "/etc/hosts")).toBe("/etc/hosts");
+  });
+});
+
+describe("权限名清单", () => {
+  test("设置页下拉包含联网搜索与重复调用保护（曾漏掉）", () => {
+    const names = Object.keys(HUMAN_PERMISSION_LABELS);
+    expect(names).toContain("websearch");
+    expect(names).toContain("doom_loop");
+    expect(names).toContain("sandbox_escalation");
+  });
+
+  test("humanPermissionLabel 有中文说明，未知权限名原样返回", () => {
+    expect(humanPermissionLabel("bash")).toBe("执行命令");
+    expect(humanPermissionLabel("knowledge")).toBe("knowledge");
   });
 });

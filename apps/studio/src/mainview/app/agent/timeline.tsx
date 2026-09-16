@@ -686,7 +686,3 @@ function timelineItemKey(item: TimelineItem, index: number): string {
   }
 }
 
-/** 已经处理完的工具调用次数（折叠行的摘要用）。 */
-export function countToolCalls(events: AgentEventRow[]): number {
-  return events.filter((event) => event.kind === "tool_start").length;
-}

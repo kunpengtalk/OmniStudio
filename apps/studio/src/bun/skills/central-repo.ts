@@ -19,6 +19,7 @@ import {
 } from "../../shared/skills";
 import { isSkillDir, parseSkillMd } from "./metadata";
 import { safeJoin, safeName } from "../path-safety";
+import { logEvent } from "../app-log";
 
 /** 中央库根目录（git 备份仓库根）。 */
 export function getCentralRepoDir(): string {
@@ -78,7 +79,15 @@ export function ensureCentralRepo(): { ok: boolean; dir: string; created: boolea
     mkdirSync(join(dir, SKILLS_META_DIR, "skills"), { recursive: true });
     mkdirSync(join(dir, SKILLS_META_DIR, "tmp"), { recursive: true });
     return { ok: true, dir, created: !existed };
-  } catch {
+  } catch (e) {
+    // 中央库建不出来 = 整个 Skills 页面都没法用，但界面只会显示"0 个技能"。
+    logEvent({
+      level: "error",
+      source: "skills",
+      event: "skills.central.init_failed",
+      message: e instanceof Error ? e.message : String(e),
+      detail: { dir, error: e },
+    });
     return { ok: false, dir, created: false };
   }
 }
@@ -155,7 +164,16 @@ export function reindexCentralRepo(): { added: string[]; removed: string[] } {
         added.push(e.name);
       }
     }
-  } catch {}
+  } catch (e) {
+    // git pull / 手工编辑后重建索引失败：技能会"消失"，不留痕就只能靠猜。
+    logEvent({
+      level: "error",
+      source: "skills",
+      event: "skills.central.reindex_failed",
+      message: e instanceof Error ? e.message : String(e),
+      detail: { dir, added: added.length, error: e },
+    });
+  }
 
   for (const row of db.select().from(skillsTable).all()) {
     if (!diskIds.has(row.id)) {
@@ -171,12 +189,30 @@ export function cleanupTmp() {
   const tmp = getTmpDir();
   if (!existsSync(tmp)) return;
   try {
-    for (const e of readdirSync(tmp, { withFileTypes: true })) {
+    // 循环变量与 catch 参数不能同名：`catch (e)` 会把 Dirent 那个 e 遮住，
+    // 编译器和读代码的人都会看错（tsc 直接报 "e is of type unknown"）。
+    for (const entry of readdirSync(tmp, { withFileTypes: true })) {
       try {
-        rmSync(join(tmp, e.name), { recursive: true, force: true });
-      } catch {}
+        rmSync(join(tmp, entry.name), { recursive: true, force: true });
+      } catch (err) {
+        logEvent({
+          level: "debug",
+          source: "skills",
+          event: "skills.central.tmp_cleanup_failed",
+          message: err instanceof Error ? err.message : String(err),
+          detail: { path: join(tmp, entry.name) },
+        });
+      }
     }
-  } catch {}
+  } catch (err) {
+    logEvent({
+      level: "debug",
+      source: "skills",
+      event: "skills.central.tmp_cleanup_failed",
+      message: err instanceof Error ? err.message : String(err),
+      detail: { dir: tmp },
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

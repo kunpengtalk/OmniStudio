@@ -31,7 +31,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { useT } from "@stores/ui-lang";
 import type { McpServerConfig, McpServerWithStatus, McpToolSummary } from "@/shared/mcp";
-import { PageHeader, SettingsSection, SettingRow } from "./setting-ui";
+import { PageHeader, SettingsSection, SettingRow } from "@components/setting-ui";
 
 /** 行内测试结果：成功显示工具清单，失败显示错误。 */
 type TestState =

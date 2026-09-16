@@ -3,12 +3,10 @@ import { readFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { db } from "./db";
 import { prompts as promptsTable, promptCategories as catsTable } from "./db/schema";
-import { IMAGE_SERVER_HOST, imageServerPort } from "../shared/server-info";
-import {
-  getPromptLibraryMediaBase,
-  getPromptLibraryCacheBase,
-  promptLibraryLocalUrl,
-} from "./image-server";
+import { PROMPT_PAGE_SIZE } from "../shared/prompts";
+import { containsLikePattern } from "../shared/sql-like";
+import { logEvent } from "./app-log";
+import { getPromptLibraryCacheBase, promptLibraryLocalUrl } from "./image-server";
 import type { PromptKind } from "./db/schema";
 
 export type { PromptKind } from "./db/schema";
@@ -85,16 +83,68 @@ export function promptMediaCloudUrl(raw: string | null): string | null {
   return null;
 }
 
-/** 已有本地缓存 / 开发机 vibedesign 素材时优先本地，否则用云端直链。 */
+/**
+ * 广场媒体（图片 / 视频封面）在界面上加载用的地址。
+ *
+ * **一律指向本地媒体服务**，由它按需取上游：只有主进程那条路经过 `bun/proxy.ts`
+ * 包装的 `globalThis.fetch`，代理设置（系统 / 自定义 / 直连）才生效。此前这里直接把
+ * 第三方 CDN 直链交给 `<img src>`，走的是 webview 自己的网络栈 —— 配了代理的用户
+ * 广场图必然先失败一次、再走 `ensurePromptMedia` 兜底重下，首屏延迟被放大一倍，
+ * 而且失败原因（代理没生效 / 热链被拒）在日志里看不出来。
+ */
 export function mediaUrl(raw: string | null): string | null {
   if (!raw) return null;
-  if (!raw.startsWith("/prompt-library/")) return raw; // 已是绝对地址
-  const rel = raw.slice("/prompt-library/".length);
-  // 已下载过的本地缓存优先（离线也能看）
-  if (existsSync(join(getPromptLibraryCacheBase(), rel))) return promptLibraryLocalUrl(rel);
-  // 开发机上有 vibedesign 素材目录时由本地 image-server 静态服务
-  if (getPromptLibraryMediaBase()) return `http://${IMAGE_SERVER_HOST}:${imageServerPort()}${raw}`;
-  return promptMediaCloudUrl(raw);
+  if (!raw.startsWith("/prompt-library/")) return raw; // 已是绝对地址（如用户上传的图）
+  return promptLibraryLocalUrl(raw.slice("/prompt-library/".length));
+}
+
+/**
+ * 按需取上游媒体，作为 `Response` 直接回给媒体服务（**不落盘**）。
+ *
+ * 只有确实需要的那些图片会被取一次（浏览器会按响应头缓存），不会因为用户翻了几页
+ * 就把几十 MB 素材堆进数据目录 —— 落盘缓存仍然只属于"显式兜底"那条路
+ * （`ensurePromptMedia`，离线可看）。
+ *
+ * 取不到（上游 4xx / 不是图片 / 超时）返回 null，由调用方回 404。
+ */
+export async function fetchPromptMediaUpstream(rel: string): Promise<Response | null> {
+  if (!rel || rel.includes("..") || rel.length > 300) return null;
+  const candidates: string[] = [];
+  const cloud = promptMediaCloudUrl(`/prompt-library/${rel}`);
+  if (cloud) candidates.push(cloud);
+  const special = await resolveSpecialMedia(rel);
+  if (special && special !== cloud) candidates.push(special);
+  for (const url of candidates) {
+    const res = await fetchImagePassthrough(url);
+    if (res) return res;
+  }
+  return null;
+}
+
+/** 取一张图并校验（content-type 排除站点回退页，魔数排除伪装成图片的 HTML）。 */
+async function fetchImagePassthrough(url: string): Promise<Response | null> {
+  try {
+    const resp = await fetch(url, {
+      signal: AbortSignal.timeout(20_000),
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    if (!resp.ok) return null;
+    const ct = resp.headers.get("content-type") ?? "";
+    if (ct && !/^image\//i.test(ct) && !/octet-stream/i.test(ct)) return null;
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    if (buf.byteLength < 12 || buf.byteLength > MAX_MEDIA_BYTES) return null;
+    if (!isImageBytes(buf)) return null;
+    return new Response(buf, {
+      headers: {
+        "Content-Type": ct.startsWith("image/") ? ct : "image/jpeg",
+        // 媒体服务的响应默认不缓存；这里显式允许浏览器缓存一天，
+        // 免得每次重渲染都回来问一趟（数据目录不跟着膨胀）。
+        "Cache-Control": "public, max-age=86400",
+      },
+    });
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +251,14 @@ export function seedIfNeeded(): void {
       });
       console.log(`[prompt-library] seeded ${kind}: +${toInsert.length} prompts`);
     } catch (e) {
-      console.warn(`[prompt-library] seed ${kind} failed: ${e}`);
+      // 灌种子失败 = 广场永远是空的，而这条路径此前只有 console.warn（打包后没人接）。
+      logEvent({
+        level: "error",
+        source: "app",
+        event: "prompt.seed.failed",
+        message: e instanceof Error ? e.message : String(e),
+        detail: { kind, error: e },
+      });
     }
   }
 }
@@ -254,7 +311,8 @@ export type PromptListParams = {
   offset?: number;
 };
 
-const PAGE_SIZE = 60;
+/** 默认分页大小：与前端共用同一个常量（见 shared/prompts.ts）。 */
+const PAGE_SIZE = PROMPT_PAGE_SIZE;
 
 /** 某类型下的分类列表（含条数）。 */
 export function listCategories(kind: PromptKind): PromptCategoryRow[] {
@@ -283,9 +341,10 @@ export function listPrompts(params: PromptListParams): { items: PromptRow[]; tot
   if (category) conds.push(eq(promptsTable.category, category));
   if (source) conds.push(eq(promptsTable.source, source));
   if (search?.trim()) {
-    const kw = `%${search.trim()}%`;
+    // 转义 + ESCAPE：搜「100%」不再命中全库（见 shared/sql-like.ts）。
+    const kw = containsLikePattern(search.trim());
     conds.push(
-      sql`(${promptsTable.name} like ${kw} or ${promptsTable.subcategory} like ${kw} or ${promptsTable.summary} like ${kw} or ${promptsTable.prompt} like ${kw})`,
+      sql`(${promptsTable.name} like ${kw} escape '\\' or ${promptsTable.subcategory} like ${kw} escape '\\' or ${promptsTable.summary} like ${kw} escape '\\' or ${promptsTable.prompt} like ${kw} escape '\\')`,
     );
   }
 
@@ -438,5 +497,13 @@ export async function ensurePromptMedia(mediaKey: string): Promise<string | null
   if (cloud && (await downloadToCache(cloud, rel))) return promptLibraryLocalUrl(rel);
   const special = await resolveSpecialMedia(rel);
   if (special && (await downloadToCache(special, rel))) return promptLibraryLocalUrl(rel);
+  // 兜底也失败：界面只会留一个破图占位。日志里要能看出"试过哪些源、是不是压根推导不出地址"。
+  logEvent({
+    level: "warn",
+    source: "app",
+    event: "prompt.media.download_failed",
+    message: "提示词素材下载失败",
+    detail: { rel, cloudTried: cloud, specialTried: special },
+  });
   return null;
 }

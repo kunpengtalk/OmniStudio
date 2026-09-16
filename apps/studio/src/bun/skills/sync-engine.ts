@@ -25,7 +25,8 @@ import {
   resolveAdapters,
   toSyncStatus,
 } from "./store";
-import { hashSkillDir } from "./metadata";
+import { hashSkillDir, isSkillDir } from "./metadata";
+import { logEvent } from "../app-log";
 import { audit } from "./audit";
 
 const isWindows = process.platform === "win32";
@@ -74,6 +75,27 @@ export function copyDirRecursive(src: string, dest: string) {
 }
 
 /**
+ * 递归删除前的守卫：目标确实是一个技能目录才允许删。
+ *
+ * 工具目录可以由用户在「工具管理」里手填（`SKILLS_TOOL_PATH_OVERRIDES` /
+ * 自定义工具），所以 `<工具目录>/<技能名>` 这条路径**有可能落在任何地方** ——
+ * 路径填错（比如填成 `~/Documents`）再加上一个同名目录，`rmSync(recursive)` 就会
+ * 把用户自己的东西删掉。技能目录的标志是 SKILL.md，删之前先确认这一点。
+ */
+function canRemoveSkillDir(dir: string): boolean {
+  if (!existsSync(dir)) return true;
+  if (isSkillDir(dir)) return true;
+  logEvent({
+    level: "warn",
+    source: "skills",
+    event: "skills.sync.delete_refused",
+    message: "目标目录不含 SKILL.md，拒绝递归删除",
+    detail: { dir },
+  });
+  return false;
+}
+
+/**
  * 部署一个技能目录到目标：
  * - symlink 模式：Unix 直接符号链接；Windows 依次尝试 symlink → junction → 降级 copy（如实返回实际模式）。
  * - copy 模式：递归复制。
@@ -89,6 +111,9 @@ export function deploySkillDir(
   if (live === "central-root") return { ok: false, error: "target is central repo" };
   if (live === "real-dir" || live === "real-file" || live === "foreign-link") {
     if (!overwrite) return { ok: false, needConfirm: true };
+    if (!canRemoveSkillDir(targetDir)) {
+      return { ok: false, error: "目标目录不是技能目录（缺少 SKILL.md），已拒绝覆盖" };
+    }
     try {
       rmSync(targetDir, { recursive: true, force: true });
     } catch (e) {
@@ -153,6 +178,9 @@ export function removeRecordedTarget(skillId: string, sourceDir: string, toolKey
     // 记录是 copy 模式才允许删真实目录。
     const row = all.find((t) => t.skillId === skillId && t.tool === toolKey);
     if (!row || row.mode !== "copy") return { ok: false, error: "disk state mismatch" };
+    if (!canRemoveSkillDir(targetDir)) {
+      return { ok: false, error: "目标目录不是技能目录（缺少 SKILL.md），已拒绝删除" };
+    }
     try {
       rmSync(targetDir, { recursive: true, force: true });
     } catch (e) {

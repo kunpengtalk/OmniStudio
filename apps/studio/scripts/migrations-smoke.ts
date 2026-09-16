@@ -10,7 +10,7 @@
 import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
-import { mkdtempSync, readFileSync, rmSync } from "fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
@@ -36,6 +36,7 @@ const EXPECTED_TABLES = [
   "knowledge_chunks",
   "memories",
   "video_records",
+  "music_records",
   "benchmark_records",
   "agent_permissions",
   "agent_todos",
@@ -43,6 +44,7 @@ const EXPECTED_TABLES = [
   "automations",
   "automation_runs",
   "usage_records",
+  "miniapp_notes",
 ];
 
 function assert(cond: unknown, msg: string): asserts cond {
@@ -102,6 +104,54 @@ ok(`全新库建表齐全（${fresh.tables.length} 张表，应用 ${fresh.appli
 const again = apply("重复打开");
 assert(again.applied === fresh.applied, `重复打开后迁移数变化：${fresh.applied} → ${again.applied}`);
 ok("重复打开同一库：迁移幂等");
+
+// 4. 老库升级：只应用"上一个版本已发布的那批"，再跑全量。
+//
+// 这一步专治**新增迁移在老库上没生效**：全新库那条路会掩盖它（表从零建，看不出
+// ALTER TABLE / CREATE TABLE 有没有跑）。而 drizzle 是拿库里已记录的
+// `max(created_at)` 决定跳过哪些迁移的 —— 顺序、`when`、或迁移本身写错，都会让
+// 老用户升级后缺表缺列，而 CI 全新库照样全绿。
+{
+  const oldFolder = path.join(dir, "old-migrations");
+  cpSync(MIGRATIONS, oldFolder, { recursive: true });
+  const oldJournalPath = path.join(oldFolder, "meta", "_journal.json");
+  const oldJournal = JSON.parse(readFileSync(oldJournalPath, "utf8")) as {
+    entries: { idx: number; when: number; tag: string }[];
+  };
+  // 去掉最后一条：它就是"这次发布新增的那个迁移"。
+  const newest = oldJournal.entries[oldJournal.entries.length - 1]!;
+  oldJournal.entries = oldJournal.entries.slice(0, -1);
+  writeFileSync(oldJournalPath, JSON.stringify(oldJournal, null, 2));
+
+  const oldDbPath = path.join(dir, "legacy.db");
+  const oldSqlite = new Database(oldDbPath, { create: true });
+  migrate(drizzle({ client: oldSqlite }), { migrationsFolder: oldFolder });
+  // 造一行"上一个版本就存在"的数据：升级不能把它弄丢。
+  oldSqlite.exec(
+    "insert into cloud_providers (id, name, vendor, base_url, api_key, models, enabled, video_api) " +
+      "values ('legacy-row','老厂商','x','https://x.test','k','[]',1,'stepfun')",
+  );
+  oldSqlite.close();
+
+  const upgraded = new Database(oldDbPath, { create: true });
+  migrate(drizzle({ client: upgraded }), { migrationsFolder: MIGRATIONS });
+  const upTables = (
+    upgraded.query("select name from sqlite_master where type='table'").all() as { name: string }[]
+  ).map((r) => r.name);
+  const upCols = (upgraded.query("PRAGMA table_info(cloud_providers)").all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  const legacyRow = upgraded
+    .query("select id, video_api from cloud_providers where id='legacy-row'")
+    .get() as { id: string; video_api: string } | null;
+  upgraded.close();
+
+  const missed = EXPECTED_TABLES.filter((t) => !upTables.includes(t));
+  assert(missed.length === 0, `老库升级后缺表：${missed.join(", ")}（迁移 ${newest.tag} 在老库上没生效？）`);
+  assert(legacyRow?.id === "legacy-row", "老库升级后原有数据丢失");
+  assert(legacyRow.video_api === "stepfun", "老库升级后原有列的值被改动");
+  ok(`老库升级（跳过 ${newest.tag} 后应用全量）：表齐全、${upCols.length} 列保留、原数据未丢`);
+}
 
 rmSync(dir, { recursive: true, force: true });
 console.log("\nmigrations smoke 全部通过");

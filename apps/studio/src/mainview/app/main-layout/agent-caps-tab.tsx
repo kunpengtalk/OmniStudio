@@ -10,7 +10,7 @@ import { Switch } from "@ui/switch";
 import { formatSize } from "@/mainview/lib/format";
 import { Textarea } from "@ui/textarea";
 import { useT } from "@stores/ui-lang";
-import { PageHeader, SettingsSection, SettingRow } from "./setting-ui";
+import { PageHeader, SettingsSection, SettingRow } from "@components/setting-ui";
 
 /**
  * 设置 → Agent 能力：对齐 Codex 的那批开关。

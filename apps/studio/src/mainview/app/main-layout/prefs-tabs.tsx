@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Spinner } from "@ui/spinner";
 import { useT, useUILang } from "@stores/ui-lang";
 import { LANGS, type UILang } from "@/shared/i18n";
-import { PageHeader, SettingsSection, SettingRow } from "./setting-ui";
+import { PageHeader, SettingsSection, SettingRow } from "@components/setting-ui";
 
 export const THEME_OPTIONS = ["system", "light", "dark"] as const;
 export type ThemeOption = (typeof THEME_OPTIONS)[number];

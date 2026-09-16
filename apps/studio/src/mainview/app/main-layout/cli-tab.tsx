@@ -1,12 +1,11 @@
-import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CheckIcon, CopyIcon, BookOpenTextIcon, SquareTerminalIcon } from "lucide-react";
+import { BookOpenTextIcon, SquareTerminalIcon } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
-import { Button } from "@ui/button";
 import { useT, useUILang } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
-import { PageHeader, SettingsSection } from "./setting-ui";
+import { PageHeader, SettingsSection } from "@components/setting-ui";
+import { CopyButton } from "@components/copy-button";
 import {
   CLI_DOC_INTRO,
   CLI_MEMORY_SNIPPETS,
@@ -25,28 +24,16 @@ import {
 
 /** 点击复制的等宽行。 */
 function CopyLine({ value, className }: { value: string; className?: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // 剪贴板不可用时忽略
-    }
-  };
   return (
     <div className={cn("flex min-w-0 items-center gap-2 rounded-lg border bg-muted/40 px-2.5 py-1.5", className)}>
       <code className="min-w-0 flex-1 overflow-x-auto font-mono text-xs whitespace-pre">{value}</code>
-      <Button
-        variant="ghost"
+      <CopyButton
+        text={value}
+        iconOnly
+        title={value}
         size="icon-sm"
         className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
-        onClick={copy}
-        title={value}
-      >
-        {copied ? <CheckIcon className="size-3.5 text-emerald-500" /> : <CopyIcon className="size-3.5" />}
-      </Button>
+      />
     </div>
   );
 }
@@ -94,16 +81,6 @@ function SnippetCard({
   code: string;
   language: string;
 }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // 剪贴板不可用时忽略
-    }
-  };
   return (
     <div className="flex flex-col gap-2 border-b px-4 py-3.5 last:border-b-0">
       <div className="flex items-start justify-between gap-3">
@@ -116,15 +93,13 @@ function SnippetCard({
           </div>
           <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
         </div>
-        <Button
-          variant="ghost"
+        <CopyButton
+          text={code}
+          iconOnly
+          title={title}
           size="icon-sm"
           className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
-          onClick={copy}
-          title={title}
-        >
-          {copied ? <CheckIcon className="size-3.5 text-emerald-500" /> : <CopyIcon className="size-3.5" />}
-        </Button>
+        />
       </div>
       <pre className="overflow-x-auto rounded-lg border bg-muted/40 px-3 py-2 font-mono text-[11px] leading-relaxed">
         {code}

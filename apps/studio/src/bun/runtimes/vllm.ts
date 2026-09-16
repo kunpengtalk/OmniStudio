@@ -1,6 +1,7 @@
 import type { Subprocess } from "bun";
 import { existsSync } from "fs";
 import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/settings";
+import { resolveManagedPython } from "../python-engine";
 import { modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
@@ -83,6 +84,10 @@ export class VllmRuntime implements Runtime {
   }
 
   async checkBinary(): Promise<BinaryCheckResult> {
+    // 应用自己装的托管 venv 优先（引导页 / 设置里的「一键安装」）。
+    const managed = resolveManagedPython("vllm", "vllm");
+    if (managed) return { found: true, path: managed, mode: "python" };
+
     // Check for vllm CLI
     const vllmPath = Bun.which("vllm");
     if (vllmPath) return { found: true, path: vllmPath };
@@ -96,7 +101,7 @@ export class VllmRuntime implements Runtime {
           stderr: "pipe",
         });
         const exited = await waitExit(proc, 5000);
-        if (exited) return { found: true, path: pythonPath };
+        if (exited) return { found: true, path: pythonPath, mode: "python" };
       } catch {
         // not available
       }
@@ -209,14 +214,19 @@ export class VllmRuntime implements Runtime {
 
     const binary = await this.checkBinary();
     if (!binary.found) {
-      return { ok: false, error: "vLLM not found. Install with: pip install vllm" };
+      return { ok: false, error: "vLLM 未安装。可在引导页 / 设置里点「一键安装」（仅 Linux），或手动执行 pip install vllm" };
     }
 
     const args = this.buildArgs(model, servedName);
     this.lastError = "";
     this.setStatus("starting");
 
-    const isPython = binary.path?.endsWith("python3") || binary.path?.endsWith("python");
+    // venv / 系统 python 走 `-m vllm.entrypoints…`，`vllm` CLI 直接执行。
+    const isPython =
+      binary.mode === "python" ||
+      binary.path?.endsWith("python3") ||
+      binary.path?.endsWith("python") ||
+      binary.path?.endsWith("python.exe");
     const cmd = isPython
       ? [binary.path!, "-m", "vllm.entrypoints.openai.api_server", ...args.slice(1)]
       : [binary.path!, ...args];

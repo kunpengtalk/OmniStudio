@@ -1,4 +1,5 @@
 import type { DownloadTask } from "../../bun/download-manager";
+import { formatBytes as formatBytesSi } from "@lib/format";
 
 /**
  * 下载面板与市场文件行的展示计算：排队位置、剩余时间、聚合速度/剩余量。
@@ -7,12 +8,9 @@ import type { DownloadTask } from "../../bun/download-manager";
  * 推送刷新，不必为「排队第几位」再引一条状态。
  */
 
-/** 字节数的展示形式（GB / MB / KB）。 */
+/** 字节数的展示形式（GB / MB / KB）。下载面板沿用「0 B」占位与 1 位 MB 小数。 */
 export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
-  return `${Math.round(bytes / 1e3)} KB`;
+  return formatBytesSi(bytes, { zero: "0 B", mbDecimals: 1 });
 }
 
 const ACTIVE: ReadonlySet<DownloadTask["status"]> = new Set([

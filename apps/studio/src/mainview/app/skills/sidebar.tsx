@@ -53,7 +53,7 @@ export function SkillsSidebar() {
       <SidebarMenu className="mb-1 px-2">
         <span
           className="block truncate text-[11px] text-muted-foreground"
-          title={t("skills.centralPath")}
+          title={t("skills.centralSummary")}
         >
           {skillCount} {t("skills.unit.skills")} · {enabledTools} {t("skills.unit.tools")}
         </span>

@@ -36,6 +36,7 @@ import {
   providerColor,
   type CloudModelEntry,
   type CloudModelType,
+  type CloudMusicApi,
   type CloudProviderInfo,
   type CloudVideoApi,
 } from "@/shared/cloud-providers";
@@ -259,6 +260,14 @@ export function CloudProviderPanel() {
     onSuccess: invalidate,
   });
 
+  const musicApiMutation = useMutation({
+    mutationFn: (musicApi: CloudMusicApi) => {
+      if (!selected) return Promise.resolve({ ok: false });
+      return rpcClient.cloudProviderUpdate({ id: selected.id, musicApi });
+    },
+    onSuccess: invalidate,
+  });
+
   const commitBase = () => {
     if (!selected) return;
     if (draftBase.trim() !== selected.baseUrl) {
@@ -430,9 +439,12 @@ export function CloudProviderPanel() {
     onSuccess: invalidate,
   });
 
-  // 设为默认模型：selectChatModel("api", id) 同步 VLLM_MODEL_NAME + CHAT_MODEL + remote
+  // 设为默认模型：selectChatModel("api", id) 同步 VLLM_MODEL_NAME + CHAT_MODEL + remote。
+  // providerId 必须带上 —— 网关只往**默认厂商**发云端请求，不把默认厂商切到这台服务商，
+  // 记下的模型名就会拿到另一家的地址和密钥去问，回来的是一句莫名其妙的「模型不存在」。
   const setDefaultMutation = useMutation({
-    mutationFn: (modelId: string) => rpcClient.selectChatModel({ type: "api", value: modelId }),
+    mutationFn: (modelId: string) =>
+      rpcClient.selectChatModel({ type: "api", value: modelId, providerId: selected?.id }),
     onSuccess: invalidate,
   });
 
@@ -727,6 +739,31 @@ export function CloudProviderPanel() {
                     {t("cloud.videoApiHint")}
                   </p>
                 </div>
+
+                {/* 生音乐接口：音乐 API 同样各家不通用 —— 而且执行模型都不一样
+                    （StepFun 是提交 + 轮询，MiniMax 是一次同步长请求），
+                    所以协议也要在这里按厂商选一次。 */}
+                <div className="flex items-center gap-3 border-t px-4 py-3.5">
+                  <div className="min-w-0 flex-1">
+                    <Label className="mb-1 block text-xs">{t("cloud.musicApi")}</Label>
+                    <Select
+                      value={selected.musicApi || "none"}
+                      onValueChange={(v) => musicApiMutation.mutate(v === "none" ? "" : (v as CloudMusicApi))}
+                    >
+                      <SelectTrigger size="sm" className="h-8 w-52 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">{t("cloud.musicApiNone")}</SelectItem>
+                        <SelectItem value="stepfun">StepFun（/v1/audio/music）</SelectItem>
+                        <SelectItem value="minimax">MiniMax（/v1/music_generation）</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <p className="max-w-72 text-[11px] text-muted-foreground">
+                    {t("cloud.musicApiHint")}
+                  </p>
+                </div>
               </div>
 
               {/* 模型管理卡片：工具栏 + 表格 */}
@@ -798,14 +835,25 @@ export function CloudProviderPanel() {
                   ) : (
                     <table className="w-full text-xs">
                       <thead>
+                        {/* 表头一律不折行：右侧那几列本来就只有一个徽章宽，标题一折行
+                            就会在列里竖成两行，反而比列内容还占地方。 */}
                         <tr className="border-b text-left text-muted-foreground">
-                          <th className="px-2 py-1.5 font-medium">{t("cloud.colModel")}</th>
-                          <th className="px-2 py-1.5 font-medium" title={t("cloud.modelTypeHint")}>
+                          <th className="px-2 py-1.5 font-medium whitespace-nowrap">
+                            {t("cloud.colModel")}
+                          </th>
+                          <th
+                            className="px-2 py-1.5 font-medium whitespace-nowrap"
+                            title={t("cloud.modelTypeHint")}
+                          >
                             {t("cloud.colType")}
                           </th>
-                          <th className="px-2 py-1.5 font-medium">{t("cloud.colGroup")}</th>
-                          <th className="px-2 py-1.5 font-medium">{t("cloud.colStatus")}</th>
-                          <th className="px-2 py-1.5 text-right font-medium">
+                          <th className="px-2 py-1.5 font-medium whitespace-nowrap">
+                            {t("cloud.colGroup")}
+                          </th>
+                          <th className="px-2 py-1.5 font-medium whitespace-nowrap">
+                            {t("cloud.colStatus")}
+                          </th>
+                          <th className="px-2 py-1.5 text-right font-medium whitespace-nowrap">
                             {t("cloud.colActions")}
                           </th>
                         </tr>
@@ -815,15 +863,28 @@ export function CloudProviderPanel() {
                           const isDefault = cloudActive && entry.id === currentModel;
                           return (
                             <tr key={entry.id} className="border-b border-muted/50 last:border-0">
-                              <td className="max-w-0 px-2 py-1.5" title={entry.remark || entry.id}>
-                                <span className="block truncate">
-                                  {entry.name || entry.id}
-                                  {entry.name && entry.name !== entry.id && (
-                                    <span className="ml-1.5 font-mono text-[10px] text-muted-foreground/60">
+                              {/* 模型 id 是这条记录的唯一标识（要拿去填 API、要在相似型号之间
+                                  区分），任何情况下都完整显示：列窄了就换行，不出现省略号，也不
+                                  靠悬浮提示兜底 —— 别名（`name`）再长也只是补充，不许把 id 挤掉。 */}
+                              <td
+                                className="px-2 py-1.5"
+                                data-model-id={entry.id}
+                                title={entry.remark || entry.id}
+                              >
+                                {entry.name && entry.name !== entry.id ? (
+                                  <span className="flex flex-col gap-0.5">
+                                    <span className="text-[11px] wrap-anywhere">
+                                      {entry.name}
+                                    </span>
+                                    <span className="font-mono text-[10px] wrap-anywhere text-muted-foreground">
                                       {entry.id}
                                     </span>
-                                  )}
-                                </span>
+                                  </span>
+                                ) : (
+                                  <span className="block font-mono text-[11px] wrap-anywhere">
+                                    {entry.id}
+                                  </span>
+                                )}
                               </td>
                               {/* 用途可改：自动识别认不出（other）或认错时，用户在这里
                                   定死它属于哪个功能页。改完功能页的选择器立即跟着变。 */}
@@ -893,6 +954,7 @@ export function CloudProviderPanel() {
                                       size="icon-sm"
                                       className="h-6 w-6 text-muted-foreground"
                                       tooltip={t("cloud.setDefault")}
+                                      data-set-default={entry.id}
                                       disabled={setDefaultMutation.isPending}
                                       onClick={() => setDefaultMutation.mutate(entry.id)}
                                     >
@@ -1286,7 +1348,8 @@ function RemoteModelsDialog({
                           isCollapsed && "-rotate-90",
                         )}
                       />
-                      <span className="truncate text-[11px] font-medium">
+                      {/* 分组名是 id 的前缀（行里只留后缀），截了就等于 id 缺一截 */}
+                      <span className="min-w-0 font-medium text-[11px] wrap-anywhere">
                         {group || t("cloud.groupOther")}
                       </span>
                       <span className="shrink-0 font-mono text-[10px] text-muted-foreground tabular-nums">
@@ -1321,7 +1384,7 @@ function RemoteModelsDialog({
                             label={t(`models.cat.${row.category}`)}
                           />
                           <span
-                            className="min-w-0 flex-1 truncate font-mono text-[11px]"
+                            className="min-w-0 flex-1 font-mono text-[11px] wrap-anywhere"
                             title={row.id}
                           >
                             {label}

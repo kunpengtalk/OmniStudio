@@ -25,7 +25,7 @@ import {
   type ProxyMode,
 } from "@/shared/proxy";
 import { cn } from "@/mainview/lib/utils";
-import { PageHeader, SettingsSection, SettingRow } from "./setting-ui";
+import { PageHeader, SettingsSection, SettingRow } from "@components/setting-ui";
 
 /** 「谁走代理、谁直连」的采样地址：覆盖用户最关心的四类目标。 */
 const SAMPLES: { key: string; url: string }[] = [

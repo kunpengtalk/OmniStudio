@@ -72,7 +72,27 @@ const get = async (p: string) => {
   return { status: r.status, body: await r.text() };
 };
 
+// 广场媒体现在由主进程按需取上游（见 prompt-library.ts 的 mediaUrl / fetchPromptMediaUpstream）：
+// 这里把"非本地"的请求拦下来，测试便不依赖外网，同时能断言"确实走的是主进程这条链路"。
+const upstreamCalls: string[] = [];
+let upstreamReply: () => Response = () =>
+  new Response(FAKE_JPEG, { status: 200, headers: { "Content-Type": "image/jpeg" } });
+const realFetch = globalThis.fetch;
+globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+  if (url.startsWith(base) || url.includes("127.0.0.1") || url.includes("localhost")) {
+    return realFetch(input as RequestInfo, init);
+  }
+  upstreamCalls.push(url);
+  return Promise.resolve(upstreamReply());
+}) as typeof fetch;
+// 一张最小的合法 JPEG（魔数校验要求 ffd8ff 开头，且至少 12 字节）。
+const FAKE_JPEG = new Uint8Array([
+  0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0xff, 0xd9,
+]);
+
 afterAll(() => {
+  globalThis.fetch = realFetch;
   // HOME 是进程级的，同一个测试进程里后面的文件还要用（homedir() 读的就是它）。
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
@@ -121,10 +141,36 @@ if (serverReady) {
     const cacheDir = getPromptLibraryCacheBase();
     mkdirSync(join(cacheDir, "awesome"), { recursive: true });
     writeFileSync(join(cacheDir, "awesome", "case1.jpg"), "CACHE-JPG");
-    // vibedesign 目录里没有，但缓存里有 -> 由缓存兜底
+    // vibedesign 目录里没有，但缓存里有 -> 由缓存兜底（不再问上游）
+    upstreamCalls.length = 0;
     expect((await get("/prompt-library/awesome/case1.jpg")).body).toBe("CACHE-JPG");
-    // 两个目录都没有 -> 404
-    expect((await get("/prompt-library/awesome/case999.jpg")).status).toBe(404);
+    expect(upstreamCalls).toEqual([]);
+  });
+
+  test("本地没有的广场图由主进程按需取上游（界面不再直连第三方 CDN）", async () => {
+    upstreamCalls.length = 0;
+    const res = await get("/prompt-library/awesome/case999.jpg");
+    expect(res.status).toBe(200);
+    // 走的是 promptMediaCloudUrl 推出来的云端直链，且**只有主进程**发起了这次请求
+    expect(upstreamCalls).toEqual([
+      "https://cdn.jsdelivr.net/gh/freestylefly/awesome-gpt-image-2@main/data/images/case999.jpg",
+    ]);
+  });
+
+  test("上游回的是一张图才放行（HTML 回退页 / 无法推导的路径都是 404）", async () => {
+    upstreamReply = () =>
+      new Response("<html>not an image</html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      });
+    expect((await get("/prompt-library/awesome/case-something.jpg")).status).toBe(404);
+    upstreamReply = () =>
+      new Response(FAKE_JPEG, { status: 200, headers: { "Content-Type": "image/jpeg" } });
+
+    // 推导不出云端地址、也不是特例页面的相对路径：连上游都不用问
+    upstreamCalls.length = 0;
+    expect((await get("/prompt-library/nonexistent.png")).status).toBe(404);
+    expect(upstreamCalls).toEqual([]);
   });
 
   test("媒体直链（TTS 音频 / 生成图）能按相对路径取到", async () => {

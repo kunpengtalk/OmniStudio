@@ -99,6 +99,14 @@ export const ENGINE_OPTIONS: { value: InferenceEngine; labelKey: string }[] = EN
   labelKey: ENGINE_SPECS[id].labelKey,
 }));
 
+/**
+ * 当前平台的引擎选项。UI 不要自己判断 `value !== "mlx"`，平台限制只声明在
+ * `ENGINE_SPECS[id].macOnly`（否则新增 macOnly 引擎时选择器又会漏掉）。
+ */
+export function engineOptions(isMac = process.platform === "darwin"): { value: InferenceEngine; labelKey: string }[] {
+  return ENGINE_OPTIONS.filter((o) => !ENGINE_SPECS[o.value].macOnly || isMac);
+}
+
 /** 各引擎监听端口的设置键（UI 侧读取设置 blob 用）。 */
 export const ENGINE_PORT_KEYS: Record<InferenceEngine, string> = Object.fromEntries(
   ENGINE_IDS.map((id) => [id, ENGINE_SPECS[id].portKey]),
@@ -124,6 +132,20 @@ export function engineSupportsEmbeddings(engine: InferenceEngine): boolean {
 }
 
 /**
+ * 各引擎「上下文窗口」的设置键（基准测试页据此提示哪些档位会被服务端拒绝）。
+ *
+ * llama.cpp 的 `SERVER_CTX_SIZE` 是 KV 总量、会被 `--parallel` 的槽位均分，读的人要
+ * 自己换算成单请求的量（见 `shared/benchmark.ts` 的 `serverContextWindow`）；
+ * null = 窗口由模型自己决定，应用侧没有可读的键（MLX）。
+ */
+export const ENGINE_CTX_KEYS: Record<InferenceEngine, string | null> = {
+  "llama.cpp": "SERVER_CTX_SIZE",
+  vllm: "VLLM_MAX_MODEL_LEN",
+  sglang: "SGLANG_CONTEXT_LENGTH",
+  mlx: null,
+};
+
+/**
  * 引擎短名（品牌名，不翻译）。选择器里的徽标用这个，不要用 `settings.engine.*`：
  * 那几个是设置页的完整说明（「MLX（Apple Silicon，MLX 模型）」），放进一行模型
  * 条目里会把模型名挤到只剩省略号。
@@ -139,6 +161,101 @@ export const ENGINE_SHORT_NAMES: Record<InferenceEngine, string> = {
 export const ENGINE_INSTALL_HINTS: Record<InferenceEngine, string> = Object.fromEntries(
   ENGINE_IDS.map((id) => [id, ENGINE_SPECS[id].installHint]),
 ) as Record<InferenceEngine, string>;
+
+// ---------------------------------------------------------------------------
+// 一键安装能力
+// ---------------------------------------------------------------------------
+
+/** 应用怎么把这个引擎装上：下载官方二进制，或在数据目录里建 venv 装 pip 包。 */
+export type EngineInstallKind = "binary" | "python";
+
+export type EngineInstallSupport = {
+  /** 本平台能不能一键装（不能时界面只给手动安装提示）。 */
+  supported: boolean;
+  kind: EngineInstallKind;
+  /** 一键安装要下载的量级（界面上的「约 xx」用）。 */
+  approxBytes?: number;
+  /** 需要用户先具备的前提（Python / 驱动 / 体积），点安装之前就要说清楚。 */
+  requirement?: string;
+  /** 不支持时的原因，界面直接展示。 */
+  note?: string;
+};
+
+/**
+ * 平台 → 一键安装能力。判定与引擎注册表放在同一份，否则界面上的按钮与主进程
+ * 真正会做的事会各说一套（「能装」的按钮点下去必然失败，是最坏的一种不一致）。
+ *
+ * - **llama.cpp**：官方发布预编译二进制，全平台可装；Apple 芯片的 macOS 构建自带
+ *   Metal，Linux / Windows 有 NVIDIA 显卡时自动换 CUDA 构建（体积大一个数量级）。
+ * - **mlx-lm**：Apple Silicon 专属的 pip 包，装进数据目录里的 venv。
+ * - **vLLM / SGLang**：官方只发 Linux 的 CUDA 轮子，macOS / Windows 装不了，
+ *   界面给手动提示与远程服务两条路。
+ */
+export function engineInstallSupport(
+  engine: InferenceEngine,
+  platform: string = process.platform,
+  arch: string = process.arch,
+): EngineInstallSupport {
+  switch (engine) {
+    case "llama.cpp": {
+      const known =
+        (platform === "darwin" && (arch === "arm64" || arch === "x64")) ||
+        (platform === "linux" && (arch === "x64" || arch === "arm64")) ||
+        (platform === "win32" && (arch === "x64" || arch === "arm64"));
+      if (!known) {
+        return {
+          supported: false,
+          kind: "binary",
+          note: `当前平台（${platform}/${arch}）没有官方预编译构建，请手动安装`,
+        };
+      }
+      return {
+        supported: true,
+        kind: "binary",
+        approxBytes: 25e6,
+        requirement: "NVIDIA 显卡的 Linux / Windows 机器会自动改用 CUDA 构建（约 170 MB）",
+      };
+    }
+    case "mlx":
+      if (platform !== "darwin" || arch !== "arm64") {
+        return {
+          supported: false,
+          kind: "python",
+          note: "MLX 引擎只在 Apple Silicon 的 macOS 上可用",
+        };
+      }
+      return {
+        supported: true,
+        kind: "python",
+        approxBytes: 350e6,
+        requirement: "需要本机有 Python 3.10 及以上（应用会建独立虚拟环境安装）",
+      };
+    case "vllm":
+    case "sglang": {
+      const label = engine === "vllm" ? "vLLM" : "SGLang";
+      if (platform !== "linux") {
+        return {
+          supported: false,
+          kind: "python",
+          note: `${label} 官方只发 Linux 的 CUDA 轮子，${platform === "darwin" ? "macOS" : "Windows"} 上请手动安装或改用远程服务`,
+        };
+      }
+      if (arch !== "x64" && arch !== "arm64") {
+        return {
+          supported: false,
+          kind: "python",
+          note: `当前架构（${arch}）没有 ${label} 的预编译轮子`,
+        };
+      }
+      return {
+        supported: true,
+        kind: "python",
+        approxBytes: engine === "vllm" ? 3.5e9 : 4.5e9,
+        requirement: "需要 Python 3.10+ 与 NVIDIA 驱动；含 PyTorch，下载量大、耗时较久",
+      };
+    }
+  }
+}
 
 /** 判断某个引擎能否加载某类模型文件。 */
 export function engineSupports(engine: InferenceEngine, kind: ModelFileKind): boolean {

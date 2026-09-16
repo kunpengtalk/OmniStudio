@@ -33,7 +33,7 @@ export function AgentPlanCard({ conversationId }: { conversationId: number }) {
       <div className="composer-panel-head">
         <FileTextIcon className="size-3.5 shrink-0" aria-hidden />
         <span className="font-medium">{t("agent.plan.ready")}</span>
-        <span className="composer-panel-label">({plan.chars} 字)</span>
+        <span className="composer-panel-label">{t("agent.plan.chars", { n: String(plan.chars) })}</span>
         <div className="ml-auto flex items-center gap-1.5">
           <button type="button" onClick={() => discard.mutate()} className="composer-panel-btn">
             {t("agent.plan.discard")}

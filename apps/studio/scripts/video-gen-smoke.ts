@@ -37,30 +37,35 @@ const seen: Record<string, unknown> = {};
 
 const minimax = Bun.serve({
   port: 0,
-  async fetch(req) {
+  async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
-    if (req.method === "POST" && url.pathname === "/v2/video_generation") {
+    // MiniMax 官方 v1 契约：业务码走 HTTP 200 + base_resp.status_code
+    if (req.method === "POST" && url.pathname === "/v1/video_generation") {
       seen.minimaxSubmit = await req.json();
       minimaxQueries.posts++;
       // 第二次提交返回会失败的任务，走轮询的失败分支。
       const taskId = minimaxQueries.posts === 2 ? "mm-fail" : "mm-1";
-      return Response.json({ task_id: taskId, status: "Created", model: "MiniMax-H3" });
+      return Response.json({ base_resp: { status_code: 0 }, task_id: taskId });
     }
-    if (url.pathname === "/v2/query/video_generation/mm-1") {
+    if (url.pathname === "/v1/query/video_generation") {
+      const taskId = url.searchParams.get("task_id");
+      if (taskId === "mm-fail") {
+        return Response.json({ base_resp: { status_code: 0 }, status: "Fail", fail_reason: "内容审核未通过" });
+      }
       minimaxQueries.minimax++;
       if (minimaxQueries.minimax >= 2) {
-        return Response.json({
-          status: "Success",
-          progress: 1,
-          content: { url: "/v2/files/mm-1.mp4" },
-        });
+        // 成功只给 file_id：成片地址要走 /v1/files/retrieve 换
+        return Response.json({ base_resp: { status_code: 0 }, status: "Success", file_id: "file-mm-1" });
       }
-      return Response.json({ status: "Processing", progress: 0.3 });
+      return Response.json({ base_resp: { status_code: 0 }, status: "Processing" });
     }
-    if (url.pathname === "/v2/files/mm-1.mp4") return new Response(FAKE_MP4);
-    if (url.pathname === "/v2/query/video_generation/mm-fail") {
-      return Response.json({ status: "Fail", fail_reason: "内容审核未通过" });
+    if (url.pathname === "/v1/files/retrieve") {
+      return Response.json({
+        base_resp: { status_code: 0 },
+        file: { file_id: url.searchParams.get("file_id"), download_url: `http://localhost:${minimax.port}/mm-1.mp4` },
+      });
     }
+    if (url.pathname === "/mm-1.mp4") return new Response(FAKE_MP4);
     return new Response("not found", { status: 404 });
   },
 });
@@ -188,7 +193,7 @@ async function main() {
     baseUrl: `http://localhost:${minimax.port}`,
     apiKey: "test-key",
     videoApi: "minimax",
-    model: "MiniMax-H3",
+    model: "MiniMax-Hailuo-2.3",
   });
   const seedanceProvider = await seedCloudProvider({
     name: "Seedance（冒烟）",
@@ -201,7 +206,7 @@ async function main() {
   updateSettings({
     VIDEO_BACKEND: "cloud",
     VIDEO_PROVIDER_ID: minimaxProvider,
-    VIDEO_MODEL: "MiniMax-H3",
+    VIDEO_MODEL: "MiniMax-Hailuo-2.3",
   });
 
   // ---------- MiniMax ----------
@@ -209,16 +214,22 @@ async function main() {
   {
     const r = await VideoGen.submitVideoGeneration({
       prompt: "一只海豚跃出海面，慢镜头",
-      duration: 2, // 低于下限 4，应被钳到 4
+      duration: 2, // 不在 Hailuo 的 6/10 档位里，应被收敛到 6
       ratio: "16:9",
       resolution: "768P",
     });
     check("提交成功并返回 processing 记录", !!r.record && r.record.status === "processing", r.error);
-    const submit = seen.minimaxSubmit as { model: string; content: { type: string; text?: string }[]; duration: number; ratio: string; resolution: string; aigc_watermark: boolean };
-    check("请求体 model=MiniMax-H3", submit.model === "MiniMax-H3");
-    check("请求体 content 文本", submit.content[0]?.text === "一只海豚跃出海面，慢镜头");
-    check("duration 钳到 4", submit.duration === 4, String(submit.duration));
-    check("ratio/resolution 透传", submit.ratio === "16:9" && submit.resolution === "768P");
+    const submit = seen.minimaxSubmit as {
+      model: string;
+      prompt?: string;
+      content?: unknown;
+      duration?: number;
+      resolution?: string;
+    };
+    check("请求体 model=MiniMax-Hailuo-2.3", submit.model === "MiniMax-Hailuo-2.3");
+    check("请求体 prompt 是字符串（官方 v1，不是 content 数组）", submit.prompt === "一只海豚跃出海面，慢镜头" && submit.content === undefined);
+    check("duration 收敛到 6（Hailuo 只认 6/10）", submit.duration === 6, String(submit.duration));
+    check("resolution 透传", submit.resolution === "768P", String(submit.resolution));
     const row = await pollUntilDone(VideoGen, r.record!.id);
     assertFileOk(row, "MiniMax");
   }

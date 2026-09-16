@@ -177,7 +177,7 @@ apps/
 │       │   ├── db/         #   Drizzle schema, migrations, settings
 │       │   ├── skills/     #   skills manager: central repo, sync, presets, backup
 │       │   ├── control-server.ts  #   `omi` CLI ↔ app control channel (Unix socket)
-│       │   └── ...         #   chat / voice / image / video / OCR / translation / knowledge (RAG) /
+│       │   └── ...         #   chat / voice / image / video / music / OCR / translation / knowledge (RAG) /
 │       │                   #   memory / MCP (client + server) / model hub / downloads / stats / updates
 │       ├── cli/            # `omi` command line (bin/omi.ts, reusing the bun data layer)
 │       ├── mainview/       # React UI (components, stores, lib)
@@ -196,6 +196,7 @@ See [docs/architecture.md](./docs/architecture.md) for the full architecture (pr
 - [x] Image generation loop for the Image app
 - [x] `omi` CLI: launch app / server / cloud, model picking, launcher tools, status & logs
 - [x] AI video generation (MiniMax / Seedance / ComfyUI) with task polling and history
+- [x] AI music generation (StepFun / MiniMax, local engine reserved) — song / cover / vocal scoring
 - [x] Local RAG knowledge base (hybrid BM25 + vector recall) with chat citations
 - [x] Shared memory across agents (built-in tools, gateway REST / MCP, `omi memory`)
 - [x] Skills manager: central repo, 53 tool adapters, presets, Git backup

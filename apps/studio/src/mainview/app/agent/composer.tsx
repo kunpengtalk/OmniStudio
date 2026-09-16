@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { isRemoteClient } from "@lib/remote";
 import { parseWorkspaceRecents, withRecentWorkspace, workspaceLabel } from "@lib/workspace";
 import { useChatStore } from "@stores/chat";
 import { useAgentStore } from "@stores/agent";
@@ -212,14 +213,17 @@ export function WorkspacePicker({ conversationId }: { conversationId: number }) 
               ) : null}
             </div>
             <div className="pi-menu-sep" />
-            <button type="button" className="pi-menu-item" disabled={browsing} onClick={() => void openFolder()}>
-              {browsing ? (
-                <Loader2Icon size={14} className="animate-spin" aria-hidden style={{ flex: "none" }} />
-              ) : (
-                <FolderOpenIcon size={14} aria-hidden style={{ flex: "none" }} />
-              )}
-              {t("agent.openFolder")}
-            </button>
+            {/* 「浏览…」要开宿主机的目录选择框：网页端没有这条通道，只留上面那份工作区列表。 */}
+            {!isRemoteClient() && (
+              <button type="button" className="pi-menu-item" disabled={browsing} onClick={() => void openFolder()}>
+                {browsing ? (
+                  <Loader2Icon size={14} className="animate-spin" aria-hidden style={{ flex: "none" }} />
+                ) : (
+                  <FolderOpenIcon size={14} aria-hidden style={{ flex: "none" }} />
+                )}
+                {t("agent.openFolder")}
+              </button>
+            )}
             {/* 换目录 = 开新会话，这条不写出来就会被当成"把当前会话搬过去" */}
             <p className="pi-menu-heading">{t("agent.workspaceSwitchHint")}</p>
           </div>
@@ -372,13 +376,15 @@ export function AgentComposer({
       queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
       // 本轮的开工快照是刚建的：取回来，「撤销本轮」才会出现在这条消息上。
       queryClient.invalidateQueries({ queryKey: ["agent-snapshots", conversationId] });
-      // 后端直接返回失败（没模型 / 服务器没起来…）时不会走 chatDone，需要自己收尾。
+      // 后端直接返回失败（没模型 / 服务器没起来…）：这些路径后端也会推一条带 error 的
+      // chatDone，所以这里用**幂等**的兜底 —— 已经有落点就不再补，否则界面上会出现
+      // 两个内容相同的 ⚠️ 气泡。
       if (data && !data.ok) {
         useChatStore.getState().setStreaming(false);
         useAgentStore.getState().setRunning(false);
         useChatStore
           .getState()
-          .finalizeMessage(conversationId, Date.now(), `⚠️ ${data.error ?? t("agent.failed")}`);
+          .finalizeTurnIfPending(conversationId, `⚠️ ${data.error ?? t("agent.failed")}`);
       }
     },
     onError: (error: unknown) => {
@@ -386,9 +392,8 @@ export function AgentComposer({
       useAgentStore.getState().setRunning(false);
       useChatStore
         .getState()
-        .finalizeMessage(
+        .finalizeTurnIfPending(
           conversationId,
-          Date.now(),
           `⚠️ ${error instanceof Error ? error.message : String(error)}`,
         );
     },

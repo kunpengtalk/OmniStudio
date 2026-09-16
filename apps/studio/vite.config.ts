@@ -19,6 +19,10 @@ const paths = Object.entries(tsconfig.compilerOptions.paths).reduce(
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   root: "src/mainview",
+  // 相对基址：同一份产物既要被 Electrobun 用 `views://mainview/index.html` 加载，
+  // 又要被网关当静态站点发给浏览器（`/chat`、`/agent`）。绝对 `/assets/...` 在
+  // 子路径下会 404，相对路径两种加载方式都对。
+  base: "./",
   resolve: {
     alias: paths,
   },

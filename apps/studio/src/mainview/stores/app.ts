@@ -7,13 +7,15 @@ export type AppId =
   | "voice"
   | "image"
   | "video"
+  | "music"
   | "ocr"
   | "translate"
   | "prompt"
   | "skills"
   | "kb"
   | "memory"
-  | "benchmark";
+  | "benchmark"
+  | "apps";
 
 type AppState = {
   activeApp: AppId;

@@ -343,6 +343,38 @@ test("功能页保存「厂商 + 模型」：模型带用途落进厂商清单",
   expect(modelTypeOf(provider.models.find((m) => m.id === "flux-dev")!)).toBe("image");
 });
 
+test("预设新增的模型会补进存量厂商行（阶跃语音线：老用户升级后直接可用）", () => {
+  // 存量库里那一行是当初拷贝下来的快照（只有两个对话模型）。厂商后来上了语音线，
+  // 预设跟着版本走 —— 不补的话，语音页 / 通话页对老用户就是一片空白，
+  // 只能自己去设置页点「获取模型列表」在几百条远程模型里挑。
+  const res = CloudProviders.createCloudProvider({ presetId: "stepfun" });
+  expect(res.ok).toBe(true);
+  const id = res.id!;
+  created.push(id);
+  // 模拟老行：语音线的模型一条都没有。
+  CloudProviders.updateCloudProvider(id, { models: [{ id: "step-1-8k" }, { id: "step-1-flash" }] });
+
+  const info = CloudProviders.listCloudProviders().providers.find((p) => p.id === id)!;
+  const ids = info.models.map((m) => m.id);
+  expect(ids).toContain("stepaudio-3-tts");
+  expect(ids).toContain("stepaudio-3-asr-max");
+  expect(ids).toContain("stepaudio-3-realtime-preview");
+  // 用途跟着预设走：TTS 页只列 tts、ASR 页只列 asr，实时语音两条都不进（它在通话页选）。
+  expect(modelTypeOf(info.models.find((m) => m.id === "stepaudio-3-tts")!)).toBe("tts");
+  expect(modelTypeOf(info.models.find((m) => m.id === "stepaudio-3-asr-max")!)).toBe("asr");
+  expect(providerModelsOfType(info, "tts").map((m) => m.id)).toEqual(["stepaudio-3-tts", "stepaudio-2.5-tts"]);
+  expect(providerModelsOfType(info, "asr").map((m) => m.id)).toEqual([
+    "stepaudio-3-asr-max",
+    "stepaudio-2.5-asr",
+  ]);
+  // 用户原有的条目原样保留（没被"按预设重建"冲掉）。
+  expect(ids.slice(0, 2)).toEqual(["step-1-8k", "step-1-flash"]);
+  // 幂等：再打开几次页面也不会重复补条目。
+  const again = CloudProviders.listCloudProviders().providers.find((p) => p.id === id)!;
+  expect(again.models.map((m) => m.id)).toEqual(ids);
+  expect(new Set(ids).size).toBe(ids.length);
+});
+
 test("按用途挑厂商与模型：未启用的厂商不进选择器", () => {
   const providers: CloudProviderInfo[] = [
     {
@@ -354,6 +386,7 @@ test("按用途挑厂商与模型：未启用的厂商不进选择器", () => {
       models: [{ id: "flux-dev" }, { id: "qwen-max", type: "chat" }],
       enabled: true,
       videoApi: "",
+      musicApi: "",
       createdAt: 0,
       updatedAt: 0,
     },
@@ -366,6 +399,7 @@ test("按用途挑厂商与模型：未启用的厂商不进选择器", () => {
       models: [{ id: "sdxl" }],
       enabled: false,
       videoApi: "",
+      musicApi: "",
       createdAt: 0,
       updatedAt: 0,
     },
@@ -386,6 +420,7 @@ test("生视频只列有视频接口协议的厂商", () => {
       models: [{ id: "MiniMax-H3", type: "video" }],
       enabled: true,
       videoApi: "minimax",
+      musicApi: "",
       createdAt: 0,
       updatedAt: 0,
     },
@@ -399,6 +434,7 @@ test("生视频只列有视频接口协议的厂商", () => {
       models: [{ id: "some-video-model", type: "video" }],
       enabled: true,
       videoApi: "",
+      musicApi: "",
       createdAt: 0,
       updatedAt: 0,
     },
@@ -406,4 +442,84 @@ test("生视频只列有视频接口协议的厂商", () => {
   expect(providersForType(providers, "video", { requireVideoApi: true }).map((p) => p.id)).toEqual([
     "mm",
   ]);
+});
+
+test("保存厂商：地址栏粘成 API Key 时当场拒绝，而不是回一句 fetch() URL is invalid", () => {
+  const bad = CloudProviders.createCloudProvider({ name: "填错地址的", baseUrl: "sk-opc-abcdef" });
+  expect(bad.ok).toBe(false);
+  expect(bad.error).toContain("http://");
+
+  // 空地址仍然允许（可以先建厂商、后补地址）
+  const blank = CloudProviders.createCloudProvider({ name: "还没填地址的" });
+  expect(blank.ok).toBe(true);
+
+  const good = CloudProviders.createCloudProvider({
+    name: "地址正常的",
+    baseUrl: "https://open.cherryin.net",
+  });
+  expect(good.ok).toBe(true);
+
+  const update = CloudProviders.updateCloudProvider(good.id!, { baseUrl: "sk-opc-abcdef" });
+  expect(update.ok).toBe(false);
+  expect(update.error).toContain("API Key");
+});
+
+// ---------------------------------------------------------------------------
+// 存量厂商补预设新增的接口协议（`syncPresetModels`）
+//
+// 现场：v0.0.9 加生音乐时 `musicApi` 是新加到预设上的字段，而老用户库里那一行是
+// 当初拷贝的快照 —— 模型补上了（syncPresetModels 早就在做模型），协议没补，于是
+// 「设置里启用着 StepFun、音乐模型也在清单里，音乐页却一个厂商都选不到」。
+// 两半拼不上，而且不报错、不打日志，只能靠人肉发现选择器是空的。
+// ---------------------------------------------------------------------------
+
+/** 拿 stepfun 预设行（前面用例可能已经建过），并把它交回 afterAll 清理。 */
+function stepfunRowId(): string {
+  const existing = CloudProviders.listCloudProviders().providers.some((p) => p.id === "stepfun");
+  if (!existing) {
+    const r = CloudProviders.createCloudProvider({ presetId: "stepfun" });
+    expect(r.ok).toBe(true);
+  }
+  if (!created.includes("stepfun")) created.push("stepfun");
+  return "stepfun";
+}
+
+test("存量行补上预设的 musicApi，并因此出现在音乐页的候选厂商里", async () => {
+  const id = stepfunRowId();
+  // 模拟升级前的存量行：协议列刚由迁移加上，默认是空串。
+  expect(CloudProviders.updateCloudProvider(id, { musicApi: "" }).ok).toBe(true);
+  // 新建的厂商默认未启用，而选择器只列已启用的 —— 先把密钥校验 mock 掉启用它，
+  // 否则这个用例会因为"未启用"而红，掩盖掉真正要验的协议补全。
+  globalThis.fetch = mock(
+    async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+  ) as never;
+  expect(CloudProviders.updateCloudProvider(id, { apiKey: "sk-stepfun-test" }).ok).toBe(true);
+  const enabled = await CloudProviders.setCloudProviderEnabled(id, true);
+  expect(enabled.ok).toBe(true);
+
+  // 读列表就会触发补全（音乐页选厂商走的就是这条路径），所以补全前的状态
+  // 通过公开 API 观察不到 —— 这正是它「透明生效」的原因。
+  const { providers } = CloudProviders.listCloudProviders();
+  expect(providers.find((p) => p.id === id)?.musicApi).toBe("stepfun");
+
+  // 补完必须真的进得了音乐页的选择器：这才是用户看得见的结果，
+  // 只断言字段值的话，选择器的过滤条件变了这个用例也不会红。
+  const candidates = providersForType(providers, "music", { requireMusicApi: true });
+  expect(candidates.some((p) => p.id === id)).toBe(true);
+});
+
+test("用户自己选过的协议不被预设覆盖（只补空值）", () => {
+  const id = stepfunRowId();
+  // 用户的显式选择优先：这里把它指向 minimax 协议的转售方，预设说 stepfun 也不该改。
+  expect(CloudProviders.updateCloudProvider(id, { musicApi: "minimax" }).ok).toBe(true);
+  const { providers } = CloudProviders.listCloudProviders();
+  expect(providers.find((p) => p.id === id)?.musicApi).toBe("minimax");
+});
+
+test("自定义厂商（没有预设）不被补协议：没声明过协议就不该凭空多一个", () => {
+  const id = makeProvider({ name: "补协议测试（自定义）", baseUrl: "https://custom-music.example/v1" });
+  const { providers } = CloudProviders.listCloudProviders();
+  const row = providers.find((p) => p.id === id);
+  expect(row?.musicApi).toBe("");
+  expect(row?.videoApi).toBe("");
 });

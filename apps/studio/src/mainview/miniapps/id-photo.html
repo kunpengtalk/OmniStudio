@@ -1,0 +1,868 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>证件照</title>
+<!--
+  小应用：证件照（本地抠图换底 + 按规格裁剪 + A4 排版）。
+
+  两段式，与抠图那个小应用共用同一个本地引擎：
+    1. `omni.bg.run` 只做一件事——把人像抠出来（一次约 1 秒，图片不出本机）；
+    2. 之后的换底色、拖动、缩放、按规格裁剪、排 A4 全在本页画布上做，**不再跑模型**。
+  所以换底色是瞬时的，规格与底色可以随便试。
+
+  为什么尺寸不由模型决定：证件的尺寸是硬标准（25×35mm 就是 25×35mm），
+  生成模型只会"大致画一张"。这里所有像素都来自乘法：mm × 300dpi ÷ 25.4。
+
+  没有下载模型时也不拦死：底色选「保持原图」照样能按规格裁剪（只是背景还是原图的）。
+
+  宿主注入：基础样式、window.omni 运行时、window.__OMNI_BOOT__。
+-->
+<style>
+  .layout { display: grid; grid-template-columns: minmax(0, 320px) 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+  .preview {
+    background: var(--soft); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px; display: flex; justify-content: center; align-items: center; min-height: 200px;
+  }
+  #canvas { max-width: 100%; max-height: 460px; border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,.14); touch-action: none; cursor: grab; }
+  #canvas.dragging { cursor: grabbing; }
+  .src-row { display: flex; gap: 12px; align-items: center; }
+  .src-row img { width: 76px; height: 76px; object-fit: cover; border-radius: 10px; border: 1px solid var(--line); }
+  .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .options label { display: flex; flex-direction: column; gap: 5px; }
+  .options select { width: 100%; }
+  input[type="range"] { width: 100%; }
+  .meta { font-size: 11px; color: var(--muted); }
+  .mrow { display: flex; align-items: center; gap: 10px; }
+  .grow { flex: 1; min-width: 0; }
+  #bgs { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .chip {
+    padding: 5px 10px; font-size: 12px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--soft); color: var(--fg); cursor: pointer;
+  }
+  .chip[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,.18); display: inline-block; vertical-align: -1px; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="hd">
+    <h1 data-i18n="title"></h1>
+    <span class="sub" data-i18n="sub"></span>
+  </div>
+
+  <!-- 没有可用模型时才出现：权重可以在这里下，不用去设置页 -->
+  <div class="card col hidden" id="models">
+    <span class="lb" data-i18n="modelLabel"></span>
+    <span class="hint" data-i18n="modelNote"></span>
+    <div class="mrow" id="model-row"></div>
+  </div>
+
+  <div class="card col">
+    <span class="lb" data-i18n="pickLabel"></span>
+    <div class="src-row">
+      <div class="drop grow" id="pick" data-i18n="pickHint"></div>
+      <img id="src" class="hidden" alt="source" />
+    </div>
+    <span class="hint" data-i18n="pickNote"></span>
+  </div>
+
+  <div class="card col">
+    <span class="lb" data-i18n="specLabel"></span>
+    <select class="field" id="spec"></select>
+    <span class="lb" data-i18n="bgLabel"></span>
+    <div id="bgs"></div>
+    <span class="hint" id="bg-note"></span>
+    <span class="lb" data-i18n="layoutLabel"></span>
+    <div class="options">
+      <label>
+        <span class="meta" data-i18n="layoutMode"></span>
+        <select class="field" id="layout">
+          <option value="single" data-i18n="layoutSingle" selected></option>
+          <option value="a4x6" data-i18n="layoutA46"></option>
+          <option value="a4x9" data-i18n="layoutA49"></option>
+        </select>
+      </label>
+    </div>
+    <span class="hint" data-i18n="specNote"></span>
+  </div>
+
+  <div class="row">
+    <button class="btn primary" id="run" disabled data-i18n="run"></button>
+    <span class="busy hidden" id="busy"><span class="spin"></span><span id="busy-text"></span></span>
+    <span class="err grow" id="err"></span>
+    <span class="ok grow hidden" id="ok"></span>
+  </div>
+
+  <div class="layout" id="workspace" style="display:none">
+    <div class="col">
+      <div class="preview"><canvas id="canvas" width="295" height="413"></canvas></div>
+      <span class="meta" id="meta"></span>
+    </div>
+    <div class="col">
+      <span class="lb" data-i18n="zoomLabel"></span>
+      <input type="range" id="zoom" min="100" max="400" value="100" />
+      <span class="hint" data-i18n="dragNote"></span>
+      <div class="row">
+        <button class="btn sm" id="auto-frame" data-i18n="autoFrame"></button>
+        <button class="btn sm" id="reset-frame" data-i18n="resetFrame"></button>
+      </div>
+      <span class="hint" id="stat"></span>
+      <div class="row">
+        <button class="btn primary" id="save" data-i18n="save"></button>
+        <button class="btn" id="reopen" data-i18n="reopen"></button>
+      </div>
+      <span class="hint" data-i18n="saveNote"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var DICT = {
+    zh: {
+      title: '证件照',
+      sub: '本地抠出人像，换底色、按规格裁剪，可排成 A4 打印',
+      modelLabel: '抠图模型',
+      modelNote: '第一次使用需要下载一次权重（约 44MB），之后离线可用。模型在本机运行，照片不会上传。',
+      pickLabel: '照片',
+      pickHint: '点击选择照片',
+      pickNote: '支持 PNG / JPG / WebP。建议用正面、光线均匀、背景干净的照片。',
+      specLabel: '证件照规格',
+      bgLabel: '背景颜色',
+      layoutLabel: '导出方式',
+      specNote: '尺寸按常见标准以 300dpi 换算内置；报名系统另有像素、文件大小或底色要求时，以对方说明为准。',
+      zoomLabel: '人像缩放',
+      dragNote: '在预览图上按住拖动可以移动人像，滑块缩放；「自动构图」按人像轮廓重新居中。',
+      autoFrame: '自动构图',
+      resetFrame: '复位',
+      run: '生成证件照',
+      reopen: '换一张照片',
+      save: '保存',
+      saveNote: '单张导出 JPG；A4 版式导出 300dpi 的整页，直接打印后裁剪即可。',
+      layoutMode: '版式',
+      layoutSingle: '单张 JPG',
+      layoutA46: 'A4 六张（2×3）',
+      layoutA49: 'A4 九张（3×3）',
+      bgKeep: '保持原图',
+      bgWhite: '白色',
+      bgBlue: '蓝色',
+      bgRed: '红色',
+      bgGrey: '灰色',
+      bgCustom: '自定义',
+      groupCommon: '常用',
+      groupCard: '证件',
+      groupExam: '考试报名',
+      groupVisa: '签证',
+      loading: '读取照片…',
+      working: '本地抠图中，首次使用需要先加载模型…',
+      composing: '生成中…',
+      downloading: '下载模型 {done} / {total} MB',
+      saved: '已保存到「{name}」',
+      needPick: '请先选择一张照片',
+      needModel: '这个底色需要抠图模型：请先在上面下载，或把底色改成「保持原图」只做裁剪',
+      keepOnly: '未下载抠图模型：这次只按规格裁剪原图（下载模型后可以换底色）',
+      stat: '{label} · {w}×{h}px · 300dpi',
+      statCut: '{label} · {w}×{h}px · 300dpi · 抠图 {ms}ms（{model}）',
+      download: '下载',
+      ready: '已就绪',
+      failed: '处理失败',
+      sheet: 'A4 整页 {n} 张 · 2480×3508px',
+    },
+    en: {
+      title: 'ID photo',
+      sub: 'Local cutout, swap the backdrop, crop to spec, print on A4',
+      modelLabel: 'Cutout model',
+      modelNote: 'The first use downloads weights once (about 44MB), then works offline. The model runs locally; your photo is never uploaded.',
+      pickLabel: 'Photo',
+      pickHint: 'Click to choose a photo',
+      pickNote: 'PNG / JPG / WebP. A front-facing photo with even lighting and a clean background works best.',
+      specLabel: 'Photo size',
+      bgLabel: 'Backdrop colour',
+      layoutLabel: 'Export',
+      specNote: 'Sizes are the common standards at 300dpi. If an application states its own pixel size, file size or colour, follow theirs.',
+      zoomLabel: 'Zoom',
+      dragNote: 'Drag inside the preview to move the subject, use the slider to zoom; “Auto frame” re-centres on the subject outline.',
+      autoFrame: 'Auto frame',
+      resetFrame: 'Reset',
+      run: 'Make ID photo',
+      reopen: 'Another photo',
+      save: 'Save',
+      saveNote: 'Single export is a JPG; A4 exports a full 300dpi sheet, ready to print and cut.',
+      layoutMode: 'Layout',
+      layoutSingle: 'Single JPG',
+      layoutA46: 'A4 six (2×3)',
+      layoutA49: 'A4 nine (3×3)',
+      bgKeep: 'Keep original',
+      bgWhite: 'White',
+      bgBlue: 'Blue',
+      bgRed: 'Red',
+      bgGrey: 'Grey',
+      bgCustom: 'Custom',
+      groupCommon: 'Common',
+      groupCard: 'Documents',
+      groupExam: 'Exams',
+      groupVisa: 'Visas',
+      loading: 'Reading photo…',
+      working: 'Cutting out locally — the first run also loads the model…',
+      composing: 'Rendering…',
+      downloading: 'Downloading model {done} / {total} MB',
+      saved: 'Saved to “{name}”',
+      needPick: 'Pick a photo first',
+      needModel: 'This backdrop needs the cutout model: download it above, or switch the backdrop to “Keep original” to crop only',
+      keepOnly: 'No cutout model yet: cropping the original to spec (download a model to swap the backdrop)',
+      stat: '{label} · {w}×{h}px · 300dpi',
+      statCut: '{label} · {w}×{h}px · 300dpi · cutout {ms}ms ({model})',
+      download: 'Download',
+      ready: 'Ready',
+      failed: 'Failed',
+      sheet: 'A4 sheet × {n} · 2480×3508px',
+    },
+  };
+
+  /**
+   * 规格：mm 是真实标准，px 是按 300dpi 换算出来的输出像素（mm ÷ 25.4 × 300，四舍五入）。
+   * 只写 mm 让 px 由代码算，是为了避免"表的像素"和"标注的毫米"对不上时没人发现。
+   */
+  var SPECS = [
+    { id: 'one', group: 'common', zh: '一寸', en: '1 inch', mm: [25, 35] },
+    { id: 'small-one', group: 'common', zh: '小一寸', en: 'Small 1 inch', mm: [22, 32] },
+    { id: 'big-one', group: 'common', zh: '大一寸', en: 'Large 1 inch', mm: [33, 48] },
+    { id: 'two', group: 'common', zh: '二寸', en: '2 inch', mm: [35, 49] },
+    { id: 'small-two', group: 'common', zh: '小二寸', en: 'Small 2 inch', mm: [35, 45] },
+    { id: 'idcard', group: 'card', zh: '身份证', en: 'ID card', mm: [26, 32] },
+    { id: 'social', group: 'card', zh: '社保卡', en: 'Social security card', mm: [26, 32] },
+    { id: 'license', group: 'card', zh: '驾驶证', en: 'Driving licence', mm: [22, 32] },
+    { id: 'passport', group: 'card', zh: '中国护照', en: 'CN passport', mm: [33, 48] },
+    { id: 'hkmac', group: 'card', zh: '港澳通行证', en: 'HK / Macau permit', mm: [33, 48] },
+    { id: 'civil', group: 'exam', zh: '公务员考试', en: 'Civil service exam', mm: [25, 35] },
+    { id: 'teacher', group: 'exam', zh: '教师资格', en: 'Teacher certificate', mm: [25, 35] },
+    { id: 'postgrad', group: 'exam', zh: '研究生报名', en: 'Graduate admission', mm: [41, 54] },
+    { id: 'cet', group: 'exam', zh: '英语四六级', en: 'CET', mm: [41, 54] },
+    { id: 'us-visa', group: 'visa', zh: '美国签证 51×51', en: 'US visa 51×51', mm: [51, 51] },
+    { id: 'schengen', group: 'visa', zh: '申根签证', en: 'Schengen visa', mm: [35, 45] },
+    { id: 'jp-visa', group: 'visa', zh: '日本签证', en: 'Japan visa', mm: [35, 45] },
+    { id: 'uk-visa', group: 'visa', zh: '英国签证', en: 'UK visa', mm: [35, 45] },
+  ];
+
+  var GROUPS = [
+    { id: 'common', key: 'groupCommon' },
+    { id: 'card', key: 'groupCard' },
+    { id: 'exam', key: 'groupExam' },
+    { id: 'visa', key: 'groupVisa' },
+  ];
+
+  var BGS = [
+    { id: 'keep', key: 'bgKeep', none: true },
+    { id: 'white', key: 'bgWhite', color: '#ffffff' },
+    { id: 'blue', key: 'bgBlue', color: '#438edb' },
+    { id: 'red', key: 'bgRed', color: '#d9001b' },
+    { id: 'grey', key: 'bgGrey', color: '#e6e7e9' },
+  ];
+
+  var DPI = 300;
+  var MM_PER_INCH = 25.4;
+  var A4 = { w: Math.round((210 / MM_PER_INCH) * DPI), h: Math.round((297 / MM_PER_INCH) * DPI) };
+  var SHEET_MARGIN = Math.round((10 / MM_PER_INCH) * DPI);
+  var SHEET_GAP = Math.round((5 / MM_PER_INCH) * DPI);
+  /** 预览用的整页缩放：1/4 的 A4 拖动起来才跟手，导出时按 1 重算。 */
+  var SHEET_PREVIEW_SCALE = 0.25;
+
+  var t = function (key, params) {
+    var table = DICT[omni.lang] || DICT.zh;
+    var text = table[key] || DICT.zh[key] || key;
+    if (params) Object.keys(params).forEach(function (k) { text = text.split('{' + k + '}').join(String(params[k])); });
+    return text;
+  };
+  var label = function (item) { return omni.lang === 'en' ? item.en : item.zh; };
+  var $ = function (sel) { return document.querySelector(sel); };
+  var px = function (mm) { return Math.round((mm / MM_PER_INCH) * DPI); };
+  var el = function (tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+
+  var state = {
+    path: '',
+    dataUrl: '',
+    sourceImg: null,   // 原图
+    fgImg: null,       // 真正画上去的前景：抠图结果（带 alpha）或原图
+    cut: false,        // 前景是不是抠图结果
+    spec: SPECS[0],
+    bg: 'white',
+    custom: '#4a90d9',
+    layout: 'single',
+    busy: false,
+    model: '',
+    cutMs: 0,
+    models: [],
+    defaultModel: '',
+  };
+  var view = { scale: 1, dx: 0, dy: 0 };
+
+  function showError(message) { $('#err').textContent = message || ''; }
+  function showOk(message) {
+    var node = $('#ok');
+    node.textContent = message || '';
+    node.classList.toggle('hidden', !message);
+  }
+  function setBusy(on, text) {
+    state.busy = on;
+    $('#busy').classList.toggle('hidden', !on);
+    if (text) $('#busy-text').textContent = text;
+    renderButtons();
+  }
+  function anyReady() { return state.models.some(function (m) { return m.ready; }); }
+  function renderButtons() {
+    $('#run').disabled = state.busy || !state.path;
+    $('#save').disabled = state.busy || !state.fgImg;
+  }
+
+  function bgColor() {
+    if (state.bg === 'keep') return null;
+    if (state.bg === 'custom') return state.custom;
+    var preset = BGS.filter(function (b) { return b.id === state.bg; })[0];
+    return preset && preset.color ? preset.color : '#ffffff';
+  }
+
+  // -------------------------------------------------------------------
+  // 界面：规格 / 底色 / 版式
+  // -------------------------------------------------------------------
+  function fillSpecs() {
+    var select = $('#spec');
+    select.innerHTML = '';
+    GROUPS.forEach(function (group) {
+      var box = document.createElement('optgroup');
+      box.label = t(group.key);
+      SPECS.filter(function (s) { return s.group === group.id; }).forEach(function (spec) {
+        var option = document.createElement('option');
+        option.value = spec.id;
+        option.textContent = label(spec) + ' · ' + spec.mm[0] + '×' + spec.mm[1] + 'mm';
+        box.appendChild(option);
+      });
+      select.appendChild(box);
+    });
+    select.value = state.spec.id;
+  }
+
+  function fillBgs() {
+    var box = $('#bgs');
+    box.innerHTML = '';
+    BGS.forEach(function (preset) {
+      var chip = el('button', 'chip');
+      chip.dataset.id = preset.id;
+      chip.setAttribute('aria-pressed', String(preset.id === state.bg));
+      if (preset.color) {
+        var swatch = el('span', 'swatch');
+        swatch.style.background = preset.color;
+        chip.appendChild(swatch);
+        chip.appendChild(document.createTextNode(' ' + t(preset.key)));
+      } else {
+        chip.textContent = t(preset.key);
+      }
+      chip.addEventListener('click', function () { setBg(preset.id); });
+      box.appendChild(chip);
+    });
+    var custom = el('button', 'chip');
+    custom.dataset.id = 'custom';
+    custom.setAttribute('aria-pressed', String(state.bg === 'custom'));
+    var dot = el('span', 'swatch');
+    dot.style.background = state.custom;
+    custom.appendChild(dot);
+    custom.appendChild(document.createTextNode(' ' + t('bgCustom')));
+    custom.addEventListener('click', function () { setBg('custom'); });
+    box.appendChild(custom);
+
+    var picker = document.createElement('input');
+    picker.type = 'color';
+    picker.value = state.custom;
+    picker.title = t('bgCustom');
+    picker.addEventListener('input', function () {
+      state.custom = picker.value;
+      custom.replaceChild((function () {
+        var next = el('span', 'swatch');
+        next.style.background = state.custom;
+        return next;
+      })(), custom.firstChild);
+      if (state.bg === 'custom') draw();
+    });
+    box.appendChild(picker);
+
+    var hasModel = anyReady();
+    $('#bg-note').textContent = hasModel ? '' : t('keepOnly');
+  }
+
+  function setBg(id) {
+    state.bg = id;
+    document.querySelectorAll('#bgs .chip').forEach(function (chip) {
+      chip.setAttribute('aria-pressed', String(chip.dataset.id === id));
+    });
+    draw();
+  }
+
+  function paintLabels() {
+    document.querySelectorAll('[data-i18n]').forEach(function (node) { node.textContent = t(node.dataset.i18n); });
+    fillSpecs();
+    fillBgs();
+  }
+
+  // -------------------------------------------------------------------
+  // 模型：清单 / 下载（与抠图那个小应用同一套 RPC）
+  // -------------------------------------------------------------------
+  function mb(bytes) { return (bytes / 1048576).toFixed(1); }
+
+  function renderModels() {
+    var row = $('#model-row');
+    row.innerHTML = '';
+    var ready = state.models.some(function (m) { return m.ready; });
+    $('#models').classList.toggle('hidden', ready);
+    // 先刷新底色那行的说明：模型已就绪时它还写着"只能裁剪"，是最容易让人以为白下载了的一句话
+    fillBgs();
+    if (ready) return;
+    var spec = state.models.filter(function (m) { return m.id === state.defaultModel; })[0] || state.models[0];
+    if (!spec) return;
+    row.appendChild(el('span', 'meta', spec.id + ' · ' + mb(spec.bytes) + ' MB'));
+    var button = el('button', 'btn sm primary grow', t('download'));
+    button.disabled = state.busy;
+    button.addEventListener('click', function () { downloadModel(spec); });
+    row.appendChild(button);
+    fillBgs();
+  }
+
+  function refreshStatus() {
+    return omni.bg.status().then(function (res) {
+      state.models = res.models || [];
+      state.defaultModel = res.defaultModel || '';
+      renderModels();
+      return res;
+    });
+  }
+
+  function downloadModel(spec) {
+    if (state.busy) return;
+    showError('');
+    setBusy(true, t('downloading', { done: '0', total: mb(spec.bytes) }));
+    // 进度靠轮询清单里的本地字节数：小应用收不到宿主的推送（与抠图小应用同一套做法）
+    var timer = setInterval(function () {
+      omni.bg.status().then(function (res) {
+        var m = (res.models || []).filter(function (x) { return x.id === spec.id; })[0];
+        if (m) setBusy(true, t('downloading', { done: mb(m.localBytes || 0), total: mb(m.bytes) }));
+      }).catch(function () {});
+    }, 800);
+    omni.bg.download(spec.id).then(function () {
+      return refreshStatus();
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('model.download.failed', e.message || String(e), { model: spec.id });
+    }).then(function () {
+      clearInterval(timer);
+      setBusy(false);
+      refreshStatus().catch(function () {});
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // 选图
+  // -------------------------------------------------------------------
+  $('#pick').addEventListener('click', function () {
+    if (state.busy) return;
+    showError('');
+    showOk('');
+    setBusy(true, t('loading'));
+    omni.files.pick({ types: 'png,jpg,jpeg,webp' }).then(function (picked) {
+      var path = (picked.paths || [])[0];
+      if (!path) return null;
+      return omni.files.read({ path: path }).then(function (file) {
+        return loadImage(file.dataUrl).then(function (img) {
+          state.path = path;
+          state.dataUrl = file.dataUrl;
+          state.sourceImg = img;
+          state.fgImg = img;
+          state.cut = false;
+          state.model = '';
+          state.cutMs = 0;
+          var thumb = $('#src');
+          thumb.src = file.dataUrl;
+          thumb.classList.remove('hidden');
+          $('#pick').classList.add('hidden');
+          resetFrame();
+          showWorkspace();
+        });
+      });
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('pick.failed', e.message || String(e), {});
+    }).then(function () { setBusy(false); });
+  });
+
+  $('#reopen').addEventListener('click', function () { $('#pick').click(); });
+
+  /** 图片按跨源方式加载：媒体服务带 ACAO:*，否则画布会被污染、导不出来。 */
+  function loadImage(url) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = function () { resolve(img); };
+      img.onerror = function () { reject(new Error('图片加载失败')); };
+      img.src = url;
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // 构图：cover 底 + 缩放 / 平移
+  // -------------------------------------------------------------------
+  function baseScale(width, height, img) {
+    return Math.max(width / img.width, height / img.height);
+  }
+
+  function clampView(width, height, img) {
+    var base = baseScale(width, height, img);
+    view.scale = Math.min(base * 4, Math.max(base, view.scale));
+    var dw = img.width * view.scale;
+    var dh = img.height * view.scale;
+    // 位移夹在"图片始终盖满画框"的范围内：否则证件照会露出没有像素的空白
+    view.dx = Math.min(0, Math.max(width - dw, view.dx));
+    view.dy = Math.min(0, Math.max(height - dh, view.dy));
+  }
+
+  function resetFrame() {
+    var spec = specPx();
+    if (!state.fgImg) return;
+    view.scale = baseScale(spec.w, spec.h, state.fgImg);
+    view.dx = (spec.w - state.fgImg.width * view.scale) / 2;
+    view.dy = (spec.h - state.fgImg.height * view.scale) / 2;
+    clampView(spec.w, spec.h, state.fgImg);
+    $('#zoom').value = '100';
+    draw();
+  }
+
+  function zoomTo(percent) {
+    var spec = specPx();
+    var img = state.fgImg;
+    if (!img) return;
+    var base = baseScale(spec.w, spec.h, img);
+    var next = base * (percent / 100);
+    // 以画框中心为锚点缩放：人像不会因为拖滑块而整个跑掉
+    var cx = spec.w / 2;
+    var cy = spec.h / 2;
+    var ix = (cx - view.dx) / view.scale;
+    var iy = (cy - view.dy) / view.scale;
+    view.scale = next;
+    view.dx = cx - ix * next;
+    view.dy = cy - iy * next;
+    clampView(spec.w, spec.h, img);
+    draw();
+  }
+
+  /**
+   * 自动构图：按 alpha 轮廓把人像摆正。
+   *
+   * 抠图结果四周是透明边（模型把整张原图的尺寸都留着了），不重排的话人像可能偏在一角。
+   * 采样到小图上取 alpha 包围盒，再解出覆盖率与位移 —— 证件照的"头肩比例"就是这么定的：
+   * 头顶留 ~8%，人像占画面高度 ~78%。
+   */
+  function autoFrame() {
+    var spec = specPx();
+    var img = state.fgImg;
+    if (!img) return;
+    var box = alphaBounds(img);
+    if (!box) { resetFrame(); return; }
+    var targetH = spec.h * 0.78;
+    var scale = targetH / box.h;
+    // 还要保证整张图（含透明边）盖满画框，否则会出现没有像素的边
+    scale = Math.max(scale, baseScale(spec.w, spec.h, img));
+    view.scale = scale;
+    view.dx = spec.w / 2 - (box.x + box.w / 2) * scale;
+    view.dy = spec.h * 0.08 - box.y * scale;
+    clampView(spec.w, spec.h, img);
+    var percent = Math.round((scale / baseScale(spec.w, spec.h, img)) * 100);
+    $('#zoom').value = String(Math.min(400, Math.max(100, percent)));
+    draw();
+  }
+
+  /** 前景的非透明包围盒（采样到长边 256 的小图上算，避免整图 getImageData）。 */
+  function alphaBounds(img) {
+    var sample = document.createElement('canvas');
+    var maxSide = 256;
+    var ratio = Math.min(1, maxSide / Math.max(img.width, img.height));
+    sample.width = Math.max(1, Math.round(img.width * ratio));
+    sample.height = Math.max(1, Math.round(img.height * ratio));
+    var ctx = sample.getContext('2d');
+    ctx.drawImage(img, 0, 0, sample.width, sample.height);
+    var data;
+    try {
+      data = ctx.getImageData(0, 0, sample.width, sample.height).data;
+    } catch (e) {
+      return null;
+    }
+    var minX = sample.width, minY = sample.height, maxX = -1, maxY = -1;
+    for (var y = 0; y < sample.height; y += 1) {
+      for (var x = 0; x < sample.width; x += 1) {
+        if (data[(y * sample.width + x) * 4 + 3] > 32) {
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < 0) return null;
+    return {
+      x: (minX / ratio),
+      y: (minY / ratio),
+      w: Math.max(1, (maxX - minX + 1) / ratio),
+      h: Math.max(1, (maxY - minY + 1) / ratio),
+    };
+  }
+
+  // -------------------------------------------------------------------
+  // 画布
+  // -------------------------------------------------------------------
+  function specPx() {
+    return { w: px(state.spec.mm[0]), h: px(state.spec.mm[1]) };
+  }
+
+  /** 单张证件照画到给定画布（颜色随底色）：预览、单张导出、A4 排版共用。 */
+  function composePhoto(canvas) {
+    var ctx = canvas.getContext('2d');
+    var color = bgColor();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = color || '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (!state.fgImg) return canvas;
+    // 「保持原图」且原图不透明时，底色铺不铺都看不见；有 alpha 的 PNG 才会透出来，
+    // 这时用 placeholder 色无意义 —— 保留浅灰以便看出透明区（导出仍按所选底色）。
+    ctx.drawImage(state.fgImg, view.dx, view.dy, state.fgImg.width * view.scale, state.fgImg.height * view.scale);
+    return canvas;
+  }
+
+  /** A4 整页：按 scale 缩放整页尺寸，n 张排成网格，居中并带裁切线。 */
+  function composeSheet(canvas, count, scale) {
+    var ctx = canvas.getContext('2d');
+    var cols = count === 9 ? 3 : 2;
+    var rows = count === 9 ? 3 : 2;
+    var gap = SHEET_GAP * scale;
+    var margin = SHEET_MARGIN * scale;
+    var spec = specPx();
+    var cellW = spec.w * scale;
+    var cellH = spec.h * scale;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    var gridW = cols * cellW + (cols - 1) * gap;
+    var gridH = rows * cellH + (rows - 1) * gap;
+    var originX = Math.max(margin, (canvas.width - gridW) / 2);
+    var originY = Math.max(margin, (canvas.height - gridH) / 2);
+
+    var single = document.createElement('canvas');
+    single.width = Math.max(1, Math.round(cellW));
+    single.height = Math.max(1, Math.round(cellH));
+    // 单张按整页比例重画一遍（导出 scale=1 时就是规格的真实像素），再贴到每个格子里
+    composePhotoScaled(single, scale);
+
+    for (var row = 0; row < rows; row += 1) {
+      for (var col = 0; col < cols; col += 1) {
+        var x = originX + col * (cellW + gap);
+        var y = originY + row * (cellH + gap);
+        ctx.drawImage(single, x, y, cellW, cellH);
+        ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1);
+      }
+    }
+    return canvas;
+  }
+
+  /** 在指定缩放比例下渲染一张证件照（A4 排版用；scale=1 就是规格像素）。 */
+  function composePhotoScaled(canvas, scale) {
+    var ctx = canvas.getContext('2d');
+    var color = bgColor();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = color || '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (!state.fgImg) return canvas;
+    ctx.drawImage(
+      state.fgImg,
+      view.dx * scale,
+      view.dy * scale,
+      state.fgImg.width * view.scale * scale,
+      state.fgImg.height * view.scale * scale,
+    );
+    return canvas;
+  }
+
+  function draw() {
+    var canvas = $('#canvas');
+    var spec = specPx();
+    if (state.layout === 'single') {
+      canvas.width = spec.w;
+      canvas.height = spec.h;
+      composePhoto(canvas);
+      $('#stat').textContent = state.cut
+        ? t('statCut', { label: label(state.spec), w: spec.w, h: spec.h, ms: state.cutMs, model: state.model })
+        : t('stat', { label: label(state.spec), w: spec.w, h: spec.h });
+      $('canvas').style.cursor = 'grab';
+    } else {
+      var count = state.layout === 'a4x9' ? 9 : 6;
+      canvas.width = Math.round(A4.w * SHEET_PREVIEW_SCALE);
+      canvas.height = Math.round(A4.h * SHEET_PREVIEW_SCALE);
+      composeSheet(canvas, count, SHEET_PREVIEW_SCALE);
+      $('#stat').textContent = t('sheet', { n: count }) + ' · ' + label(state.spec);
+    }
+    $('#meta').textContent = label(state.spec) + ' · ' + state.spec.mm[0] + '×' + state.spec.mm[1] + 'mm';
+    $('#zoom').disabled = state.layout !== 'single';
+  }
+
+  function showWorkspace() {
+    $('#workspace').style.display = '';
+    draw();
+    renderButtons();
+  }
+
+  // 拖动 / 缩放（只在单张版式下有意义：A4 是同一张照片的重复排版）
+  var dragging = null;
+  $('#canvas').addEventListener('pointerdown', function (event) {
+    if (event.button !== 0 || !state.fgImg || state.layout !== 'single') return;
+    event.preventDefault();
+    $('#canvas').setPointerCapture(event.pointerId);
+    $('#canvas').classList.add('dragging');
+    dragging = { x: event.clientX, y: event.clientY, dx: view.dx, dy: view.dy };
+  });
+  $('#canvas').addEventListener('pointermove', function (event) {
+    if (!dragging) return;
+    event.preventDefault();
+    var spec = specPx();
+    var rect = $('#canvas').getBoundingClientRect();
+    var perCss = spec.w / rect.width; // 画布像素 / 屏幕像素
+    view.dx = dragging.dx + (event.clientX - dragging.x) * perCss;
+    view.dy = dragging.dy + (event.clientY - dragging.y) * perCss;
+    clampView(spec.w, spec.h, state.fgImg);
+    draw();
+  });
+  var endDrag = function () {
+    dragging = null;
+    $('#canvas').classList.remove('dragging');
+  };
+  $('#canvas').addEventListener('pointerup', endDrag);
+  $('#canvas').addEventListener('pointercancel', endDrag);
+  window.addEventListener('blur', endDrag);
+
+  $('#zoom').addEventListener('input', function () { zoomTo(Number($('#zoom').value)); });
+  $('#auto-frame').addEventListener('click', autoFrame);
+  $('#reset-frame').addEventListener('click', resetFrame);
+
+  $('#spec').addEventListener('change', function () {
+    state.spec = SPECS.filter(function (s) { return s.id === $('#spec').value; })[0] || SPECS[0];
+    resetFrame();
+  });
+  $('#layout').addEventListener('change', function () {
+    state.layout = $('#layout').value;
+    draw();
+  });
+
+  // -------------------------------------------------------------------
+  // 生成：先抠图（可选），再按规格渲染
+  // -------------------------------------------------------------------
+  $('#run').addEventListener('click', function () {
+    if (!state.path || state.busy) return;
+    showError('');
+    showOk('');
+    var color = bgColor();
+    if (!color) {
+      // 保持原图：纯裁剪，不碰模型
+      state.fgImg = state.sourceImg;
+      state.cut = false;
+      state.model = '';
+      resetFrame();
+      showWorkspace();
+      omni.log('render.crop', 'crop only', { spec: state.spec.id });
+      return;
+    }
+    if (!anyReady()) {
+      showError(t('needModel'));
+      return;
+    }
+    setBusy(true, t('working'));
+    omni.bg.run({ path: state.path, model: state.defaultModel || undefined, maxSize: 2048 }).then(function (res) {
+      return loadImage(res.cutout.url).then(function (img) {
+        state.fgImg = img;
+        state.cut = true;
+        state.model = res.model || '';
+        state.cutMs = res.totalMs || 0;
+        // 抠图结果的尺寸可能与原图不同（引擎按长边 2048 限过），构图一律重算
+        autoFrame();
+        showWorkspace();
+        return omni.log('cutout.done', 'cutout ready', {
+          model: res.model, ms: res.totalMs, w: res.width, h: res.height,
+        });
+      });
+    }).catch(function (e) {
+      showError((e.message || String(e)) + ' ' + t('failed'));
+      omni.log('cutout.failed', e.message || String(e), {});
+    }).then(function () { setBusy(false); });
+  });
+
+  // -------------------------------------------------------------------
+  // 导出
+  // -------------------------------------------------------------------
+  /** 导出用的画布：单张按规格像素，A4 按 300dpi 的整页（预览是缩略的，这里重算）。 */
+  function exportCanvas() {
+    var spec = specPx();
+    var canvas = document.createElement('canvas');
+    if (state.layout === 'single') {
+      canvas.width = spec.w;
+      canvas.height = spec.h;
+      composePhoto(canvas);
+      return canvas;
+    }
+    canvas.width = A4.w;
+    canvas.height = A4.h;
+    composeSheet(canvas, state.layout === 'a4x9' ? 9 : 6, 1);
+    return canvas;
+  }
+
+  $('#save').addEventListener('click', function () {
+    if (!state.fgImg || state.busy) return;
+    showError('');
+    var spec = state.spec;
+    var suffix = state.layout === 'single' ? spec.id : state.layout + '-' + spec.id;
+    var name = 'id-photo-' + suffix + '-' + state.bg + '.jpg';
+    setBusy(true, t('composing'));
+    var dataUrl;
+    try {
+      dataUrl = exportCanvas().toDataURL('image/jpeg', 0.92);
+    } catch (e) {
+      // 画布被污染时 toDataURL 抛 SecurityError —— 只可能是 crossorigin 那步没生效
+      showError('导出失败：' + (e.message || String(e)));
+      omni.log('save.failed', String(e.message || e), {});
+      setBusy(false);
+      return;
+    }
+    omni.files.save({ name: name, dataUrl: dataUrl }).then(function (res) {
+      showOk(t('saved', { name: (res.path || name).split('/').pop() }));
+      return omni.log('saved', 'id photo exported', {
+        spec: spec.id, bg: state.bg, layout: state.layout,
+      });
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('save.failed', e.message || String(e), {});
+    }).then(function () { setBusy(false); });
+  });
+
+  omni.ready.then(function () {
+    paintLabels();
+    renderButtons();
+    refreshStatus().catch(function (e) {
+      omni.log('status.failed', e.message || String(e), {});
+    });
+  });
+  omni.onCapabilities = function () { refreshStatus().catch(function () {}); };
+})();
+</script>
+</body>
+</html>

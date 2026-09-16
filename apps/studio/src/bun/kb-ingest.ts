@@ -36,6 +36,7 @@ import {
 import { chunkContentHash, contextText, splitIntoChunksWithMeta } from "./kb-chunk";
 import { peekKbIndex } from "./kb-index";
 import { recordKbEvent } from "./kb-events";
+import { logEvent } from "./app-log";
 import { getSetting, getActiveServerPort } from "./db/settings";
 import * as CloudProviders from "./cloud-providers";
 import { convertFileToImages, generate, type ModelEndpoint } from "./vllm";
@@ -267,11 +268,16 @@ export function textContentHash(text: string): string {
   return new Bun.CryptoHasher("sha256").update(text).digest("hex");
 }
 
-function embeddingConfigOf(kb: KnowledgeBaseRow): EmbeddingConfig {
+/**
+ * 嵌入配置：云服务商槽位优先（地址/密钥从 cloud_providers 行解析，页面不落盘密钥），
+ * 其次用 per-KB 手填的 base/key，最后跟随本地推理服务。
+ */
+export function embeddingConfigOf(kb: KnowledgeBaseRow): EmbeddingConfig {
+  const provider = CloudProviders.resolveCloudProvider(kb.embeddingProviderId);
   return {
     embeddingModel: kb.embeddingModel,
-    embeddingBase: kb.embeddingBase,
-    embeddingApiKey: kb.embeddingApiKey,
+    embeddingBase: provider?.baseUrl ?? kb.embeddingBase,
+    embeddingApiKey: provider?.apiKey ?? kb.embeddingApiKey,
     embeddingDim: kb.embeddingDim,
   };
 }
@@ -782,11 +788,27 @@ async function runJob(job: typeof kbIngestJobs.$inferSelect): Promise<void> {
         action: "doc_failed",
         detail: { attempts: job.attempts, error: message },
       });
+      // kb_events 只在知识库自己的治理页可见；统一日志里也要有一条，
+      // 否则「文档一直 processing / 最终 failed」在 `omi logs` 里查不到原因。
+      logEvent({
+        level: "error",
+        source: "kb",
+        event: "kb.ingest.failed",
+        message,
+        detail: { kbId: job.kbId, docId: job.docId, kind: job.kind, attempts: job.attempts },
+      });
     } else {
       db.update(kbIngestJobs)
         .set({ state: "queued", lastError: message, nextRunAt: Date.now() + backoffMs(job.attempts), lockedAt: null })
         .where(eq(kbIngestJobs.id, job.id))
         .run();
+      logEvent({
+        level: "warn",
+        source: "kb",
+        event: "kb.ingest.retry",
+        message,
+        detail: { kbId: job.kbId, docId: job.docId, kind: job.kind, attempts: job.attempts, maxAttempts: job.maxAttempts },
+      });
     }
   }
 }

@@ -68,9 +68,20 @@ type Listener = (msg: VoiceCallOutgoing) => void;
 
 const listeners = new Set<Listener>();
 
-/** 通话调试日志：进统一日志（`logs/app.log`，source=tts、event=voicecall）。 */
+/**
+ * 通话日志：进统一日志（`logs/app.log`）。
+ *
+ * 分两档是有意的 —— 逐句转写 / 音频块这类过程信息量大且只在深挖时有用，记 debug；
+ * **失败**记 warn/error，否则 `omi logs` 按等级过滤后看不到任何通话故障：
+ * 「云端连不上」和「本地 ASR 挂了」在界面上都只是一句提示，事后无从查起。
+ */
 function callLog(line: string): void {
   logEvent({ level: "debug", source: "tts", event: "voicecall", message: line });
+}
+
+/** 通话失败：带上下文记 error 级。 */
+export function callLogFailure(event: string, message: string, detail?: unknown): void {
+  logEvent({ level: "error", source: "tts", event: `voicecall.${event}`, message, detail });
 }
 
 export function onVoiceCallEvent(cb: Listener): () => void {
@@ -188,8 +199,12 @@ async function runPartial(session: Session): Promise<void> {
       session.liveText = text;
       emit({ type: "partial", conversationId: session.conversationId, text });
     }
-  } catch {
-    // 增量转写失败不打断通话，等下一片或端句时再试。
+  } catch (e) {
+    // 增量转写失败不打断通话，等下一片或端句时再试 —— 但要留痕：整场通话一个字幕都
+    // 没出来的话，只有这条日志能说明是 ASR 一直在失败。
+    callLogFailure("asr.partial_failed", `增量转写失败：${(e instanceof Error ? e.message : String(e))}`, {
+      conversationId: session.conversationId,
+    });
   }
 }
 
@@ -449,6 +464,7 @@ function openRealtime(session: Session, ack?: (r: { ok: boolean; error?: string 
       onEvent: (ev) => onRealtimeEvent(session, ev),
     },
     callLog,
+    (message, detail) => callLogFailure("realtime.failed", message, detail),
   );
   session.realtime = client;
   if (ack) {
@@ -657,6 +673,8 @@ export async function startVoiceCall(opts: {
 }): Promise<{ ok: boolean; conversation?: Conversation; error?: string }> {
   const provider = opts.provider ?? getVoiceCallProvider();
   if (provider === "cloud" && !getRealtimeProviderConfig().configured) {
+    // 用户点了拨号却"什么都没发生"时，这条日志说明是缺 Key（界面上只弹一句提示）。
+    callLogFailure("start.not_configured", "云端模式未配置 API Key，拨号被拒绝");
     return { ok: false, error: "云端模式未配置 API Key，请先在通话界面的「云端配置」中填写" };
   }
 
@@ -778,8 +796,12 @@ export async function endVoiceCallUtterance(opts: {
       const res = await transcribeAudio({ wavBase64 });
       const finalText = res.text.trim();
       if (finalText) text = finalText;
-    } catch {
-      // 转写失败：沿用增量字幕
+    } catch (e) {
+      // 转写失败：沿用增量字幕（用户至少看得到已经识别出来的那部分）。
+      callLogFailure("asr.utterance_failed", `端句转写失败：${(e instanceof Error ? e.message : String(e))}`, {
+        conversationId: session.conversationId,
+        bytes: total,
+      });
     }
   }
   if (session.utterance === utterance) session.utterance = Buffer.alloc(0);

@@ -58,7 +58,24 @@ export function isLocalOrigin(origin: string | null | undefined): boolean {
 }
 
 export function chatImageUrl(ref: string): string {
-  return `http://${IMAGE_SERVER_HOST}:${imageServerPort()}/${ref}`;
+  return `${mediaBase()}/${ref}`;
+}
+
+/**
+ * 媒体地址基址覆盖。
+ *
+ * 桌面端永远用回环地址；网页端（浏览器里跑同一份前端）连不上宿主的 127.0.0.1，
+ * 由它在启动时设成 `<当前站点>/media` —— 网关上有一条带鉴权的媒体代理。
+ * 不设就是原来的行为，所以对桌面端零影响。
+ */
+let mediaBaseOverride: string | null = null;
+
+export function setMediaBaseOverride(base: string | null): void {
+  mediaBaseOverride = base ? base.replace(/\/+$/, "") : null;
+}
+
+function mediaBase(): string {
+  return mediaBaseOverride ?? `http://${IMAGE_SERVER_HOST}:${imageServerPort()}`;
 }
 
 /**
@@ -67,7 +84,7 @@ export function chatImageUrl(ref: string): string {
  */
 export function artifactPreviewUrl(artifactId: number, version?: number): string {
   const suffix = version == null ? "" : `?v=${version}`;
-  return `http://${IMAGE_SERVER_HOST}:${imageServerPort()}/artifact/${artifactId}${suffix}`;
+  return `${mediaBase()}/artifact/${artifactId}${suffix}`;
 }
 
 /** 工作区文件预览地址；rootId 由主进程登记（见 registerWorkspaceRoot）。 */
@@ -82,5 +99,5 @@ export function workspaceFilePreviewUrl(
     .map(encodeURIComponent)
     .join("/");
   const suffix = version == null ? "" : `?v=${version}`;
-  return `http://${IMAGE_SERVER_HOST}:${imageServerPort()}/workspace/${rootId}/${encoded}${suffix}`;
+  return `${mediaBase()}/workspace/${rootId}/${encoded}${suffix}`;
 }

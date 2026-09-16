@@ -1,0 +1,204 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1789480883951,
+  "projectRoot": "/Users/lishuhong/workspace/projects/research_projects/OmniStudio",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "npm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "npm run build",
+    "testCommand": "npm test",
+    "lintCommand": "npm run lint",
+    "devCommand": null,
+    "scripts": {
+      "build": "turbo run build",
+      "typecheck": "turbo run typecheck",
+      "test": "bun run --cwd apps/studio test",
+      "lint": "oxlint --report-unused-disable-directives",
+      "fmt": "oxfmt",
+      "fmt:check": "oxfmt --check",
+      "push:canary": "bun pm version prerelease --preid=canary && git push origin main --tags",
+      "push:patch": "bun pm version prepatch --preid=canary && git push origin main --tags",
+      "push:minor": "bun pm version preminor --preid=canary && git push origin main --tags",
+      "push:major": "bun pm version premajor --preid=canary && git push origin main --tags",
+      "push:stable": "bun pm version patch && git push origin main --tags"
+    }
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": true,
+    "workspaces": [
+      "apps/*",
+      "packages/*"
+    ],
+    "mainDirectories": [
+      "docs",
+      "scripts"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "apps": {
+      "path": "apps",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1789480883937,
+      "keyFiles": []
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 3,
+      "lastAccessed": 1789480883937,
+      "keyFiles": [
+        "architecture.md",
+        "omi-cli.md",
+        "omni-cli.md"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 4,
+      "lastAccessed": 1789480883940,
+      "keyFiles": [
+        "backlog.tsv",
+        "bundle-prompt-library-assets.ts",
+        "create-project-backlog.sh",
+        "extract-vibedesign-prompts.ts"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "apps/studio/src/bun/knowledge.ts",
+      "accessCount": 11,
+      "lastAccessed": 1789525124142,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/bun/rpc/index.ts",
+      "accessCount": 10,
+      "lastAccessed": 1789525256854,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/bun/knowledge-multimodal.tests.ts",
+      "accessCount": 6,
+      "lastAccessed": 1789526229447,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/mainview/app/chat/message.tsx",
+      "accessCount": 5,
+      "lastAccessed": 1789524811225,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/mainview/app/kb/docs-tab.tsx",
+      "accessCount": 5,
+      "lastAccessed": 1789525462364,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/mainview/app/local-models/installed.tsx",
+      "accessCount": 4,
+      "lastAccessed": 1789524843407,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/mainview/app/model-detail/index.tsx",
+      "accessCount": 4,
+      "lastAccessed": 1789525536205,
+      "type": "file"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "accessCount": 3,
+      "lastAccessed": 1789525721437,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/mainview/app/kb/settings-tab.tsx",
+      "accessCount": 3,
+      "lastAccessed": 1789526169614,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/mainview/app/local-models/launch-bar.tsx",
+      "accessCount": 2,
+      "lastAccessed": 1789524829942,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/shared/engines.ts",
+      "accessCount": 2,
+      "lastAccessed": 1789524886588,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/mainview/app/kb/settings-tab.test.tsx",
+      "accessCount": 2,
+      "lastAccessed": 1789525405932,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/bun/db/db-migrate-timestamps.tests.ts",
+      "accessCount": 2,
+      "lastAccessed": 1789525989706,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/bun/gateway.ts",
+      "accessCount": 1,
+      "lastAccessed": 1789524866300,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/bun/runtimes/llama.ts",
+      "accessCount": 1,
+      "lastAccessed": 1789524867468,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/mainview/app/kb/create-dialog.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1789525320142,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/mainview/app/gateway-screen.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1789525362698,
+      "type": "file"
+    },
+    {
+      "path": "apps/studio/src/mainview/app/gateway-screen.test.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1789525645048,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

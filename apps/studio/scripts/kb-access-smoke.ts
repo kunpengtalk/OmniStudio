@@ -47,11 +47,11 @@ try {
 
     const deadline = Date.now() + 15_000;
     while (Date.now() < deadline) {
-      const docs = K.listDocs(kb.id);
+      const docs = K.listDocs(kb.id).docs;
       if (docs.length === 2 && docs.every((d) => d.status === "ready")) break;
       await Bun.sleep(200);
     }
-    const docs = K.listDocs(kb.id);
+    const docs = K.listDocs(kb.id).docs;
     check("全部摄取就绪", docs.every((d) => d.status === "ready"), JSON.stringify(docs.map((d) => [d.name, d.status, d.error])));
 
     const hit = await K.recall([kb.id], "凤梨酥是什么");

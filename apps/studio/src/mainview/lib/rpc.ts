@@ -10,6 +10,7 @@ import { useTerminalStore } from "../stores/terminal";
 import { useVoiceCallStore } from "../stores/voice-call";
 import { useModelDownloadStore } from "../stores/model-download";
 import { useGatewayStore } from "../stores/gateway";
+import { useTunnelStore } from "../stores/tunnel";
 import { useMlxInstallStore } from "../stores/mlx-install";
 import { useMlxModelDownloadStore } from "../stores/mlx-model-download";
 import { useMlxModelRunStore } from "../stores/mlx-model-run";
@@ -17,11 +18,14 @@ import { useMediaSetupStore } from "../stores/media-setup";
 import { usePpOcrInstallStore } from "../stores/ppocr-install";
 import { usePpOcrDownloadStore } from "../stores/ppocr-download";
 import { useTessInstallStore } from "../stores/tess-install";
+import { useEngineInstallStore } from "../stores/engine-install";
 import { useSkillsStore } from "../stores/skills";
 import { useBackupStore } from "../stores/backup";
 import { useRouter } from "../stores/router";
 import { t } from "../stores/ui-lang";
 import { useAppStore, type AppId } from "../stores/app";
+import { isInstallTerminalLine } from "./install-log";
+import { createHttpTransport, isRemoteClient } from "./remote";
 
 const knownCompletedIds = new Set<string>();
 
@@ -32,6 +36,7 @@ const NAV_APP_PATHS = new Set<string>([
   "voice",
   "image",
   "video",
+  "music",
   "ocr",
   "translate",
   "prompt",
@@ -228,13 +233,23 @@ const rpc = Electroview.defineRPC<AppRPC>({
         // 网关启停会改变 MCP 端点可用性，知识库接入页据此刷新。
         queryClient.invalidateQueries({ queryKey: ["gateway-status"] });
       },
-      mlxInstallLog: ({ text }) => {
-        useMlxInstallStore.getState().appendLog(text);
-        // 安装完成（成功或失败）后刷新引擎状态；失败的日志形如「mflux 安装失败」。
-        if (text.includes("安装成功") || text.includes("安装失败")) {
-          queryClient.invalidateQueries({ queryKey: ["mlx-gen-status"] });
+      tunnelStatusChanged: (info) => {
+        useTunnelStore.getState().setInfo(info);
+        queryClient.invalidateQueries({ queryKey: ["tunnel-status"] });
+      },
+      tunnelInstallLog: ({ lines }) => {
+        useTunnelStore.getState().appendLines(lines);
+        // 安装收尾（成功或失败）后刷新二进制状态；终态日志形如「cloudflared 安装成功 / 安装失败」。
+        if (lines.some(isInstallTerminalLine)) {
+          queryClient.invalidateQueries({ queryKey: ["tunnel-status"] });
         }
       },
+      mlxInstallLog: ({ lines }) => {
+        useMlxInstallStore.getState().appendLines(lines);
+        // 安装完成（成功或失败）后刷新引擎状态；终态日志形如「mflux 安装成功 / 安装失败」。
+        if (lines.some(isInstallTerminalLine)) {
+          queryClient.invalidateQueries({ queryKey: ["mlx-gen-status"] });
+        }      },
       mlxModelDownloadProgress: (p) => {
         useMlxModelDownloadStore.getState().setProgress(p);
         // 下载结束（成功/失败）后刷新「已下载模型」列表和「继续下载」状态，
@@ -251,18 +266,32 @@ const rpc = Electroview.defineRPC<AppRPC>({
           queryClient.invalidateQueries({ queryKey: ["mlx-active-model"] });
         }
       },
-      ppOcrInstallLog: ({ text }) => {
-        usePpOcrInstallStore.getState().appendLog(text);
+      ppOcrInstallLog: ({ lines }) => {
+        usePpOcrInstallStore.getState().appendLines(lines);
         // 安装完成（成功或失败）后刷新引擎状态。
-        if (text.includes("安装成功") || text.includes("安装失败")) {
+        if (lines.some(isInstallTerminalLine)) {
           queryClient.invalidateQueries({ queryKey: ["ppocr-status"] });
         }
       },
-      tesseractInstallLog: ({ text }) => {
-        useTessInstallStore.getState().appendLog(text);
+      tesseractInstallLog: ({ lines }) => {
+        useTessInstallStore.getState().appendLines(lines);
         // 安装完成（成功或失败）后刷新引擎状态。
-        if (text.includes("安装成功") || text.includes("安装失败")) {
+        if (lines.some(isInstallTerminalLine)) {
           queryClient.invalidateQueries({ queryKey: ["ocr-status"] });
+        }
+      },
+      engineInstallLog: ({ lines }) => {
+        useEngineInstallStore.getState().appendLines(lines);
+        // 收尾（成功或失败）后重新检测引擎：引导页的「未就绪 / 就绪」与下一步解锁都挂在
+        // setup-env 这一条查询上，不刷就一直是旧状态。
+        if (lines.some(isInstallTerminalLine)) {
+          queryClient.invalidateQueries({ queryKey: ["setup-env"] });
+        }
+      },
+      engineInstallPhase: (event) => {
+        useEngineInstallStore.getState().setPhase(event);
+        if (event.phase === "done" || event.phase === "failed") {
+          queryClient.invalidateQueries({ queryKey: ["setup-env"] });
         }
       },
       ppOcrPhase: ({ phase }) => {
@@ -338,6 +367,12 @@ const rpc = Electroview.defineRPC<AppRPC>({
   },
 });
 
-const electrobun = new Electroview({ rpc });
-
-export const rpcClient = electrobun.rpc!.request;
+/**
+ * 传输层二选一：
+ *   - 桌面端（有 Electrobun 预加载桥）：原来的 WebSocket 通道；
+ *   - 网页端（浏览器）：同一份 RPC 定义换成 HTTP + SSE（见 lib/remote.ts）。
+ * RPC 之上的 stores / 组件 / 处理器完全一致 —— 这正是"网页版就是应用本身"的关键。
+ */
+export const rpcClient = isRemoteClient()
+  ? (rpc.setTransport(createHttpTransport()), rpc.request)
+  : new Electroview({ rpc }).rpc!.request;

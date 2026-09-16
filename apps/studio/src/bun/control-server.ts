@@ -25,6 +25,7 @@ import {
   getBenchmarkRun,
   cancelBenchmark,
   listBenchmarkRecords,
+  type BenchmarkParams,
 } from "./benchmark";
 
 /**
@@ -289,6 +290,10 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
       const contexts = Array.isArray(payload.contexts)
         ? payload.contexts.map(Number).filter((n) => Number.isFinite(n))
         : undefined;
+      // 缓存场景：这里按白名单重建参数，漏一个键就等于 CLI 的开关静默失效。
+      const cacheModes = Array.isArray(payload.cacheModes)
+        ? (payload.cacheModes.filter((m) => typeof m === "string") as BenchmarkParams["cacheModes"])
+        : undefined;
       const result = startBenchmark({
         model: typeof payload.model === "string" ? payload.model : "",
         providerId: typeof payload.providerId === "string" ? payload.providerId : undefined,
@@ -296,6 +301,7 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
         batchSize: Number(payload.batchSize) || undefined,
         temperature: Number.isFinite(Number(payload.temperature)) ? Number(payload.temperature) : undefined,
         contexts,
+        cacheModes,
       });
       if ("error" in result) return { ok: false, error: result.error };
       return { ok: true, data: { runId: result.runId } };
@@ -312,6 +318,15 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
     // --cloud 服务商解析用：完整 cloud_providers 表（"models" 只回激活槽位）。
     case "cloudProviders": {
       return { ok: true, data: CloudProviders.listCloudProviders() };
+    }
+
+    // `omi launch --model <云模型>` 用：模型属于已启用但非默认的厂商时先切过去，
+    // 否则网关（只往激活厂商发）会拿着这个模型去问另一家。
+    case "cloudProviderActivate": {
+      const id = String(payload.id ?? "").trim();
+      if (!id) return { ok: false, error: "缺少 id" };
+      const r = CloudProviders.activateCloudProvider(id);
+      return r.ok ? { ok: true, data: { id } } : { ok: false, error: r.error ?? "切换默认云厂商失败" };
     }
 
     case "models": {

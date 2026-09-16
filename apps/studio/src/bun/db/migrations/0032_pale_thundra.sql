@@ -1,0 +1,1 @@
+ALTER TABLE `video_records` ADD `comfy_base` text;

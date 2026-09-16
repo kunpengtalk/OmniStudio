@@ -5,12 +5,14 @@ import { rpcClient } from "../lib/rpc";
 import { useChatStore } from "../stores/chat";
 import { useVoiceCallStore, type AudioEntry, type VoiceCallProvider } from "../stores/voice-call";
 import { encodePcm16Base64 } from "../lib/wav";
+import { REALTIME_OUTPUT_RATE, realtimeDialectFor, realtimeInputRate } from "@/shared/realtime-voice";
 
 /**
  * 实时语音通话引擎（前端侧）：
  * - 麦克风采集 + 能量 VAD：说话开始/结束自动断句，680ms 静音判定一句话说完
  * - 本地模式：说话期间每 ~280ms 推一帧 16k WAV（整段）给后端做增量转写
- * - 云端模式：说话期间每 ~120ms 推增量 PCM16 16k 给 Qwen Realtime（服务端 smart_turn 断句）
+ * - 云端模式：说话期间每 ~120ms 推增量 PCM16 给实时模型（服务端 VAD 断句）；
+ *   采样率按厂商取（百炼 16k / 阶跃 24k，喂错会被当成另一种语速）
  * - 抢话打断：agent 正在想/正在说（云端）时检测到人声 → voicecallInterrupt + 清空播放队列
  * - 播放：消费 store.audioQueue 顺序播放（WAV decodeAudioData / PCM16 24k 直构），
  *   interrupt/hangup 可立即停声
@@ -22,8 +24,6 @@ const CLOUD_PUSH_INTERVAL_MS = 120; // 云端实时流：推得越勤，断句�
 const UTTERANCE_MIN_SAMPLES = INPUT_RATE * 0.08; // <80ms 视为误触发
 const SILENCE_END_CHUNKS = 5; // ≈430ms 连续低电平 → 一句话结束（早一点进下一轮，响应更快）
 const SPEECH_START_CHUNKS = 2;
-/** 云端输出采样率（Qwen Realtime 返回 PCM16 24k）。 */
-const REALTIME_OUTPUT_RATE = 24000;
 
 /**
  * 把连续多个 PCM 音频块拼成一块 AudioBuffer 再播。
@@ -71,6 +71,11 @@ export function useVoiceCallEngine() {
   /** 云端模式：已推送到后端的采样下标（只发增量，避免整段重发）。 */
   const lastPushRef = useRef(0);
   const providerRef = useRef<VoiceCallProvider>("local");
+  /**
+   * 云端上行采样率：拨号时按厂商定一次（百炼 16k / 阶跃 24k）。
+   * 通话中不能改（改设置不影响正在进行的连接），所以存在 ref 里。
+   */
+  const inputRateRef = useRef(realtimeInputRate("dashscope"));
   const pushTimerRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
   const activeRef = useRef(false);
@@ -231,10 +236,13 @@ export function useVoiceCallEngine() {
     const samples = samplesRef.current;
     const from = lastPushRef.current;
     if (samples.length - from < UTTERANCE_MIN_SAMPLES) return;
-    // 本地/云端统一发增量裸 PCM16 16k：
-    //  - 云端直接喂给 Qwen Realtime（input_audio_buffer.append）
+    // 本地/云端统一发增量裸 PCM16：
+    //  - 云端直接喂给实时模型（input_audio_buffer.append），采样率按厂商取
     //  - 本地由后端累积，转写前统一包 WAV 头（避免把多个 WAV 小块粘成一个非法文件）
-    const pcmBase64 = encodePcm16Base64(samples.subarray(from), INPUT_RATE);
+    const pcmBase64 =
+      providerRef.current === "cloud"
+        ? encodePcm16Base64(samples.subarray(from), INPUT_RATE, inputRateRef.current)
+        : encodePcm16Base64(samples.subarray(from), INPUT_RATE);
     lastPushRef.current = samples.length;
     void rpcClient.voicecallPushAudio({ conversationId, wavBase64: pcmBase64, format: "pcm" });
   };
@@ -281,9 +289,10 @@ export function useVoiceCallEngine() {
       }
       return;
     }
-    const finalPush = encodePcm16Base64(samples.subarray(from), INPUT_RATE);
-    lastPushRef.current = samples.length;
-    if (!cloud) store.setPhase("transcribing");
+    const finalPush = cloud
+      ? encodePcm16Base64(samples.subarray(from), INPUT_RATE, inputRateRef.current)
+      : encodePcm16Base64(samples.subarray(from), INPUT_RATE);
+    lastPushRef.current = samples.length;    if (!cloud) store.setPhase("transcribing");
     void (async () => {
       try {
         await rpcClient.voicecallPushAudio({
@@ -470,6 +479,18 @@ export function useVoiceCallEngine() {
     store.setPhase("starting");
     store.setError(null);
     primeAudio();
+    if (mode === "cloud") {
+      // 上行采样率跟着厂商走（百炼 16k / 阶跃 24k）：拿当前配置里的地址 + 模型判方言。
+      // 取不到配置就沿用上一次的值 —— 采样率猜错的代价是"对方听不清"，不值得在这里失败。
+      try {
+        const { config } = await rpcClient.voicecallGetProviderConfig(undefined);
+        inputRateRef.current = realtimeInputRate(
+          realtimeDialectFor({ baseUrl: config?.baseUrl, model: config?.model }),
+        );
+      } catch {
+        // 保持上一次的采样率
+      }
+    }
     let convId: number | null = null;
     try {
       const res = await rpcClient.voicecallStart({

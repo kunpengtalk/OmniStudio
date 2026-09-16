@@ -100,6 +100,7 @@ mock.module("@lib/rpc", () => ({
 const { act, createElement } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query");
+const { TooltipProvider } = await import("@ui/tooltip");
 const { SettingsScreen } = await import("./settings");
 const { translate } = await import("../../../shared/i18n");
 
@@ -118,7 +119,15 @@ async function renderSettings() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const root = createRoot(container);
   await act(async () => {
-    root.render(createElement(QueryClientProvider, { client }, createElement(SettingsScreen)));
+    // 与 App 同款 Provider（components/providers.tsx）：本地模型 / 模型库的行内按钮
+    // 挂了 Tooltip，缺 Provider 会直接抛错。
+    root.render(
+      createElement(
+        QueryClientProvider,
+        { client },
+        createElement(TooltipProvider, null, createElement(SettingsScreen)),
+      ),
+    );
   });
   // 一拍给查询解析，一拍给渲染。
   await act(async () => {
@@ -148,6 +157,7 @@ test("设置导航就是这一份：通用（代理）在偏好分组里，没�
     "模型库",
     "在线模型市场",
     "网关",
+    "远程访问",
     "集成",
     "联网检索",
     "MCP",
@@ -203,8 +213,46 @@ test("自启动开关落在概览页：默认开启，关掉后写入 AUTO_START
   await cleanup();
 });
 
+/**
+ * 页面宽度只有一份。
+ *
+ * 每页各写自己的 `max-w-*`（曾经同时存在 max-w-2xl / 3xl / 5xl / 6xl 四种，控制台那份
+ * 干脆一个都没写），切标签页时内容左右边缘会来回跳 —— 这里钉住"所有标签页都用
+ * `PageShell` 的同一个宽度"：容器在场、宽度等于 `PAGE_WIDTH`、且页面没有再写第二个
+ * `max-w-*` 把它盖掉。
+ */
+test("每个标签页的内容容器宽度一致（都走 PageShell 的单一宽度）", async () => {
+  const { PAGE_WIDTH } = await import("@components/setting-ui");
+  const { cleanup } = await renderSettings();
+  const nav = document.querySelector("nav[aria-label]");
+
+  // 挑的是改造前宽度各不相同的页面：概览/本地模型/模型库是 3xl，默认模型 5xl，
+  // 使用统计 6xl，通用这类行式页面 2xl，控制台完全没有宽度上限。
+  for (const label of ["概览", "默认模型", "本地模型", "模型库", "使用统计", "通用", "控制台"]) {
+    const button = [...nav!.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim() === label,
+    );
+    expect(button).not.toBeUndefined();
+    await act(async () => {
+      (button as unknown as HTMLElement).click();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const shells = document.querySelectorAll('[data-slot="page-shell"]');
+    expect({ label, shells: shells.length }).toEqual({ label, shells: 1 });
+    const widths = shells[0]!.className
+      .split(/\s+/)
+      .filter((cls) => cls.startsWith("max-w-"));
+    expect({ label, widths }).toEqual({ label, widths: [PAGE_WIDTH] });
+  }
+
+  await cleanup();
+});
+
 test("原「性能」页的参数在本地模型页都有入口（删页面不丢设置）", async () => {
-  const { PARAM_FIELDS, PIPELINE_FIELDS } = await import("../local-models-screen");
+  const { PARAM_FIELDS, PIPELINE_FIELDS } = await import("../local-models/params");
   const keys = new Set([
     ...Object.values(PARAM_FIELDS).flat().map((f) => f.key),
     ...PIPELINE_FIELDS.map((f) => f.key),

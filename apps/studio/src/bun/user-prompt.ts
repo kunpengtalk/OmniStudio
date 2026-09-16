@@ -3,6 +3,8 @@ import { db } from "./db";
 import { userPrompts as upTable, prompts as promptsTable } from "./db/schema";
 import type { PromptKind } from "./db/schema";
 import { mediaUrl } from "./prompt-library";
+import { containsLikePattern } from "../shared/sql-like";
+import { logEvent } from "./app-log";
 
 export type { PromptKind };
 
@@ -121,9 +123,10 @@ export function listMyPrompts(
     conds.push(eq(upTable.category, params.category));
   }
   if (params.search?.trim()) {
-    const kw = `%${params.search.trim()}%`;
+    // 同提示词广场：转义后再匹配，`%` / `_` 是字面量（见 shared/sql-like.ts）。
+    const kw = containsLikePattern(params.search.trim());
     conds.push(
-      sql`(${upTable.name} like ${kw} or ${upTable.category} like ${kw} or ${upTable.summary} like ${kw} or ${upTable.prompt} like ${kw})`,
+      sql`(${upTable.name} like ${kw} escape '\\' or ${upTable.category} like ${kw} escape '\\' or ${upTable.summary} like ${kw} escape '\\' or ${upTable.prompt} like ${kw} escape '\\')`,
     );
   }
   const where = and(...conds);
@@ -235,8 +238,18 @@ export function updateMyPrompt(id: number, patch: MyPromptPatch): UserPromptView
   return toView(row);
 }
 
-/** 删除。 */
-export function deleteMyPrompt(id: number): { ok: boolean } {
-  db.delete(upTable).where(eq(upTable.id, id)).run();
+/** 删除。id 不存在时如实回失败（此前恒 true，界面删了个寂寞也当成功）。 */
+export function deleteMyPrompt(id: number): { ok: boolean; error?: string } {
+  const row = db.delete(upTable).where(eq(upTable.id, id)).returning({ id: upTable.id }).get();
+  if (!row) {
+    logEvent({
+      level: "warn",
+      source: "app",
+      event: "prompt.user.delete_failed",
+      message: `提示词不存在：${id}`,
+      detail: { id },
+    });
+    return { ok: false, error: "提示词不存在（可能已被删除）" };
+  }
   return { ok: true };
 }

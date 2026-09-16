@@ -6,6 +6,7 @@ import {
   AudioWaveformIcon,
   ShapesIcon,
   ClapperboardIcon,
+  MusicIcon,
   ScanSearchIcon,
   EarthIcon,
   WandSparklesIcon,
@@ -13,6 +14,7 @@ import {
   LibraryIcon,
   BrainIcon,
   GaugeIcon,
+  LayoutGridIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
 
@@ -31,6 +33,7 @@ const APP_IDS: AppId[] = [
   "voice",
   "image",
   "video",
+  "music",
   "ocr",
   "translate",
   "prompt",
@@ -38,6 +41,7 @@ const APP_IDS: AppId[] = [
   "kb",
   "memory",
   "benchmark",
+  "apps",
 ];
 
 // 抽象几何风格图标，区别于参考原型（气泡/麦克风/风景画）的具象图标
@@ -48,6 +52,7 @@ const APP_ICONS: Record<AppId, ReactNode> = {
   voice: <AudioWaveformIcon className="size-5" />,
   image: <ShapesIcon className="size-5" />,
   video: <ClapperboardIcon className="size-5" />,
+  music: <MusicIcon className="size-5" />,
   ocr: <ScanSearchIcon className="size-5" />,
   translate: <EarthIcon className="size-5" />,
   prompt: <WandSparklesIcon className="size-5" />,
@@ -55,6 +60,8 @@ const APP_ICONS: Record<AppId, ReactNode> = {
   kb: <LibraryIcon className="size-5" />,
   memory: <BrainIcon className="size-5" />,
   benchmark: <GaugeIcon className="size-5" />,
+  // 小应用中心：九宫格 == "一堆小格子点进去"，与其它具象图标区分开
+  apps: <LayoutGridIcon className="size-5" />,
 };
 
 function RailButton({

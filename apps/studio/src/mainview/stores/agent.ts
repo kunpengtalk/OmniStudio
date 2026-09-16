@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AgentEventRow, AgentMode, AgentSessionView } from "../../bun/agent";
+import type { AgentEventRow, AgentMode } from "../../bun/agent";
 import type { PendingPermission, PendingQuestion } from "../../bun/agent-interactions";
 import type { TodoItem } from "../../bun/agent-todos";
 import type { AgentGoal } from "../../bun/agent-goals";
@@ -126,8 +126,6 @@ type AgentState = {
   workspace: string;
   /** 当前工作区是否用的默认目录（~/.omnistudio/workspace）。 */
   workspaceIsDefault: boolean;
-  /** 会话列表（侧栏）。 */
-  sessions: AgentSessionView[];
   /** 待办清单（输入框上方的进度面板）。 */
   todos: TodoItem[];
   /** 当前目标（Goal 模式；没有目标时为 null）。 */
@@ -182,7 +180,6 @@ type AgentState = {
   /** `/compact` 的一次性反馈（裁了多少 / 为什么没裁）。与模型提示同理，只放内存。 */
   compactNotice: string | null;
   setCompactNotice: (notice: string | null) => void;
-  setSessions: (sessions: AgentSessionView[]) => void;
   setTodos: (todos: TodoItem[]) => void;
   setGoal: (goal: (AgentGoal & { maxContinuations: number }) | null) => void;
   setPlan: (plan: { approvedAt: number | null; chars: number } | null) => void;
@@ -230,7 +227,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   mode: "agent",
   workspace: "",
   workspaceIsDefault: true,
-  sessions: [],
   todos: [],
   goal: null,
   plan: null,
@@ -307,7 +303,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   setModelNotice: (modelNotice) => set({ modelNotice }),
   compactNotice: null,
   setCompactNotice: (compactNotice) => set({ compactNotice }),
-  setSessions: (sessions) => set({ sessions }),
   setTodos: (todos) => set({ todos }),
   setGoal: (goal) => set({ goal }),
   setPlan: (plan) => set({ plan }),

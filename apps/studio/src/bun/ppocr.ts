@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import path from "path";
 
+import { logEvent } from "./app-log";
 import { getSetting, updateSettings } from "./db/settings";
 import { getDataDir } from "./paths";
 import { getImagesBaseDir } from "./image-server";
@@ -468,6 +469,13 @@ async function doDownloadPpOcrEngine(): Promise<{
   }
   if (code !== 0) {
     emitLog("paddleocr 安装失败");
+    logEvent({
+      level: "error",
+      source: "ocr",
+      event: "ocr.ppocr.install_failed",
+      message: `paddleocr 安装失败（退出码 ${code}）`,
+      detail: { stage: "pip_install", exitCode: code },
+    });
     return {
       ok: false,
       error: `paddleocr 安装失败（退出码 ${code}）。可能是网络问题，请检查代理/网络后重试，详见安装日志。`,
@@ -697,6 +705,13 @@ async function doDownloadPpOcrModel(
     }
     const err = e instanceof Error ? e.message : String(e);
     emitLog(`模型下载失败：${model.name}：${err}`);
+    logEvent({
+      level: "error",
+      source: "ocr",
+      event: "ocr.ppocr.model_download_failed",
+      message: err,
+      detail: { name: model.name, kind: model.kind, url: model.url, error: e },
+    });
     emitModelProgress({
       size,
       model: model.name,
@@ -1033,6 +1048,13 @@ export async function startPpOcr(
     emitLog(`PaddleOCR（PP-OCRv6 ${size}）已就绪，可开始识别。`);
   } else {
     emitLog(`PaddleOCR 启动失败：${r.error}`);
+    logEvent({
+      level: "error",
+      source: "ocr",
+      event: "ocr.ppocr.start_failed",
+      message: r.error ?? "PaddleOCR 启动失败",
+      detail: { size },
+    });
     await stopPpOcr();
   }
   return r;

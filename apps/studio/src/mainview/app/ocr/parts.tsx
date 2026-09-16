@@ -1,7 +1,5 @@
-import { useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import {
-  CheckIcon,
-  CopyIcon,
   ImagePlusIcon,
   ScanTextIcon,
   XIcon,
@@ -9,6 +7,7 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
+import { CopyButton as SharedCopyButton } from "@components/copy-button";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 
@@ -55,37 +54,7 @@ export function PanelSection({
   );
 }
 
-/** 分段切换控件（引擎 / 来源等互斥选项）。 */
-export function SegmentedControl<T extends string>({
-  value,
-  onChange,
-  options,
-}: {
-  value: T;
-  onChange: (v: T) => void;
-  options: readonly { value: T; label: string; icon?: ReactNode }[];
-}) {
-  return (
-    <div className="flex gap-0.5 rounded-lg border bg-background p-0.5">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          onClick={() => onChange(o.value)}
-          className={cn(
-            "flex flex-1 items-center justify-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors",
-            value === o.value
-              ? "bg-primary text-primary-foreground"
-              : "text-muted-foreground hover:bg-muted hover:text-foreground",
-          )}
-        >
-          {o.icon}
-          <span className="truncate">{o.label}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
+export { SegmentedControl } from "@components/segmented-control";
 
 /** 状态展示行（引擎 / 服务器 / 远程服务）。 */
 export function StatusCard({
@@ -190,29 +159,11 @@ export function ImagePicker({
   );
 }
 
-/** 复制按钮（webview 下 clipboard 可能不可用，失败静默）。 */
+/** 复制按钮（webview 下 clipboard 可能不可用，失败静默）。实现在 components/copy-button。 */
 export function CopyButton({ text }: { text: string }) {
   const t = useT();
-  const [copied, setCopied] = useState(false);
-
   return (
-    <Button
-      size="sm"
-      variant="ghost"
-      disabled={!text}
-      onClick={() => {
-        void navigator.clipboard?.writeText(text).catch(() => undefined);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
-    >
-      {copied ? (
-        <CheckIcon data-icon="inline-start" className="text-emerald-500" />
-      ) : (
-        <CopyIcon data-icon="inline-start" />
-      )}
-      {copied ? t("ocr.copied") : t("ocr.copy")}
-    </Button>
+    <SharedCopyButton text={text} label={t("ocr.copy")} copiedLabel={t("ocr.copied")} />
   );
 }
 

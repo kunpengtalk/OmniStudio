@@ -2,6 +2,7 @@ import type { Subprocess } from "bun";
 import { existsSync } from "fs";
 import { resolve as resolvePath } from "path";
 import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/settings";
+import { resolveManagedPython } from "../python-engine";
 import { markServerStarted } from "../stats";
 import { extractDeadWorkerError, extractStartupError } from "./errors";
 import { MAX_LOG_CHARS, killProcessTree, pumpServerOutput, spawnServerProcess, waitExit } from "./proc";
@@ -147,6 +148,11 @@ export class MlxRuntime implements Runtime {
   }
 
   async checkBinary(): Promise<BinaryCheckResult> {
+    // 0) 应用自己装的托管 venv（引导页 / 设置里的「一键安装」）：用户没装过任何 Python 包
+    //    也能用，而且这一份的版本与我们的启动参数是对得上的。
+    const managed = resolveManagedPython("mlx-lm", "mlx_lm");
+    if (managed) return { found: true, path: managed, mode: "python" };
+
     // 1) `mlx_lm.server` console script（pip 安装 mlx-lm 后随包提供）。
     const serverScript = Bun.which("mlx_lm.server");
     if (serverScript) return { found: true, path: serverScript, mode: "server" };
@@ -276,7 +282,7 @@ export class MlxRuntime implements Runtime {
 
     const binary = await this.checkBinary();
     if (!binary.found || !binary.path) {
-      return { ok: false, error: "MLX 未安装。安装命令：pip install -U mlx-lm" };
+      return { ok: false, error: "MLX 未安装。可在引导页 / 设置里点「一键安装」，或手动执行 pip install -U mlx-lm" };
     }
     this.binary = binary.path;
     this.binaryMode = binary.mode === "server" || binary.mode === "mlx-lm" ? binary.mode : "python";

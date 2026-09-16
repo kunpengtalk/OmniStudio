@@ -10,6 +10,7 @@ import { useAgentStore } from "@stores/agent";
 import { useTerminalStore } from "@stores/terminal";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
+import { reportClientError } from "@/mainview/lib/app-log";
 
 /**
  * 终端页签：真实 PTY + xterm.js。
@@ -68,6 +69,8 @@ export function TerminalTab() {
 
     const disposable = term.onData((data) => {
       const id = sessionIdRef.current;
+      // 每次按键都会走这里：失败的是"这一个字符没送出去"，记日志会被几十毫秒一次的
+      // 频率淹掉，反而盖住真正有用的条目。会话级的失败（开不出来 / 关不掉）下面单独上报。
       if (id) void rpcClient.writeTerminal({ id, data }).catch(() => {});
     });
 
@@ -79,6 +82,7 @@ export function TerminalTab() {
       }
       const id = sessionIdRef.current;
       if (id) {
+        // 同上：拖窗口时会连续触发，失败只是这一帧的尺寸没同步过去。
         void rpcClient.resizeTerminal({ id, cols: term.cols, rows: term.rows }).catch(() => {});
       }
     });
@@ -139,7 +143,11 @@ export function TerminalTab() {
         attach(info.id);
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : String(e));
+        // 界面上的红字只活在这一次渲染里；pty 起不来（shell 不存在 / 权限）要能在
+        // `omi logs` 里查到。
+        reportClientError("client.terminal.start_failed", e, { workspace: workspace || "" });
       })
       .finally(() => {
         if (!cancelled) setStarting(false);

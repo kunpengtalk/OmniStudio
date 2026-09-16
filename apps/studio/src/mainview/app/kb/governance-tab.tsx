@@ -27,6 +27,7 @@ import { Label } from "@ui/label";
 import { Switch } from "@ui/switch";
 import { Textarea } from "@ui/textarea";
 import { useT } from "@stores/ui-lang";
+import { StatCard } from "@components/stat-card";
 import type { KbView } from "@/bun/knowledge";
 import type { KbEventEntry } from "@/shared/knowledge";
 
@@ -299,11 +300,7 @@ export function KbGovernanceTab({ kb }: { kb: KbView }) {
   );
 }
 
+/** 治理页统计小卡：竖排紧凑版，外观由共享 StatCard 的 stackCompact 变体负责。 */
 function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex flex-col gap-0.5 rounded-lg border bg-muted/30 px-2.5 py-1.5">
-      <span className="text-sm font-semibold tabular-nums leading-tight">{value}</span>
-      <span className="text-[10px] leading-tight text-muted-foreground">{label}</span>
-    </div>
-  );
+  return <StatCard variant="stackCompact" label={label} value={value} />;
 }

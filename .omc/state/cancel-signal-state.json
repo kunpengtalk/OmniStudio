@@ -1,0 +1,8 @@
+{
+  "active": true,
+  "requested_at": "2026-09-15T08:13:59.485Z",
+  "expires_at": "2026-09-15T08:14:29.485Z",
+  "mode": "ralph",
+  "source": "state_clear",
+  "target_state_sha256": "4a49f0696396739f3318f6ad8e40e7de44bd2e80f2a89c6439153a2166a565f5"
+}

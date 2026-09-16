@@ -7,6 +7,7 @@ import {
   mkdirSync,
 } from "fs";
 import path from "path";
+import { logEvent } from "./app-log";
 import { getDataDir } from "./paths";
 import { getSetting } from "./db/settings";
 
@@ -176,6 +177,17 @@ function emitLog(text: string): void {
   }
 }
 
+/**
+ * 失败现场落统一日志（`app.log`）。
+ *
+ * 安装 / 下载 / worker 三类失败此前只有界面上一句红字 + 内存里的安装日志（关窗即丢），
+ * 事后拿 `omi logs` 一条也查不到 —— 这正是 omni-doctor 那套流程最需要的东西。
+ * 只在**真的失败**时调；进度类的中间态不进来（否则日志会被几千行 tqdm 淹掉）。
+ */
+function logMlxFailure(event: string, message: string, detail?: Record<string, unknown>): void {
+  logEvent({ level: "error", source: "image", event, message, detail });
+}
+
 /** 逐行读取子进程输出并转发到日志。 */
 async function streamLines(
   stream: ReadableStream<Uint8Array>,
@@ -249,10 +261,15 @@ export async function downloadMlxEngine(): Promise<{
   version?: string;
 }> {
   if (!(process.platform === "darwin" && process.arch === "arm64")) {
+    logMlxFailure("image.mlx.install_failed", "MLX 引擎仅支持 Apple Silicon (arm64) 的 macOS", {
+      platform: process.platform,
+      arch: process.arch,
+    });
     return { ok: false, error: "MLX 引擎仅支持 Apple Silicon (arm64) 的 macOS" };
   }
   const python = await findPython();
   if (!python) {
+    logMlxFailure("image.mlx.install_failed", "未找到 python3", { stage: "find_python" });
     return { ok: false, error: "未找到 python3，请先安装 Python 3.10+（brew install python）" };
   }
 
@@ -268,6 +285,7 @@ export async function downloadMlxEngine(): Promise<{
       try {
         rmSync(engineDir, { recursive: true, force: true });
       } catch (e) {
+        logMlxFailure("image.mlx.install_failed", "重建虚拟环境失败", { stage: "venv_reset", error: e });
         return { ok: false, error: `重建虚拟环境失败：${e instanceof Error ? e.message : e}` };
       }
     }
@@ -284,10 +302,9 @@ export async function downloadMlxEngine(): Promise<{
         stderr: "pipe",
       });
       if (venv.exitCode !== 0) {
-        return {
-          ok: false,
-          error: venv.stderr.toString().slice(0, 500) || "创建虚拟环境失败",
-        };
+        const err = venv.stderr.toString().slice(0, 500) || "创建虚拟环境失败";
+        logMlxFailure("image.mlx.install_failed", err, { stage: "uv_venv", exitCode: venv.exitCode });
+        return { ok: false, error: err };
       }
     } else {
       emitLog(`$ ${python} -m venv ${engineDir}`);
@@ -296,10 +313,9 @@ export async function downloadMlxEngine(): Promise<{
         stderr: "pipe",
       });
       if (venv.exitCode !== 0) {
-        return {
-          ok: false,
-          error: venv.stderr.toString().slice(0, 500) || "创建虚拟环境失败",
-        };
+        const err = venv.stderr.toString().slice(0, 500) || "创建虚拟环境失败";
+        logMlxFailure("image.mlx.install_failed", err, { stage: "python_venv", exitCode: venv.exitCode });
+        return { ok: false, error: err };
       }
     }
   }
@@ -326,6 +342,10 @@ export async function downloadMlxEngine(): Promise<{
   }
   if (code !== 0) {
     emitLog("mflux 安装失败");
+    logMlxFailure("image.mlx.install_failed", `mflux 安装失败（退出码 ${code}）`, {
+      stage: "pip_install",
+      exitCode: code,
+    });
     return {
       ok: false,
       error: `mflux 安装失败（退出码 ${code}）。可能是网络问题，请检查代理/网络后重试，详见安装日志。`,
@@ -646,6 +666,12 @@ async function doDownloadMlxModel(
   // 保存失败现场（已下载多少/剩多少），下次点「继续下载」从这里接着下。
   persist(true);
   emitLog(`模型 ${model.label} 下载失败：${err}`);
+  logMlxFailure("image.mlx.download_failed", err, {
+    modelId: model.id,
+    repo: MLX_MODEL_REPOS[model.id] ?? null,
+    exitCode: code,
+    downloadedBytes: singleRun.allBytes,
+  });
   emitProgress(buildProgress(singleRun, "error"));
   return { ok: false, error: err };
 }
@@ -1038,6 +1064,7 @@ export async function startMlxModel(
   } catch (e) {
     const err = `启动 worker 失败：${e instanceof Error ? e.message : e}`;
     emitPhase({ modelId: model.id, phase: "error", message: err });
+    logMlxFailure("image.mlx.worker_failed", err, { modelId: model.id, stage: "spawn", error: e });
     return { ok: false, error: err };
   }
   activeWorker = {
@@ -1056,6 +1083,8 @@ export async function startMlxModel(
   void proc.exited.then((code) => {
     const w = activeWorker;
     if (!w) return;
+    // 退出时正在干什么：清 pending 之前先记下来，否则日志里只剩「退出」看不出阶段。
+    const stage = w.pendingLoad ? "load" : w.pendingGen ? "generate" : "idle";
     if (w.pendingLoad) {
       const l = w.pendingLoad;
       w.pendingLoad = null;
@@ -1070,11 +1099,20 @@ export async function startMlxModel(
     if (activeWorker === w) activeWorker = null;
     cancelIdleUnload();
     emitPhase({ modelId: w.modelId, phase: "error", message: `worker 退出（退出码 ${code}）` });
+    // worker 意外退出（OOM / 崩溃）后下一次生图会静默改走 CLI 路径，慢很多 ——
+    // 这条日志是"为什么突然变慢了"的唯一线索。
+    logMlxFailure("image.mlx.worker_failed", `worker 进程退出（退出码 ${code}）`, {
+      modelId: w.modelId,
+      stage,
+      exitCode: code,
+    });
   });
   try {
     await workerSend({ msg: "load", model: model.id, quantize: q });
   } catch (e) {
-    return { ok: false, error: `发送加载指令失败：${e instanceof Error ? e.message : e}` };
+    const err = `发送加载指令失败：${e instanceof Error ? e.message : e}`;
+    logMlxFailure("image.mlx.worker_failed", err, { modelId: model.id, stage: "send_load", error: e });
+    return { ok: false, error: err };
   }
   const r = await loadResult;
   if (r.ok) {
@@ -1083,6 +1121,10 @@ export async function startMlxModel(
     scheduleIdleUnload();
   } else {
     emitLog(`模型 ${model.label} 加载失败：${r.error}`);
+    logMlxFailure("image.mlx.model_load_failed", r.error ?? "模型加载失败", {
+      modelId: model.id,
+      quantize: q,
+    });
   }
   return r;
 }

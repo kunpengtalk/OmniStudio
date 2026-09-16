@@ -1,6 +1,6 @@
 // Skills 页主入口：按侧边栏选中区渲染六个 Tab。
 import { useSkillsStore } from "@stores/skills";
-import { MarketTab } from "./market-tab";
+import { MarketTab } from "./market";
 import { MySkillsTab } from "./my-skills-tab";
 import { PresetsTab } from "./presets-tab";
 import { ProjectsTab } from "./projects-tab";

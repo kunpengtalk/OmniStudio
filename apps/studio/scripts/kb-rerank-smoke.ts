@@ -63,8 +63,8 @@ try {
     ["# 退款政策", "自购买之日起 7 天内可申请无理由退款，30 天内质量问题可部分退款。"].join("\n\n"),
   );
 
-  const ready = await waitFor(() => K.listDocs(kb.id).every((d) => d.status === "ready"));
-  check("摄取+嵌入完成", ready, JSON.stringify(K.listDocs(kb.id).map((d) => [d.name, d.status, d.error])));
+  const ready = await waitFor(() => K.listDocs(kb.id).docs.every((d) => d.status === "ready"));
+  check("摄取+嵌入完成", ready, JSON.stringify(K.listDocs(kb.id).docs.map((d) => [d.name, d.status, d.error])));
 
   const testR = await K.testRerank({ base: "http://127.0.0.1:18777", model: "fake-rerank" });
   check("重排连通测试", testR.ok, JSON.stringify(testR));

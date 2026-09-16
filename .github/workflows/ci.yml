@@ -35,6 +35,14 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      # 单测里有两条（gateway-web 的产物定位与静态资源 Content-Type）要读 vite 产物
+      # `apps/studio/dist`：不构建的话它们会**如实跳过**（本地没构建时同样跳过），
+      # 但那样等于没验过网页端能不能真的把界面发出去，所以这里先构建一次。
+      # 与独立的 `vite build` 作业是同一条命令，约 20 秒。
+      - name: Build webview bundle（单测要读 vite 产物）
+        run: bun x vite build
+        working-directory: apps/studio
+
       - name: Unit tests（bunfig preload 会把数据目录指向临时目录）
         run: bun run test
 

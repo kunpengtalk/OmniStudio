@@ -113,16 +113,16 @@ try {
 
   const added = K.addFileDocs(kb.id, [specFile]);
   check("首次导入建立文档", added.length === 1);
-  const ready = await waitFor(() => K.listDocs(kb.id).every((d) => d.status === "ready" && d.chunkCount > 0));
-  check("摄取完成", ready, JSON.stringify(K.listDocs(kb.id).map((d) => [d.name, d.status, d.error])));
-  const docAfterEmbed = K.listDocs(kb.id)[0]!;
+  const ready = await waitFor(() => K.listDocs(kb.id).docs.every((d) => d.status === "ready" && d.chunkCount > 0));
+  check("摄取完成", ready, JSON.stringify(K.listDocs(kb.id).docs.map((d) => [d.name, d.status, d.error])));
+  const docAfterEmbed = K.listDocs(kb.id).docs[0]!;
   check("全部分块已向量化", docAfterEmbed.embeddedCount === docAfterEmbed.chunkCount, JSON.stringify(docAfterEmbed));
 
   const reskip = K.addFileDocs(kb.id, [specFile]);
   check(
     "源文件未变化时不重复导入",
-    reskip.length === 0 && K.listDocs(kb.id).length === 1,
-    `added=${reskip.length} docs=${K.listDocs(kb.id).length}`,
+    reskip.length === 0 && K.listDocs(kb.id).docs.length === 1,
+    `added=${reskip.length} docs=${K.listDocs(kb.id).docs.length}`,
   );
 
   // 改一节：内容变了但大小也变，确保 mtime/size 判定一定命中
@@ -130,14 +130,14 @@ try {
   await fetch(`${EMBED_BASE}/stats/reset`);
   writeFileSync(specFile, v2);
   const reimported = K.addFileDocs(kb.id, [specFile]);
-  check("源文件变化时就地重建（不新增文档）", reimported.length === 1 && K.listDocs(kb.id).length === 1);
-  const ready2 = await waitFor(() => K.listDocs(kb.id).every((d) => d.status === "ready" && d.chunkCount > 0));
-  check("重建后摄取完成", ready2, JSON.stringify(K.listDocs(kb.id).map((d) => [d.name, d.status, d.error])));
+  check("源文件变化时就地重建（不新增文档）", reimported.length === 1 && K.listDocs(kb.id).docs.length === 1);
+  const ready2 = await waitFor(() => K.listDocs(kb.id).docs.every((d) => d.status === "ready" && d.chunkCount > 0));
+  check("重建后摄取完成", ready2, JSON.stringify(K.listDocs(kb.id).docs.map((d) => [d.name, d.status, d.error])));
 
   // ---- 3. 增量向量化：只有变化的分块重新嵌入 ----
   console.log("[3] incremental embedding（未变化分块复用向量）");
   {
-    const doc = K.listDocs(kb.id)[0]!;
+    const doc = K.listDocs(kb.id).docs[0]!;
     const stats = (await (await fetch(`${EMBED_BASE}/stats`)).json()) as { embedInputs: number };
     check("全部分块都有向量", doc.embeddedCount === doc.chunkCount, JSON.stringify(doc));
     check(
@@ -157,8 +157,8 @@ try {
         section(1, `退款流程第 ${i + 1} 部分`, `退款流程第 ${i + 1} 部分的说明，含所需材料与时效。`),
       ).join("\n\n"),
     );
-    await waitFor(() => K.listDocs(kb.id).find((d) => d.id === note.id)?.status === "ready");
-    const chunks = K.listChunks(note.id);
+    await waitFor(() => K.listDocs(kb.id).docs.find((d) => d.id === note.id)?.status === "ready");
+    const chunks = K.listChunks(note.id).chunks;
     check("分块带标题路径与字符偏移", chunks.every((c) => !!c.headingPath && c.charStart != null && c.charEnd != null));
 
     // 先关掉合并，看原始命中粒度：多路召回都有信号，才能验证分数下限确实在筛
@@ -202,7 +202,7 @@ try {
     const exported = K.exportKb(kb.id, { includeEmbeddings: true });
     check("导出载荷版本化", exported.payload.format === "omnistudio.kb" && exported.payload.version === 1);
     const imported = K.importKb(JSON.parse(exported.json));
-    check("导入文档数一致", imported.docs === K.listDocs(kb.id).length, `${imported.docs}`);
+    check("导入文档数一致", imported.docs === K.listDocs(kb.id).docs.length, `${imported.docs}`);
     check("导入带向量（无需重新向量化）", imported.embedded > 0, JSON.stringify(imported));
     const importedHits = await K.recall([imported.kb.id], "退款政策", 5);
     check("导入库可直接检索", importedHits.hits.length > 0, JSON.stringify(importedHits.hits.length));

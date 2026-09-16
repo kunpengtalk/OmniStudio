@@ -53,7 +53,7 @@ test("默认值是普通工具类，且合并后调用方宽度在场", () => {
 });
 
 test("提示词详情弹窗：868px 的两栏宽度能真的落到元素上", () => {
-  // prompt-screen.tsx 里那个把图片和提示词分两栏的详情弹窗。
+  // app/prompt/detail-dialog.tsx 里那个把图片和提示词分两栏的详情弹窗。
   const detail = "flex max-h-[85vh] max-w-[min(56rem,calc(100%-2rem))] flex-col gap-0 overflow-hidden p-0";
   const merged = cn("fixed z-50 grid w-full", dialogWidthClass(detail), detail);
   expect(merged).toContain("max-w-[min(56rem,calc(100%-2rem))]");

@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>会议纪要</title>
+<!--
+  小应用：会议纪要（音频 → 转写 → 结构化纪要）。
+  链路上每一段都用宿主已有的能力，小应用自己只做"格式转换 + 排版"：
+    音频 → (本地 WebAudio 重采样成 16k 单声道 WAV) → omni.audio.transcribe（可带说话人）
+         → omni.text.complete（生成纪要） → omni.files.save（导出 Markdown）
+  录音走**宿主**：小应用跑在不透明源的 sandbox iframe 里，`navigator.mediaDevices` 在那里
+  根本不存在（见 lib/mic-record.ts 的说明），所以页面只说
+  `omni.audio.record('start' / 'stop')`，麦克风由宿主窗口采集、采完把整段 16k 单声道 WAV 交回来。
+  于是这个按钮在任何环境都点得动，拿不到麦克风时给的是权限提示（不再是"去别的页面录"）。
+-->
+<style>
+  .tabs { display: flex; gap: 6px; }
+  .timer { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 18px; }
+  .rec-dot { width: 8px; height: 8px; border-radius: 50%; background: #e5484d; display: inline-block; animation: pulse 1.1s infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+  .seg { padding: 6px 0; border-bottom: 1px dashed var(--line); font-size: 12.5px; }
+  .seg:last-child { border-bottom: 0; }
+  .seg .who { color: var(--accent); font-weight: 600; margin-right: 6px; }
+  .seg .at { color: var(--muted); font-size: 11px; margin-right: 6px; }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+  @media (max-width: 760px) { .split { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="hd">
+    <h1 data-i18n="title"></h1>
+    <span class="sub" data-i18n="sub"></span>
+  </div>
+
+  <div id="gate" class="card hidden">
+    <div class="row">
+      <span class="grow err" id="gate-text"></span>
+      <button class="btn sm" id="gate-btn" data-i18n="toSettings"></button>
+    </div>
+  </div>
+
+  <div class="card col">
+    <div class="row">
+      <button class="btn primary" id="import" data-i18n="import"></button>
+      <button class="btn hidden" id="record" data-i18n="record"></button>
+      <button class="btn hidden" id="stop" data-i18n="stop"></button>
+      <span class="row hidden" id="rec-status">
+        <span class="rec-dot"></span><span class="timer" id="timer">00:00</span>
+      </span>
+      <label class="row" style="gap:6px;margin-left:auto">
+        <input type="checkbox" id="diarize" checked />
+        <span class="lb" data-i18n="diarize"></span>
+      </label>
+    </div>
+    <span class="hint" data-i18n="importNote"></span>
+    <span class="busy hidden" id="busy"><span class="spin"></span><span id="busy-text"></span></span>
+    <span class="err" id="err"></span>
+  </div>
+
+  <div class="split hidden" id="workspace">
+    <div class="card col">
+      <div class="row">
+        <span class="lb grow" data-i18n="transcriptLabel"></span>
+        <button class="btn sm" id="save-tx" data-i18n="saveTx"></button>
+      </div>
+      <div class="out" id="transcript" style="max-height:420px"></div>
+      <span class="hint" id="engine"></span>
+    </div>
+    <div class="col">
+      <div class="card col">
+        <div class="row">
+          <span class="lb grow" data-i18n="minutesLabel"></span>
+          <button class="btn sm primary" id="make" data-i18n="make"></button>
+        </div>
+        <span class="hint" data-i18n="minutesNote"></span>
+        <span class="busy hidden" id="sum-busy"><span class="spin"></span><span data-i18n="summing"></span></span>
+        <span class="err" id="sum-err"></span>
+      </div>
+      <div class="card col hidden" id="minutes-card">
+        <div class="row">
+          <span class="lb grow" data-i18n="minutesResult"></span>
+          <button class="btn sm" id="save-md" data-i18n="saveMd"></button>
+        </div>
+        <div class="out" id="minutes" style="max-height:440px"></div>
+        <span class="ok hidden" id="ok"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var DICT = {
+    zh: {
+      title: '会议纪要',
+      sub: '音频转写 + 结构化纪要（含待办）',
+      import: '导入音频',
+      record: '开始录音',
+      stop: '停止录音',
+      diarize: '区分说话人',
+      importNote: '支持 wav / mp3 / m4a / aac / ogg / flac / webm。转写在本机或你配置的语音服务上完成。',
+      transcriptLabel: '转写原文',
+      minutesLabel: '会议纪要',
+      minutesNote: '把转写文本交给对话模型，整理成议题 / 结论 / 待办。',
+      make: '生成纪要',
+      summing: '模型正在整理…',
+      minutesResult: '整理结果',
+      saveTx: '保存文本',
+      saveMd: '保存 Markdown',
+      toSettings: '去配置模型',
+      decoding: '正在解析音频…',
+      transcribing: '正在转写，长录音请耐心等待…',
+      saved: '已保存到「{name}」',
+      noSpeech: '没有识别到语音内容',
+      engineOf: '识别引擎：{engine} · 用时 {sec}s',
+      needAsr: '还没配置语音识别：去「设置 → 模型云服务」配置 ASR，或在本地安装 whisper 模型',
+      needChat: '纪要需要对话模型：去「设置 → 模型云服务」配置',
+      recordingHint: '拿不到麦克风：请确认系统允许 OmniStudio 使用麦克风（系统设置 → 隐私与安全性 → 麦克风），或改用「导入音频」。',
+      noRecording: '没有录到声音（可能刚点开就停了）',
+      speaker: '说话人 {n}',
+      noTask: '（未发现明确待办）',
+      failDecode: '音频解码失败：请换一个格式（wav / mp3 / m4a）再试',
+    },
+    en: {
+      title: 'Meeting notes',
+      sub: 'Transcribe audio and turn it into structured minutes',
+      import: 'Import audio',
+      record: 'Record',
+      stop: 'Stop',
+      diarize: 'Separate speakers',
+      importNote: 'wav / mp3 / m4a / aac / ogg / flac / webm. Transcription runs locally or on your configured speech service.',
+      transcriptLabel: 'Transcript',
+      minutesLabel: 'Minutes',
+      minutesNote: 'Hands the transcript to your chat model to produce topics / decisions / action items.',
+      make: 'Write minutes',
+      summing: 'Model is writing…',
+      minutesResult: 'Minutes',
+      saveTx: 'Save transcript',
+      saveMd: 'Save Markdown',
+      toSettings: 'Configure a model',
+      decoding: 'Decoding audio…',
+      transcribing: 'Transcribing — long recordings take a while…',
+      saved: 'Saved to “{name}”',
+      noSpeech: 'No speech recognised',
+      engineOf: 'Engine: {engine} · {sec}s',
+      needAsr: 'Speech recognition is not configured — set up ASR in Settings → Cloud providers, or install a local whisper model',
+      needChat: 'Minutes need a chat model — configure one in Settings → Cloud providers',
+      recordingHint: 'Could not get the microphone — allow OmniStudio to use it in System Settings → Privacy & Security → Microphone, or use “Import audio” instead.',
+      noRecording: 'Nothing was recorded (the recording started and stopped right away)',
+      speaker: 'Speaker {n}',
+      noTask: '(no explicit action items found)',
+      failDecode: 'Could not decode this audio; try wav / mp3 / m4a',
+    },
+  };
+
+  var t = function (key, params) {
+    var table = DICT[omni.lang] || DICT.zh;
+    var text = table[key] || DICT.zh[key] || key;
+    if (params) Object.keys(params).forEach(function (k) { text = text.split('{' + k + '}').join(params[k]); });
+    return text;
+  };
+  var $ = function (sel) { return document.querySelector(sel); };
+
+  // recorder / chunks 不在这里：音频由宿主采集（见文件头的说明），本页只留一个计时器。
+  var state = { segments: [], text: '', minutes: '', busy: false, startedAt: 0, timer: null };
+
+  function paint() {
+    document.querySelectorAll('[data-i18n]').forEach(function (el) { el.textContent = t(el.dataset.i18n); });
+  }
+  function showError(message) { $('#err').textContent = message || ''; }
+  function showOk(id, message) {
+    var el = $(id);
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+  }
+  // 声明在 setBusy 之前：停忙碌时要按 asrReady 复位按钮，读不到它就会把没配 ASR 的
+  // 「导入音频 / 开始录音」误放行。
+  var asrReady = false, chatReady = false;
+
+  function setBusy(on, text) {
+    state.busy = on;
+    $('#busy').classList.toggle('hidden', !on);
+    if (text) $('#busy-text').textContent = text;
+    // 没配 ASR 时不给录：录完也只能得到一句"去配置"，白占着麦克风。
+    $('#import').disabled = on || !asrReady;
+    $('#record').disabled = on || !asrReady;
+  }
+
+  function checkGate() {
+    asrReady = Boolean(omni.capabilities && omni.capabilities.asr && omni.capabilities.asr.ready);
+    chatReady = Boolean(omni.capabilities && omni.capabilities.chat && omni.capabilities.chat.ready);
+    var missing = [];
+    if (!asrReady) missing.push(t('needAsr'));
+    if (!chatReady) missing.push(t('needChat'));
+    $('#gate').classList.toggle('hidden', missing.length === 0);
+    $('#gate-text').textContent = missing.join('；');
+    $('#import').disabled = state.busy || !asrReady;
+    $('#record').disabled = state.busy || !asrReady;
+    $('#make').disabled = !chatReady || !state.text;
+  }
+
+  // ---- 音频 → 16k 单声道 WAV（base64）----------------------------------------
+  async function toWavBase64(arrayBuffer) {
+    var probe = new OfflineAudioContext(1, 1, 16000);
+    var decoded = await probe.decodeAudioData(arrayBuffer);
+    var frames = Math.max(1, Math.ceil(decoded.duration * 16000));
+    var ctx = new OfflineAudioContext(1, frames, 16000);
+    var src = ctx.createBufferSource();
+    src.buffer = decoded;
+    src.connect(ctx.destination);
+    src.start();
+    var rendered = await ctx.startRendering();
+    var pcm = rendered.getChannelData(0);
+
+    var buffer = new ArrayBuffer(44 + pcm.length * 2);
+    var view = new DataView(buffer);
+    var writeText = function (offset, text) {
+      for (var i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+    };
+    writeText(0, 'RIFF');
+    view.setUint32(4, 36 + pcm.length * 2, true);
+    writeText(8, 'WAVE');
+    writeText(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, 1, true); // mono
+    view.setUint32(24, 16000, true);
+    view.setUint32(28, 16000 * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeText(36, 'data');
+    view.setUint32(40, pcm.length * 2, true);
+    var offset = 44;
+    for (var i = 0; i < pcm.length; i++, offset += 2) {
+      var sample = Math.max(-1, Math.min(1, pcm[i]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    }
+
+    var bytes = new Uint8Array(buffer);
+    var binary = '';
+    var CHUNK = 0x8000;
+    for (var j = 0; j < bytes.length; j += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(j, j + CHUNK));
+    }
+    return btoa(binary);
+  }
+
+  function dataUrlToArrayBuffer(dataUrl) {
+    var base64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+    var binary = atob(base64);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  // ---- 转写 ----------------------------------------------------------------
+  /** 导入的文件：先解码重采样成 16k 单声道 WAV，再走同一条转写路径。 */
+  function transcribe(arrayBuffer) {
+    setBusy(true, t('decoding'));
+    toWavBase64(arrayBuffer).then(function (wavBase64) {
+      return transcribeWav(wavBase64);
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('decode.failed', e.message || String(e), {});
+    }).then(function () { setBusy(false); });
+  }
+
+  /** 已经拿到 WAV base64 的路径（宿主录音回来就是这种）。 */
+  function transcribeWav(wavBase64) {
+    var startedAt = Date.now();
+    setBusy(true, t('transcribing'));
+    return omni.audio.transcribe({ wavBase64: wavBase64, diarize: $('#diarize').checked }).then(function (result) {
+      state.segments = Array.isArray(result.segments) ? result.segments : [];
+      state.text = result.text || '';
+      if (!state.text.trim()) throw new Error(t('noSpeech'));
+      $('#engine').textContent = t('engineOf', {
+        engine: result.engine || '-',
+        sec: String(Math.max(1, Math.round((Date.now() - startedAt) / 1000))),
+      });
+      renderTranscript();
+      $('#workspace').classList.remove('hidden');
+      $('#make').disabled = !chatReady;
+      return omni.log('transcribed', 'audio transcribed', { segments: state.segments.length });
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('transcribe.failed', e.message || String(e), {});
+    }).then(function () { setBusy(false); });
+  }
+
+  function formatTime(seconds) {
+    var m = Math.floor(seconds / 60);
+    var s = Math.floor(seconds % 60);
+    return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function renderTranscript() {
+    var host = $('#transcript');
+    host.innerHTML = '';
+    if (state.segments.length === 0) {
+      host.textContent = state.text;
+      return;
+    }
+    state.segments.forEach(function (seg) {
+      var line = document.createElement('div');
+      line.className = 'seg';
+      var head = document.createElement('span');
+      head.className = 'at';
+      head.textContent = formatTime(seg.start || 0);
+      line.appendChild(head);
+      if (typeof seg.speaker === 'number') {
+        var who = document.createElement('span');
+        who.className = 'who';
+        who.textContent = t('speaker', { n: String(seg.speaker + 1) });
+        line.appendChild(who);
+      }
+      var body = document.createElement('span');
+      body.textContent = seg.text || '';
+      line.appendChild(body);
+      host.appendChild(line);
+    });
+  }
+
+  function plainTranscript() {
+    if (state.segments.length === 0) return state.text;
+    return state.segments.map(function (seg) {
+      var who = typeof seg.speaker === 'number' ? '[' + t('speaker', { n: String(seg.speaker + 1) }) + '] ' : '';
+      return '[' + formatTime(seg.start || 0) + '] ' + who + (seg.text || '');
+    }).join('\n');
+  }
+
+  // ---- 导入 / 录音 ----------------------------------------------------------
+  $('#import').addEventListener('click', function () {
+    if (state.busy || !asrReady) return;
+    showError('');
+    showOk('#ok', '');
+    omni.files.pickAndRead({ types: 'wav,mp3,m4a,aac,ogg,flac,webm,mp4' }).then(function (file) {
+      if (!file) return null;
+      return transcribe(dataUrlToArrayBuffer(file.dataUrl));
+    }).catch(function (e) {
+      showError(e.message || t('failDecode'));
+      omni.log('import.failed', e.message || String(e), {});
+    });
+  });
+
+  function startTimer() {
+    state.startedAt = Date.now();
+    state.timer = setInterval(function () {
+      var elapsed = Math.floor((Date.now() - state.startedAt) / 1000);
+      var m = Math.floor(elapsed / 60);
+      var s = elapsed % 60;
+      $('#timer').textContent = (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+    }, 500);
+  }
+
+  /**
+   * 录音由宿主采集（小应用在 sandbox iframe 里没有 navigator.mediaDevices）：
+   * 这里只说开始 / 停止，停的时候宿主把整段 WAV 交回来，再走同一条转写路径。
+   */
+  $('#record').addEventListener('click', function () {
+    if (state.busy) return;
+    showError('');
+    showOk('#ok', '');
+    omni.audio.record('start').then(function () {
+      startTimer();
+      $('#rec-status').classList.remove('hidden');
+      $('#record').classList.add('hidden');
+      $('#stop').classList.remove('hidden');
+      return omni.log('record.start', 'recording via host', {});
+    }).catch(function (e) {
+      showError(t('recordingHint'));
+      omni.log('record.denied', e.message || String(e), {});
+    });
+  });
+
+  $('#stop').addEventListener('click', function () {
+    clearInterval(state.timer);
+    $('#rec-status').classList.add('hidden');
+    $('#stop').classList.add('hidden');
+    $('#record').classList.remove('hidden');
+    omni.audio.record('stop').then(function (result) {
+      if (!result || !result.wavBase64) {
+        // 宿主的原话优先（例如"没有正在进行的录音"）：它比一句泛泛的兜底更准确
+        throw new Error((result && result.error) || t('noRecording'));
+      }
+      return transcribeWav(result.wavBase64);
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('record.stop.failed', e.message || String(e), {});
+    });
+  });
+
+  // ---- 纪要 ----------------------------------------------------------------
+  function minutesSystemPrompt() {
+    if (omni.lang === 'en') {
+      return 'You are a meeting-minutes assistant. From the transcript, produce Markdown with exactly these sections: ' +
+        '## Topics (bullet list), ## Decisions (bullet list), ## Action items (a table with columns: item, owner, due). ' +
+        'Use only what is in the transcript; when something is unstated, write 未提及 / not stated instead of inventing it. ' +
+        'Keep it concise and in the transcript’s own language.';
+    }
+    return '你是会议纪要助手。请根据转写文本输出 Markdown，且只包含这三节：' +
+      '## 议题（要点列表）、## 结论（要点列表）、## 待办（表格，列为：事项、负责人、时间）。' +
+      '只使用转写文本里的信息；原文没提到的不要编造，写「未提及」。语言与原文一致，尽量简短。';
+  }
+
+  $('#make').addEventListener('click', function () {
+    if (!state.text || !chatReady || state.busy) return;
+    showOk('#ok', '');
+    $('#sum-err').textContent = '';
+    $('#sum-busy').classList.remove('hidden');
+    omni.text.complete({
+      system: minutesSystemPrompt(),
+      messages: [{ role: 'user', content: plainTranscript() }],
+      maxTokens: 2048,
+    }).then(function (result) {
+      state.minutes = result.text || '';
+      $('#minutes').textContent = state.minutes;
+      $('#minutes-card').classList.remove('hidden');
+      return omni.log('minutes', 'minutes generated', { chars: state.minutes.length });
+    }).catch(function (e) {
+      $('#sum-err').textContent = e.message || String(e);
+      omni.log('minutes.failed', e.message || String(e), {});
+    }).then(function () {
+      $('#sum-busy').classList.add('hidden');
+    });
+  });
+
+  function save(name, text, mime) {
+    var bytes = new TextEncoder().encode(text);
+    var binary = '';
+    for (var i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return omni.files.save({ name: name, dataUrl: 'data:' + mime + ';base64,' + btoa(binary) });
+  }
+
+  $('#save-tx').addEventListener('click', function () {
+    var name = 'transcript-' + Date.now().toString().slice(-6) + '.md';
+    save(name, plainTranscript(), 'text/markdown').then(function (res) {
+      showOk('#ok', t('saved', { name: (res.path || name).split('/').pop() }));
+    }).catch(function (e) { showError(e.message || String(e)); });
+  });
+
+  $('#save-md').addEventListener('click', function () {
+    var name = 'meeting-minutes-' + Date.now().toString().slice(-6) + '.md';
+    var body = state.minutes + '\n\n---\n\n## ' + t('transcriptLabel') + '\n\n' + plainTranscript();
+    save(name, body, 'text/markdown').then(function (res) {
+      showOk('#ok', t('saved', { name: (res.path || name).split('/').pop() }));
+    }).catch(function (e) {
+      $('#sum-err').textContent = e.message || String(e);
+    });
+  });
+
+  omni.ready.then(function () {
+    paint();
+    checkGate();
+    // 录音按钮不再看本页有没有麦克风接口（本页永远没有，麦克风归宿主）——直接显示；
+    // 真的拿不到时，宿主会在点下去的那一刻给出权限提示。
+    $('#record').classList.remove('hidden');
+  });
+  omni.onCapabilities = function () { checkGate(); };
+})();
+</script>
+</body>
+</html>

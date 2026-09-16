@@ -40,6 +40,7 @@ export type AppLogSource =
   | "chat" // 对话
   | "image" // 生图（云端 API / ComfyUI / MLX）
   | "video" // 生视频
+  | "music" // 生音乐（StepFun 提交 + 轮询 / MiniMax 同步长请求 / 本地预留位）
   | "tts" // 语音合成
   | "asr" // 语音识别
   | "ocr" // OCR / 文档解析
@@ -47,6 +48,7 @@ export type AppLogSource =
   | "media-server" // 图片 / 音频预览服务
   | "server" // 推理服务器（llama.cpp / vLLM / SGLang / MLX）
   | "gateway" // OpenAI 兼容网关
+  | "tunnel" // 内网穿透（Cloudflare 隧道：cloudflared 安装、启停、连接状态）
   | "download" // 模型下载
   | "skills" // 技能中心
   | "kb" // 知识库
@@ -54,6 +56,8 @@ export type AppLogSource =
   | "backup" // 备份 / 恢复
   | "mcp" // MCP 服务
   | "automation" // 自动化
+  | "benchmark" // 基准测试（速度扫描 / 能力评测）
+  | "miniapp" // 小应用（应用中心里的沙箱页面：能力探测、一次性补全、产物落盘）
   | "update" // 版本更新
   | "notice" // 通知中心落下的条目
   | "usage" // 用量账本（记录失败这类不影响业务的告警）

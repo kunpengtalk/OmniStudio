@@ -1,0 +1,8 @@
+{
+  "active": true,
+  "requested_at": "2026-09-15T07:15:07.904Z",
+  "expires_at": "2026-09-15T07:15:37.904Z",
+  "mode": "ralplan",
+  "source": "state_clear",
+  "target_state_sha256": "e3f9333f9b15763be47f9fe2244ee7d9fc3805b9542b0a35f29ab35027f21b05"
+}

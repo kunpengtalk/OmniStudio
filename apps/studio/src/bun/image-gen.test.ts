@@ -19,9 +19,10 @@ migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
 
 // 设置层用「真实导出 + 局部覆盖」：不用再手工补齐形状，真实模块新增导出时自动跟上
 // （缺导出会在 import 阶段直接报 "Export named ... not found"）。
+const settings: Record<string, string> = {};
 await mockModulePartial<typeof import("./db")>("./db", { db });
 await mockModulePartial<typeof import("./db/settings")>("./db/settings", {
-  getSetting: () => "",
+  getSetting: (key: string) => settings[key] ?? "",
   updateSettings: () => {},
   getAllSettings: () => ({}),
 });
@@ -54,6 +55,7 @@ await mockModulePartial<typeof import("./cloud-providers")>("./cloud-providers",
           models: [],
           enabled: true,
           videoApi: "",
+          musicApi: "",
           createdAt: 0,
           updatedAt: 0,
         }
@@ -85,12 +87,69 @@ globalThis.fetch = mock(async (url: URL | string) => {
 }) as never;
 
 // 所有 mock 注册后再动态加载被测模块。
-const { generateImage } = await import("./image-gen");
+const { generateImage, listImageGenModelIds, upstreamErrorText, modelNotFoundHint } =
+  await import("./image-gen");
+
+test("上游报错取 message，而不是把整段 JSON 丢给用户", async () => {
+  // 国内聚合网关的信封是 { code, message }（不是 OpenAI 的 { error: { message } }）：
+  // 只认后者的结果是小应用里直接显示 {"code":20012,"message":"Model does not exist…"}
+  expect(upstreamErrorText('{"code":20012,"message":"Model does not exist.","data":null}')).toBe(
+    "Model does not exist.",
+  );
+  expect(upstreamErrorText('{"error":{"message":"bad key"}}')).toBe("bad key");
+  expect(upstreamErrorText('{"error":"plain string"}')).toBe("plain string");
+  // 非 JSON 原样保留（有些网关直接回一段 HTML / 纯文本）
+  expect(upstreamErrorText("<html>502</html>")).toBe("<html>502</html>");
+  expect(upstreamErrorText("")).toBe("");
+});
+
+test("「模型不存在」补一句能照着做的提示（并带上厂商名）", async () => {
+  const message = '{"code":20012,"message":"Model does not exist. Please check it carefully."}';
+  const text = upstreamErrorText(message);
+  const hinted = modelNotFoundHint(text, "z-image-turbo", "硅基流动");
+  expect(hinted).toContain("硅基流动");
+  expect(hinted).toContain("z-image-turbo");
+  expect(hinted).toContain("图像生成");
+  // 原始报错留着：排查时要能看到上游到底说了什么
+  expect(hinted).toContain("Model does not exist");
+
+  // 别的错误一个字都不改（别把网络超时、鉴权失败也套上"换模型"的结论）
+  expect(modelNotFoundHint("connection reset", "flux", "硅基流动")).toBe("connection reset");
+  expect(modelNotFoundHint("Incorrect API key", "flux")).toBe("Incorrect API key");
+  // 没给厂商名时也要成句
+  expect(modelNotFoundHint("Model does not exist", "x")).toContain("当前厂商");
+});
 
 afterAll(() => {
   globalThis.fetch = originalFetch;
   fs.rmSync(tmpDb, { force: true });
   fs.rmSync(`/tmp/img-${process.pid}`, { recursive: true, force: true });
+});
+
+test("列模型用的密钥来自选中的厂商行，页面不参与", async () => {
+  // 页面唯一能选的是"哪个厂商"（IMG_PROVIDER_ID）；密钥从这里解析。
+  // 曾经的写法是 RPC 接页面传的 apiKey，而页面传的是空串 —— 空串不被 `??` 拦下，
+  // 于是一次"列模型"请求无声地丢掉了 Authorization，需要鉴权的上游只回 401。
+  const calls: { url: string; auth: string | null }[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = mock(async (url: URL | string, init?: RequestInit) => {
+    calls.push({ url: String(url), auth: new Headers(init?.headers).get("authorization") });
+    return new Response(JSON.stringify({ data: [{ id: "Kwai-Kolors/Kolors" }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as never;
+  settings.IMG_PROVIDER_ID = "live-provider";
+
+  const models = await listImageGenModelIds("api");
+
+  expect(models).toContain("Kwai-Kolors/Kolors");
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.url).toBe("https://api.siliconflow.cn/v1/models");
+  expect(calls[0]!.auth).toBe("Bearer sk-live-key");
+
+  globalThis.fetch = realFetch;
+  delete settings.IMG_PROVIDER_ID;
 });
 
 // 回归测试：即使数据库里是旧/空的配置，只要前端带上实时 config，生成也应成功。

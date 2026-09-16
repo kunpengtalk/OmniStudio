@@ -13,7 +13,7 @@
 
 | # | 任务 | 状态 | 实际落地 |
 |---|---|---|---|
-| OW-01 | 工具授权（allow / ask / deny + 弹窗四选） | ✅ | `bun/permissions.ts` + `bun/agent-interactions.ts` + `Agent.beforeToolCall` 闸门 + `app/agent/permission-modal.tsx`；审批模式 `AGENT_APPROVAL_MODE`（smart/manual/auto/strict） |
+| OW-01 | 工具授权（allow / ask / deny + 弹窗四选） | ✅ | `bun/permissions.ts` + `bun/agent-interactions.ts` + `Agent.beforeToolCall` 闸门 + `app/agent/inline-interactions.tsx`（授权卡片画在触发它的消息下方，不是独立弹窗）；审批模式 `AGENT_APPROVAL_MODE`（smart/manual/auto/strict） |
 | OW-02 | 生效权限面板 + 记住的授权 | ✅ | 设置页「Agent 权限」：探针 + 命中规则 + 来源归属 + 例外计数 + 会话/工作区授权列表 + 授权目录 |
 | OW-03 | 待办清单（todowrite） | ✅ | `agent-todos.ts` + `todo_write` 工具 + 输入框上方的进度面板 |
 | OW-04 | 反问用户（question） | ✅ | `ask_user` 工具 + 选项/多选/自填答案弹窗 |
@@ -27,7 +27,7 @@
 | OW-11 | 运行中排队消息 / 插话（steer） | ✅ | `followUpAgentMessage()` + 队列面板：Enter 排队、Cmd/Ctrl+Enter 立即插话、停止时连队列一起取消 |
 | OW-12 | 会话分叉（从某条消息分支） | 🟡 | `Chat.forkConversation()` + 消息操作条「分支」按钮；回退 / 上下文压缩未做 |
 | OW-12b | 确认改到消息流内（不遮挡输入框、可回看） | ✅ | 授权 / 提问的请求与结果各落一条事件（按 id 配对），卡片画在触发它的消息下方，答完收成一行记录 |
-| OW-12c | 搜索 / 自动化 / 插件 / Skills 收到 Agent 侧栏 | ✅ | 「新建任务」下面四个入口，点开在 Agent 主区域内显示（带返回对话）；一级菜单移除「自动化」；搜索支持正文命中与片段 |
+| OW-12c | 搜索 / 自动化 / 插件 / Skills 收到 Agent 侧栏 | ✅ | 侧栏「新建任务」下面是**自动化 / 插件**两个子视图（点开在 Agent 主区域内显示，带返回对话），一级菜单移除「自动化」；搜索后来改成顶栏 ⌘K 弹窗（正文命中 + 片段），Skills 提升为一级菜单 —— 上一版留下的 `AgentSearchView` / `AgentSkillsView` 已作为死代码删除 |
 | OW-13 | 通知中心 | ✅ | `bun/notifications.ts` + 顶栏铃铛：后台授权请求、自动化结果、无人值守回合结束 |
 | OW-16 | 审查 / 终端 / 浏览器页签（对齐 ZCode 侧栏） | ✅ | **审查**：工作区是 git 仓库时列 `git status` 改动 + numstat 增删行数，点开看 unified diff（`bun/workspace-changes.ts`，只走 argv 不经过 shell，路径限工作区内）；不是仓库时回落到「本会话 agent 改过的文件」（从工具事件里的 diff 汇总）。**终端**：`bun/terminal-sessions.ts` 起真实 PTY（`Bun.Terminal` + `zsh -l`），输出按 32ms 批量推送直通 xterm.js（`subscribeOutput` 不走 React 渲染），支持清屏 / 重开 / 跟随工作区，窗口关闭时统一收摊。**浏览器**：地址栏 + iframe，看本地产物页 / dev server，可转默认浏览器打开 |
 | OW-15 | 消息流渲染（轨迹行 / 思考行 / 正文流式） | ✅ | 工具调用收成一行「图标 + 动作 + 参数 + diff 计数」（点开看命令原文 / diff / 输出，diff 结果按参数串缓存），思考是「思考 · 持续了 N 秒」可展开行，正文不再套气泡、产出文件在正文下挂卡片（点「打开」进右侧预览）；正文与思考按 40ms 批量流式下发（`bun/agent.ts`），会话重取不再覆盖流式中的正文（`stores/chat.ts` 的 `mergeServerMessages`），没有正文时不再留空白气泡 |
@@ -160,7 +160,7 @@ snapcompact（历史栅格化成图）、`xd://` 工具设备、协作中继、L
 | OPS-01 | 日志查看器：多文件切换 | ❌ | 现为单流视图（`main-layout/server-logs.tsx`，197 行：自动滚动 / 复制 / 清空 / 行数）；server.log 未按天或大小分片 |
 | OPS-02 | 日志查看器：最近 N 条筛选 | ❌ | 显式条数筛选 |
 | OPS-03 | 基准测试：batch × ctx 扫描矩阵 | ❌ | 当前一趟固定 batch，改矩阵扫描 |
-| OPS-04 | 基准测试：准确度 / 质量基准 | ❌ | 除吞吐外的质量维度 |
+| OPS-04 | 基准测试：准确度 / 质量基准 | ✅ | 已实现「能力评测」模式（`bun/eval.ts`，8 套件：mmlu / cmmlu / gsm8k / mmlu_pro / humaneval / mbpp / ifeval / longctx，支持抽样、并发跑题与按类别得分），结果落 `benchmark_records` |
 | OPS-05 | 服务统计：逐模型显存 / VRAM | ❌ | `/slots` 已能拿实际加载模型，但仅 llama-server 支持；其他引擎靠"最近使用即视作 loaded"兜底 |
 | OPS-06 | 服务统计：GPU 温度与显存锁定量 | ❌ | |
 

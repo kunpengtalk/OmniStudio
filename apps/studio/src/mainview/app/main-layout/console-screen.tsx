@@ -1,6 +1,7 @@
 import { TerminalSquareIcon } from "lucide-react";
 
 import { ServedModelsPanel, ServedModelLogs, StopAllServedButton } from "@components/served-models-panel";
+import { PageShell } from "@components/setting-ui";
 import { useServedStore } from "@stores/served";
 import { useT } from "@stores/ui-lang";
 
@@ -17,7 +18,7 @@ export function ConsoleScreen() {
   const running = models.filter((m) => m.status === "running").length;
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 px-6 pb-20">
+    <PageShell className="h-full min-h-0 gap-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
           <TerminalSquareIcon className="size-4" />
@@ -37,6 +38,6 @@ export function ConsoleScreen() {
       </div>
 
       <ServedModelLogs />
-    </div>
+    </PageShell>
   );
 }

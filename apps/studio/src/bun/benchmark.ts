@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { benchmarkRecords } from "./db/schema";
 import {
@@ -9,6 +9,15 @@ import {
 import { getCloudProviderInfo } from "./cloud-providers";
 import { getChatModelName, getLocalRequestModelId } from "./chat-model";
 import { modelNameFromRef } from "../shared/modelscope";
+import {
+  BENCHMARK_DEFAULT_CACHE_MODES,
+  BENCHMARK_DEFAULT_CONTEXTS,
+  fmtCtx,
+  normalizeCacheModes,
+  normalizeContexts,
+  type BenchmarkCacheMode,
+} from "../shared/benchmark";
+import { logEvent } from "./app-log";
 import { listInstalledModels, slugModelFileName } from "./model-store";
 import { isMlxActive } from "./runtimes/mlx";
 import {
@@ -29,6 +38,8 @@ export type BenchmarkParams = {
   genLength?: number;
   contexts?: number[];
   temperature?: number;
+  /** 缓存场景；缺省测全部三种（见 shared/benchmark.ts 的说明）。 */
+  cacheModes?: BenchmarkCacheMode[];
   /** 缺省 speed = 速度扫描；eval = 能力评测（suite 必填）。 */
   mode?: "speed" | "eval";
   suite?: EvalSuiteId;
@@ -41,7 +52,7 @@ export type BenchmarkParams = {
 /** 单档上下文的完整指标行。tokens 均为 usage 精确值（无 usage 时回退 chunk 计数）。 */
 export type SpeedBenchRow = {
   contextLength: number;
-  /** 实际 prompt tokens（预热请求的 usage；拿不到时按 4 字符/token 估算）。 */
+  /** 实际 prompt tokens（测量请求的 usage；拿不到时按 4 字符/token 估算）。 */
   promptTokens: number;
   batchSize: number;
   /** 平均首 token 延迟（ms）。 */
@@ -59,7 +70,27 @@ export type SpeedBenchRow = {
   totalMs: number;
   ok: number;
   fails: number;
+  /**
+   * 这一档为什么没测出来（服务端拒绝 / 超时 / 全档失败）。ok=0 时必有值：
+   * 档位扫描的意义就是"哪一档是墙"，把失败原因丢掉等于让用户自己猜。
+   */
+  error?: string;
+  /**
+   * 服务端收到的 prompt 明显短于目标档位（被静默截断，云端 API 常见）：
+   * 这一档的速度看着最快，但测的根本不是目标长度。
+   */
+  truncated?: boolean;
+  /** 这一行是哪种缓存场景（老记录没有这个字段 = 当年只有"预热过再测"的命中态）。 */
+  cache?: BenchmarkCacheMode;
+  /**
+   * 服务端自报的"复用自缓存的 prompt tokens"（llama.cpp 的 `timings.cache_n`）。
+   * 有的引擎不报（vLLM / SGLang 的 OpenAI 兼容流里没有），那时只能看 TTFT 差值。
+   */
+  cacheReusedTokens?: number;
 };
+
+/** 任务提前收尾的档位（1M 扫描里"更大的档位只会更糟"的两种情形）。 */
+export type BenchmarkStopReason = "context-overflow" | "timeout";
 
 export type BenchmarkSummary = {
   avgTps: number;
@@ -69,6 +100,15 @@ export type BenchmarkSummary = {
   peakAggTps: number;
   peakPrefillTps: number;
   totalTokens: number;
+  /** 没跑完所有档位时的收尾原因（界面按 reason 出文案，不去解析 error 串）。 */
+  stopped?: { reason: BenchmarkStopReason; contextLength: number };
+  /**
+   * 平均 / 最佳这几个数取自哪种缓存场景。
+   *
+   * 冷启和命中混在一起平均没有意义（那是两种完全不同的工况），所以有冷启就报冷启
+   * —— 它是唯一不会被缓存粉饰的数字；只勾了命中场景时才报命中。
+   */
+  basis?: BenchmarkCacheMode;
   /** kind='eval' 时有值（速度字段全 0）。 */
   eval?: {
     suite: EvalSuiteId;
@@ -105,6 +145,8 @@ export type BenchmarkRunState = {
     done: number;
     phase: "warmup" | "measure";
     currentContext?: number;
+    /** 当前正在跑的缓存场景。 */
+    currentCache?: BenchmarkCacheMode;
   };
   rows: SpeedBenchRow[];
   /** eval 任务的类别得分行。 */
@@ -116,6 +158,8 @@ export type BenchmarkRunState = {
   durationMs?: number;
   /** eval 任务的实时进度。 */
   eval?: BenchmarkEvalInfo;
+  /** 速度扫描提前收尾时，跳过了哪些档位、为什么。 */
+  stopped?: { reason: BenchmarkStopReason; contextLength: number };
   /** **展示名**（模型名 / 云模型 id），落库与界面都用它 —— 绝不是 MLX 那种路径型请求 id。 */
   model: string;
   /** local（本地引擎）/ remote（激活的云服务商槽位）/ cloud（按 id 直连的云服务商）。 */
@@ -132,7 +176,7 @@ export type BenchmarkRecordRow = {
   serverMode: string | null;
   engine: string | null;
   params: Record<string, unknown> | null;
-  rows: SpeedBenchRow[] | EvalCategoryRow[];
+  rows: SpeedBenchRow[] | EvalCategoryRow[] | null;
   summary: BenchmarkSummary | null;
   status: "done" | "cancelled" | "error";
   durationMs: number | null;
@@ -140,22 +184,127 @@ export type BenchmarkRecordRow = {
   createdAt: number;
 };
 
-const DEFAULT_CONTEXTS = [1024, 4096, 8192, 16384, 32768];
 const CHARS_PER_TOKEN = 4;
+/** 单请求超时的下限 = 老版本写死的 10 分钟；只有更大的档位才需要放宽。 */
+const MIN_REQUEST_TIMEOUT_MS = 600_000;
+/** 单请求超时的上限：卡死的服务端最多拖这么久，再长用户只能看到"还在跑"。 */
+const MAX_REQUEST_TIMEOUT_MS = 3 * 3600_000;
+/** 超时兜底用的 prefill / decode 速率（tok/s）。比任何能跑大窗口的机器都慢 —— 只用来兜底。 */
+const FALLBACK_PREFILL_TPS = 30;
+const FALLBACK_DECODE_TPS = 1;
+/** 预热请求的超时上限（大档位的预热只是"叫醒模型"，不该占满整档的时间预算）。 */
+const WARMUP_TIMEOUT_MS = 300_000;
+/**
+ * 超过这个档位就不再拿全量 prompt 预热：全量预热等于把这一档的 prefill 白跑一遍
+ * （1M 档就是几十分钟），而精确 prompt tokens 与"超窗被拒"都能从测量请求本身拿到。
+ */
+const WARMUP_FULL_MAX_CONTEXT = 32768;
+/** 大档位改用短 prompt 预热时的长度。 */
+const WARMUP_PROBE_TOKENS = 256;
+/** 实际 prompt tokens 低于目标档位的这个比例时，判定被服务端截断。 */
+const TRUNCATION_RATIO = 0.85;
 
-export const BENCHMARK_PRESET_CONTEXTS = DEFAULT_CONTEXTS;
+/**
+ * 单请求的超时预算：随档位放大。
+ *
+ * 固定 10 分钟是给 32k 以下写的 —— 1M 档的 prefill 在本地机器上要几十分钟，
+ * 拿老超时去测，最大几档永远只会得到一句 `timeout`，看着像模型不支持长上下文，
+ * 其实是测的人自己把自己掐死了。反过来也不能不封顶：卡死的服务端要能收场。
+ */
+export function requestTimeoutMs(ctxTokens: number, genLength = 0): number {
+  const scaled = (ctxTokens / FALLBACK_PREFILL_TPS) * 1000 + (genLength / FALLBACK_DECODE_TPS) * 1000;
+  return Math.min(Math.max(scaled + 120_000, MIN_REQUEST_TIMEOUT_MS), MAX_REQUEST_TIMEOUT_MS);
+}
+
+/**
+ * 服务端"这个 prompt 超出上下文窗口"的判定。
+ *
+ * 各家文案：llama.cpp `the request exceeds the available context size`、vLLM
+ * `maximum context length is N tokens`、OpenAI 兼容云端 `context_length_exceeded`。
+ * 命中说明窗口是硬墙 —— 更大的档位只会同样被拒，早点收尾比把剩下几档全撞一遍有用。
+ */
+const CONTEXT_OVERFLOW_RE =
+  /(exceeds?[^"]{0,40}context|context (size|length|window)|context_length_exceeded|maximum context|too (long|many tokens)|reduce the length|n_ctx|input is too long)/i;
+
+export function isContextOverflowError(text: string): boolean {
+  return CONTEXT_OVERFLOW_RE.test(text);
+}
+
+/** 我们自己的超时（combineSignals 用 Error("timeout") 中止）与底层网络超时。 */
+export function isTimeoutError(text: string): boolean {
+  return /\btimeout\b|timed out|ETIMEDOUT|AbortError/i.test(text);
+}
 
 /** 去掉尾斜杠与 /v1 后缀，统一成拼接 /v1/chat/completions 的形态。 */
 function normalizeBase(url: string): string {
   return url.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
 }
 
+/**
+ * 噪声 prompt 的句子池。
+ *
+ * 轮转不同句子而不是同一句重复 N 次：重复文本在 BPE 下压缩得更狠，1M 档实测
+ * prompt tokens 会明显低于目标（把"1M 上下文"测成 700k）。句子池循环周期近千字符，
+ * 已经足够让字符/词元比例贴近自然文本。
+ */
+const PROMPT_SENTENCES = [
+  "The quick brown fox jumps over the lazy dog while measuring transformer throughput and latency across multiple context sizes. ",
+  "A local inference server must keep the key-value cache resident, so longer prompts trade memory for fewer decode steps per second. ",
+  "Prefill time grows super-linearly once the attention window stops fitting into the fastest cache level on the accelerator. ",
+  "Batch size 8 with a 128 token generation is a common smoke test for chat workloads served from a single GPU. ",
+  "量化权重把显存占用压到四分之一，代价通常是长上下文里更早出现的数值漂移和重复。 ",
+  "The scheduler interleaves decode steps from several sequences, which raises aggregate throughput but inflates per-token latency. ",
+  "长窗口模型在检索式问答上更稳，但把整本手册塞进 prompt 之前值得先量一量每档的首 token 延迟。 ",
+  "Tokens per second is a poor single number on its own; report time to first token, time per output token and prefill rate together. ",
+];
+
 function buildPrompt(ctxTokens: number): string {
-  const unit =
-    "The quick brown fox jumps over the lazy dog while measuring transformer throughput and latency across multiple context sizes. ";
+  const unit = PROMPT_SENTENCES.join("");
   const needed = Math.max(ctxTokens * CHARS_PER_TOKEN, unit.length);
   const repeats = Math.ceil(needed / unit.length);
   return unit.repeat(repeats).slice(0, needed);
+}
+
+/** 部分命中时新内容占的比例（尾巴越长，越多内容要重新算）。 */
+const PARTIAL_TAIL_RATIO = 0.1;
+
+/**
+ * 每请求唯一的标记串。
+ *
+ * 用 randomUUID 而不是计数器：并发批次里的每个请求都要是不同的串，否则同批的第 2 个
+ * 请求会命中第 1 个刚写进去的缓存，"冷启档"就变成了"同批命中档"。
+ * 补位也用随机字符而不是 `0`：一长串 0 在 BPE 下的合并行为跟正文差太远。
+ */
+function uniqueMarker(seed: string, len: number): string {
+  let out = `${seed}${crypto.randomUUID().replace(/-/g, "")}`;
+  while (out.length < len) out += crypto.randomUUID().replace(/-/g, "");
+  return out.slice(0, len);
+}
+
+/** 部分命中档共享的前缀长度（尾巴留给每个请求自己的新内容）。 */
+function partialPrefixLength(promptLength: number): number {
+  return Math.max(promptLength - Math.floor(promptLength * PARTIAL_TAIL_RATIO), 1);
+}
+
+/**
+ * 按缓存场景造 prompt：长度都等于目标档位，只有"前缀是不是新的"不同。
+ *
+ * - cold：唯一标记放在**最前面**。前缀缓存是按最长公共前缀命中的，第 1 个 token 就
+ *   不同 ⇒ 一定不命中（把标记放结尾会变成"整段都能复用"，那就不是冷启了）。
+ * - partial：共享前缀 + 每个请求自己的新尾巴 —— 多轮对话的真实形态：前面的历史
+ *   原样不动，只有新追问要算。
+ * - warm：与预热完全相同的正文，测命中上限。
+ */
+function buildPromptFor(ctxTokens: number, mode: BenchmarkCacheMode, requestIndex: number): string {
+  const base = buildPrompt(ctxTokens);
+  if (mode === "warm") return base;
+  if (mode === "cold") {
+    const marker = uniqueMarker(`cold${requestIndex}-`, Math.min(base.length, 64));
+    return marker + base.slice(marker.length);
+  }
+  const prefixLen = partialPrefixLength(base.length);
+  const tailLen = base.length - prefixLen;
+  return base.slice(0, prefixLen) + uniqueMarker(`partial${requestIndex}-`, tailLen);
 }
 
 /** 把任务取消信号与单请求超时合成一个 AbortSignal。 */
@@ -179,6 +328,8 @@ type StreamStats = {
   tokens: number;
   promptTokens: number;
   totalMs: number;
+  /** 服务端自报复用自缓存的 prompt tokens（llama.cpp 的 timings.cache_n）；不报为 null。 */
+  cacheReusedTokens: number | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -261,10 +412,11 @@ async function timedStream(
   prompt: string,
   genLength: number,
   temperature: number,
+  timeoutMs: number,
   cancel: AbortSignal,
 ): Promise<StreamStats> {
   const start = performance.now();
-  const { signal, cleanup } = combineSignals(cancel, 600_000);
+  const { signal, cleanup } = combineSignals(cancel, timeoutMs);
   let res: Response;
   try {
     res = await chatFetch(
@@ -296,6 +448,7 @@ async function timedStream(
   let chunkCount = 0;
   let usageTokens: number | null = null;
   let usagePromptTokens: number | null = null;
+  let cacheReusedTokens: number | null = null;
 
   const consumeLine = (line: string) => {
     const trimmed = line.trim();
@@ -313,6 +466,10 @@ async function timedStream(
         if (typeof json.usage.completion_tokens === "number") usageTokens = json.usage.completion_tokens;
         if (typeof json.usage.prompt_tokens === "number") usagePromptTokens = json.usage.prompt_tokens;
       }
+      // llama.cpp 在末块给 timings（cache_n = 直接复用、没有重算的 prompt tokens）：
+      // 这是"到底有没有命中缓存"的唯一权威答案，别的引擎不报就只能看 TTFT 差值。
+      const cacheN = json.timings?.cache_n;
+      if (typeof cacheN === "number") cacheReusedTokens = cacheN;
     } catch {
       // skip malformed chunk
     }
@@ -343,18 +500,24 @@ async function timedStream(
     tokens,
     promptTokens: usagePromptTokens ?? 0,
     totalMs,
+    cacheReusedTokens,
   };
 }
 
-/** 非流式短请求：预热模型并拿该 prompt 的精确 prompt tokens。 */
+/**
+ * 非流式短请求：叫醒模型并顺带看服务端收不收这个 prompt。
+ *
+ * 大档位只发一个短 prompt（见 WARMUP_FULL_MAX_CONTEXT）：这一档的精确 prompt tokens
+ * 从测量请求的 usage 拿，预热不必再把整个 prefill 白跑一遍。
+ */
 async function warmupRequest(
   base: string,
   apiKey: string,
   model: string,
   prompt: string,
   cancel: AbortSignal,
-): Promise<number> {
-  const { signal, cleanup } = combineSignals(cancel, 120_000);
+): Promise<{ promptTokens: number; reject?: string }> {
+  const { signal, cleanup } = combineSignals(cancel, WARMUP_TIMEOUT_MS);
   try {
     const res = await chatFetch(
       base,
@@ -366,11 +529,17 @@ async function warmupRequest(
       },
       signal,
     );
-    if (!res.ok) return 0;
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { promptTokens: 0, reject: `HTTP ${res.status}: ${text.slice(0, 300)}` };
+    }
     const json = (await res.json().catch(() => null)) as { usage?: { prompt_tokens?: number } } | null;
-    return typeof json?.usage?.prompt_tokens === "number" ? json.usage.prompt_tokens : 0;
-  } catch {
-    return 0;
+    return { promptTokens: typeof json?.usage?.prompt_tokens === "number" ? json.usage.prompt_tokens : 0 };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // chatFetch 对 4xx 抛的是带服务端原文的 Error：那是"服务端说这个请求不行"，
+    // 与超时/网络抖动区分开 —— 前者可以据此判档位，后者不能（可能只是慢）。
+    return { promptTokens: 0, reject: /failed \(4\d\d\)/.test(msg) ? msg : undefined };
   } finally {
     cleanup();
   }
@@ -378,7 +547,16 @@ async function warmupRequest(
 
 type BatchOutcome = {
   row: SpeedBenchRow;
-  hardError?: string;
+  /**
+   * 这一档之后怎么走：
+   *  - ok / partial      有数据，下一档继续；
+   *  - context-overflow  服务端拒绝（超窗口）→ 更大的档位只会同样被拒，收尾；
+   *  - timeout           单请求超时 → 更大的档位 prefill 更久，收尾；
+   *  - fatal             一整档一个请求都没成功（服务没起 / 模型不对）；
+   *  - cancelled         用户取消。
+   */
+  kind: "ok" | "partial" | "context-overflow" | "timeout" | "fatal" | "cancelled";
+  error?: string;
 };
 
 async function runBatch(
@@ -389,29 +567,62 @@ async function runBatch(
   genLength: number,
   batchSize: number,
   temperature: number,
+  cache: BenchmarkCacheMode,
   cancel: AbortSignal,
 ): Promise<BatchOutcome> {
-  const prompt = buildPrompt(ctx);
-  const promptTokens =
-    (await warmupRequest(base, apiKey, model, prompt, cancel)) || Math.floor(prompt.length / CHARS_PER_TOKEN);
+  const basePrompt = buildPrompt(ctx);
+  // 预热要按场景挑内容 —— 这决定了测量时缓存里已经有什么：
+  //  - warm    ：与测量请求**完全相同**（命中前提）；
+  //  - partial ：只发共享前缀，把前缀填进缓存，测量请求的新尾巴仍然要现算；
+  //  - cold    ：只发一小段探针（冷启档拿正文去预热毫无意义，反正命中不了）。
+  const probe =
+    cache === "warm"
+      ? basePrompt
+      : cache === "partial"
+        ? basePrompt.slice(0, partialPrefixLength(basePrompt.length))
+        : ctx > WARMUP_FULL_MAX_CONTEXT
+          ? buildPrompt(WARMUP_PROBE_TOKENS)
+          : basePrompt;
+  const warm = await warmupRequest(base, apiKey, model, probe, cancel);
+  // 服务端当场说不收（4xx）：不必再让每档的 prefill 跑满，几毫秒就能给出结论。
+  if (warm.reject) {
+    const kind = isContextOverflowError(warm.reject) ? "context-overflow" : "fatal";
+    return { row: { ...emptyRow(ctx, batchSize, cache), error: warm.reject }, kind, error: warm.reject };
+  }
 
+  const timeoutMs = requestTimeoutMs(ctx, genLength);
   const wallStart = performance.now();
   const settled = await Promise.allSettled(
-    Array.from({ length: batchSize }).map(() => timedStream(base, apiKey, model, prompt, genLength, temperature, cancel)),
+    Array.from({ length: batchSize }).map((_, i) =>
+      timedStream(base, apiKey, model, buildPromptFor(ctx, cache, i), genLength, temperature, timeoutMs, cancel),
+    ),
   );
   const okStats = settled
     .filter((s): s is PromiseFulfilledResult<StreamStats> => s.status === "fulfilled")
     .map((s) => s.value);
   const fails = settled.length - okStats.length;
-  // 全部失败：若是用户主动取消则按取消处理，否则上报首个错误。
-  if (okStats.length === 0) {
-    if (cancel.aborted) return { row: emptyRow(ctx, batchSize), hardError: "cancelled" };
+
+  /** 失败请求的首个原因（服务端原文 / timeout）。 */
+  const firstFailReason = (): string => {
     const first = settled.find((s) => s.status === "rejected") as PromiseRejectedResult | undefined;
-    return {
-      row: emptyRow(ctx, batchSize),
-      hardError: first ? String(first.reason?.message ?? first.reason) : "all requests failed",
-    };
+    return first ? String(first.reason?.message ?? first.reason) : "all requests failed";
+  };
+
+  // 整档颗粒无收：若是用户主动取消则按取消处理，否则把原因写给这一档。
+  if (okStats.length === 0) {
+    if (cancel.aborted) return { row: emptyRow(ctx, batchSize, cache), kind: "cancelled" };
+    const reason = firstFailReason();
+    const kind = isContextOverflowError(reason) ? "context-overflow" : isTimeoutError(reason) ? "timeout" : "fatal";
+    return { row: { ...emptyRow(ctx, batchSize, cache), error: reason }, kind, error: reason };
   }
+
+  // prompt tokens 以测量请求的 usage 为准（大档位的预热只发短 prompt，值不是这一档的；
+  // partial 档的尾巴长度也在这时才定得下来），退到预热值，再退到 4 字符/token 估算。
+  const measuredPromptTokens = okStats.find((s) => s.promptTokens > 0)?.promptTokens ?? 0;
+  const promptTokens = measuredPromptTokens || warm.promptTokens || Math.floor(basePrompt.length / CHARS_PER_TOKEN);
+  const truncated = measuredPromptTokens > 0 && measuredPromptTokens < ctx * TRUNCATION_RATIO;
+  // 只有部分引擎会报 cache_n；不报的留空，界面靠 TTFT 差值看缓存收益。
+  const cacheReusedTokens = okStats.find((s) => s.cacheReusedTokens != null)?.cacheReusedTokens ?? null;
 
   const totalTokens = okStats.reduce((s, r) => s + r.tokens, 0);
   const ttftAvg = okStats.reduce((s, r) => s + r.ttftMs, 0) / okStats.length;
@@ -422,6 +633,8 @@ async function runBatch(
   const wallMs = Math.max(performance.now() - wallStart, ...okStats.map((r) => r.totalMs));
 
   return {
+    kind: fails > 0 ? "partial" : "ok",
+    error: fails > 0 ? `${fails}/${settled.length} requests failed: ${firstFailReason()}` : undefined,
     row: {
       contextLength: ctx,
       promptTokens,
@@ -435,11 +648,14 @@ async function runBatch(
       totalMs: Math.round(avgTotalMs),
       ok: okStats.length,
       fails,
+      truncated: truncated || undefined,
+      cache,
+      cacheReusedTokens: cacheReusedTokens ?? undefined,
     },
   };
 }
 
-function emptyRow(ctx: number, batchSize: number): SpeedBenchRow {
+function emptyRow(ctx: number, batchSize: number, cache?: BenchmarkCacheMode): SpeedBenchRow {
   return {
     contextLength: ctx,
     promptTokens: 0,
@@ -453,22 +669,42 @@ function emptyRow(ctx: number, batchSize: number): SpeedBenchRow {
     totalMs: 0,
     ok: 0,
     fails: batchSize,
+    cache,
   };
 }
 
-function summarize(rows: SpeedBenchRow[]): BenchmarkSummary {
-  if (rows.length === 0) {
-    return { avgTps: 0, peakTps: 0, avgTtftMs: 0, bestTtftMs: 0, peakAggTps: 0, peakPrefillTps: 0, totalTokens: 0 };
-  }
-  return {
-    avgTps: Number((rows.reduce((s, r) => s + r.tps, 0) / rows.length).toFixed(1)),
-    peakTps: Math.max(...rows.map((r) => r.tps)),
-    avgTtftMs: Math.round(rows.reduce((s, r) => s + r.ttftMs, 0) / rows.length),
-    bestTtftMs: Math.min(...rows.map((r) => r.ttftMs)),
-    peakAggTps: Math.max(...rows.map((r) => r.aggTps)),
-    peakPrefillTps: Math.max(...rows.map((r) => r.prefillTps)),
+function summarize(
+  rows: SpeedBenchRow[],
+  stopped?: { reason: BenchmarkStopReason; contextLength: number },
+): BenchmarkSummary {
+  // 失败档位（ok=0）不进平均：把"一整档没测出来"当 0 摊进平均值，会让恰好最关键的
+  // 结论被拉成无意义的数字。峰值本来取 Max，0 值不影响。
+  const ok = rows.filter((r) => r.ok > 0);
+  // 平均 / 最佳只取一种缓存场景：冷启和命中是两种工况，混着平均出来的数谁都不像。
+  // 有冷启就报冷启（唯一没被缓存粉饰的那个）；只勾了命中场景时才报命中。
+  const basis: BenchmarkCacheMode | undefined =
+    ok.some((r) => r.cache === "cold") ? "cold" : ok.some((r) => r.cache === "warm") ? "warm" : undefined;
+  const basisRows = basis ? ok.filter((r) => r.cache === basis) : ok;
+  const summary: BenchmarkSummary = {
+    avgTps: 0,
+    peakTps: 0,
+    avgTtftMs: 0,
+    bestTtftMs: 0,
+    peakAggTps: 0,
+    peakPrefillTps: 0,
     totalTokens: rows.reduce((s, r) => s + r.tokens, 0),
   };
+  if (basis) summary.basis = basis;
+  if (basisRows.length > 0) {
+    summary.avgTps = Number((basisRows.reduce((s, r) => s + r.tps, 0) / basisRows.length).toFixed(1));
+    summary.peakTps = Math.max(...basisRows.map((r) => r.tps));
+    summary.avgTtftMs = Math.round(basisRows.reduce((s, r) => s + r.ttftMs, 0) / basisRows.length);
+    summary.bestTtftMs = Math.min(...basisRows.map((r) => r.ttftMs));
+    summary.peakAggTps = Math.max(...basisRows.map((r) => r.aggTps));
+    summary.peakPrefillTps = Math.max(...basisRows.map((r) => r.prefillTps));
+  }
+  if (stopped) summary.stopped = stopped;
+  return summary;
 }
 
 // ---------------------------------------------------------------------------
@@ -555,9 +791,14 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
   const batchSize = Math.max(params.batchSize ?? 1, 1);
   const genLength = Math.max(params.genLength ?? 128, 16);
   const temperature = params.temperature ?? 0;
-  const contexts = (params.contexts?.length ? params.contexts : DEFAULT_CONTEXTS)
-    .map((c) => Math.max(c, 128))
-    .sort((a, b) => a - b);
+  // 档位统一规范化：去重、升序、夹在 128 ~ 1M（上限也是防呆 —— 1M 的 prompt 已是 4MB）。
+  const contexts = normalizeContexts(
+    params.contexts?.length ? params.contexts : BENCHMARK_DEFAULT_CONTEXTS,
+  );
+  // 缓存场景（冷启 / 部分命中 / 完全命中）：每个档位每种场景各测一轮。
+  const cacheModes = normalizeCacheModes(
+    params.cacheModes?.length ? params.cacheModes : BENCHMARK_DEFAULT_CACHE_MODES,
+  );
 
   const kind: "speed" | "eval" = params.mode === "eval" ? "eval" : "speed";
   if (kind === "eval" && !params.suite) return { error: "eval suite required" };
@@ -572,14 +813,15 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
     status: "running",
     startedAt: Date.now(),
     kind,
-    progress: { total: contexts.length, done: 0, phase: "warmup" },
+    // 一档一片（contexts × cacheModes），进度条按这个总数走。
+    progress: { total: contexts.length * cacheModes.length, done: 0, phase: "warmup" },
     rows: [],
     model: displayModel,
     serverMode,
     engine,
     params:
       kind === "speed"
-        ? { genLength, batchSize, contexts, temperature, requestModel: model }
+        ? { genLength, batchSize, contexts, cacheModes, temperature, requestModel: model }
         : { suite, sampleSize, concurrency, requestModel: model },
   };
   if (kind === "eval") {
@@ -600,10 +842,17 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
     if (run.state.status !== "running" && runs.size > 3 && id !== runId) runs.delete(id);
   }
 
+  logEvent({
+    source: "benchmark",
+    event: "benchmark.run.started",
+    message: `基准测试开始：${displayModel}（${kind === "speed" ? `${contexts.map(fmtCtx).join(" / ")} × ${cacheModes.length} 种缓存场景` : `评测 ${suite}`}）`,
+    detail: { runId, kind, serverMode, engine, model, contexts, cacheModes, genLength, batchSize, suite, sampleSize, concurrency },
+  });
+
   if (kind === "eval") {
     void executeEvalRun(runId, { base, apiKey, model, suite, sampleSize, concurrency, cancel, state });
   } else {
-    void executeRun(runId, { base, apiKey, model, genLength, batchSize, contexts, temperature, cancel, state });
+    void executeRun(runId, { base, apiKey, model, genLength, batchSize, contexts, cacheModes, temperature, cancel, state });
   }
   return { runId };
 }
@@ -764,6 +1013,7 @@ async function executeEvalRun(
   if (info.done > 0 || state.status === "error") {
     persistRun(state, { kind: "eval", rows: state.evalRows ?? [], summary: state.summary });
   }
+  logRunFinished("eval", state, { suite, answered: info.done, accuracy: info.accuracy });
 }
 
 async function executeRun(
@@ -775,23 +1025,72 @@ async function executeRun(
     genLength: number;
     batchSize: number;
     contexts: number[];
+    cacheModes: BenchmarkCacheMode[];
     temperature: number;
     cancel: AbortController;
     state: BenchmarkRunState;
   },
 ) {
   const { state, cancel } = env;
-  const { base, apiKey, model, genLength, batchSize, contexts, temperature } = env;
+  const { base, apiKey, model, genLength, batchSize, contexts, cacheModes, temperature } = env;
+  // 扫描顺序：档位 × 缓存场景（每个档位先冷启、再部分命中、最后完全命中）。
+  // 同一档位的三种场景连着跑：服务和机器状态最接近，TTFT 的差值才是缓存带来的。
+  const slots = contexts.flatMap((ctx) => cacheModes.map((cache) => ({ ctx, cache })));
   try {
-    for (let i = 0; i < contexts.length; i++) {
+    for (let i = 0; i < slots.length; i++) {
       if (cancel.signal.aborted) break;
-      const ctx = contexts[i]!;
-      state.progress = { total: contexts.length, done: i, phase: "warmup", currentContext: ctx };
-      const outcome = await runBatch(base, apiKey, model, ctx, genLength, batchSize, temperature, cancel.signal);
-      if (outcome.hardError === "cancelled") break;
-      if (outcome.hardError) throw new Error(outcome.hardError);
+      const { ctx, cache } = slots[i]!;
+      state.progress = {
+        total: slots.length,
+        done: i,
+        phase: "warmup",
+        currentContext: ctx,
+        currentCache: cache,
+      };
+      const outcome = await runBatch(
+        base,
+        apiKey,
+        model,
+        ctx,
+        genLength,
+        batchSize,
+        temperature,
+        cache,
+        cancel.signal,
+      );
+      if (outcome.kind === "cancelled") break;
+
       state.rows.push(outcome.row);
-      state.progress = { total: contexts.length, done: i + 1, phase: "measure", currentContext: ctx };
+      state.progress = {
+        total: slots.length,
+        done: i + 1,
+        phase: "measure",
+        currentContext: ctx,
+        currentCache: cache,
+      };
+      if (outcome.error) {
+        logEvent({
+          level: "warn",
+          source: "benchmark",
+          event: "benchmark.bucket.failed",
+          message: `基准测试 ${fmtCtx(ctx)} · ${cache} 档失败：${outcome.error}`,
+          detail: { runId, contextLength: ctx, cache, kind: outcome.kind, batchSize, error: outcome.error },
+        });
+      }
+
+      // 更大的档位只会更糟：超窗是服务端的硬墙（拒绝得干脆），超时说明这一档
+      // 已经到了这台机器的 prefill 极限 —— 再翻一倍只是把同样的等待重来一遍。
+      // 同一档位的其它缓存场景也没必要再试：prompt 长度一样，窗口不会因此变大。
+      if (outcome.kind === "context-overflow" || outcome.kind === "timeout") {
+        state.stopped = { reason: outcome.kind, contextLength: ctx };
+        break;
+      }
+      // 一整档颗粒无收、而且前面也一档都没成：服务没起 / 模型不对，早点报错，
+      // 别让用户对着五个必然失败的档位等下去。前面有成过的档位则说明服务是好的，
+      // 这一档的失败已经记在行里，继续扫。
+      if (outcome.kind === "fatal" && !state.rows.some((r) => r.ok > 0)) {
+        throw new Error(outcome.error ?? "all requests failed");
+      }
     }
     state.status = cancel.signal.aborted ? "cancelled" : "done";
   } catch (e) {
@@ -800,11 +1099,41 @@ async function executeRun(
   }
 
   state.durationMs = Date.now() - state.startedAt;
-  state.summary = summarize(state.rows);
+  state.summary = summarize(state.rows, state.stopped);
   // 取消时已完成的档位仍有价值，一并落库。
   if (state.rows.length > 0 || state.status === "error") {
     persistRun(state, { kind: "speed", rows: state.rows, summary: state.summary });
   }
+  logRunFinished("speed", state, { contexts, cacheModes });
+}
+
+/** 任务收尾统一记一条：长跑几十分钟的失败不能只在内存里。 */
+function logRunFinished(kind: "speed" | "eval", state: BenchmarkRunState, detail: Record<string, unknown>): void {
+  const okRows = state.rows.filter((r) => r.ok > 0).length;
+  const failedRows = state.rows.length - okRows;
+  logEvent({
+    level: state.status === "error" ? "error" : state.status === "cancelled" ? "warn" : "info",
+    source: "benchmark",
+    event: state.status === "error" ? "benchmark.run.failed" : "benchmark.run.finished",
+    message:
+      state.status === "error"
+        ? `基准测试失败：${state.model} — ${state.error ?? ""}`
+        : `基准测试${state.status === "cancelled" ? "已取消" : "完成"}：${state.model}（${okRows} 档成功${failedRows > 0 ? ` / ${failedRows} 档失败` : ""}）`,
+    detail: {
+      runId: state.runId,
+      kind,
+      status: state.status,
+      model: state.model,
+      serverMode: state.serverMode,
+      engine: state.engine,
+      durationMs: state.durationMs,
+      recordId: state.recordId,
+      failedRows,
+      stopped: state.stopped,
+      error: state.error,
+      ...detail,
+    },
+  });
 }
 
 export function getBenchmarkRun(runId: string): BenchmarkRunState | null {
@@ -839,6 +1168,29 @@ function parseRecord(r: typeof benchmarkRecords.$inferSelect): BenchmarkRecordRo
   };
 }
 
+/** 列表用的轻量元数据：不带 rows / summary（它们是大 JSON），只用于侧栏与选择器。 */
+function parseRecordMeta(r: typeof benchmarkRecords.$inferSelect): BenchmarkRecordRow {
+  return {
+    id: r.id,
+    kind: r.kind,
+    model: r.model,
+    serverMode: r.serverMode,
+    engine: r.engine,
+    params: null,
+    rows: null,
+    summary: null,
+    status: r.status,
+    durationMs: r.durationMs,
+    error: r.error,
+    createdAt: r.createdAt ?? 0,
+  };
+}
+
+/**
+ * 历史列表（完整正文）。供 CLI / 控制通道使用：它们一次只取前 20 条展示摘要。
+ * 界面侧请用 `listBenchmarkRecordSummaries()` + `getBenchmarkRecord(id)`，
+ * 避免把每条记录的 rows / summary 大 JSON 全量拉进 webview。
+ */
 export function listBenchmarkRecords(): BenchmarkRecordRow[] {
   return db
     .select()
@@ -846,6 +1198,35 @@ export function listBenchmarkRecords(): BenchmarkRecordRow[] {
     .orderBy(desc(benchmarkRecords.createdAt))
     .all()
     .map(parseRecord);
+}
+
+/**
+ * 历史列表。
+ *
+ * 此前每次打开侧栏都全量取回所有记录（每条都带 rows / summary 两段大 JSON）。
+ * 基准是长跑任务、历史会累积，这里只返回轻量元数据并带上上限与总数，
+ * 选中某条时再用 `getBenchmarkRecord(id)` 取完整正文。
+ */
+export function listBenchmarkRecordSummaries(): { records: BenchmarkRecordRow[]; total: number } {
+  const total =
+    db.select({ n: sql<number>`count(*)` }).from(benchmarkRecords).get()?.n ?? 0;
+  const records = db
+    .select()
+    .from(benchmarkRecords)
+    .orderBy(desc(benchmarkRecords.createdAt))
+    .limit(BENCHMARK_RECORD_LIST_MAX)
+    .all()
+    .map(parseRecordMeta);
+  return { records, total: Number(total) };
+}
+
+/** 历史列表返回的上限（轻量元数据，上限可以放得比完整记录大）。 */
+export const BENCHMARK_RECORD_LIST_MAX = 500;
+
+/** 单条记录的完整内容（含 rows / summary），供结果页回放。 */
+export function getBenchmarkRecord(id: number): BenchmarkRecordRow | null {
+  const row = db.select().from(benchmarkRecords).where(eq(benchmarkRecords.id, id)).get();
+  return row ? parseRecord(row) : null;
 }
 
 export function deleteBenchmarkRecord(id: number): { ok: boolean } {

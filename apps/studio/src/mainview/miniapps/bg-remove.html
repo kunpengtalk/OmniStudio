@@ -1,0 +1,796 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>抠图换底</title>
+<!--
+  小应用：抠图换底（去背景 / 换底色），走**本地**分割模型。
+
+  与生图路线的区别是这个应用的全部价值所在：模型在主进程里跑（onnxruntime-web 的
+  WASM 后端，见 src/bun/bg-remove.ts），图片不出本机、不需要任何云端厂商配置，
+  一次约 1 秒。所以这里不再有"还缺 AI 修图能力"的拦截门，缺的只是权重文件 ——
+  而权重就在这个页面里下载。
+
+  两段式：模型只跑一次，拿到「剪切图 + 灰度掩膜」；之后换底色、擦除/复原笔刷全在
+  本页画布上做。掩膜就是 alpha 平面，笔刷直接改它 —— 所以涂抹是跟手的，不会每笔
+  都回去跑一遍模型。
+
+  宿主注入：基础样式、window.omni 运行时、window.__OMNI_BOOT__。
+-->
+<style>
+  .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .options label { display: flex; flex-direction: column; gap: 5px; }
+  .options select { width: 100%; }
+
+  .models { display: flex; flex-direction: column; gap: 8px; }
+  .mrow {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px;
+  }
+  .mrow[data-ready="true"] { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .mname { font-size: 13px; font-weight: 500; }
+  .mmeta { font-size: 11px; color: var(--muted); }
+  .grow { flex: 1; min-width: 0; }
+
+  .stage { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 700px) { .stage { grid-template-columns: 1fr; } }
+  .stage figure { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+  .stage figcaption { font-size: 11px; color: var(--muted); }
+  .stage img { width: 100%; max-height: 320px; object-fit: contain; border-radius: 12px; border: 1px solid var(--line); }
+
+  /* 透明区用棋盘格衬底，否则"透明"和"白色"在界面上分不出来 */
+  .checker {
+    background-color: #fff;
+    background-image:
+      linear-gradient(45deg, #d9d9de 25%, transparent 25%, transparent 75%, #d9d9de 75%),
+      linear-gradient(45deg, #d9d9de 25%, transparent 25%, transparent 75%, #d9d9de 75%);
+    background-size: 16px 16px;
+    background-position: 0 0, 8px 8px;
+  }
+  #work { width: 100%; max-height: 320px; object-fit: contain; border-radius: 12px; border: 1px solid var(--line); display: block; touch-action: none; }
+  #work.movable { cursor: crosshair; }
+
+  .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .tool {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; font-size: 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--soft); color: var(--fg); cursor: pointer;
+  }
+  .tool[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .tool:disabled { opacity: .45; cursor: not-allowed; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,.18); }
+  input[type="range"] { width: 110px; }
+  .chip {
+    padding: 5px 10px; font-size: 12px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--soft); color: var(--fg); cursor: pointer;
+  }
+  .chip[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  #presets { display: flex; flex-wrap: wrap; gap: 8px; }
+  .stat { font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="hd">
+    <h1 data-i18n="title"></h1>
+    <span class="sub" data-i18n="sub"></span>
+  </div>
+
+  <!-- 模型未就绪时才出现：权重可以在这里下，不用去设置页 -->
+  <div class="card col hidden" id="models">
+    <span class="lb" data-i18n="modelLabel"></span>
+    <span class="hint" data-i18n="modelNote"></span>
+    <div class="models" id="model-list"></div>
+  </div>
+
+  <div class="card col">
+    <span class="lb" data-i18n="pickLabel"></span>
+    <div class="zone">
+      <div class="drop grow" id="pick" data-i18n="pickHint"></div>
+      <img id="src" class="hidden" alt="source" style="width:76px;height:76px;object-fit:cover;border-radius:10px;border:1px solid var(--line)" />
+    </div>
+    <span class="hint" data-i18n="pickNote"></span>
+  </div>
+
+  <div class="card col">
+    <span class="lb" data-i18n="optLabel"></span>
+    <div class="options">
+      <label>
+        <span class="mmeta" data-i18n="optModel"></span>
+        <select class="field" id="opt-model"></select>
+      </label>
+      <label>
+        <span class="mmeta" data-i18n="optRefine"></span>
+        <select class="field" id="opt-refine">
+          <option value="0" data-i18n="refineOff"></option>
+          <option value="0.5" data-i18n="refineStd" selected></option>
+          <option value="0.85" data-i18n="refineStrong"></option>
+        </select>
+      </label>
+      <label>
+        <span class="mmeta" data-i18n="optSize"></span>
+        <select class="field" id="opt-size">
+          <option value="2048" data-i18n="sizeStd" selected></option>
+          <option value="0" data-i18n="sizeFull"></option>
+        </select>
+      </label>
+    </div>
+    <span class="hint" data-i18n="optNote"></span>
+  </div>
+
+  <div class="row">
+    <button class="btn primary" id="run" disabled data-i18n="run"></button>
+    <span class="busy hidden" id="busy"><span class="spin"></span><span id="busy-text"></span></span>
+    <span class="err grow" id="err"></span>
+    <span class="ok grow hidden" id="ok"></span>
+  </div>
+
+  <div class="card col hidden" id="result">
+    <div class="row">
+      <span class="lb grow" data-i18n="resultLabel"></span>
+      <span class="stat" id="stat"></span>
+      <button class="btn sm" id="save" data-i18n="save"></button>
+    </div>
+
+    <div class="stage">
+      <figure>
+        <img id="before" alt="source" />
+        <figcaption data-i18n="before"></figcaption>
+      </figure>
+      <figure>
+        <div class="checker" style="border-radius:12px">
+          <canvas id="work"></canvas>
+        </div>
+        <figcaption data-i18n="after"></figcaption>
+      </figure>
+    </div>
+
+    <span class="lb" data-i18n="bgLabel"></span>
+    <div class="row">
+      <div id="presets"></div>
+      <input type="color" id="custom" value="#ffffff" title="custom" />
+    </div>
+
+    <span class="lb" data-i18n="editLabel"></span>
+    <div class="tools">
+      <button class="tool" id="t-erase" aria-pressed="true" data-i18n="erase"></button>
+      <button class="tool" id="t-restore" aria-pressed="false" data-i18n="restore"></button>
+      <button class="tool" id="t-circle" aria-pressed="true" data-i18n="circle"></button>
+      <button class="tool" id="t-square" aria-pressed="false" data-i18n="square"></button>
+      <span class="stat" data-i18n="brushSize"></span>
+      <input type="range" id="brush" min="4" max="200" value="40" />
+      <button class="tool" id="undo" data-i18n="undo"></button>
+      <button class="tool" id="redo" data-i18n="redo"></button>
+      <button class="tool" id="reset" data-i18n="resetEdits"></button>
+    </div>
+    <span class="hint" data-i18n="editNote"></span>
+  </div>
+</div>
+
+<script>
+(function () {
+  var DICT = {
+    zh: {
+      title: '抠图换底',
+      sub: '本地模型去背景，不出本机、不上传，大约 1 秒',
+      modelLabel: '抠图模型',
+      modelNote: '权重只在第一次使用时下载，之后离线可用。模型在本机运行，图片不会上传到任何地方。',
+      pickLabel: '原始图片',
+      pickHint: '点击选择图片',
+      pickNote: '支持 PNG / JPG / WebP。处理全部在本机完成。',
+      optLabel: '运行参数',
+      optModel: '模型',
+      optRefine: '边缘优化',
+      refineOff: '关闭',
+      refineStd: '标准',
+      refineStrong: '强（发丝更清楚，半透明处可能变硬）',
+      optSize: '输出尺寸',
+      sizeStd: '标准（长边 2048）',
+      sizeFull: '原图尺寸（慢、文件大）',
+      optNote: '改动这些参数后重新点「抠图」即可生效。',
+      run: '抠图',
+      save: '保存 PNG',
+      before: '原图',
+      after: '结果（可涂抹修改）',
+      resultLabel: '处理结果',
+      bgLabel: '背景',
+      editLabel: '擦除 / 复原',
+      erase: '擦除',
+      restore: '复原',
+      circle: '圆形',
+      square: '方形',
+      brushSize: '笔刷',
+      undo: '撤销',
+      redo: '重做',
+      resetEdits: '清除涂抹',
+      editNote: '左键拖动涂抹；背景选「透明」时可导出带 alpha 的 PNG。',
+      transparent: '透明',
+      white: '纯白',
+      blue: '证件蓝',
+      red: '证件红',
+      studio: '影棚灰',
+      loading: '读取图片…',
+      working: '正在抠图，首次使用需要先加载模型…',
+      downloading: '下载模型 {done} / {total} MB',
+      saved: '已保存到「{name}」',
+      needPick: '请先选择一张图片',
+      pickFirst: '先选图片',
+      needModel: '请先下载一个抠图模型',
+      failed: '处理失败',
+      statLine: '{model} · {ms}ms · {w}×{h}',
+      tierFast: '最快',
+      tierBalanced: '均衡',
+      tierQuality: '高质量',
+      tierDetail: '最细',
+      download: '下载',
+      ready: '已就绪',
+    },
+    en: {
+      title: 'Cutout & Re-backdrop',
+      sub: 'Local model — nothing leaves this machine, about a second',
+      modelLabel: 'Cutout model',
+      modelNote: 'Weights download once, then work offline. The model runs locally; your image is never uploaded.',
+      pickLabel: 'Source image',
+      pickHint: 'Click to choose an image',
+      pickNote: 'PNG / JPG / WebP. Everything runs on this machine.',
+      optLabel: 'Run options',
+      optModel: 'Model',
+      optRefine: 'Edge refine',
+      refineOff: 'Off',
+      refineStd: 'Standard',
+      refineStrong: 'Strong (crisper hair, may harden translucency)',
+      optSize: 'Output size',
+      sizeStd: 'Standard (2048 long side)',
+      sizeFull: 'Original size (slower, bigger file)',
+      optNote: 'Change these and press Cut out again to apply.',
+      run: 'Cut out',
+      save: 'Save PNG',
+      before: 'Source',
+      after: 'Result (paint to fix)',
+      resultLabel: 'Result',
+      bgLabel: 'Background',
+      editLabel: 'Erase / restore',
+      erase: 'Erase',
+      restore: 'Restore',
+      circle: 'Circle',
+      square: 'Square',
+      brushSize: 'Brush',
+      undo: 'Undo',
+      redo: 'Redo',
+      resetEdits: 'Clear strokes',
+      editNote: 'Drag with the left button to paint. Pick "Transparent" to export a PNG with alpha.',
+      transparent: 'Transparent',
+      white: 'White',
+      blue: 'ID blue',
+      red: 'ID red',
+      studio: 'Studio grey',
+      loading: 'Reading image…',
+      working: 'Cutting out — the first run also loads the model…',
+      downloading: 'Downloading model {done} / {total} MB',
+      saved: 'Saved to “{name}”',
+      needPick: 'Pick an image first',
+      pickFirst: 'Pick an image first',
+      needModel: 'Download a cutout model first',
+      failed: 'Failed',
+      statLine: '{model} · {ms}ms · {w}×{h}',
+      tierFast: 'Fastest',
+      tierBalanced: 'Balanced',
+      tierQuality: 'High quality',
+      tierDetail: 'Most detail',
+      download: 'Download',
+      ready: 'Ready',
+    },
+  };
+
+  // 背景预设：id 决定怎么画；transparent 时不铺底，导出的 PNG 保留 alpha
+  var PRESETS = [
+    { id: 'transparent', zh: '透明', en: 'Transparent', none: true },
+    { id: 'white', zh: '纯白', en: 'White', color: '#ffffff' },
+    { id: 'blue', zh: '证件蓝', en: 'ID blue', color: '#438edb' },
+    { id: 'red', zh: '证件红', en: 'ID red', color: '#d9001b' },
+    { id: 'studio', zh: '影棚灰', en: 'Studio grey', grad: ['#f2f3f5', '#c9ccd2'] },
+  ];
+
+  var TIER_KEY = { fast: 'tierFast', balanced: 'tierBalanced', quality: 'tierQuality', detail: 'tierDetail' };
+
+  var t = function (key, params) {
+    var table = DICT[omni.lang] || DICT.zh;
+    var text = table[key] || DICT.zh[key] || key;
+    if (params) Object.keys(params).forEach(function (k) { text = text.split('{' + k + '}').join(params[k]); });
+    return text;
+  };
+  var $ = function (sel) { return document.querySelector(sel); };
+
+  function paint() {
+    document.querySelectorAll('[data-i18n]').forEach(function (el) { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll('#presets .chip').forEach(function (el) {
+      var p = PRESETS.filter(function (x) { return x.id === el.dataset.id; })[0];
+      if (p) el.textContent = omni.lang === 'en' ? p.en : p.zh;
+    });
+  }
+
+  function showError(message) { $('#err').textContent = message || ''; }
+  function showOk(message) {
+    var el = $('#ok');
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+  }
+  function setBusy(on, text) {
+    state.busy = on;
+    $('#busy').classList.toggle('hidden', !on);
+    if (text) $('#busy-text').textContent = text;
+    $('#run').disabled = on || !state.path;
+  }
+
+  var state = {
+    path: '',
+    dataUrl: '',
+    busy: false,
+    result: null,       // { source, mask, width, height, model }
+    models: [],
+    defaultModel: '',
+    preset: 'white',
+    custom: '',
+    mode: 'erase',      // erase | restore
+    shape: 'circle',
+    brush: 40,
+    ops: [],
+    redo: [],
+    current: null,   // 正在画的那一笔（抬手才提交进 ops）
+    srcImg: null,
+    maskImg: null,
+    width: 0,
+    height: 0,
+    alpha: null,
+    maskData: null,
+    dirty: null,
+  };
+
+  // ---------------------------------------------------------------------
+  // 模型：清单 / 下载
+  // ---------------------------------------------------------------------
+  function mb(bytes) { return (bytes / 1048576).toFixed(1); }
+
+  function renderModels() {
+    var list = $('#model-list');
+    list.innerHTML = '';
+    state.models.forEach(function (m) {
+      var row = document.createElement('div');
+      row.className = 'mrow';
+      row.dataset.ready = m.ready ? 'true' : 'false';
+
+      var info = document.createElement('div');
+      info.className = 'grow';
+      var name = document.createElement('div');
+      name.className = 'mname';
+      name.textContent = m.id;
+      var meta = document.createElement('div');
+      meta.className = 'mmeta';
+      meta.textContent = t(TIER_KEY[m.tier] || 'tierBalanced') + ' · ' + mb(m.bytes) + ' MB · ' + m.license;
+      info.appendChild(name);
+      info.appendChild(meta);
+
+      var btn = document.createElement('button');
+      btn.className = 'btn sm' + (m.defaultModel ? ' primary' : '');
+      btn.textContent = m.ready ? t('ready') : t('download');
+      btn.disabled = m.ready || state.busy;
+      btn.addEventListener('click', function () { downloadModel(m); });
+
+      row.appendChild(info);
+      row.appendChild(btn);
+      list.appendChild(row);
+    });
+    $('#models').classList.toggle('hidden', state.models.some(function (m) { return m.ready; }));
+    fillModelSelect();
+    $('#run').disabled = state.busy || !state.path || !anyReady();
+  }
+
+  function anyReady() {
+    return state.models.some(function (m) { return m.ready; });
+  }
+
+  function fillModelSelect() {
+    var sel = $('#opt-model');
+    var keep = sel.value;
+    sel.innerHTML = '';
+    state.models.forEach(function (m) {
+      var opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.id + (m.ready ? '' : ' · ' + mb(m.bytes) + 'MB');
+      opt.disabled = !m.ready;
+      sel.appendChild(opt);
+    });
+    var preferred = keep || state.defaultModel;
+    var usable = state.models.filter(function (m) { return m.ready; });
+    if (usable.some(function (m) { return m.id === preferred; })) sel.value = preferred;
+    else if (usable[0]) sel.value = usable[0].id;
+  }
+
+  function refreshStatus() {
+    return omni.bg.status().then(function (res) {
+      state.models = (res.models || []).map(function (m) { return Object.assign({}, m, { defaultModel: m.id === res.defaultModel }); });
+      state.defaultModel = res.defaultModel || '';
+      renderModels();
+      return res;
+    });
+  }
+
+  function downloadModel(spec) {
+    if (state.busy) return;
+    showError('');
+    setBusy(true, t('downloading', { done: '0', total: mb(spec.bytes) }));
+    // 下载进度靠轮询 status：小应用收不到宿主的推送事件，而清单里本来就带本地字节数
+    var timer = setInterval(function () {
+      omni.bg.status().then(function (res) {
+        var m = (res.models || []).filter(function (x) { return x.id === spec.id; })[0];
+        if (m) setBusy(true, t('downloading', { done: mb(m.localBytes || 0), total: mb(m.bytes) }));
+      }).catch(function () {});
+    }, 800);
+    omni.bg.download(spec.id).then(function () {
+      return refreshStatus();
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('bg.download.failed', e.message || String(e), { model: spec.id });
+    }).then(function () {
+      clearInterval(timer);
+      setBusy(false);
+      refreshStatus();
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // 选图
+  // ---------------------------------------------------------------------
+  $('#pick').addEventListener('click', function () {
+    if (state.busy) return;
+    showError('');
+    showOk('');
+    setBusy(true, t('loading'));
+    omni.files.pick({ types: 'png,jpg,jpeg,webp' }).then(function (picked) {
+      var path = (picked.paths || [])[0];
+      if (!path) return null;
+      return omni.files.read({ path: path }).then(function (file) {
+        state.path = path;
+        state.dataUrl = file.dataUrl;
+        var img = $('#src');
+        img.src = file.dataUrl;
+        img.classList.remove('hidden');
+        $('#pick').classList.add('hidden');
+        $('#before').src = file.dataUrl;
+      });
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('bg.pick.failed', e.message || String(e), {});
+    }).then(function () {
+      setBusy(false);
+      $('#run').disabled = state.busy || !state.path || !anyReady();
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // 画布：掩膜 = alpha 平面，笔刷直接改它
+  // ---------------------------------------------------------------------
+  function loadImage(url) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      // 必须有：小应用跑在不透明源的 sandbox iframe 里，不加这句图片会把画布污染，
+      // 之后 getImageData 直接抛 SecurityError。
+      img.crossOrigin = 'anonymous';
+      img.onload = function () { resolve(img); };
+      img.onerror = function () { reject(new Error('image load failed')); };
+      img.src = url;
+    });
+  }
+
+  function setupCanvas() {
+    var work = $('#work');
+    work.width = state.width;
+    work.height = state.height;
+    var wctx = work.getContext('2d');
+    var srcCanvas = document.createElement('canvas');
+    srcCanvas.width = state.width;
+    srcCanvas.height = state.height;
+    srcCanvas.getContext('2d').drawImage(state.srcImg, 0, 0, state.width, state.height);
+
+    var maskCanvas = document.createElement('canvas');
+    maskCanvas.width = state.width;
+    maskCanvas.height = state.height;
+    var mctx = maskCanvas.getContext('2d');
+    mctx.drawImage(state.maskImg, 0, 0, state.width, state.height);
+    var md = mctx.getImageData(0, 0, state.width, state.height);
+
+    var n = state.width * state.height;
+    var alpha = new Uint8ClampedArray(n);
+    var data = md.data;
+    for (var i = 0; i < n; i += 1) {
+      var a = data[i * 4];
+      alpha[i] = a;
+      data[i * 4] = 255;
+      data[i * 4 + 1] = 255;
+      data[i * 4 + 2] = 255;
+      data[i * 4 + 3] = a;
+    }
+    state.alpha = alpha;
+    state.maskData = md;
+    // 把改写过的 ImageData 写回掩膜画布 —— 少了这一步，掩膜画布还是"原始灰度图"
+    // （RGB 是灰阶、alpha 全 255），下面 paintCanvas 的 destination-in 就等于没裁，
+    // 表现是"换底色没反应、整张原图连背景一起留着"。
+    mctx.putImageData(md, 0, 0);
+    // 原始掩膜的副本：撤销 / 清除涂抹时从这里重建，而不是给每次笔刷存一份快照
+    state.baseAlpha = new Uint8ClampedArray(alpha);
+    state.srcCanvas = srcCanvas;
+    state.maskCanvas = maskCanvas;
+    state.maskCtx = mctx;
+    state.wctx = wctx;
+    state.ops = [];
+    state.redo = [];
+    state.current = null;
+    work.classList.add('movable');
+    paintCanvas();
+  }
+
+  function paintCanvas() {
+    var w = state.width;
+    var h = state.height;
+    var ctx = state.wctx;
+    if (!ctx) return;
+
+    var fg = state.fgCanvas || (state.fgCanvas = document.createElement('canvas'));
+    if (fg.width !== w || fg.height !== h) { fg.width = w; fg.height = h; }
+    var fctx = fg.getContext('2d');
+    fctx.globalCompositeOperation = 'source-over';
+    fctx.clearRect(0, 0, w, h);
+    fctx.drawImage(state.srcCanvas, 0, 0);
+    fctx.globalCompositeOperation = 'destination-in';
+    fctx.drawImage(state.maskCanvas, 0, 0);
+    fctx.globalCompositeOperation = 'source-over';
+
+    ctx.clearRect(0, 0, w, h);
+    paintBackground(ctx, w, h);
+    ctx.drawImage(fg, 0, 0);
+  }
+
+  function paintBackground(ctx, w, h) {
+    var preset = PRESETS.filter(function (p) { return p.id === state.preset; })[0] || PRESETS[0];
+    if (preset.none && !state.custom) return;
+    if (state.custom) {
+      ctx.fillStyle = state.custom;
+      ctx.fillRect(0, 0, w, h);
+      return;
+    }
+    if (preset.grad) {
+      var g = ctx.createLinearGradient(0, 0, 0, h);
+      g.addColorStop(0, preset.grad[0]);
+      g.addColorStop(1, preset.grad[1]);
+      ctx.fillStyle = g;
+    } else {
+      ctx.fillStyle = preset.color || '#ffffff';
+    }
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  /** 把一次笔刷操作写进 alpha 平面（带 1px 覆盖度抗锯齿，硬边看着才不毛）。 */
+  function applyOp(op) {
+    var w = state.width;
+    var h = state.height;
+    var target = op.mode === 'restore' ? 255 : 0;
+    var x0 = Math.max(0, Math.floor(op.x - op.r - 1));
+    var x1 = Math.min(w - 1, Math.ceil(op.x + op.r + 1));
+    var y0 = Math.max(0, Math.floor(op.y - op.r - 1));
+    var y1 = Math.min(h - 1, Math.ceil(op.y + op.r + 1));
+    var data = state.maskData.data;
+    for (var y = y0; y <= y1; y += 1) {
+      for (var x = x0; x <= x1; x += 1) {
+        var dx = x - op.x;
+        var dy = y - op.y;
+        var dist;
+        if (op.shape === 'circle') dist = Math.sqrt(dx * dx + dy * dy);
+        else dist = Math.max(Math.abs(dx), Math.abs(dy));
+        var cov = op.r - dist + 0.5;
+        if (cov <= 0) continue;
+        if (cov > 1) cov = 1;
+        var i = y * w + x;
+        var v = state.alpha[i];
+        v = v + (target - v) * cov;
+        state.alpha[i] = v;
+        data[i * 4 + 3] = v;
+      }
+    }
+    state.maskCtx.putImageData(state.maskData, 0, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+  }
+
+  function replayOps() {
+    // 从原始掩膜重建：把 alpha 复位后重放笔画，比给每笔存快照省内存
+    var n = state.width * state.height;
+    var data = state.maskData.data;
+    var base = state.baseAlpha;
+    for (var i = 0; i < n; i += 1) {
+      state.alpha[i] = base[i];
+      data[i * 4 + 3] = base[i];
+    }
+    state.maskCtx.putImageData(state.maskData, 0, 0);
+    for (var k = 0; k < state.ops.length; k += 1) {
+      // 一次拖动 = 一个操作（里面很多个采样点）：否则撤销要按很多下才退掉一笔
+      var stroke = state.ops[k];
+      for (var j = 0; j < stroke.length; j += 1) applyOp(stroke[j]);
+    }
+  }
+
+  function strokeAt(clientX, clientY, first) {
+    var rect = $('#work').getBoundingClientRect();
+    // 画布是原图分辨率、按 CSS 缩放显示的：坐标必须换算回画布坐标
+    var x = (clientX - rect.left) * (state.width / rect.width);
+    var y = (clientY - rect.top) * (state.height / rect.height);
+    var op = { x: x, y: y, r: state.brush, shape: state.shape, mode: state.mode };
+    if (!state.current) state.current = [];
+    state.current.push(op);
+    applyOp(op);
+    paintCanvas();
+    if (first) omni.log('bg.stroke', 'brush stroke', { mode: state.mode, shape: state.shape });
+  }
+
+  var drawing = false;
+  $('#work').addEventListener('pointerdown', function (e) {
+    if (!state.result || e.button !== 0) return;
+    e.preventDefault();
+    drawing = true;
+    // 新的一笔：清掉待提交缓冲，并作废重做栈（新的编辑分支）
+    state.current = [];
+    state.redo = [];
+    showOk('');
+    if ($('#work').setPointerCapture) $('#work').setPointerCapture(e.pointerId);
+    strokeAt(e.clientX, e.clientY, true);
+  });
+  $('#work').addEventListener('pointermove', function (e) {
+    if (!drawing) return;
+    e.preventDefault();
+    strokeAt(e.clientX, e.clientY, false);
+  });
+  var endStroke = function () {
+    if (!drawing) return;
+    drawing = false;
+    // 抬手才把这笔提交进撤销栈：拖动中途的每个采样点都算一次操作的话，
+    // 撤销一次只退掉几个像素，用起来像坏了。
+    if (state.current && state.current.length) state.ops.push(state.current);
+    state.current = null;
+  };
+  $('#work').addEventListener('pointerup', endStroke);
+  $('#work').addEventListener('pointercancel', endStroke);
+  window.addEventListener('blur', endStroke);
+
+  $('#undo').addEventListener('click', function () {
+    if (!state.ops.length) return;
+    state.redo.push(state.ops.pop());
+    replayOps();
+    paintCanvas();
+  });
+  $('#redo').addEventListener('click', function () {
+    if (!state.redo.length) return;
+    var stroke = state.redo.pop();
+    state.ops.push(stroke);
+    for (var j = 0; j < stroke.length; j += 1) applyOp(stroke[j]);
+    paintCanvas();
+  });
+  $('#reset').addEventListener('click', function () {
+    if (!state.ops.length) return;
+    state.ops = [];
+    state.redo = [];
+    replayOps();
+    paintCanvas();
+  });
+
+  function toggle(pair, activeId, key) {
+    pair.forEach(function (id) {
+      $('#' + id).setAttribute('aria-pressed', String(id === activeId));
+    });
+    if (key === 'mode') state.mode = activeId === 't-erase' ? 'erase' : 'restore';
+    else state.shape = activeId === 't-circle' ? 'circle' : 'square';
+  }
+  $('#t-erase').addEventListener('click', function () { toggle(['t-erase', 't-restore'], 't-erase', 'mode'); });
+  $('#t-restore').addEventListener('click', function () { toggle(['t-erase', 't-restore'], 't-restore', 'mode'); });
+  $('#t-circle').addEventListener('click', function () { toggle(['t-circle', 't-square'], 't-circle', 'shape'); });
+  $('#t-square').addEventListener('click', function () { toggle(['t-circle', 't-square'], 't-square', 'shape'); });
+  $('#brush').addEventListener('input', function () {
+    state.brush = Number($('#brush').value);
+  });
+
+  PRESETS.forEach(function (p) {
+    var chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.dataset.id = p.id;
+    chip.setAttribute('aria-pressed', String(p.id === state.preset));
+    chip.textContent = omni.lang === 'en' ? p.en : p.zh;
+    chip.addEventListener('click', function () {
+      state.preset = p.id;
+      state.custom = '';
+      document.querySelectorAll('#presets .chip').forEach(function (el) {
+        el.setAttribute('aria-pressed', String(el.dataset.id === p.id));
+      });
+      paintCanvas();
+    });
+    $('#presets').appendChild(chip);
+  });
+  $('#custom').addEventListener('input', function () {
+    state.custom = $('#custom').value;
+    document.querySelectorAll('#presets .chip').forEach(function (el) { el.setAttribute('aria-pressed', 'false'); });
+    paintCanvas();
+  });
+
+  // ---------------------------------------------------------------------
+  // 抠图
+  // ---------------------------------------------------------------------
+  $('#run').addEventListener('click', function () {
+    if (!state.path || state.busy) return;
+    if (!anyReady()) { showError(t('needModel')); return; }
+    showError('');
+    showOk('');
+    setBusy(true, t('working'));
+    var size = Number($('#opt-size').value);
+    var refine = Number($('#opt-refine').value);
+    omni.bg.run({
+      path: state.path,
+      model: $('#opt-model').value || undefined,
+      refine: refine,
+      maxSize: size > 0 ? size : undefined,
+    }).then(function (res) {
+      return Promise.all([
+        loadImage(res.source.url),
+        loadImage(res.mask.url),
+      ]).then(function (imgs) {
+        state.result = res;
+        state.srcImg = imgs[0];
+        state.maskImg = imgs[1];
+        state.width = res.width;
+        state.height = res.height;
+        $('#before').src = res.source.url;
+        setupCanvas();
+        $('#result').classList.remove('hidden');
+        $('#stat').textContent = t('statLine', {
+          model: res.model, ms: res.totalMs, w: res.width, h: res.height,
+        });
+        return omni.log('bg.done', 'cutout ready', {
+          model: res.model, ms: res.totalMs, width: res.width, height: res.height,
+        });
+      });
+    }).catch(function (e) {
+      showError((e.message || String(e)) + '');
+      omni.log('bg.run.failed', e.message || String(e), { model: $('#opt-model').value });
+    }).then(function () { setBusy(false); });
+  });
+
+  $('#save').addEventListener('click', function () {
+    if (!state.result) return;
+    showError('');
+    var name = 'cutout-' + Date.now().toString().slice(-6) + '.png';
+    var dataUrl;
+    try {
+      dataUrl = $('#work').toDataURL('image/png');
+    } catch (e) {
+      // 画布被污染时 toDataURL 会抛 SecurityError —— 只有 crossorigin 那一步出问题才会走到这
+      showError('导出失败：' + (e.message || String(e)));
+      omni.log('bg.save.failed', String(e.message || e), {});
+      return;
+    }
+    setBusy(true, t('working'));
+    omni.files.save({ name: name, dataUrl: dataUrl }).then(function (res) {
+      showOk(t('saved', { name: (res.path || name).split('/').pop() }));
+      return omni.log('bg.saved', 'cutout saved', {});
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('bg.save.failed', e.message || String(e), {});
+    }).then(function () { setBusy(false); });
+  });
+
+  omni.ready.then(function () {
+    paint();
+    refreshStatus().catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('bg.status.failed', e.message || String(e), {});
+    });
+  });
+  omni.onCapabilities = function () { refreshStatus().catch(function () {}); };
+})();
+</script>
+</body>
+</html>

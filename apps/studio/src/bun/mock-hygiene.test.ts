@@ -206,3 +206,15 @@ test("检查器自己认得出手写替身漏掉的导出（拿真实例子钉�
   // 展开真实导出后不再报缺
   expect(literalKeys("() => ({ ...real, getSetting: () => \"\" })")).toBeNull();
 });
+
+test("测试跑在 --parallel 下（每个文件一个进程，模块 mock 才真的隔离）", () => {
+  const pkg = JSON.parse(readFileSync(join(APP, "package.json"), "utf8")) as {
+    scripts: Record<string, string>;
+  };
+  const script = pkg.scripts.test ?? "";
+  // `--isolate` 只隔离全局对象，module registry 仍共享：实测同一批用例会红 23 条
+  // （报错落在 safeJoin / 备份 / 密钥加密这些毫不相干的文件里）。改回它 = 把那个
+  // 随机器不同而变化的"谜题"重新装回来。
+  expect(script).toContain("--parallel");
+  expect(script).not.toContain("--isolate");
+});

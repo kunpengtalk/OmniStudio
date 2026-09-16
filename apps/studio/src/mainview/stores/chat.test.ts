@@ -237,3 +237,35 @@ describe("流式实时统计", () => {
     expect(useChatStore.getState().activeMessages).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 兜底收尾的幂等性。
+//
+// 踩过的坑：后端"没模型 / 服务器没起来"这类早退也会推一条带 error 的 chatDone，
+// 而调用方（composer / 对话页）在拿到 `ok:false` 时又自己 finalize 一次 ——
+// 界面上就是两个内容相同的 ⚠️ 气泡，看起来像"报错报了两次"。
+// ---------------------------------------------------------------------------
+test("finalizeTurnIfPending：这一轮已经收过尾时不再补第二条", () => {
+  reset([user(1, "你好")]);
+  // 正常路径：chatDone 先到，落成一条有内容的助手消息
+  useChatStore.getState().finalizeMessage(1, 2, "⚠️ No model configured");
+  const before = useChatStore.getState().activeMessages.length;
+
+  // 兜底后到：不应再补
+  useChatStore.getState().finalizeTurnIfPending(1, "⚠️ No model configured");
+  const after = useChatStore.getState().activeMessages;
+  expect(after).toHaveLength(before);
+  expect(after.filter((m) => m.content.includes("No model configured"))).toHaveLength(1);
+});
+
+test("finalizeTurnIfPending：末尾是空助手行（没人收过尾）时照常补一条", () => {
+  reset([user(1, "你好"), assistant(2, "")]);
+  useChatStore.getState().setStreaming(true);
+
+  useChatStore.getState().finalizeTurnIfPending(1, "⚠️ Request failed");
+  const messages = useChatStore.getState().activeMessages;
+  // 复用那条空行，而不是另起一条
+  expect(messages).toHaveLength(2);
+  expect(messages[1]!.content).toBe("⚠️ Request failed");
+  expect(useChatStore.getState().streaming).toBe(false);
+});

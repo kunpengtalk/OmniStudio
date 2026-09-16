@@ -226,3 +226,24 @@ function assistantMessage(
     timestamp,
   };
 }
+
+/**
+ * 「重新生成」的上下文决策。
+ *
+ * 重新生成 = 删掉这条回答及其之后的一切，再用**同一条**用户消息重跑一遍。要点在于
+ * 那条用户消息**不在删除区间内**（它排在目标回答之前），所以本轮绝不能再写一条 user 行：
+ * 写下去就是同一段任务在历史里出现两遍 —— 界面上两个一模一样的用户气泡，模型侧则
+ * 既在历史里看到它、又在 prompt 里收到它（这正是 dropCurrentPrompt 那条注释警告的形态）。
+ *
+ * 抽成纯函数是为了能单测：`regenerateAgentMessage` 那一层要连上模型才跑得起来，
+ * 而这条规则错一次的代价是"每次重新生成都多一条用户消息"，很难在界面上认出来。
+ */
+export function planRegenerate(
+  history: { id: number; role?: string | null; content?: string | null }[],
+  messageId: number,
+): { ok: false; error: string } | { ok: true; deleteFromId: number; prompt: string } {
+  const beforeTarget = history.filter((m) => m.id < messageId);
+  const lastUser = [...beforeTarget].reverse().find((m) => m.role === "user");
+  if (!lastUser) return { ok: false, error: "Nothing to regenerate" };
+  return { ok: true, deleteFromId: messageId, prompt: lastUser.content ?? "" };
+}

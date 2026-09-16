@@ -27,6 +27,8 @@ export type UsageChannel =
   | "image"
   /** 生视频。 */
   | "video"
+  /** 生音乐（云端按次计费，本地引擎免费）。 */
+  | "music"
   /** 文档 OCR 的 VLM 视觉理解。 */
   | "ocr"
   /** 翻译页的整段翻译。 */
@@ -38,6 +40,7 @@ export const USAGE_CHANNELS: readonly UsageChannel[] = [
   "gateway",
   "image",
   "video",
+  "music",
   "ocr",
   "translate",
 ];

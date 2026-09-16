@@ -9,19 +9,21 @@ import { SidebarInset, SidebarProvider } from "@ui/sidebar";
 import { rpcClient } from "@lib/rpc";
 import { useRouter } from "@stores/router";
 import { SettingsScreen } from "./settings";
-import { ChatWindow } from "../chat-screen";
-import { AgentWindow } from "../agent-screen";
+import { ChatWindow } from "../chat";
+import { AgentWindow } from "../agent";
 import { VoiceCallWindow } from "../voice-call-screen";
-import { VoiceScreen } from "../voice-screen";
-import { ImageScreen } from "../image-screen";
-import { VideoScreen } from "../video-screen";
+import { VoiceScreen } from "../voice";
+import { ImageScreen } from "../image";
+import { VideoScreen } from "../video";
+import { MusicScreen } from "../music";
 import { OcrScreen } from "../ocr";
-import { TranslateScreen } from "../translate-screen";
-import { PromptScreen } from "../prompt-screen";
+import { TranslateScreen } from "../translate";
+import { PromptScreen } from "../prompt";
 import { SkillsScreen } from "../skills";
-import { MemoryScreen } from "../memory-screen";
+import { MemoryScreen } from "../memory";
 import { KbScreen } from "../kb";
-import { BenchmarkScreen } from "../benchmark-screen";
+import { BenchmarkScreen } from "../benchmark";
+import { AppsScreen } from "../apps";
 import { ModelDetailScreen } from "../model-detail";
 import { DownloadsButton } from "@components/download-panel";
 import { NotificationBell } from "../agent/notification-bell";
@@ -47,6 +49,8 @@ const renderActiveApp = (activeApp: AppId): ReactNode => {
       return <ImageScreen />;
     case "video":
       return <VideoScreen />;
+    case "music":
+      return <MusicScreen />;
     case "translate":
       return <TranslateScreen />;
     case "prompt":
@@ -59,6 +63,8 @@ const renderActiveApp = (activeApp: AppId): ReactNode => {
       return <KbScreen />;
     case "benchmark":
       return <BenchmarkScreen />;
+    case "apps":
+      return <AppsScreen />;
     default:
       return <ChatWindow />;
   }
@@ -94,8 +100,10 @@ export function MainLayout() {
   const activeApp = useAppStore((s) => s.activeApp);
 
   // 设置页是全新的一级页面，不显示左侧对话菜单；
-  // Agent 页自带会话侧栏（置顶 / 归档 / 工作区分组），全局侧栏会重复列出同一批会话。
-  const showSidebar = route.path !== "settings" && activeApp !== "agent";
+  // Agent 页自带会话侧栏（置顶 / 归档 / 工作区分组），全局侧栏会重复列出同一批会话；
+  // 应用中心是"小应用自己的入口"，侧栏里的会话列表在这里没有对应物。
+  const showSidebar =
+    route.path !== "settings" && activeApp !== "agent" && activeApp !== "apps";
 
   // 回报「用户在看什么」：主进程据此决定后台跑完的回合要不要发通知。
   useViewStateReport();

@@ -1,5 +1,7 @@
 import { MODEL_PROFILES } from "@/shared/model-profiles";
 import { CLOUD_PRESETS } from "@/shared/cloud-providers";
+import type { ModelCandidates } from "@/shared/hardware";
+import type { InferenceEngine } from "@/shared/modelscope";
 
 export const REMOTE_PROFILES = [
   ...MODEL_PROFILES,
@@ -59,6 +61,15 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
+ * 每 token 的 KV 缓存（bytes）：层数 × KV 头 × head_dim × 2(K/V) × 2B（fp16）。
+ * 与上下文长度相乘即为 KV 缓存总量。不是实测值，是引导页展示量级的估算口径
+ * —— 架构参数变了（层数 / KV 头数）要跟着改，否则估算会静默偏小。
+ */
+function kvBytesPerToken(layers: number, kvHeads: number, headDim = 128): number {
+  return layers * kvHeads * headDim * 2 * 2;
+}
+
+/**
  * 主力对话模型（引导界面用）。OCR 模型不再出现在引导里——
  * 需要 OCR 的用户可在应用内自行选择。
  */
@@ -66,7 +77,11 @@ export type SetupModelOption = {
   id: string;
   label: string;
   params: string;
+  /** 参数规模（十亿），用于「本机跑得动的前提下挑最大的」排序。 */
+  paramsB: number;
   description: string;
+  /** 每 token 的 KV 缓存（bytes），见 `kvBytesPerToken`。 */
+  kvBytesPerToken: number;
   /** llama.cpp 使用的 GGUF 量化仓库（unsloth），`-hf repo:quant` 直接拉取。 */
   ggufRepo: string;
   /** vLLM / SGLang 使用的 safetensors 官方仓库。 */
@@ -82,7 +97,9 @@ export const SETUP_MODELS: readonly SetupModelOption[] = [
     id: "qwen35-4b",
     label: "Qwen3.5 4B",
     params: "4B",
+    paramsB: 4,
     description: "轻量通用对话模型，低内存也能流畅运行",
+    kvBytesPerToken: kvBytesPerToken(36, 8),
     ggufRepo: "unsloth/Qwen3.5-4B-GGUF",
     hfRepo: "Qwen/Qwen3.5-4B",
     hfSizeBytes: 9.3 * 1e9,
@@ -98,7 +115,9 @@ export const SETUP_MODELS: readonly SetupModelOption[] = [
     id: "qwen35-9b",
     label: "Qwen3.5 9B",
     params: "9B",
+    paramsB: 9,
     description: "均衡的通用对话模型，质量与资源占用兼顾",
+    kvBytesPerToken: kvBytesPerToken(48, 8),
     ggufRepo: "unsloth/Qwen3.5-9B-GGUF",
     hfRepo: "Qwen/Qwen3.5-9B",
     hfSizeBytes: 19.3 * 1e9,
@@ -114,7 +133,10 @@ export const SETUP_MODELS: readonly SetupModelOption[] = [
     id: "qwen35-35b",
     label: "Qwen3.5 35B-A3B",
     params: "35B",
+    paramsB: 35,
     description: "MoE 大模型，激活参数仅 3B，本地也能高效推理",
+    // MoE：KV 头只有 4 个，KV 缓存比同尺寸稠密模型小得多。
+    kvBytesPerToken: kvBytesPerToken(48, 4),
     ggufRepo: "unsloth/Qwen3.5-35B-A3B-GGUF",
     hfRepo: "Qwen/Qwen3.5-35B-A3B",
     hfSizeBytes: 71.9 * 1e9,
@@ -130,7 +152,9 @@ export const SETUP_MODELS: readonly SetupModelOption[] = [
     id: "qwen36-27b",
     label: "Qwen3.6 27B",
     params: "27B",
+    paramsB: 27,
     description: "新一代旗舰通用对话模型，中文与推理能力突出",
+    kvBytesPerToken: kvBytesPerToken(64, 8),
     ggufRepo: "unsloth/Qwen3.6-27B-GGUF",
     hfRepo: "Qwen/Qwen3.6-27B",
     hfSizeBytes: 55.6 * 1e9,
@@ -143,6 +167,26 @@ export const SETUP_MODELS: readonly SetupModelOption[] = [
     defaultQuant: "Q4_K_M",
   },
 ];
+
+/**
+ * 把引导页的模型表翻译成内存估算需要的形状（权重档位 + 架构常数）。
+ * MLX 预设只有仓库名、没有体积信息，返回空 —— 那条路上不显示「约占多少内存」，
+ * 好过编一个数字出来。
+ */
+export function setupModelCandidates(engine: InferenceEngine): ModelCandidates[] {
+  if (engine === "mlx") return [];
+  return SETUP_MODELS.map((model) => ({
+    id: model.id,
+    paramsB: model.paramsB,
+    kvBytesPerToken: model.kvBytesPerToken,
+    variants:
+      engine === "llama.cpp"
+        ? model.quants.map((q) => ({ name: q.name, sizeBytes: q.size }))
+        : // vLLM / SGLang 直接吃 bf16 safetensors，没有量化档位可挑。
+          [{ name: "BF16", sizeBytes: model.hfSizeBytes }],
+    defaultQuant: engine === "llama.cpp" ? model.defaultQuant : "BF16",
+  }));
+}
 
 export const MODEL_QUANTS: Record<string, ModelQuantInfo> = {
   chandra: {

@@ -217,8 +217,8 @@ function adoptCandidate(candidate: MediaSetupCandidate): void {
 export async function scanSetupCandidates(input: {
   kind?: string;
   backend?: string;
+  /** ComfyUI 地址（表单里刚改的值，可能还没落盘）。 */
   base?: string;
-  apiKey?: string;
   /** 弹窗里刚选中的厂商：地址 / 密钥按它取（此时还没落盘，不能用已保存的配置）。 */
   providerId?: string;
 }): Promise<{ candidates: MediaSetupCandidate[]; error?: string }> {
@@ -255,7 +255,7 @@ export async function scanSetupCandidates(input: {
     }
     const base = (input.base ?? apiBase).trim();
     if (!base) return { candidates: [], error: "请先在「设置 → 模型云服务」里启用一个厂商" };
-    const models = await ImageGen.listImageApiModels(base, (input.apiKey ?? apiKey).trim());
+    const models = await ImageGen.listImageApiModels(base, apiKey);
     // 生图服务的 /v1/models 也会列对话模型：只挑生图模型，认不出时保留全量。
     const picked = filterModelIds(models, MODEL_CATEGORY_SETS.image, { relax: true });
     return { candidates: picked.ids.map((m) => ({ id: m, label: m, ready: true })) };

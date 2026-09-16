@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>马赛克</title>
+<!--
+  小应用：马赛克（涂抹式打码）。
+
+  为什么不是"拖一个方框"：要遮的东西基本都不方 —— 聊天记录里的一串手机号、
+  快递单上的地址、截图里零散的昵称 —— 方框一盖就把不该遮的内容一起盖住了。
+  所以这里是**涂哪儿遮哪儿**：按住左键涂，松开即生效。
+
+  全部处理都在本页画布上完成：不跑模型、不连网、图片不出这个小应用（宿主只负责
+  选文件 / 存文件）。凿毛的程序：
+    1. 涂的时候把笔迹记成**原图坐标**下的点列（不是屏幕坐标），缩放窗口怎么变都不影响结果；
+    2. 预览与导出用同一个函数：先把笔画画成掩膜，再把"按块降采样再硬放大"的马赛克
+       用 source-in 贴进掩膜里 —— 于是只有涂过的地方被凿毛，其余像素原样保留；
+    3. 导出按原分辨率重算一遍（预览是屏幕分辨率，两者块大小同源，所见即所得）。
+
+  宿主注入：基础样式、window.omni 运行时、window.__OMNI_BOOT__。
+-->
+<style>
+  .list {
+    border: 1px solid var(--line); border-radius: 12px; background: var(--bg);
+    max-height: 260px; overflow: auto;
+  }
+  .item {
+    display: flex; align-items: center; gap: 8px; padding: 8px 11px; cursor: pointer;
+    border-bottom: 1px solid var(--line); font-size: 12px;
+  }
+  .item:last-child { border-bottom: 0; }
+  .item[aria-selected="true"] { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .painted { color: var(--ok); }
+  .empty { padding: 22px; text-align: center; color: var(--muted); font-size: 12px; }
+
+  /* 涂抹窗口：盖满整个小应用（iframe 里就是全屏），涂的时候不受列表干扰 */
+  .paint { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; z-index: 20; }
+  .paint .bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .stagebox {
+    flex: 1; min-height: 0; border: 1px solid var(--line); border-radius: 12px;
+    overflow: hidden; background: var(--soft); position: relative;
+  }
+  #stage { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+  .zoom { font-size: 11px; color: var(--muted); min-width: 44px; text-align: right; }
+  input[type="range"] { width: 130px; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="hd">
+    <h1 data-i18n="title"></h1>
+    <span class="sub" data-i18n="sub"></span>
+  </div>
+
+  <div class="card col">
+    <div class="row">
+      <button class="btn primary" id="pick" data-i18n="pick"></button>
+      <span class="hint" id="count"></span>
+      <button class="btn ghost sm" id="clear-list" data-i18n="clearList"></button>
+    </div>
+    <span class="hint" data-i18n="pickNote"></span>
+    <div class="list" id="list"><div class="empty" data-i18n="noFiles"></div></div>
+  </div>
+
+  <div class="card col">
+    <span class="lb" data-i18n="blockLabel"></span>
+    <div class="row">
+      <input type="range" id="block" min="4" max="80" step="2" value="12" />
+      <span class="hint" id="block-value"></span>
+    </div>
+    <span class="hint" data-i18n="blockNote"></span>
+    <span class="lb" data-i18n="formatLabel"></span>
+    <div class="row" id="formats"></div>
+  </div>
+
+  <div class="row">
+    <button class="btn primary" id="run" disabled data-i18n="run"></button>
+    <button class="btn" id="paint" disabled data-i18n="paint"></button>
+    <span class="busy hidden" id="busy"><span class="spin"></span><span id="busy-text"></span></span>
+    <span class="err grow" id="err"></span>
+    <span class="ok grow hidden" id="ok"></span>
+  </div>
+  <span class="hint" data-i18n="runNote"></span>
+</div>
+
+<!-- 涂抹窗口 -->
+<div class="paint hidden" id="paint-view">
+  <div class="bar">
+    <button class="btn sm" id="p-done" data-i18n="done"></button>
+    <button class="btn ghost sm" id="p-clear" data-i18n="clearStrokes"></button>
+    <button class="btn ghost sm" id="p-undo" data-i18n="undo"></button>
+    <span class="lb" data-i18n="brushLabel"></span>
+    <input type="range" id="brush" min="4" max="240" step="2" value="48" />
+    <span class="hint" id="brush-value"></span>
+    <button class="btn ghost sm" id="p-zoom-out" title="-">−</button>
+    <span class="zoom" id="zoom"></span>
+    <button class="btn ghost sm" id="p-zoom-in" title="+">＋</button>
+    <button class="btn ghost sm" id="p-fit" data-i18n="fit"></button>
+    <span class="hint" data-i18n="paintNote"></span>
+  </div>
+  <div class="stagebox"><canvas id="stage"></canvas></div>
+</div>
+
+<script>
+(function () {
+  var DICT = {
+    zh: {
+      title: '马赛克',
+      sub: '涂哪儿遮哪儿：手机号、地址、头像随手涂掉，图片不出本机',
+      pick: '选择图片',
+      pickNote: '支持 PNG / JPG / WebP，可一次选多张。双击列表里的图片进入涂抹窗口。',
+      clearList: '清空列表',
+      noFiles: '还没有选择图片',
+      count: '已选 {n} 张 · 已涂 {painted} 张',
+      blockLabel: '马赛克块大小',
+      blockValue: '{n} 像素',
+      blockNote: '按原图像素计：图越大、要遮的字越小，块就要调得越大。预览与导出用的是同一份设置。',
+      formatLabel: '导出格式',
+      run: '开始处理',
+      paint: '涂抹这张',
+      runNote: '只导出涂过的图片；没涂的会跳过（不会产出没改动的副本）。',
+      brushLabel: '画笔',
+      brushValue: '{n} 像素',
+      fit: '适应窗口',
+      paintNote: '按住左键涂抹；滚轮平移，Ctrl / ⌘ + 滚轮缩放。',
+      done: '完成涂抹',
+      clearStrokes: '清空笔迹',
+      undo: '撤销一笔',
+      loading: '读取图片…',
+      working: '正在处理 {done}/{total}…',
+      saved: '已保存 {n} 张到「{dir}」',
+      skipped: '（{n} 张未涂抹，已跳过）',
+      nonePainted: '还没有涂抹任何区域：先双击列表里的图片涂一下',
+      needPick: '请先选择图片',
+      failed: '处理失败',
+      strokeCount: '{n} 笔',
+    },
+    en: {
+      title: 'Mosaic',
+      sub: 'Paint over phone numbers, addresses and faces — nothing leaves this machine',
+      pick: 'Choose images',
+      pickNote: 'PNG / JPG / WebP, multiple at once. Double-click a row to start painting.',
+      clearList: 'Clear list',
+      noFiles: 'No images yet',
+      count: '{n} selected · {painted} painted',
+      blockLabel: 'Mosaic block size',
+      blockValue: '{n} px',
+      blockNote: 'In source pixels — bigger photos and smaller text need bigger blocks. Preview and export share this setting.',
+      formatLabel: 'Export format',
+      run: 'Process',
+      paint: 'Paint this one',
+      runNote: 'Only painted images are exported; untouched ones are skipped rather than copied.',
+      brushLabel: 'Brush',
+      brushValue: '{n} px',
+      fit: 'Fit',
+      paintNote: 'Drag with the left button to paint; scroll to pan, Ctrl / ⌘ + scroll to zoom.',
+      done: 'Done',
+      clearStrokes: 'Clear strokes',
+      undo: 'Undo stroke',
+      loading: 'Reading image…',
+      working: 'Processing {done}/{total}…',
+      saved: 'Saved {n} file(s) to “{dir}”',
+      skipped: '({n} unpainted skipped)',
+      nonePainted: 'Nothing painted yet — double-click an image and paint first',
+      needPick: 'Pick images first',
+      failed: 'Failed',
+      strokeCount: '{n} strokes',
+    },
+  };
+
+  var FORMATS = [
+    { id: 'png', label: 'PNG', mime: 'image/png', ext: 'png' },
+    { id: 'jpeg', label: 'JPEG', mime: 'image/jpeg', ext: 'jpg' },
+  ];
+
+  var t = function (key, params) {
+    var table = DICT[omni.lang] || DICT.zh;
+    var text = table[key] || DICT.zh[key] || key;
+    if (params) Object.keys(params).forEach(function (k) { text = text.split('{' + k + '}').join(String(params[k])); });
+    return text;
+  };
+  var $ = function (sel) { return document.querySelector(sel); };
+
+  // 每张图自己带一份笔迹：{ path, name, strokes: [ { r, points: [{x,y}…] } ] }，坐标都是原图像素
+  var files = [];
+  var selected = -1;
+  var block = 12;
+  var format = 'png';
+  var busy = false;
+
+  function paintLabels() {
+    document.querySelectorAll('[data-i18n]').forEach(function (el) { el.textContent = t(el.dataset.i18n); });
+    document.querySelectorAll('#formats .chip').forEach(function (el) { el.textContent = el.dataset.label; });
+    renderList();
+    renderBlock();
+  }
+
+  function showError(message) { $('#err').textContent = message || ''; }
+  function showOk(message) {
+    var el = $('#ok');
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+  }
+  function setBusy(on, text) {
+    busy = on;
+    $('#busy').classList.toggle('hidden', !on);
+    if (text) $('#busy-text').textContent = text;
+    renderButtons();
+  }
+  function renderButtons() {
+    var item = files[selected];
+    $('#paint').disabled = busy || !item;
+    $('#run').disabled = busy || !files.length;
+  }
+  function renderBlock() { $('#block-value').textContent = t('blockValue', { n: block }); }
+
+  // -------------------------------------------------------------------
+  // 文件列表
+  // -------------------------------------------------------------------
+  function renderList() {
+    var list = $('#list');
+    list.innerHTML = '';
+    if (!files.length) {
+      var empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = t('noFiles');
+      list.appendChild(empty);
+    }
+    var painted = 0;
+    files.forEach(function (file, index) {
+      if (file.strokes.length) painted += 1;
+      var row = document.createElement('div');
+      row.className = 'item';
+      row.setAttribute('aria-selected', String(index === selected));
+      var name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = (index + 1) + '. ' + file.name;
+      row.appendChild(name);
+      if (file.strokes.length) {
+        var tag = document.createElement('span');
+        tag.className = 'painted';
+        tag.textContent = t('strokeCount', { n: file.strokes.length });
+        row.appendChild(tag);
+      }
+      row.addEventListener('click', function () {
+        selected = index;
+        renderList();
+        renderButtons();
+      });
+      // 双击进涂抹窗口 —— 与参考工具的肌肉记忆一致
+      row.addEventListener('dblclick', function () {
+        selected = index;
+        renderList();
+        openPaint();
+      });
+      list.appendChild(row);
+    });
+    $('#count').textContent = files.length ? t('count', { n: files.length, painted: painted }) : '';
+  }
+
+  $('#pick').addEventListener('click', function () {
+    if (busy) return;
+    showError('');
+    showOk('');
+    omni.files.pick({ types: 'png,jpg,jpeg,webp', multiple: true }).then(function (picked) {
+      var paths = (picked.paths || []).slice(0, 40);
+      if (!paths.length) return null;
+      paths.forEach(function (path) {
+        if (files.some(function (f) { return f.path === path; })) return;
+        files.push({ path: path, name: path.split('/').pop(), strokes: [], image: null });
+      });
+      selected = 0;
+      renderList();
+      renderButtons();
+      return omni.log('files.picked', 'picked images', { n: paths.length });
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('pick.failed', e.message || String(e), {});
+    });
+  });
+
+  $('#clear-list').addEventListener('click', function () {
+    if (busy) return;
+    files = [];
+    selected = -1;
+    showError('');
+    showOk('');
+    renderList();
+    renderButtons();
+  });
+
+  // -------------------------------------------------------------------
+  // 读图
+  // -------------------------------------------------------------------
+  /** 图片按跨源方式加载：媒体服务带 ACAO:*，否则画布会被污染、导不出来。 */
+  function loadImage(url) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = function () { resolve(img); };
+      img.onerror = function () { reject(new Error('图片加载失败')); };
+      img.src = url;
+    });
+  }
+
+  function ensureImage(file) {
+    if (file.image) return Promise.resolve(file.image);
+    return omni.files.read({ path: file.path }).then(function (res) {
+      if (!res.dataUrl) throw new Error('读取失败');
+      file.dataUrl = res.dataUrl;
+      return loadImage(res.dataUrl);
+    }).then(function (img) {
+      file.image = img;
+      return img;
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // 马赛克核心：一份实现，预览与导出共用
+  // -------------------------------------------------------------------
+  /**
+   * 把 region（原图坐标）处的马赛克贴进 layer，只落在 strokes 覆盖的地方。
+   *
+   * `scale` 是 layer 像素 / 原图像素：预览传屏幕比例、导出传 1。块大小与画笔半径
+   * 都跟着同一个 scale 走，所以预览看起来什么样，导出来就是什么样（只是更清楚）。
+   *
+   * 掩膜与马赛克在**同一张画布**上完成：先画笔迹，再用 `source-in` 把马赛克贴上去 ——
+   * source-in 只保留"已有内容不透明处"的新像素，正好是"笔画 ∩ 马赛克"，
+   * 省掉一张全尺寸掩膜画布（4000×3000 的照片省下来就是 48MB）。
+   */
+  function buildMosaicLayer(image, region, sourcePerLayer, strokes) {
+    var lw = Math.max(1, Math.round(region.w * sourcePerLayer));
+    var lh = Math.max(1, Math.round(region.h * sourcePerLayer));
+    var layer = document.createElement('canvas');
+    layer.width = lw;
+    layer.height = lh;
+    var ctx = layer.getContext('2d');
+
+    // 1) 笔迹 → 掩膜。线宽取**每笔自己的半径**：中途调过画笔大小的话，早先那几笔
+    //    不能跟着变粗（那是"改了笔刷把已涂的地方也放大"的经典 bug）。
+    //    圆头圆角，涂出来才是连续的带子而不是一串圆点。
+    ctx.strokeStyle = '#fff';
+    ctx.fillStyle = '#fff';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    var toLayerX = function (x) { return (x - region.x) * sourcePerLayer; };
+    var toLayerY = function (y) { return (y - region.y) * sourcePerLayer; };
+    strokes.forEach(function (stroke) {
+      var pts = stroke.points;
+      if (!pts.length) return;
+      var r = Math.max(1, stroke.r * sourcePerLayer);
+      if (pts.length === 1) {
+        // 单击也要留下一个圆点：只 moveTo 不落笔的话"点一下"没反应
+        ctx.beginPath();
+        ctx.arc(toLayerX(pts[0].x), toLayerY(pts[0].y), r, 0, Math.PI * 2);
+        ctx.fill();
+        return;
+      }
+      ctx.lineWidth = r * 2;
+      ctx.beginPath();
+      ctx.moveTo(toLayerX(pts[0].x), toLayerY(pts[0].y));
+      for (var i = 1; i < pts.length; i += 1) ctx.lineTo(toLayerX(pts[i].x), toLayerY(pts[i].y));
+      ctx.stroke();
+    });
+
+    // 2) 马赛克：按块降采样（浏览器做面积平均）再关掉插值硬放大 → 方块
+    var blockLayerPx = Math.max(1, block * sourcePerLayer);
+    var bw = Math.max(1, Math.round(lw / blockLayerPx));
+    var bh = Math.max(1, Math.round(lh / blockLayerPx));
+    var small = document.createElement('canvas');
+    small.width = bw;
+    small.height = bh;
+    var sctx = small.getContext('2d');
+    sctx.imageSmoothingEnabled = true;
+    sctx.drawImage(image, region.x, region.y, region.w, region.h, 0, 0, bw, bh);
+    sctx.imageSmoothingEnabled = false;
+
+    // 3) 只保留掩膜内的马赛克
+    ctx.globalCompositeOperation = 'source-in';
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(small, 0, 0, bw, bh, 0, 0, lw, lh);
+    ctx.globalCompositeOperation = 'source-over';
+    return layer;
+  }
+
+  /** 所有笔迹的包围盒（按各自的半径外扩）—— 只在这块区域内做马赛克，别把整张图重算一遍。 */
+  function strokeBounds(strokes, width, height) {
+    var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    strokes.forEach(function (stroke) {
+      var pad = stroke.r + 2;
+      stroke.points.forEach(function (p) {
+        if (p.x - pad < minX) minX = p.x - pad;
+        if (p.y - pad < minY) minY = p.y - pad;
+        if (p.x + pad > maxX) maxX = p.x + pad;
+        if (p.y + pad > maxY) maxY = p.y + pad;
+      });
+    });
+    if (!isFinite(minX)) return null;
+    var x = Math.max(0, Math.floor(minX));
+    var y = Math.max(0, Math.floor(minY));
+    return {
+      x: x,
+      y: y,
+      w: Math.max(1, Math.min(width, Math.ceil(maxX)) - x),
+      h: Math.max(1, Math.min(height, Math.ceil(maxY)) - y),
+    };
+  }
+
+  function intersectRegion(a, b) {
+    var x = Math.max(a.x, b.x);
+    var y = Math.max(a.y, b.y);
+    var x2 = Math.min(a.x + a.w, b.x + b.w);
+    var y2 = Math.min(a.y + a.h, b.y + b.h);
+    if (x2 <= x || y2 <= y) return null;
+    return { x: x, y: y, w: x2 - x, h: y2 - y };
+  }
+
+  /**
+   * 视口覆盖的原图区域。
+   *
+   * 预览只在"看得见的部分"上算马赛克，而且层分辨率不超过原图（layerScale ≤ 1，见
+   * drawStage）——两者一起把每帧的分配量压在视口大小以内。少了这一条，放大到 8 倍
+   * 涂一笔就要分配一张 32000px 宽的画布，涂两下就崩。
+   */
+  function visibleRegion(img) {
+    var x0 = Math.max(0, Math.floor(-view.panX / view.scale));
+    var y0 = Math.max(0, Math.floor(-view.panY / view.scale));
+    var x1 = Math.min(img.naturalWidth, Math.ceil((view.w - view.panX) / view.scale));
+    var y1 = Math.min(img.naturalHeight, Math.ceil((view.h - view.panY) / view.scale));
+    if (x1 <= x0 || y1 <= y0) return null;
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  // -------------------------------------------------------------------
+  // 涂抹窗口
+  // -------------------------------------------------------------------
+  var view = { zoom: 1, panX: 0, panY: 0, scale: 1, fit: 1, w: 0, h: 0, dpr: 1 };
+  var brush = 48;
+  var drawing = null;
+
+  function stageCanvas() { return $('#stage'); }
+
+  function fitScale(img) {
+    var canvas = stageCanvas();
+    var rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return 1;
+    return Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+  }
+
+  function clampPan() {
+    var img = files[selected] && files[selected].image;
+    if (!img) return;
+    var iw = img.naturalWidth * view.scale;
+    var ih = img.naturalHeight * view.scale;
+    // 图比视口小就居中；比视口大就不许拖出空白（否则会对着空气涂）
+    view.panX = iw <= view.w ? (view.w - iw) / 2 : Math.min(0, Math.max(view.w - iw, view.panX));
+    view.panY = ih <= view.h ? (view.h - ih) / 2 : Math.min(0, Math.max(view.h - ih, view.panY));
+  }
+
+  function resizeStage() {
+    var canvas = stageCanvas();
+    var rect = canvas.getBoundingClientRect();
+    var dpr = window.devicePixelRatio || 1;
+    view.dpr = dpr;
+    view.w = Math.max(1, Math.round(rect.width));
+    view.h = Math.max(1, Math.round(rect.height));
+    canvas.width = Math.round(view.w * dpr);
+    canvas.height = Math.round(view.h * dpr);
+    var file = files[selected];
+    if (file && file.image) {
+      view.fit = fitScale(file.image);
+      view.scale = view.fit * view.zoom;
+      clampPan();
+    }
+    drawStage();
+  }
+
+  function drawStage() {
+    var file = files[selected];
+    var canvas = stageCanvas();
+    var ctx = canvas.getContext('2d');
+    ctx.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
+    ctx.clearRect(0, 0, view.w, view.h);
+    if (!file || !file.image) return;
+    var img = file.image;
+    ctx.save();
+    ctx.translate(view.panX, view.panY);
+    ctx.scale(view.scale, view.scale);
+    ctx.drawImage(img, 0, 0);
+    ctx.restore();
+
+    if (file.strokes.length) {
+      // 屏幕分辨率下算一遍马赛克：与导出同一个函数、同一份笔迹（颜色分布同源，
+      // 只是分辨率不同 —— 所以"所见即所得"）。范围取 笔迹包围盒 ∩ 视口，
+      // 层分辨率不超过原图：涂得再大也不会出现几百 MB 的临时画布。
+      var visible = visibleRegion(img);
+      var bounds = strokeBounds(file.strokes, img.naturalWidth, img.naturalHeight);
+      var region = visible && bounds ? intersectRegion(visible, bounds) : null;
+      if (region) {
+        var layerScale = Math.min(view.scale, 1);
+        var layer = buildMosaicLayer(img, region, layerScale, file.strokes);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(
+          layer,
+          view.panX + region.x * view.scale,
+          view.panY + region.y * view.scale,
+          region.w * view.scale,
+          region.h * view.scale,
+        );
+        ctx.imageSmoothingEnabled = true;
+      }
+    }
+    $('#zoom').textContent = Math.round(view.scale * 100) + '%';
+    $('#brush-value').textContent = t('brushValue', { n: brush });
+  }
+
+  function stagePoint(event) {
+    var rect = stageCanvas().getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left - view.panX) / view.scale,
+      y: (event.clientY - rect.top - view.panY) / view.scale,
+    };
+  }
+
+  function openPaint() {
+    var file = files[selected];
+    if (!file) return;
+    showError('');
+    setBusy(true, t('loading'));
+    ensureImage(file).then(function () {
+      $('#paint-view').classList.remove('hidden');
+      view.zoom = 1;
+      view.panX = 0;
+      view.panY = 0;
+      resizeStage();
+      return omni.log('paint.open', 'paint window', {
+        w: file.image.naturalWidth,
+        h: file.image.naturalHeight,
+      });
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('image.load.failed', e.message || String(e), {});
+    }).then(function () { setBusy(false); });
+  }
+
+  function closePaint() {
+    $('#paint-view').classList.add('hidden');
+    renderList();
+    renderButtons();
+  }
+
+  $('#paint').addEventListener('click', openPaint);
+  $('#p-done').addEventListener('click', closePaint);
+
+  $('#p-undo').addEventListener('click', function () {
+    var file = files[selected];
+    if (!file || !file.strokes.length) return;
+    file.strokes.pop();
+    drawStage();
+    renderList();
+  });
+  $('#p-clear').addEventListener('click', function () {
+    var file = files[selected];
+    if (!file) return;
+    file.strokes = [];
+    drawStage();
+    renderList();
+  });
+  $('#brush').addEventListener('input', function () {
+    brush = Number($('#brush').value);
+    drawStage();
+  });
+
+  function setZoom(next, anchorX, anchorY) {
+    var file = files[selected];
+    if (!file || !file.image) return;
+    var before = view.scale;
+    view.zoom = Math.min(8, Math.max(0.2, next));
+    view.scale = view.fit * view.zoom;
+    if (typeof anchorX === 'number') {
+      // 以指针为锚点缩放：手底下的那块内容不会跑掉
+      view.panX = anchorX - ((anchorX - view.panX) / before) * view.scale;
+      view.panY = anchorY - ((anchorY - view.panY) / before) * view.scale;
+    }
+    clampPan();
+    drawStage();
+  }
+
+  $('#p-zoom-in').addEventListener('click', function () { setZoom(view.zoom * 1.25); });
+  $('#p-zoom-out').addEventListener('click', function () { setZoom(view.zoom / 1.25); });
+  $('#p-fit').addEventListener('click', function () {
+    view.zoom = 1;
+    var file = files[selected];
+    if (file && file.image) {
+      view.fit = fitScale(file.image);
+      view.scale = view.fit;
+    }
+    clampPan();
+    drawStage();
+  });
+
+  stageCanvas().addEventListener('pointerdown', function (event) {
+    if (event.button !== 0) return;
+    var file = files[selected];
+    if (!file || !file.image) return;
+    event.preventDefault();
+    stageCanvas().setPointerCapture(event.pointerId);
+    var point = stagePoint(event);
+    drawing = { r: brush, points: [{ x: point.x, y: point.y }] };
+    file.strokes.push(drawing);
+    drawStage();
+  });
+  stageCanvas().addEventListener('pointermove', function (event) {
+    if (!drawing) return;
+    event.preventDefault();
+    var point = stagePoint(event);
+    drawing.points.push({ x: point.x, y: point.y });
+    drawStage();
+  });
+  var endStroke = function () {
+    if (drawing) {
+      renderList();
+      omni.log('paint.stroke', 'stroke', { points: drawing.points.length, r: drawing.r });
+    }
+    drawing = null;
+  };
+  stageCanvas().addEventListener('pointerup', endStroke);
+  stageCanvas().addEventListener('pointercancel', endStroke);
+  window.addEventListener('blur', endStroke);
+
+  stageCanvas().addEventListener('wheel', function (event) {
+    event.preventDefault();
+    if (event.ctrlKey || event.metaKey) {
+      var rect = stageCanvas().getBoundingClientRect();
+      setZoom(view.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), event.clientX - rect.left, event.clientY - rect.top);
+      return;
+    }
+    view.panX -= event.deltaX;
+    view.panY -= event.deltaY;
+    clampPan();
+    drawStage();
+  }, { passive: false });
+
+  window.addEventListener('resize', function () {
+    if (!$('#paint-view').classList.contains('hidden')) resizeStage();
+  });
+  window.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && !$('#paint-view').classList.contains('hidden')) closePaint();
+  });
+
+  // -------------------------------------------------------------------
+  // 导出
+  // -------------------------------------------------------------------
+  FORMATS.forEach(function (item) {
+    var chip = document.createElement('button');
+    chip.className = 'chip';
+    chip.dataset.id = item.id;
+    chip.dataset.label = item.label;
+    chip.setAttribute('aria-pressed', String(item.id === format));
+    chip.textContent = item.label;
+    chip.addEventListener('click', function () {
+      format = item.id;
+      document.querySelectorAll('#formats .chip').forEach(function (el) {
+        el.setAttribute('aria-pressed', String(el.dataset.id === item.id));
+      });
+    });
+    $('#formats').appendChild(chip);
+  });
+
+  $('#block').addEventListener('input', function () {
+    block = Number($('#block').value);
+    renderBlock();
+    if (!$('#paint-view').classList.contains('hidden')) drawStage();
+  });
+
+  /** 导出：按原分辨率重算马赛克，输出整张图。 */
+  function renderFull(file) {
+    return ensureImage(file).then(function (img) {
+      var width = img.naturalWidth;
+      var height = img.naturalHeight;
+      var out = document.createElement('canvas');
+      out.width = width;
+      out.height = height;
+      var ctx = out.getContext('2d');
+      if (format === 'jpeg') {
+        // JPEG 没有透明通道：先铺白底，否则带 alpha 的 PNG 会被合成到黑底上
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+      }
+      ctx.drawImage(img, 0, 0);
+      var region = strokeBounds(file.strokes, width, height);
+      if (region) {
+        // sourcePerLayer = 1：层就是原分辨率，1:1 贴回原图，像素不会被二次重采样
+        var layer = buildMosaicLayer(img, region, 1, file.strokes);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(layer, region.x, region.y);
+        ctx.imageSmoothingEnabled = true;
+      }
+      return out;
+    });
+  }
+
+  $('#run').addEventListener('click', function () {
+    if (busy) return;
+    if (!files.length) { showError(t('needPick')); return; }
+    var targets = files.filter(function (f) { return f.strokes.length > 0; });
+    if (!targets.length) { showError(t('nonePainted')); return; }
+    showError('');
+    showOk('');
+    setBusy(true, t('working', { done: 0, total: targets.length }));
+
+    var spec = FORMATS.filter(function (f) { return f.id === format; })[0];
+    var savedPaths = [];
+    var chain = Promise.resolve();
+    targets.forEach(function (file, index) {
+      chain = chain.then(function () {
+        setBusy(true, t('working', { done: index, total: targets.length }));
+        return renderFull(file).then(function (canvas) {
+          var stem = (file.name || 'image').replace(/\.[^.]+$/, '');
+          var dataUrl = canvas.toDataURL(spec.mime, 0.92);
+          return omni.files.save({ name: stem + '-mosaic.' + spec.ext, dataUrl: dataUrl });
+        }).then(function (res) {
+          savedPaths.push(res.path || '');
+        });
+      });
+    });
+
+    chain.then(function () {
+      setBusy(true, t('working', { done: targets.length, total: targets.length }));
+      var dir = (savedPaths[0] || '').split('/').slice(-2)[0] || '';
+      var skipped = files.length - targets.length;
+      showOk(t('saved', { n: savedPaths.length, dir: dir }) + (skipped ? ' ' + t('skipped', { n: skipped }) : ''));
+      return omni.log('export.done', 'mosaic exported', { n: savedPaths.length, skipped: skipped, format: format });
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('export.failed', e.message || String(e), {});
+    }).then(function () {
+      setBusy(false);
+      renderList();
+    });
+  });
+
+  omni.ready.then(function () {
+    paintLabels();
+    renderButtons();
+    omni.log('ready', 'mosaic ready', {});
+  });
+  omni.onCapabilities = function () {};
+})();
+</script>
+</body>
+</html>

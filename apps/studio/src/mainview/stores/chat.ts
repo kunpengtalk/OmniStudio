@@ -92,12 +92,23 @@ interface ChatState {
     reasoning?: string,
     citations?: KbCitation[],
   ) => void;
-  /** 删除单条消息（并清理它的统计）。 */
+  /**
+   * 兜底收尾：只在"这一轮还没有落点"时补一条错误消息。
+   *
+   * 与 `finalizeMessage` 的区别是**幂等**：调用方是在 RPC 返回 ok:false / 抛错时用它
+   * 收尾的，而此时正常路径推来的 `chatDone` 往往已经收过尾了 —— 直接 finalize 会
+   * 在界面上留下两个内容相同的 ⚠️ 气泡。
+   */
+  finalizeTurnIfPending: (
+    conversationId: number,
+    content: string,
+    reasoning?: string,
+    citations?: KbCitation[],
+  ) => void;
   removeMessage: (conversationId: number, messageId: number) => void;
   /** 重新生成：回退到目标消息之前（删除目标消息及之后的本地消息与统计）。 */
   rewindMessages: (conversationId: number, messageId: number) => void;
   upsertConversation: (conversation: Conversation) => void;
-  removeConversation: (id: number) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -326,6 +337,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
   },
 
+  finalizeTurnIfPending: (conversationId, content, reasoning, citations) => {
+    if (conversationId !== get().activeConversationId) return;
+    const last = get().activeMessages[get().activeMessages.length - 1];
+    /**
+     * 只在"这一轮还没有落点"时补一条。
+     *
+     * 收尾有两条独立路径：后端推的 `chatDone`（正常路径，带真实 messageId）与调用方的
+     * 兜底（RPC 抛错 / 后端回 ok:false）。两条都会到的时候，兜底再补一条就是界面上
+     * 两个 ⚠️ 气泡、内容还一样 —— 用户看到的像是"报错报了两次"。
+     * 判据很直接：末尾已经是一条有内容的助手消息 = 这一轮已经有落点了。
+     */
+    if (last?.role === "assistant" && last.content) return;
+    get().finalizeMessage(conversationId, Date.now(), content, reasoning, citations);
+  },
+
   removeMessage: (conversationId, messageId) => {
     if (conversationId !== get().activeConversationId) return;
     set((state) => {
@@ -366,16 +392,5 @@ export const useChatStore = create<ChatState>((set, get) => ({
         : [conversation, ...state.conversations];
       return { conversations };
     });
-  },
-
-  removeConversation: (id) => {
-    set((state) => ({
-      conversations: state.conversations.filter((c) => c.id !== id),
-      activeConversationId:
-        state.activeConversationId === id ? null : state.activeConversationId,
-      activeMessages: state.activeConversationId === id ? [] : state.activeMessages,
-      messageStats: state.activeConversationId === id ? {} : state.messageStats,
-      liveStats: state.activeConversationId === id ? {} : state.liveStats,
-    }));
   },
 }));

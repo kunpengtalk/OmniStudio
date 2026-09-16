@@ -42,13 +42,20 @@ export function useKbModelCandidates(
   base: string,
   apiKey: string,
   enabled = true,
+  /** 云服务商 id：非空时地址/密钥/模型候选都取该厂商。 */
+  providerId = "",
 ) {
   const trimmedBase = base.trim();
   const trimmedKey = apiKey.trim();
+  const trimmedProvider = providerId.trim();
   return useQuery({
-    queryKey: ["kb-model-candidates", source, trimmedBase],
+    queryKey: ["kb-model-candidates", source, trimmedBase, trimmedProvider],
     queryFn: () => {
-      const params = { base: trimmedBase || undefined, apiKey: trimmedKey || undefined };
+      const params = {
+        base: trimmedBase || undefined,
+        apiKey: trimmedKey || undefined,
+        providerId: trimmedProvider || undefined,
+      };
       return source === "embedding"
         ? rpcClient.kbEmbeddingModels(params)
         : rpcClient.kbRerankModels(params);

@@ -24,6 +24,7 @@ export type BackupScopeId =
   | "prompts"
   | "skills"
   | "memory"
+  | "notes"
   | "knowledge"
   | "media";
 
@@ -87,6 +88,13 @@ export const BACKUP_SCOPES: BackupScopeDef[] = [
     defaultOn: true,
   },
   {
+    // 笔记是用户自己写的正文（日记 / 随手记），丢了没法重算 —— 与设置、记忆同级，默认备份。
+    id: "notes",
+    group: "core",
+    tables: ["miniapp_notes"],
+    defaultOn: true,
+  },
+  {
     id: "knowledge",
     group: "large",
     tables: ["knowledge_bases", "knowledge_docs", "knowledge_chunks", "kb_ingest_jobs", "kb_events"],
@@ -96,7 +104,15 @@ export const BACKUP_SCOPES: BackupScopeDef[] = [
   {
     id: "media",
     group: "large",
-    tables: ["documents", "pages", "image_records", "video_records", "voice_records", "translation_records"],
+    tables: [
+      "documents",
+      "pages",
+      "image_records",
+      "video_records",
+      "music_records",
+      "voice_records",
+      "translation_records",
+    ],
     // 生成的音频 / 图片 / 视频动辄几个 GB：默认不备份，否则云端上传又慢又贵。
     defaultOn: false,
   },
@@ -214,6 +230,9 @@ export interface BackupFileRoot {
  */
 export const BACKUP_FILE_ROOTS: BackupFileRoot[] = [
   { id: "chat-images", scope: "chats", rel: "images/chat", defaultOn: true },
+  // 笔记附件必须自己占一条：它们挤在 `images/` 下，而那个根属于 media 作用域（默认不备份，
+  // 因为生成的音视频动辄几个 GB）。归类按前缀最长优先，"images/notes" 会先于 "images" 命中。
+  { id: "note-images", scope: "notes", rel: "images/notes", defaultOn: true },
   { id: "images", scope: "media", rel: "images", exclude: ["chat"], defaultOn: true },
   { id: "uploads", scope: "media", rel: "uploads", defaultOn: true },
   { id: "prompt-media", scope: "prompts", rel: "prompt-media", defaultOn: false },

@@ -59,7 +59,7 @@
 
 ## 生视频（source `video`，记录表 `video_records`）
 
-证据：`omi logs --source video --verbose`（`video.submit.failed` / `video.poll.failed` / `video.poll.timeout`）。
+证据：`omi logs --source video --verbose`（`video.submit.failed` / `video.poll.failed` / `video.poll.http` / `video.poll.timeout`）。
 
 | 原文 | 原因 | 修复 |
 | --- | --- | --- |
@@ -68,11 +68,14 @@
 | `这条任务的厂商已删除，无法继续查询上游状态` | 轮询时记录里的厂商行被删了 | 该任务无法续查，重新提交；轮询按记录里的 providerId 查上游，删厂商前先确认没有在途任务 |
 | `请先配置 MiniMax 服务地址` / `请先配置 Seedance（火山方舟）服务地址` / `请先配置 ComfyUI 服务地址（如 http://127.0.0.1:8188）` | 后端地址空（云端看厂商行的地址） | 云端：设置 →「模型云服务」补地址；ComfyUI：「视频」页填地址 |
 | `未找到 ComfyUI checkpoint，请先在 ComfyUI 下载 Wan 模型` / `未找到 ComfyUI CLIP（umt5）…` / `未找到 ComfyUI VAE（wan vae）…` | ComfyUI 缺 Wan 系列依赖模型 | 在 ComfyUI 侧下载 Wan 模型，并在应用里选好 ckpt / clip / vae |
-| `MiniMax 未返回 task_id，请检查服务配置` / `Seedance 未返回任务 id，请检查 API Key 与模型` | 鉴权或模型名不对 | 核对 key、模型 id、base（Seedance 需方舟的 endpoint 与模型） |
+| `MiniMax 未返回 task_id：…` / `Seedance 未返回任务 id，请检查 API Key 与模型` | 上游响应里没有任务 id（参数 / 模型名不对，或地址打的不是那家接口） | 核对 key、模型 id、base。MiniMax 的模型 id 只能是 `MiniMax-Hailuo-2.3` / `MiniMax-Hailuo-02` / `T2V-01` 这类官方名（`MiniMax-H3` 是自造名，MiniMax 不认）；Hailuo 系只吃 6 / 10 秒与 720P/768P/1080P |
+| `上游返回的是网页（HTML）而不是接口响应` / `上游没有 MiniMax 视频接口：/v1/video_generation 与 /v2/video_generation 都不存在` | 这个地址不是 MiniMax 视频服务（中转站 / 聚合站只做 OpenAI 那套，或地址填成了网站首页） | 换成 MiniMax 官方地址（`https://api.minimaxi.com` 或 `https://api.minimax.chat`，**不带** `/v1`），或换一个真有生视频能力的厂商；中转站不能用视频接口 |
 | `首帧图文件不存在，请重新选择` | 首帧图失效 | 重选 |
 | `上游任务不存在或已过期` | 上游把任务清了（隔太久才轮询） | 重新提交；避免跨天再回来看 |
-| `生成超时（超过 30 分钟），可重试或检查服务状态` | 上游长时间无终态 | 查上游控制台配额/排队；`video.poll.retry`(debug) 里有每次轮询的瞬时错误 |
-| 一直"生成中"但没有任何错误 | 轮询在重试（瞬时网络错）或上游排队 | `omi logs --source video --level debug` 看 `video.poll.retry`；超过 30 分钟会自动失败 |
+| `上游鉴权失败（401）：…` / `1004 login fail…（HTTP 200 + base_resp）` | 上游拒了密钥 —— MiniMax 有两种面貌：HTTP 401，或 **HTTP 200 + `base_resp.status_code` 1004** | 到「设置 → 模型云服务」重填该厂商的 API Key（过期 / 被吊销只能换新的）。日志里会有 `video.poll.http`(error)；记录保持「生成中」并显示原因，**宽限 3 分钟**（够去改设置，改好还能接着把成片取回来）后才标失败，不再挂到 30 分钟超时 |
+| `404 page not found：上游没有这个接口路径（当前 API 地址 …）` | API 地址填错：把文档里带版本的路径（`/v1`、`/v2`）一起填进了地址栏 | 把地址改成根地址（不带 `/v1`、`/v2`）；提交与轮询都会回这句提示，并剥掉误填的版本后缀。轮询这条同样有 3 分钟宽限 |
+| `生成超时（超过 30 分钟）…；最后一次查询失败：…` | 上游长时间无终态，或轮询一直在失败 | 查上游控制台配额 / 排队；`video.poll.http` 里有每次查询失败的上游原话 |
+| 一直"生成中"且 `video.poll.http` 反复出现 | 轮询在重试（上游 5xx / 网络抖动）—— 任务本身可能还在跑 | 看该事件的 `status` 与上游原话；连刷约 2 分钟后日志从 warn 升为 error，超过 30 分钟才自动失败 |
 
 ---
 

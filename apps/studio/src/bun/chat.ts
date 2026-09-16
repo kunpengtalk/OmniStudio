@@ -9,6 +9,9 @@ import { mergeSystemMessages, parseChatDelta } from "./chat-messages";
 import { computeTokenStats, parseMessageStats, type MessageStats } from "./chat-stats";
 import { estimateMessagesTokens, estimateTokens } from "../shared/token-estimate";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
+import { logEvent } from "./app-log";
+import { currentTime } from "./current-time";
+import { createChunkFlusher } from "./chunk-flusher";
 import { recordUsage } from "./stats";
 import { currentUpstream, providerLabelFor, recordUsageEvent } from "./usage";
 import { webSearch } from "./web-search";
@@ -17,6 +20,7 @@ import * as Served from "./model-servers";
 import { buildChatContext } from "./knowledge";
 import { memoryEnabled, memoryRecallSection } from "./memory";
 import type { KbCitation } from "../shared/knowledge";
+import { mainT } from "./i18n";
 
 export type ChatMessage = {
   id: number;
@@ -139,12 +143,32 @@ function emitStarted(payload: Parameters<StartedListener>[0]) {
 }
 
 /**
+ * 正在生成中的会话 → 本轮的停止句柄。
+ *
+ * 对话页此前没有停止能力：本地模型一轮可以跑几分钟，用户唯一的出路是等 600s 超时
+ * 或重启应用。Agent 页一直有停止（`stopAgentRun`），这里补上同一件事。
+ */
+const runningStreams = new Map<number, AbortController>();
+
+/**
+ * 停止某个会话正在进行的生成。保留已经生成的部分内容（与语音通话抢话打断同一套收尾
+ * 逻辑，只是文案上标明已停止），不影响其它会话。
+ */
+export function stopChatGeneration(conversationId: number): { ok: boolean } {
+  const controller = runningStreams.get(conversationId);
+  if (!controller) return { ok: false };
+  controller.abort();
+  return { ok: true };
+}
+
+/**
  * 建一条空的助手消息行，并**立刻**告诉界面它存在了（返回新行 id）。
  *
- * 发送 / 重新生成 / 翻译 / 语音通话四条路都要"先落行、再流式写回"，
+ * 发送 / 重新生成 / 翻译 / 语音通话 / Agent 回合五条路都要"先落行、再流式写回"，
  * 各自抄一遍插入语句就会各自漏掉那条推送 —— 收敛到这里，行与通知永远成对。
+ * （Agent 那边原来自己抄了一份，注释写着"收敛到这里"而实际没有。）
  */
-function insertAssistantMessage(conversationId: number): number {
+export function insertAssistantMessage(conversationId: number): number {
   const inserted = db
     .insert(messages)
     .values({ conversationId, role: "assistant", content: "" })
@@ -319,14 +343,9 @@ export function togglePinConversation(id: number): {
 } {
   const conv = db.select().from(conversations).where(eq(conversations.id, id)).get();
   if (!conv) return { ok: false, error: "Conversation not found" };
-  const pinned = conv.pinned ? 0 : 1;
-  const updated = db
-    .update(conversations)
-    .set({ pinned, updatedAt: Date.now() })
-    .where(eq(conversations.id, id))
-    .returning()
-    .get();
-  return { ok: true, conversation: updated as Conversation };
+  // 两个入口（对话侧栏的图钉 = 切换，Agent 侧栏菜单 = 显式置顶/取消）共用这一条写入路径：
+  // 以前各自写一遍 update，`updatedAt` 的语义稍有改动就会分叉。
+  return setConversationPinned(id, !conv.pinned);
 }
 
 export function setConversationPinned(id: number, pinned: boolean): {
@@ -363,7 +382,8 @@ export function forkConversation(
   const created = db
     .insert(conversations)
     .values({
-      title: `${source.title} · 分支`,
+      // 标题是落库的数据（会长期显示在侧栏），所以按界面语言生成而不是写死中文后缀。
+      title: `${source.title} · ${mainT("chat.forkTitleSuffix")}`,
       app: source.app,
       modelId: source.modelId,
       workspace: source.workspace,
@@ -549,23 +569,11 @@ export function maxOutputTokens(): number {
  * 构建携带当前时间的系统消息：模型自身不知道"今天是哪天"，不注入的话
  * 涉及"今天/最新/最近"的问题会按训练数据里的旧日期回答（如报出两年前的股价）。
  * 每次推理请求都注入在最前面，所有模型生效；仅注入 payload，不落库。
+ *
+ * 时间本身来自 `currentTime()`（与 Agent 共用一个来源），这里只负责措辞。
  */
 function currentTimeSystemMessage(): { role: string; content: string } {
-  const now = new Date();
-  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const date = now.toLocaleDateString("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    weekday: "long",
-    timeZone: tz,
-  });
-  const time = now.toLocaleTimeString("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-    timeZone: tz,
-  });
+  const { date, time, tz } = currentTime();
   return {
     role: "system",
     content:
@@ -661,49 +669,27 @@ async function streamAssistantReply(opts: {
     if (firstTokenAt == null) firstTokenAt = performance.now();
   };
 
-  /**
-   * 增量按帧批量下发：模型侧每个 token 一次 RPC 会让 webview 每秒重建几十次
-   * 消息数组、并整段重解析 Markdown。40ms 一批（≈25fps）保持"逐字"观感，
-   * 同时把 IPC 与前端重渲染次数降一个数量级。
-   */
-  const FLUSH_INTERVAL_MS = 40;
-  let pendingContent = "";
-  let pendingReasoning = "";
-  let flushTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const flushChunks = () => {
-    if (flushTimer) {
-      clearTimeout(flushTimer);
-      flushTimer = null;
-    }
-    if (pendingContent) {
-      emitChunk({ conversationId, messageId: assistantId, delta: pendingContent, kind: "content" });
-      pendingContent = "";
-    }
-    if (pendingReasoning) {
-      emitChunk({ conversationId, messageId: assistantId, delta: pendingReasoning, kind: "reasoning" });
-      pendingReasoning = "";
-    }
-  };
-  const scheduleFlush = () => {
-    if (!flushTimer) flushTimer = setTimeout(flushChunks, FLUSH_INTERVAL_MS);
-  };
+  /** 增量按帧批量下发（40ms，见 chunk-flusher.ts 的说明与常量）。 */
+  const flusher = createChunkFlusher({
+    conversationId,
+    messageId: assistantId,
+    emit: emitChunk,
+  });
+  const flushChunks = () => flusher.flushNow();
 
   const appendContent = (delta: string) => {
     if (!delta) return;
     markFirstToken();
     full += delta;
-    pendingContent += delta;
+    flusher.pushContent(delta);
     // 即时消费方（语音通话边生成边合成）仍按 token 回调，不走批量缓冲。
     opts.onDelta?.(delta);
-    scheduleFlush();
   };
   const appendReasoning = (delta: string) => {
     if (!delta) return;
     markFirstToken();
     reasoning += delta;
-    pendingReasoning += delta;
-    scheduleFlush();
+    flusher.pushReasoning(delta);
   };
 
   /**
@@ -788,9 +774,16 @@ async function streamAssistantReply(opts: {
     return stats;
   };
 
-  const requestSignal = opts.signal
-    ? AbortSignal.any([AbortSignal.timeout(600_000), opts.signal])
-    : AbortSignal.timeout(600_000);
+  // 本轮的停止句柄：用户按「停止」时只打断当前这一次生成（见 stopChatGeneration）。
+  // 注册在这里而不是函数开头 —— 上面的早退分支不产生可中断的请求，注册了反而留下
+  // 一个永远不会被清掉的条目。
+  const internal = new AbortController();
+  runningStreams.set(conversationId, internal);
+  const requestSignal = AbortSignal.any([
+    AbortSignal.timeout(600_000),
+    internal.signal,
+    ...(opts.signal ? [opts.signal] : []),
+  ]);
   try {
     const res = await fetch(`${base}/v1/chat/completions`, {
       method: "POST",
@@ -861,12 +854,21 @@ async function streamAssistantReply(opts: {
     flushChunks();
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // 被外部中断（语音通话抢话打断）：保留已生成的部分内容，不当作错误处理。
-    if (opts.signal?.aborted) {
+    // 被打断：两类来源，都保留已生成的部分内容、不当作错误处理 ——
+    //   1. 外部 signal（语音通话抢话打断，`opts.signal`）；
+    //   2. 用户在本轮点了「停止」（内部句柄）。
+    // 区别只在文案：点停止的人需要看到"确实停了"，而被抢话的人不需要多一行字。
+    if (opts.signal?.aborted || internal.signal.aborted) {
+      const stoppedByUser = internal.signal.aborted && !opts.signal?.aborted;
+      const content = stoppedByUser
+        ? full
+          ? `${full}\n\n${mainT("chat.stopped")}`
+          : mainT("chat.stopped")
+        : full;
       const partial = collectStats();
       db.update(messages)
         .set({
-          content: full,
+          content,
           reasoning: reasoning || null,
           tokens: partial.tokens,
           stats: JSON.stringify(partial),
@@ -878,16 +880,25 @@ async function streamAssistantReply(opts: {
         .set({ updatedAt: Date.now() })
         .where(eq(conversations.id, conversationId))
         .run();
+      if (stoppedByUser) {
+        logEvent({
+          level: "info",
+          source: "chat",
+          event: "chat.stream.stopped",
+          message: "用户停止了本轮生成",
+          detail: { conversationId, assistantId, charsStreamed: full.length },
+        });
+      }
       flushChunks();
       emitChatStats({ conversationId, messageId: assistantId, ...partial });
       emitDone({
         conversationId,
         messageId: assistantId,
-        content: full,
+        content,
         reasoning: reasoning || undefined,
         citations: opts.citations,
       });
-      return { ok: true, content: full };
+      return { ok: true, content };
     }
     // 把失败原因持久化到助手消息，避免刷新会话后错误反馈被清空。
     db.update(messages)
@@ -898,11 +909,30 @@ async function streamAssistantReply(opts: {
       .set({ updatedAt: Date.now() })
       .where(eq(conversations.id, conversationId))
       .run();
+    // 失败现场进统一日志：这里拿着上游地址、模型名与已生成的字数，正是排查需要的三样东西
+    // （「服务没起来」和「模型中途挂了」在前端看起来都是同一个 ⚠️ 气泡）。
+    logEvent({
+      level: "error",
+      source: "chat",
+      event: "chat.stream.failed",
+      message: `对话生成失败：${msg}`,
+      detail: {
+        conversationId,
+        assistantId,
+        model,
+        base,
+        charsStreamed: full.length,
+        reasoningChars: reasoning.length,
+      },
+    });
     flushChunks();
     emitDone({ conversationId, messageId: assistantId, content: "", reasoning: reasoning || undefined, error: msg });
     return { ok: false, error: msg, content: "" };
   } finally {
-    if (flushTimer) clearTimeout(flushTimer);
+    flusher.dispose();
+    // 只在还是自己那一轮时才摘：同一会话不可能并发两轮，但重新生成会紧接着再进一次，
+    // 无脑 delete 会把新一轮的句柄一起摘掉，「停止」就失效了。
+    if (runningStreams.get(conversationId) === internal) runningStreams.delete(conversationId);
   }
 
   const stats = collectStats();
@@ -940,17 +970,54 @@ export async function sendMessage(
   opts: { webSearch?: boolean; files?: { name: string; content: string }[]; kbIds?: number[] } = {},
 ): Promise<{ ok: boolean; error?: string }> {
   const conv = db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
-  if (!conv) return { ok: false, error: "Conversation not found" };
-  if (!content.trim() && images.length === 0) return { ok: false, error: "Empty message" };
+  if (!conv) {
+    // 这条和下面那条空消息：早退但**没有**任何终态事件，前端的 `setStreaming(true)`
+    // 就再也没人解除（界面停在「生成中」，输入框锁死）。所以除了记日志，还要发一条
+    // 带 error 的 chatDone —— 用户看到的是"一条错误气泡"，而不是"发了没反应"。
+    logEvent({
+      level: "warn",
+      source: "chat",
+      event: "chat.send.rejected",
+      message: "会话不存在，发送被拒绝",
+      detail: { conversationId },
+    });
+    emitDone({ conversationId, messageId: Date.now(), content: "", error: "Conversation not found" });
+    return { ok: false, error: "Conversation not found" };
+  }
+  if (!content.trim() && images.length === 0) {
+    logEvent({
+      level: "debug",
+      source: "chat",
+      event: "chat.send.rejected",
+      message: "空消息，发送被拒绝",
+      detail: { conversationId },
+    });
+    emitDone({ conversationId, messageId: Date.now(), content: "", error: "Empty message" });
+    return { ok: false, error: "Empty message" };
+  }
 
   // 请求里要填本地服务器实际认的 id（MLX 是解析后的路径，见 getChatRequestModelId）
   const model = getChatRequestModelId();
   if (!model) {
+    logEvent({
+      level: "warn",
+      source: "chat",
+      event: "chat.send.no_model",
+      message: "没有可用的对话模型，发送被拒绝",
+      detail: { conversationId },
+    });
     emitDone({ conversationId, messageId: Date.now(), content: "", error: "No model configured" });
     return { ok: false, error: "No model configured" };
   }
   const base = getChatBaseUrl();
   if (!base) {
+    logEvent({
+      level: "warn",
+      source: "chat",
+      event: "chat.send.no_server",
+      message: "没有可用的推理服务地址，发送被拒绝",
+      detail: { conversationId },
+    });
     emitDone({
       conversationId,
       messageId: Date.now(),

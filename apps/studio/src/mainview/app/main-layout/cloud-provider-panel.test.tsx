@@ -12,6 +12,8 @@ import { Window } from "happy-dom";
  *   3. 拉不到清单时打开空弹框、把上游报错原文（`获取失败：密钥无效或没有权限（HTTP 401）`）
  *      挂在清单区 —— 密钥过期是配置状态，不是页面错误：现在不弹框，只在模型卡片里
  *      留一行中性结论，原文交给 logs/app.log。
+ *   4. 模型列用「max-w-0 + 省略号」压宽度，一列 `stepaudio-3-asr-max` / `stepaudio-2.5-asr`
+ *      全成了 `stepaudi…` —— 模型 id 是唯一标识，现在任何情况下都完整显示（换行不截断）。
  */
 
 // happy-dom 提供真实 DOM（Radix 的 Dialog 需要），afterAll 还原全局。
@@ -58,8 +60,9 @@ for (const key of DOM_GLOBALS) {
 }
 (globalThis as unknown as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
-// 已配置的两个模型：一个对话、一个嵌入。
+// 已配置的两个模型：一个对话（带别名，用来盯住「别名不许把 id 挤掉」）、一个嵌入。
 const HAVE = ["Qwen/Qwen3-8B", "BAAI/bge-m3"];
+const HAVE_ROWS = [{ id: HAVE[0]!, name: "Qwen3 8B · 别名" }, { id: HAVE[1]! }];
 // 服务商 /v1/models 返回的清单（含上面两个 + 三个还没加的）。
 const REMOTE = [
   "Qwen/Qwen3-8B",
@@ -70,6 +73,8 @@ const REMOTE = [
 ];
 
 const updates: { id: string; models?: { id: string }[] }[] = [];
+/** 「设为默认模型」下发的参数：必须带 providerId，见对应用例。 */
+const selectCalls: { type: string; value: string; providerId?: string }[] = [];
 
 /** 让单个用例能改「拉取模型列表」的返回（成功 / 失败两种路径都要能跑到）。 */
 let remoteResult: { ok: boolean; models: string[]; error?: string } = { ok: true, models: REMOTE };
@@ -84,7 +89,7 @@ mock.module("@lib/rpc", () => ({
           vendor: "硅基流动",
           baseUrl: "https://api.siliconflow.cn/v1",
           apiKey: "sk-test",
-          models: HAVE.map((id) => ({ id })),
+          models: HAVE_ROWS,
           createdAt: 0,
           updatedAt: 0,
         },
@@ -98,7 +103,10 @@ mock.module("@lib/rpc", () => ({
       return { ok: true };
     },
     checkConnection: async () => ({ connected: true }),
-    selectChatModel: async () => ({ ok: true }),
+    selectChatModel: async (params: { type: string; value: string; providerId?: string }) => {
+      selectCalls.push(params);
+      return { ok: true };
+    },
     openGatewayDocs: async () => ({ ok: true }),
   },
 }));
@@ -318,6 +326,77 @@ test("改完密钥重新拉取：上一行结论消失，弹框正常打开", as
   } finally {
     remoteResult = { ok: true, models: REMOTE };
   }
+});
+
+test("设为默认模型：把所属厂商一起带上", async () => {
+  // 网关只往**默认厂商**发云端请求。星标按钮不带 providerId 时，面板只是把模型名记下来，
+  // 地址与密钥还停在另一家 —— 用户看到的就是「应用里能选的模型，用起来说模型不存在」。
+  selectCalls.length = 0;
+  const view = await renderPanel();
+
+  const star = view.container.querySelector<HTMLButtonElement>('[data-set-default="Qwen/Qwen3-8B"]');
+  expect(star).not.toBeNull();
+  await act(async () => {
+    star!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(selectCalls).toEqual([
+    { type: "api", value: "Qwen/Qwen3-8B", providerId: "siliconflow" },
+  ]);
+
+  await view.unmount();
+});
+
+test("模型列里的 id 一定完整：换行不省略，也不靠悬浮提示兜底", async () => {
+  const view = await renderPanel();
+
+  // 带别名的条目：别名一行、id 一行，id 一个字都不少
+  const named = view.container.querySelector<HTMLElement>('[data-model-id="Qwen/Qwen3-8B"]');
+  expect(named).not.toBeNull();
+  expect(named!.textContent).toContain("Qwen/Qwen3-8B");
+  // 「max-w-0 + truncate」就是上一版把 id 压成 stepaudi… 的那套写法，别回来
+  expect(named!.className).not.toContain("max-w-0");
+  // 这一列里不许再出现省略号 —— 别名长了也是换行
+  for (const el of named!.querySelectorAll<HTMLElement>("span")) {
+    expect(el.className).not.toContain("truncate");
+  }
+  const idLine = [...named!.querySelectorAll<HTMLElement>("span")].find(
+    (s) => s.textContent === "Qwen/Qwen3-8B",
+  );
+  expect(idLine).toBeDefined();
+  // 换行靠 overflow-wrap:anywhere：列被压窄时在 id 内部断开，而不是切掉后半截
+  expect(idLine!.className).toContain("wrap-anywhere");
+  expect(idLine!.className).toContain("font-mono");
+
+  // 没有别名的条目：id 就是正文，同样完整
+  const plain = view.container.querySelector<HTMLElement>('[data-model-id="BAAI/bge-m3"]');
+  expect(plain!.textContent).toBe("BAAI/bge-m3");
+  const plainLine = plain!.querySelector<HTMLElement>("span");
+  expect(plainLine!.className).toContain("wrap-anywhere");
+  expect(plainLine!.className).not.toContain("truncate");
+
+  await view.unmount();
+});
+
+test("挑选清单里的 id 也不省略：分组前缀与行内后缀各自完整", async () => {
+  const view = await renderPanel();
+  await openPicker(view.container);
+
+  // 行里只留后缀，前缀由分组行给出 —— 两截都不许截断，合起来才是完整 id
+  const row = rowOf("FunAudioLLM/CosyVoice2-0.5B")!;
+  const suffix = row.querySelector<HTMLElement>("span.font-mono")!;
+  expect(suffix.textContent).toBe("CosyVoice2-0.5B");
+  expect(suffix.className).toContain("wrap-anywhere");
+  expect(suffix.className).not.toContain("truncate");
+
+  const prefix = [...document.body.querySelectorAll<HTMLElement>("span")].find(
+    (s) => s.textContent === "FunAudioLLM",
+  );
+  expect(prefix).toBeDefined();
+  expect(prefix!.className).not.toContain("truncate");
+
+  await view.unmount();
 });
 
 test("逐个添加：点「+」只把那个模型加进去，已有条目不丢", async () => {

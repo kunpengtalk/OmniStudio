@@ -4,6 +4,7 @@ import { findLiveDataDir, resolveDataDir } from "./data-dir";
 type AppModules = {
   modelStore: typeof import("../bun/model-store");
   settings: typeof import("../bun/db/settings");
+  cloudProviders: typeof import("../bun/cloud-providers");
 };
 
 let loaded: AppModules | null = null;
@@ -21,15 +22,16 @@ async function appModules(): Promise<AppModules> {
   const dataDir = (await findLiveDataDir()) ?? resolveDataDir();
   process.env.OMNI_DATA_DIR = dataDir;
   process.env.OMNI_DB_PATH = join(dataDir, "omni-studio.db");
-  const [modelStore, settings] = await Promise.all([
+  const [modelStore, settings, cloudProviders] = await Promise.all([
     import("../bun/model-store"),
     import("../bun/db/settings"),
+    import("../bun/cloud-providers"),
   ]);
   // 数据层已经加载了，顺手按设置接上代理：CLI 的远端备份 / 版本检查等请求也认它
   // （见 bun/proxy.ts）。放在这里而不是入口，是为了不把数据层拖进 `omi backup`。
   const { installProxy } = await import("../bun/proxy");
   installProxy();
-  loaded = { modelStore, settings };
+  loaded = { modelStore, settings, cloudProviders };
   return loaded;
 }
 
@@ -63,4 +65,20 @@ export async function activeModelPathFallback(): Promise<string> {
 export async function servedNameForModelPathFallback(path: string): Promise<string> {
   const { modelStore } = await appModules();
   return modelStore.servedNameForModelPath(path);
+}
+
+/** 云服务商全表 + 当前激活项（与控制通道 `cloudProviders` 同一份数据）。 */
+export async function cloudProvidersFallback(): Promise<
+  ReturnType<typeof import("../bun/cloud-providers")["listCloudProviders"]>
+> {
+  const { cloudProviders } = await appModules();
+  return cloudProviders.listCloudProviders();
+}
+
+/** 切换默认（激活）云服务商：网关只往它发云端请求。 */
+export async function activateCloudProviderFallback(
+  id: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const { cloudProviders } = await appModules();
+  return cloudProviders.activateCloudProvider(id);
 }

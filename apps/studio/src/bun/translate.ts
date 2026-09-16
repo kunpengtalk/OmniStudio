@@ -6,6 +6,7 @@ import { getChatModelLabel, getChatRequestModelId } from "./chat-model";
 import { ensureServerReady, getChatBaseUrl, maxOutputTokens } from "./chat";
 import { recordUsage } from "./stats";
 import { currentUpstream, providerLabelFor, recordUsageEvent } from "./usage";
+import { logEvent } from "./app-log";
 import { estimateTokens } from "../shared/token-estimate";
 import { translationLangLabel } from "../shared/translate";
 
@@ -75,8 +76,18 @@ export async function runTranslation(params: {
   save?: boolean;
 }): Promise<{ text?: string; id?: number; error?: string }> {
   const text = (params.text ?? "").trim();
-  if (!text) return { error: "待翻译文本不能为空" };
-  if (!params.targetLang) return { error: "未指定目标语言" };
+  if (!text || !params.targetLang) {
+    // 这两个是"接口被错误调用"，不是翻译失败 —— 记 warn 就够了，但别静默：
+    // 同传那条链路一次发几十个请求，参数错时会在这里刷出一片错误。
+    logEvent({
+      level: "warn",
+      source: "translate",
+      event: "translate.request.rejected",
+      message: !text ? "待翻译文本为空" : "未指定目标语言",
+      detail: { engine: params.engine ?? "model", targetLang: params.targetLang ?? null },
+    });
+    return { error: !text ? "待翻译文本不能为空" : "未指定目标语言" };
+  }
 
   if (params.engine === "google") {
     try {
@@ -99,7 +110,22 @@ export async function runTranslation(params: {
         .get();
       return { text: content, id: record.id };
     } catch (e) {
-      return { error: e instanceof Error ? e.message : String(e) };
+      const message = e instanceof Error ? e.message : String(e);
+      // 谷歌免费接口是最容易被网络环境挡住的一条路（墙 / 代理没配对），
+      // 而 `_translate` source 此前一次都没被用过 —— 用户只说"翻译没反应"。
+      logEvent({
+        level: "error",
+        source: "translate",
+        event: "translate.google.failed",
+        message,
+        detail: {
+          sourceLang: params.sourceLang ?? "auto",
+          targetLang: params.targetLang,
+          chars: text.length,
+          error: e,
+        },
+      });
+      return { error: message };
     }
   }
 
@@ -108,12 +134,28 @@ export async function runTranslation(params: {
   const modelLabel = getChatModelLabel() || model;
   const base = getChatBaseUrl();
   if (!model || !base) {
+    logEvent({
+      level: "error",
+      source: "translate",
+      event: "translate.model.not_configured",
+      message: !model ? "未配置模型" : "未配置推理服务器",
+      detail: { hasModel: Boolean(model), hasBase: Boolean(base) },
+    });
     return { error: !model ? "未配置模型" : "未配置推理服务器" };
   }
 
   if (getSetting("SERVER_MODE") === "local") {
     const ready = await ensureServerReady();
-    if (!ready.ok) return { error: ready.error || "推理服务器未就绪" };
+    if (!ready.ok) {
+      logEvent({
+        level: "error",
+        source: "translate",
+        event: "translate.server.not_ready",
+        message: ready.error || "推理服务器未就绪",
+        detail: { model: modelLabel },
+      });
+      return { error: ready.error || "推理服务器未就绪" };
+    }
   }
 
   const sourceLabel =
@@ -159,6 +201,19 @@ export async function runTranslation(params: {
             }
           })()
         : `HTTP ${res.status}`;
+      logEvent({
+        level: "error",
+        source: "translate",
+        event: "translate.model.failed",
+        message: msg,
+        detail: {
+          status: res.status,
+          model: modelLabel,
+          base,
+          targetLang: params.targetLang,
+          chars: text.length,
+        },
+      });
       return { error: msg };
     }
 
@@ -180,7 +235,16 @@ export async function runTranslation(params: {
       outputTokens: json.usage?.completion_tokens ?? estimateTokens(content),
       estimated: json.usage == null,
     });
-    if (!content) return { error: "模型未返回译文" };
+    if (!content) {
+      logEvent({
+        level: "error",
+        source: "translate",
+        event: "translate.model.empty",
+        message: "模型未返回译文",
+        detail: { model: modelLabel, targetLang: params.targetLang, chars: text.length },
+      });
+      return { error: "模型未返回译文" };
+    }
 
     if (params.save === false) return { text: content };
     const record = db

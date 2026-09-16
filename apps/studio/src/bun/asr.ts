@@ -11,6 +11,9 @@ import {
 } from "./voice";
 import { ASR_PRESETS, DEFAULT_ASR_MODEL_FILE } from "../shared/modelscope";
 import * as CloudProviders from "./cloud-providers";
+import { normalizeApiBase } from "../shared/cloud-providers";
+import { audioVendorFor } from "../shared/tts-voices";
+import { logEvent } from "./app-log";
 import { runAsrAudioCpp } from "./asr-audiocpp";
 import { getWhisperEngineInfo, resolveWhisperBinary } from "./whisper-engine";
 import {
@@ -425,6 +428,128 @@ async function runCli(
 // Remote OpenAI-compatible transcription (verbose_json, optional diarization)
 // ---------------------------------------------------------------------------
 
+/**
+ * 阶跃（StepFun）的语音识别走得不是 OpenAI 兼容的那个 multipart 端点。
+ *
+ * 开放平台把它分成两类：`/v1/audio/transcriptions`（只能传 mp3/pcm/ogg/wav，
+ * 且仅 `stepaudio-2.5-asr` / `step-asr`）和 `/v1/audio/asr/sse`（base64 + SSE 增量
+ * 返回，**StepAudio 3 ASR 只在这里**）。另外那个异步的 `/v1/audio/asr/file/submit`
+ * 要求音频是公网可访问的 URL —— 桌面端没有可被外网下载的地址，用不了。
+ * 所以这一步统一走 SSE：它覆盖全部模型，一次提交、流式收文本。
+ */
+const STEPFUN_ASR_MODEL = "stepaudio-3-asr-max";
+
+/** SSE 端点的容器格式（键是文件扩展名）：`pcm` 必填 rate/bits/channel，其余选填。 */
+const STEPFUN_ASR_FORMATS: Record<string, string> = {
+  ".wav": "wav",
+  ".mp3": "mp3",
+  ".m4a": "m4a",
+  ".ogg": "ogg",
+  ".opus": "ogg",
+  ".pcm": "pcm",
+};
+
+/**
+ * 读 SSE 流直到 `transcript.text.done`（或 `error`）。
+ *
+ * 用流式读而不是 `res.text()`：后者要等服务端关连接 —— 上游不主动关就一直挂到
+ * 我们的超时，几分钟的音频会表现为"卡住"。收到 done 就取消读取、断开连接。
+ */
+async function readStepFunAsrStream(res: Response): Promise<string> {
+  if (!res.body) throw new Error("阶跃语音识别没有返回数据流");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let deltas = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice("data:".length).trim();
+        if (!payload || payload === "[DONE]") continue;
+        let ev: Record<string, unknown>;
+        try {
+          ev = JSON.parse(payload) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        const type = String(ev.type ?? "");
+        if (type === "transcript.text.delta") {
+          deltas += String(ev.delta ?? "");
+        } else if (type === "transcript.text.done") {
+          // done 里的 text 是定稿全文（delta 只是增量），有它就用它。
+          return String(ev.text ?? "").trim() || deltas.trim();
+        } else if (type === "error") {
+          throw new Error(`阶跃语音识别失败：${String(ev.message ?? "未知错误")}`);
+        }
+      }
+    }
+  } finally {
+    // 已拿到结果 / 抛错时都要主动断开，别把连接留在那儿。
+    try {
+      await reader.cancel();
+    } catch {
+      // 连接已由服务端关闭
+    }
+  }
+  return deltas.trim();
+}
+
+async function transcribeStepFun(input: {
+  base: string;
+  apiKey: string;
+  audioPath: string;
+  model?: string;
+  language?: string | null;
+}): Promise<{ text: string; segments: AsrSegment[] }> {
+  const ext = path.extname(input.audioPath).toLowerCase();
+  const format = STEPFUN_ASR_FORMATS[ext];
+  if (!format) {
+    throw new Error(`阶跃语音识别不支持 ${ext || "该"} 格式（可用 wav / mp3 / m4a / ogg / pcm）`);
+  }
+  const bytes = await Bun.file(input.audioPath).arrayBuffer();
+  const formatCfg: Record<string, unknown> = { type: format };
+  if (format === "pcm") {
+    // 裸 PCM 没有头，采样参数必须显式给：前端的录音统一是 16k / 16bit / 单声道。
+    Object.assign(formatCfg, { codec: "pcm_s16le", rate: 16000, bits: 16, channel: 1 });
+  }
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  };
+  if (input.apiKey && input.apiKey !== "EMPTY") headers.Authorization = `Bearer ${input.apiKey}`;
+
+  const res = await fetch(`${normalizeApiBase(input.base)}/audio/asr/sse`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      audio: {
+        data: Buffer.from(bytes).toString("base64"),
+        input: {
+          transcription: {
+            model: input.model?.trim() || STEPFUN_ASR_MODEL,
+            enable_itn: true,
+            ...(input.language ? { language: input.language } : {}),
+          },
+          format: formatCfg,
+        },
+      },
+    }),
+    signal: AbortSignal.timeout(300_000),
+  });
+  if (!res.ok) throw new Error(`ASR 请求失败（${res.status}）: ${(await res.text()).slice(0, 300)}`);
+  const text = await readStepFunAsrStream(res);
+  if (!text) throw new Error("转写结果为空");
+  // SSE 只回文本（时间戳 / 说话人只在那条异步文件接口上），没有分段可给。
+  return { text, segments: [] };
+}
+
 async function postRemoteForm(input: {
   base: string;
   apiKey: string;
@@ -450,7 +575,9 @@ async function postRemoteForm(input: {
   const headers: Record<string, string> = {};
   if (input.apiKey && input.apiKey !== "EMPTY") headers.Authorization = `Bearer ${input.apiKey}`;
 
-  const res = await fetch(`${input.base}/v1/audio/transcriptions`, {
+  // 地址规整：服务商的 baseUrl 自带 `/v1`，这里再拼一遍 `/v1/audio/...` 会得到
+  // `/v1/v1/audio/transcriptions`（稳定 404，报错来自上游网关，看不出是拼错了）。
+  const res = await fetch(`${normalizeApiBase(input.base)}/audio/transcriptions`, {
     method: "POST",
     body: form,
     headers,
@@ -487,6 +614,22 @@ async function transcribeRemote(
     : getSetting("VLLM_API_KEY");
   const m =
     model?.trim() || (configured ? provider.model : "") || undefined;
+
+  // 阶跃走自己的端点（见 transcribeStepFun）：它那个 OpenAI 兼容的转写端点既不支持
+  // StepAudio 3 ASR，也不给时间戳。说话人分离只在他家的异步文件接口上（要公网 URL），
+  // 这里如实不做 —— 界面上的"说话人"标记会保持空白，而不是给一个假的。
+  if (configured && audioVendorFor({ providerId: provider.providerId, baseUrl: base }) === "stepfun") {
+    if (diarize) {
+      logEvent({
+        source: "app",
+        event: "asr.diarize_unsupported",
+        message: "阶跃语音识别不支持说话人分离（需要公网可访问的音频 URL），本次按普通转写处理",
+        detail: { providerId: provider.providerId, model: m },
+      });
+    }
+    const r = await transcribeStepFun({ base, apiKey, audioPath, model: m, language });
+    return buildTranscript(r.text, r.segments, "remote");
+  }
 
   try {
     const r = await postRemoteForm({ base, apiKey, audioPath, model: m, diarize, verbose: true, language });

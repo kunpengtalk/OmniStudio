@@ -48,6 +48,30 @@ export const settings = sqliteTable("settings", {
   value: text("value").notNull(),
 });
 
+/**
+ * 网关 API Key：一个网关可挂多把 Key，各带名字，可单独启用 / 停用 / 删除。
+ *
+ * `key` 落盘是密文（与 settings 里的敏感槽位走同一套 AES-256-GCM，见 secrets.ts）；
+ * 停用（`enabled = 0`）的 Key 立即失效但保留在列表里，方便以后重新启用。
+ */
+export const gatewayKeys = sqliteTable(
+  "gateway_keys",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    key: text("key").notNull(),
+    enabled: int("enabled").notNull().default(1),
+    createdAt: int("created_at")
+      .$defaultFn(() => Date.now())
+      .notNull(),
+  },
+  (t) => ({
+    createdIdx: index("gateway_keys_created_at_idx").on(t.createdAt),
+  }),
+);
+
+export type GatewayKeyRow = typeof gatewayKeys.$inferSelect;
+
 export const conversations = sqliteTable("conversations", {
   id: int().primaryKey({ autoIncrement: true }),
   title: text("title").notNull(),
@@ -158,6 +182,8 @@ export const videoRecords = sqliteTable("video_records", {
   backend: text("backend").$type<"comfyui" | "cloud" | "minimax" | "seedance">(),
   /** 云端提交时使用的服务商 id：轮询按它去找上游，用户中途换厂商也不影响在途任务。 */
   providerId: text("provider_id"),
+  /** ComfyUI 提交时的服务地址：同 providerId 的道理 —— 用户改地址后在途任务仍要问对服务器。 */
+  comfyBase: text("comfy_base"),
   model: text("model"),
   prompt: text("prompt"),
   negativePrompt: text("negative_prompt"),
@@ -176,6 +202,68 @@ export const videoRecords = sqliteTable("video_records", {
   firstFramePath: text("first_frame_path"),
   /** 成片 ref（images 目录内，如 videos/xxx.mp4），由本地媒体服务播放。 */
   videoPath: text("video_path"),
+  error: text("error"),
+  createdAt: int("created_at").$defaultFn(() => Date.now()),
+});
+
+/**
+ * AI 音乐生成记录（bun/music-gen.ts）。
+ *
+ * 两种执行模型都存在，所以这张表既要有 taskId 也要能装"一次请求直接出结果"：
+ *
+ * - **stepfun 协议**：`POST /v1/audio/music/submit` 拿 task_id，
+ *   `POST /v1/audio/music/query` 轮询到 SUCCESS，音频以 Base64 回来。
+ * - **minimax 协议**：`POST /v1/music_generation` 是**同步**的（一次阻塞请求，
+ *   30~120 秒），没有 task_id 可存，提交后由后台任务把结果回填进同一条记录。
+ *
+ * `musicApi` 一列存**提交时**的协议，而不是每次去读厂商行：厂商行上的协议可以被
+ * 改掉，在途任务却还是按老协议提交的 —— 轮询按记录走，才不会问错接口。
+ */
+export const musicRecords = sqliteTable("music_records", {
+  id: int("id").primaryKey({ autoIncrement: true }),
+  status: text("status")
+    .$type<"processing" | "done" | "failed">()
+    .$defaultFn(() => "processing")
+    .notNull(),
+  source: text("source").$type<MediaSource>().default("manual").notNull(),
+  /** 后端：cloud = 云厂商；local = 本地引擎（已预留，尚未接入具体引擎）。 */
+  backend: text("backend").$type<"cloud" | "local">(),
+  /** 云端提交时使用的服务商 id（轮询按它查上游，用户中途换厂商不影响在途任务）。 */
+  providerId: text("provider_id"),
+  /** 提交时该厂商的生音乐协议（stepfun / minimax）：轮询与排查都按它分派。 */
+  musicApi: text("music_api"),
+  /** 本地后端提交时的服务地址（与 providerId 同理：改地址后在途任务仍要问对服务器）。 */
+  localBase: text("local_base"),
+  model: text("model"),
+  /**
+   * 任务类型：text_to_music（歌曲 / 器乐）、music_cover（翻唱）、vocal_to_music（干声配乐）。
+   * MiniMax 没有这个字段，由"有没有参考音频 + 是否器乐"反推，保持两边同一套取值。
+   */
+  task: text("task").$type<"text_to_music" | "music_cover" | "vocal_to_music">(),
+  /**
+   * 歌名。**只存在本地**：两家的生成接口都不接受歌名参数，所以它不会被发给上游，
+   * 只用于列表展示与下载文件名。不写这一句，下一个人会以为它能影响生成结果。
+   */
+  title: text("title"),
+  /** 风格描述（stepfun 叫 caption，minimax 叫 prompt —— 存同一列）。 */
+  caption: text("caption"),
+  lyrics: text("lyrics"),
+  /** 是否纯器乐。stepfun 的 instrumental / minimax 的 is_instrumental。 */
+  instrumental: int("instrumental"),
+  /** 参考歌曲（music_cover）或干声（vocal_to_music）的 ref（images 目录内，stageAudio 暂存）。 */
+  refAudioPath: text("ref_audio_path"),
+  responseFormat: text("response_format"),
+  sampleRate: int("sample_rate"),
+  bitRate: int("bit_rate"),
+  /** 音频时长（毫秒），由落盘的音频解析得出。 */
+  durationMs: int("duration_ms"),
+  /** 上游任务 id（仅 stepfun 这类异步协议有）。 */
+  taskId: text("task_id"),
+  /** 成片 ref（images 目录内，如 music/xxx.mp3），由本地媒体服务播放。 */
+  audioPath: text("audio_path"),
+  /** 上游改写后的风格描述 / 歌词（stepfun 只在 SUCCESS 时返回）。 */
+  rewrittenCaption: text("rewritten_caption"),
+  rewrittenLyrics: text("rewritten_lyrics"),
   error: text("error"),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
 });
@@ -413,6 +501,8 @@ export const cloudProviders = sqliteTable("cloud_providers", {
   enabled: int("enabled").notNull().default(0),
   /** 生视频接口协议："" | "minimax" | "seedance"（视频 API 没有统一标准，按厂商分派）。 */
   videoApi: text("video_api").notNull().default(""),
+  /** 生音乐接口协议："" | "stepfun" | "minimax"（音乐 API 同样没有统一标准）。 */
+  musicApi: text("music_api").notNull().default(""),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
   updatedAt: int("updated_at")
     .$defaultFn(() => Date.now())
@@ -465,6 +555,8 @@ export const knowledgeBases = sqliteTable("knowledge_bases", {
   /** OpenAI 兼容 base（不带 /v1）；空 = 跟随 VLLM_API_BASE / 本地推理服务。 */
   embeddingBase: text("embedding_base").notNull().default(""),
   embeddingApiKey: text("embedding_api_key").notNull().default(""),
+  /** 云服务商 id（非空时地址/密钥取自 cloud_providers 行，密钥不再按库落盘）。 */
+  embeddingProviderId: text("embedding_provider_id").notNull().default(""),
   /** 首次嵌入成功后记录维度，之后校验模型是否换了。 */
   embeddingDim: int("embedding_dim"),
   /** 重排模型 id；空 = 不重排（RRF 融合序即最终序）。 */
@@ -472,6 +564,8 @@ export const knowledgeBases = sqliteTable("knowledge_bases", {
   /** 重排服务 base（不带 /v1）；空 = 跟随嵌入配置/当前服务商。 */
   rerankBase: text("rerank_base").notNull().default(""),
   rerankApiKey: text("rerank_api_key").notNull().default(""),
+  /** 云服务商 id（非空时地址/密钥取自 cloud_providers 行）。 */
+  rerankProviderId: text("rerank_provider_id").notNull().default(""),
   chunkSize: int("chunk_size").notNull().default(800),
   chunkOverlap: int("chunk_overlap").notNull().default(120),
   /** 单库召回条数（聊天里多库合并后再截断）。 */
@@ -996,3 +1090,41 @@ export const usageRecords = sqliteTable("usage_records", {
 }));
 
 export type UsageRecordRow = typeof usageRecords.$inferSelect;
+
+/**
+ * 小应用「笔记」的一条记录（标题 / 正文 / 标签 / 日期 / 附件）。
+ *
+ * 为什么笔记必须落在主库，而不是小应用自己存：小应用跑在不透明源的 sandbox iframe
+ * 里（见 AGENTS.md 的小应用一节），那里 `localStorage` 根本不存在 —— 随手记的东西
+ * 一旦刷新就没了。而笔记是用户真正在意、且必须跟着 `omi backup` 走的数据，
+ * 所以正文进主库、附件进 `<dataDir>/images/notes/<附件 id>/`（只存相对 ref，
+ * 与聊天图片共用同一套媒体服务解析规则）。
+ *
+ * `day` 与 `createdAt` 分开：日历按归属日期分组，而"补记昨天的日记"是日记类应用
+ * 最常用的一步，写入当天不等于内容所属的那天。
+ */
+export const miniappNotes = sqliteTable(
+  "miniapp_notes",
+  {
+    id: int().primaryKey({ autoIncrement: true }),
+    title: text("title").notNull().default(""),
+    body: text("body").notNull().default(""),
+    /** 标签：JSON 字符串数组（笔记量级不值得为它再开一张表，筛选在内存里做）。 */
+    tags: text("tags").notNull().default("[]"),
+    /** 归属日期 YYYY-MM-DD（本地时区，由写入方算好）。 */
+    day: text("day").notNull(),
+    /** 附件：`images/` 下的相对 ref 数组（JSON），形如 `notes/<附件 id>/<文件名>`。 */
+    images: text("images").notNull().default("[]"),
+    /** 置顶：列表排在普通笔记之前。 */
+    pinned: int("pinned").notNull().default(0),
+    createdAt: int("created_at").notNull(),
+    updatedAt: int("updated_at").notNull(),
+  },
+  (t) => ({
+    // 日历视图按月拉一段区间，置顶排序按 updated_at —— 这两个索引就是主要读法。
+    dayIdx: index("miniapp_notes_day_idx").on(t.day),
+    updatedIdx: index("miniapp_notes_updated_idx").on(t.updatedAt),
+  }),
+);
+
+export type MiniappNoteRow = typeof miniappNotes.$inferSelect;
