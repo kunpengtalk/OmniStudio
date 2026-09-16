@@ -5,6 +5,7 @@ import {
   emptyTurnNudgeText,
   failureReasonOf,
   isEmptyAssistantTurn,
+  isLengthClampedTurn,
   isRetryableTurnFailure,
   lastAssistantMessage,
   retryBackoffMs,
@@ -16,10 +17,12 @@ const assistant = (input: {
   text?: string;
   tool?: boolean;
   error?: string;
+  output?: number;
 }) => ({
   role: "assistant",
   stopReason: input.stopReason,
   errorMessage: input.error,
+  usage: input.output === undefined ? undefined : { output: input.output },
   content: [
     ...(input.text === undefined ? [] : [{ type: "text", text: input.text }]),
     ...(input.tool ? [{ type: "toolCall", id: "c1", name: "read_file", arguments: {} }] : []),
@@ -73,6 +76,22 @@ describe("isEmptyAssistantTurn", () => {
     expect(isEmptyAssistantTurn(assistant({ stopReason: "aborted", error: "aborted" }))).toBe(
       false,
     );
+  });
+});
+
+describe("isLengthClampedTurn", () => {
+  test("length 且输出 ≤ 1 token = 钳制型（拿不到 usage 也按是算）", () => {
+    expect(isLengthClampedTurn(assistant({ stopReason: "length", output: 1 }))).toBe(true);
+    expect(isLengthClampedTurn(assistant({ stopReason: "length", output: 0 }))).toBe(true);
+    expect(isLengthClampedTurn(assistant({ stopReason: "length" }))).toBe(true);
+  });
+
+  test("其他 stopReason、或 length 但确实生成了内容的不算", () => {
+    expect(isLengthClampedTurn(assistant({ stopReason: "stop" }))).toBe(false);
+    expect(isLengthClampedTurn(assistant({ stopReason: "error", error: "503" }))).toBe(false);
+    expect(isLengthClampedTurn(assistant({ stopReason: "length", output: 64 }))).toBe(false);
+    expect(isLengthClampedTurn(undefined)).toBe(false);
+    expect(isLengthClampedTurn({ role: "user" })).toBe(false);
   });
 });
 

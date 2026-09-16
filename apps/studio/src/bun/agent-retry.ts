@@ -29,6 +29,7 @@ type RoughMessage = {
   content?: unknown;
   stopReason?: string;
   errorMessage?: string;
+  usage?: { output?: number };
 };
 
 /** 自动重试的次数上限（设置 `AGENT_RETRY_MAX`，0 = 关掉全部自愈）。 */
@@ -66,6 +67,22 @@ export function isEmptyAssistantTurn(message: RoughMessage | undefined): boolean
     if (part?.type === "text") return typeof part.text === "string" && part.text.trim().length > 0;
     return false;
   });
+}
+
+/**
+ * 长度钳制型空回合：`stopReason = length` 且输出 ≤ 1 token（拿不到 usage 时按是算）。
+ *
+ * 这不是「模型不想说话」，而是请求侧把 max_tokens 压到了下限 —— 典型根因是
+ * 上下文窗口配置（contextWindow）小于系统提示 + 工具定义 + 安全垫，pi-ai 的
+ * `clampMaxTokensToContext` 一算负数就钳到 `MIN_MAX_TOKENS = 1`。提醒它继续
+ * 没有意义（重发一次算术还是同一条），自愈循环应当直接交出去，让外层给出
+ * 指向配置的诊断（`agent-outcome.ts` 的 `lengthClamped`）。
+ */
+export function isLengthClampedTurn(message: RoughMessage | undefined): boolean {
+  if (!message || message.role !== "assistant") return false;
+  if (message.stopReason !== "length") return false;
+  const output = message.usage?.output;
+  return output == null || output <= 1;
 }
 
 /** 消息数组里最后一条助手消息（没有则 undefined）。 */
@@ -150,8 +167,11 @@ export function attachTurnRecovery(
   let nudges = 0;
   agent.shouldStopAfterTurn = (context) => {
     if (opts.steps() >= opts.maxSteps) return true;
-    if (nudges >= opts.budget) return false;
     if (!isEmptyAssistantTurn(context.message as never)) return false;
+    // 长度钳制型空回合：提醒无济于事（重发的 max_tokens 还是会被钳到 1），
+    // 直接交出去，外层 classifyTurnOutcome 会给出指向配置的诊断文案。
+    if (isLengthClampedTurn(context.message as never)) return true;
+    if (nudges >= opts.budget) return false;
     nudges += 1;
     opts.onNudge(nudges);
     agent.followUp(nudgeMessage(nudges));

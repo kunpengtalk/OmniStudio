@@ -26,6 +26,7 @@ import { agentEvents, conversations, messages } from "./db/schema";
 import { getSetting, updateSettings } from "./db/settings";
 import { getChatBaseUrl, getHistory, ensureServerReady, titleFromMessage } from "./chat";
 import { getChatModelLabel, getChatRequestModelId, getChatProviderLabel, chatModelSupportsImages } from "./chat-model";
+import { chatContextWindow } from "./chat-context";
 import { recordUsage } from "./stats";
 import { recordTokenUsage } from "./usage";
 import {
@@ -533,7 +534,8 @@ function buildModel(): Model<"openai-completions"> {
   const baseUrl = /\/v1$/i.test(base) ? base : `${base}/v1`;
   // id 是发请求用的（MLX 下是它认的绝对路径），name 只用于展示。
   const id = getChatRequestModelId();
-  const contextWindow = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
+  const remote = getSetting("SERVER_MODE") !== "local";
+  const contextWindow = chatContextWindow();
   const thinking = getAgentThinkingLevel();
   return {
     id,
@@ -550,7 +552,10 @@ function buildModel(): Model<"openai-completions"> {
     input: chatModelSupportsImages() ? ["text", "image"] : ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow,
-    maxTokens: Math.max(1024, Math.floor(contextWindow / 2)),
+    // 输出上限：本地跟随窗口一半（小窗口下很现实）；云端各家有自己的输出天花板
+    // （deepseek-chat 8k、qwen-max 8k……），统一 8k —— 窗口一半动辄 64k 的请求
+    // 会被厂商 400 拒掉，宁可封得保守，模型正常自己会 EOS 收尾。
+    maxTokens: remote ? 8192 : Math.max(1024, Math.floor(contextWindow / 2)),
   };
 }
 
@@ -964,7 +969,7 @@ export function compactConversationNow(conversationId: number): {
       reason: "这个会话还没跑过（没有可压缩的上下文）",
     };
   }
-  const contextWindow = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
+  const contextWindow = chatContextWindow();
   const autoBudget = Math.max(256, Math.floor(contextWindow * 0.6));
   const budget = Math.max(256, Math.floor(autoBudget / 2));
   const messages = session.agent.state.messages as { role?: string; content?: unknown }[];
@@ -1922,7 +1927,9 @@ export function makeContextTransform(
   bundle: ModelBundle,
 ): (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]> {
   return async (messages, signal) => {
-    const contextWindow = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
+    // 云端模式下窗口来自模型本身（chat-context.ts），不再拿本地引擎的 8k 默认值
+    // 当云端窗口 —— 那会让压缩在 60% × 8k 处过早触发，白丢历史。
+    const contextWindow = chatContextWindow();
     // 留 40% 给系统提示 / 工具定义 / 模型输出；下限取 256，
     // 但不能高过窗口本身的 60%（窗口本身很小的时候，下限会让压缩永远不触发）。
     const budget = Math.max(256, Math.floor(contextWindow * 0.6));
@@ -2282,6 +2289,16 @@ function lastAssistantStopReason(agent: Agent): string | undefined {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (message?.role === "assistant") return message.stopReason;
+  }
+  return undefined;
+}
+
+/** 最后一条助手消息的输出 token 数（`stopReason=length` 判「是不是被钳没」用）。 */
+function lastAssistantOutputTokens(agent: Agent): number | undefined {
+  const messages = agent.state.messages as { role?: string; usage?: { output?: number } }[];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.role === "assistant") return message.usage?.output;
   }
   return undefined;
 }
@@ -2799,6 +2816,7 @@ export async function runAgentTurn(opts: {
       // hook 拦下时这轮根本没发请求，别把上一次的 errorMessage 当成这轮的错误。
       errorMessage: hookBlockedReason ? undefined : session.agent.state.errorMessage,
       lastStopReason: hookBlockedReason ? undefined : lastAssistantStopReason(agent),
+      lastOutputTokens: hookBlockedReason ? undefined : lastAssistantOutputTokens(agent),
       hasText: fullText.trim().length > 0,
       reachedStepLimit: step >= maxSteps,
     });
@@ -2833,12 +2851,19 @@ export async function runAgentTurn(opts: {
       // 否则界面上就是一个空白气泡 —— 用户看到的是"跑完了但没有结果"。
       // 自愈已经试过了（提醒过 emptyNudges 次），所以这里要写清"试过还是这样"，
       // 否则用户会以为应用没管。
-      const note =
-        `模型（${modelName}）本轮没有给出正文，也没有再调用工具就结束了。` +
-        (emptyNudges > 0
-          ? `已经自动提醒它继续 ${emptyNudges} 次，仍然是空回合 —— 多半是模型 / 推理服务的问题（比如上下文被填满、对话模板不匹配）。`
-          : "") +
-        "可以直接重试，或在控制台确认推理服务 / 模型是否正常。";
+      const note = outcome.lengthClamped
+        ? // 长度钳制型空回合（stopReason=length 且输出 ≤ 1 token）：请求侧把
+          // max_tokens 压到了下限，重试 / 提醒都无济于事，必须指出配置矛盾本身。
+          `模型（${modelName}）本轮被输出上限直接掐断：stopReason=length、只生成了 ${
+            outcome.lastOutputTokens ?? "?"
+          } 个 token。这是请求侧的问题 —— 上下文窗口按 ${chatContextWindow()} 计，` +
+          `小于系统提示 + 工具定义 + 安全垫，max_tokens 被钳到了下限。` +
+          "请检查模型的上下文窗口配置（本地引擎看「上下文长度」，云端看模型是否被当成 8k 小窗口模型）。"
+        : `模型（${modelName}）本轮没有给出正文，也没有再调用工具就结束了。` +
+          (emptyNudges > 0
+            ? `已经自动提醒它继续 ${emptyNudges} 次，仍然是空回合 —— 多半是模型 / 推理服务的问题（比如上下文被填满、对话模板不匹配）。`
+            : "") +
+          "可以直接重试，或在控制台确认推理服务 / 模型是否正常。";
       recordEvent({
         conversationId,
         messageId: assistantId,

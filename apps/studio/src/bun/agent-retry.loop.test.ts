@@ -35,19 +35,20 @@ const MODEL = {
   maxTokens: 1024,
 } as unknown as Model<string>;
 
-/** 一轮的剧本：要么答一段正文，要么以某个错误结束。 */
-type Script = { text: string } | { error: string };
+/** 一轮的剧本：答一段正文 / 以某个错误结束 / 被输出上限钳断（length 且只生成 1 token）。 */
+type Script = { text: string } | { error: string } | { clamped: true };
 
 function message(input: Script, text: string): AssistantMessage {
   const failed = "error" in input;
+  const clamped = "clamped" in input;
   return {
     role: "assistant",
-    content: failed ? [] : [{ type: "text", text }],
+    content: failed || clamped ? [] : [{ type: "text", text }],
     api: "openai-completions",
     provider: "omni-studio",
     model: "fake",
-    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 } as never,
-    stopReason: failed ? "error" : "stop",
+    usage: { input: 1, output: clamped ? 1 : 1, cacheRead: 0, cacheWrite: 0, total: 2 } as never,
+    stopReason: failed ? "error" : clamped ? "length" : "stop",
     errorMessage: failed ? input.error : undefined,
     timestamp: Date.now(),
   } as AssistantMessage;
@@ -68,7 +69,7 @@ function fakeStream(
     const done: AssistantMessageEvent =
       "error" in script
         ? { type: "error", reason: "error", error: final }
-        : { type: "done", reason: "stop", message: final };
+        : { type: "done", reason: "clamped" in script ? "length" : "stop", message: final };
     queueMicrotask(() => {
       stream.push({ type: "start", partial: final });
       stream.push(done);
@@ -123,6 +124,24 @@ describe("空回合自愈（内核契约）", () => {
 
     expect(nudges).toEqual([1, 2]);
     expect(calls.count).toBe(3); // 首轮 + 两次提醒
+  });
+
+  test("长度钳制型空回合不提醒：重发一次 max_tokens 还是会被钳到 1，直接交出去", async () => {
+    const calls = { count: 0 };
+    const agent = buildAgent([{ clamped: true }], calls, []);
+    const nudges: number[] = [];
+    attachTurnRecovery(agent, {
+      steps: () => 0,
+      maxSteps: 10,
+      budget: 2,
+      onNudge: (attempt) => nudges.push(attempt),
+    });
+
+    await agent.prompt("做点事");
+
+    // 只跑了首轮：钳制是请求侧算术，提醒模型没有任何意义。
+    expect(calls.count).toBe(1);
+    expect(nudges).toEqual([]);
   });
 
   test("预算为 0（用户关掉自愈）时一次都不提醒", async () => {

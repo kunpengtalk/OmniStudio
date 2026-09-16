@@ -59,4 +59,30 @@ describe("classifyTurnOutcome", () => {
       classifyTurnOutcome({ hasText, reachedStepLimit: false, lastStopReason: "stop" }).kind,
     ).toBe("empty");
   });
+
+  test("长度钳制型空回合（length 且输出 ≤ 1 token）带上配置诊断标记", () => {
+    expect(
+      classifyTurnOutcome({
+        hasText: false,
+        reachedStepLimit: false,
+        lastStopReason: "length",
+        lastOutputTokens: 1,
+      }),
+    ).toEqual({ kind: "empty", lengthClamped: true, lastOutputTokens: 1 });
+    // 拿不到 usage 时同样按钳制算：length + 空正文 + 无 token 数 ≈ 一开始就没名额。
+    expect(
+      classifyTurnOutcome({ hasText: false, reachedStepLimit: false, lastStopReason: "length" }),
+    ).toEqual({ kind: "empty", lengthClamped: true, lastOutputTokens: undefined });
+  });
+
+  test("length 但确实生成了几个 token 的空回合并入普通空回合（另有成因）", () => {
+    expect(
+      classifyTurnOutcome({
+        hasText: false,
+        reachedStepLimit: false,
+        lastStopReason: "length",
+        lastOutputTokens: 6,
+      }),
+    ).toEqual({ kind: "empty" });
+  });
 });

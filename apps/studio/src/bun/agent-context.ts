@@ -13,10 +13,10 @@
  */
 import { estimateMessagesTokens } from "./agent-compaction";
 import { getHistory } from "./chat";
-import { getSetting } from "./db/settings";
+import { chatContextWindow } from "./chat-context";
 
 export type ContextUsage = {
-  /** 模型窗口（SERVER_CTX_SIZE）。 */
+  /** 模型窗口（本地 = 引擎设置，云端 = 模型本身，见 `chat-context.ts`）。 */
   windowTokens: number;
   /** 压缩预算：窗口的 60%（与 agent.ts 的 transformContext 一致）。 */
   budgetTokens: number;
@@ -45,9 +45,9 @@ export function contextBudgetTokens(windowTokens: number): number {
   return Math.max(256, Math.floor(windowTokens * 0.6));
 }
 
-/** 当前上下文窗口大小（设置项，非法值回落 8192）。 */
+/** 当前上下文窗口大小（本地看引擎设置，云端看模型本身，见 `chat-context.ts`）。 */
 export function contextWindowTokens(): number {
-  return Number(getSetting("SERVER_CTX_SIZE")) || 8192;
+  return chatContextWindow();
 }
 
 /**

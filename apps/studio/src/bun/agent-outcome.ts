@@ -11,8 +11,11 @@
  */
 export type TurnOutcome =
   | { kind: "ok" }
-  /** 既没有正文也没有工具调用就结束了：界面会是一个空白气泡，必须补一句说明。 */
-  | { kind: "empty" }
+  /** 既没有正文也没有工具调用就结束了：界面会是一个空白气泡，必须补一句说明。
+   * `lengthClamped` = stopReason=length 且输出 ≤ 1 token：请求侧把 max_tokens 钳到了
+   * 下限（典型根因：上下文窗口配置小于系统提示 + 工具定义 + 安全垫），重试无济于事，
+   * agent.ts 会给出指向配置的诊断文案而不是通用的「模型/推理服务的问题」。 */
+  | { kind: "empty"; lengthClamped?: boolean; lastOutputTokens?: number }
   | { kind: "aborted"; detail: string }
   | { kind: "error"; detail: string };
 
@@ -21,6 +24,8 @@ export function classifyTurnOutcome(input: {
   errorMessage?: string;
   /** 最后一条助手消息的 stopReason，用来区分"被中断"和"真出错"。 */
   lastStopReason?: string;
+  /** 最后一条助手消息的输出 token 数（判「length 且几乎没生成」用，可能拿不到）。 */
+  lastOutputTokens?: number;
   /** 本轮累计的正文（思考内容不算）是否非空。 */
   hasText: boolean;
   /** 是否因为到达步数上限而停止 —— 那种情况 agent.ts 另有提示，不重复。 */
@@ -32,5 +37,9 @@ export function classifyTurnOutcome(input: {
     return aborted ? { kind: "aborted", detail } : { kind: "error", detail };
   }
   if (input.hasText || input.reachedStepLimit) return { kind: "ok" };
-  return { kind: "empty" };
+  const lengthClamped =
+    input.lastStopReason === "length" && (input.lastOutputTokens == null || input.lastOutputTokens <= 1);
+  return lengthClamped
+    ? { kind: "empty", lengthClamped: true, lastOutputTokens: input.lastOutputTokens }
+    : { kind: "empty" };
 }
