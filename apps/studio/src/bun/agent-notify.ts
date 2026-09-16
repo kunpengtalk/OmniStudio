@@ -17,6 +17,7 @@
  */
 import { getSetting } from "./db/settings";
 import { logEvent } from "./app-log";
+import { resolveCommandShell } from "./shell";
 
 /** 事件类型（对齐 Codex 的 "agent-turn-complete"，其余按我们的通知种类命名）。 */
 export type ExternalNotifyType =
@@ -70,17 +71,23 @@ export function notifyExternal(input: { kind: string; title: string; body?: stri
     at: Date.now(),
   };
 
-  const shell = process.env.SHELL || "/bin/sh";
+  const shell = resolveCommandShell();
   try {
     /**
-     * `sh -c '<用户的命令> "$1"' omni-notify '<JSON>'`：
+     * POSIX shell 走 `sh -c '<用户的命令> "$1"' omni-notify '<JSON>'`：
      * - 用户的命令字符串原样进 sh（他写的是 shell 命令，这本来就该由 shell 解释）；
      * - 载荷走 "$1" 与环境变量，因此标题里的引号 / 分号 / 反引号都只是数据；
      * - detached + stdio ignore：不阻塞 Agent，也不把它的输出混进我们的日志。
+     *
+     * cmd.exe / PowerShell 没有等价的 `"$1"`，那边只保证 OMNI_NOTIFY_PAYLOAD 环境变量
+     * （Windows 上别把 "$1" 写进通知命令）—— 关键是命令至少能跑起来，而不是 spawn 就 ENOENT。
      */
+    const invocation = shell.posix ? `${command} "$1"` : command;
     const serialized = JSON.stringify(payload);
     const proc = Bun.spawn({
-      cmd: [shell, "-c", `${command} "$1"`, "omni-notify", serialized],
+      cmd: shell.posix
+        ? [...shell.commandArgs(invocation), "omni-notify", serialized]
+        : shell.commandArgs(invocation),
       env: { ...process.env, OMNI_NOTIFY_PAYLOAD: serialized },
       stdout: "ignore",
       stderr: "ignore",

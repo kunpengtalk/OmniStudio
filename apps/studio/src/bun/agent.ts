@@ -113,6 +113,7 @@ import {
 } from "./agent-spill";
 import { computeTokenStats, type MessageStats } from "./chat-stats";
 import { runHooks } from "./agent-hooks";
+import { resolveCommandShell } from "./shell";
 import { classifyTurnOutcome } from "./agent-outcome";
 import { notify } from "./notifications";
 import * as ViewState from "./view-state";
@@ -747,10 +748,16 @@ function buildSystemPrompt(mode: AgentMode, workspace: string, goalSection?: str
         "拿不准是否值得记时就不记 —— 记忆库堆满无关内容反而会让后续召回变差。",
     );
   }
+  // shell 用真实解析出来的那个（不是 $SHELL 或 /bin/sh 的空想）：Windows 上可能是
+  // cmd.exe / PowerShell，命令语法完全不同，模型必须知道自己在什么壳里（issue #15）。
+  const commandShell = resolveCommandShell();
+  const shellNote = commandShell.posix
+    ? commandShell.label
+    : `${commandShell.label}（非 POSIX：按它的语法写命令，别用 ls / grep 这类 Unix 命令）`;
   const sections = [
     "你是 OmniStudio 内置的 Pi Agent —— 一个在用户本机工作区里执行任务的 AI 智能体。",
     `工作区根目录：${workspace}`,
-    `运行环境：${os.type()} ${os.release()}（${os.arch()}），shell：${process.env.SHELL ?? "/bin/sh"}。`,
+    `运行环境：${os.type()} ${os.release()}（${os.arch()}），shell：${shellNote}。`,
     "",
     "工作准则：",
     ...guidelines,

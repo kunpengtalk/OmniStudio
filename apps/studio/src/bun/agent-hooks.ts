@@ -27,6 +27,7 @@
 import { killProcessTree } from "./runtimes/proc";
 import { getSetting } from "./db/settings";
 import { logEvent } from "./app-log";
+import { resolveCommandShell } from "./shell";
 
 /** 当前支持的事件（其余事件见 docs/codex-parity.md 的说明）。 */
 export type HookEventName = "session_start" | "user_prompt_submit";
@@ -136,12 +137,12 @@ export async function runHook(
   hook: HookConfig,
   payload: Record<string, unknown>,
 ): Promise<HookRunResult> {
-  const shell = process.env.SHELL || "/bin/sh";
+  const shell = resolveCommandShell();
   const serialized = JSON.stringify(payload);
   let proc: Bun.Subprocess<"pipe", "pipe", "pipe">;
   try {
     proc = Bun.spawn({
-      cmd: [shell, "-c", hook.command],
+      cmd: shell.commandArgs(hook.command),
       env: {
         ...process.env,
         OMNI_HOOK_EVENT: hook.event,

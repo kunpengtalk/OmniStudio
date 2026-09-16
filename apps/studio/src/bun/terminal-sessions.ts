@@ -10,6 +10,8 @@ import { existsSync, statSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 
+import { resolveCommandShell } from "./shell";
+
 export type TerminalSessionInfo = {
   id: string;
   cwd: string;
@@ -61,12 +63,11 @@ type Session = {
 const sessions = new Map<string, Session>();
 let counter = 0;
 
-/** 默认 shell：跟着用户环境走（zsh 是 macOS 默认），登录 shell 才能读到 PATH/别名。 */
+/** 默认 shell：由平台化解析决定（Windows 上没有 /bin/bash —— issue #15）；
+ *  登录 shell 才读得到 PATH / 别名，所以 zsh / bash 带 -l。 */
 function defaultShell(): { shell: string; args: string[] } {
-  const shell = process.env.SHELL?.trim() || (process.platform === "darwin" ? "/bin/zsh" : "/bin/bash");
-  const name = path.basename(shell);
-  // zsh / bash 用 -l 走登录 shell（读 .zprofile / .zshrc），其它 shell 不加参数。
-  return { shell, args: name === "zsh" || name === "bash" ? ["-l"] : [] };
+  const resolved = resolveCommandShell();
+  return { shell: resolved.file, args: resolved.interactiveArgs };
 }
 
 /** 工作目录兜底：路径不存在（工作区被删）时退回家目录，终端不能起不来。 */

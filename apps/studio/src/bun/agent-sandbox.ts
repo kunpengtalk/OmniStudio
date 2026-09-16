@@ -573,6 +573,12 @@ export function wrapShellCommand(
   opts: {
     workspace: string;
     shell: string;
+    /**
+     * 把命令包成 shell 的 argv。默认 POSIX 形状 `[shell, "-c", command]`；
+     * Windows 上 shell 可能是 cmd.exe（`/d /s /c`）或 PowerShell（`-NoProfile -Command`），
+     * 所以调用方传 `resolveCommandShell().commandArgs`（见 bun/shell.ts）。
+     */
+    shellArgs?: (command: string) => string[];
     authorizedFolders?: string[];
     platform?: string;
     /** 测试注入：Linux 上 bwrap 是否可用（不传就现场探测）。 */
@@ -584,7 +590,7 @@ export function wrapShellCommand(
   },
 ): WrappedCommand {
   const mode = sandboxMode();
-  const shell = [opts.shell, "-c", command];
+  const shell = opts.shellArgs ? opts.shellArgs(command) : [opts.shell, "-c", command];
   if (mode === "off") return { cmd: shell, mode, backend: "none" };
   const platform = opts.platform ?? process.platform;
   let backend = effectiveSandboxBackend(platform, {
