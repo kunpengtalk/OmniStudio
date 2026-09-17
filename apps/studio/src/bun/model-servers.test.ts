@@ -109,17 +109,41 @@ await mockModulePartial<typeof import("./runtimes/mlx")>("./runtimes/mlx", {
 });
 
 await mockModulePartial<typeof import("./model-store")>("./model-store", {
-  listInstalledModels: () => [],
+  listInstalledModels: () => INSTALLED,
   servedNameForModelPath: (path) =>
     (path.split("/").pop() ?? path).replace(/\.(gguf|safetensors)$/i, "").toLowerCase(),
   slugModelFileName: (name) => name.replace(/\.(gguf|safetensors)$/i, "").toLowerCase(),
 });
 
+/**
+ * 模型库桩：`pendingDownloadFor` 要拿它给的 `repo` 去和下载任务对仓库
+ * （同名文件在不同仓库里到处都是，只比文件名会把别人的下载当成本模型的）。
+ */
+const INSTALLED: import("./model-store").InstalledModel[] = [];
+
+/** 往模型库桩里放一条最小条目（只带 `pendingDownloadFor` / purpose 判定用得上的字段）。 */
+function installedEntry(repo: string, path: string): import("./model-store").InstalledModel {
+  return {
+    repo,
+    fileName: path.split("/").pop() ?? path,
+    path,
+    size: 4,
+    isActive: false,
+    isChatModel: false,
+    category: "chat",
+    favorite: false,
+    origin: "managed",
+    isDir: false,
+    kind: "gguf",
+    runtimeTarget: path,
+  };
+}
+
 /** 这些目标一启动就失败，值是错误原文。 */
 const FAILING = new Map<string, string>();
 
-/** 下载队列桩：`pendingDownloadFor` 只看 fileName 与 status。 */
-const DOWNLOADS: { fileName: string; status: string; received: number; total: number | null; percent: number | null }[] = [];
+/** 下载队列桩：`pendingDownloadFor` 看 fileName / status / repo。 */
+const DOWNLOADS: { fileName: string; repo?: string; status: string; received: number; total: number | null; percent: number | null }[] = [];
 await mockModulePartial<typeof import("./download-manager")>("./download-manager", {
   downloadManager: { list: () => DOWNLOADS } as never,
 });
@@ -150,6 +174,7 @@ beforeEach(async () => {
   created = [];
   FAILING.clear();
   DOWNLOADS.length = 0;
+  INSTALLED.length = 0;
   await Registry.stopAllServed();
 });
 
@@ -450,6 +475,43 @@ describe("启动失败的类型（LIE-05）", () => {
       rmSync(sidecar, { force: true });
       writeFileSync(modelA, "gguf");
     }
+  });
+
+  test("别的仓库里同名文件在下载：不算本模型「没下完」（分片名在每个仓库里都一样）", async () => {
+    // 本模型的仓库是 org/repo（落盘目录 org__repo），正在下载的是别人仓库里的同名文件。
+    // 只比文件名的话，用户会看到「权重还在下载中」去等一个跟自己无关的下载，
+    // 而真正的原因（架构不认识 / 文件坏了）被这句话盖掉。
+    INSTALLED.push(installedEntry("org__repo", modelA));
+    FAILING.set(modelA, "0.00.058.639 E srv  llama_server: exiting due to model loading error");
+    DOWNLOADS.push({
+      fileName: "a.gguf",
+      repo: "someone/else",
+      status: "downloading",
+      received: 3,
+      total: 100,
+      percent: 3,
+    });
+
+    const res = await Registry.startServedModel({ model: modelA });
+    expect(res.model?.errorKind).not.toBe("download-incomplete");
+    expect(res.model?.error).not.toContain("还在下载中");
+  });
+
+  test("同一个仓库（写成 org/repo 与落盘目录两种写法）在下载：照旧认成「没下完」", async () => {
+    INSTALLED.push(installedEntry("org__repo", modelB));
+    FAILING.set(modelB, "0.00.058.639 E srv  llama_server: exiting due to model loading error");
+    DOWNLOADS.push({
+      fileName: "b.gguf",
+      repo: "org/repo",
+      status: "downloading",
+      received: 30,
+      total: 100,
+      percent: 30,
+    });
+
+    const res = await Registry.startServedModel({ model: modelB });
+    expect(res.model?.errorKind).toBe("download-incomplete");
+    expect(res.model?.error).toContain("还在下载中");
   });
 
   test("磁盘上文件是完整的（没有旁路数据）：不误判成没下完", async () => {

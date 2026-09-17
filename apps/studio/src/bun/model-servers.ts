@@ -17,6 +17,7 @@ import {
   fileKind,
   modelNameFromRef,
   resolveEngineForModel,
+  safeRepoId,
   type ModelFileKind,
 } from "../shared/modelscope";
 import type { ModelPurpose, ServedModelInfo, ServedModelsSnapshot } from "../shared/served-models";
@@ -589,16 +590,26 @@ function setServedError(info: ServedModelInfo, message: string) {
   info.errorKind = classifyStartupError(message);
 }
 
-/** 正在下载 / 排队 / 暂停的任务里有没有这个模型（按文件名匹配，跨进程重启也认）。 */
+/**
+ * 正在下载 / 排队 / 暂停的任务里有没有这个模型（跨进程重启也认 —— 任务列表落盘在设置里）。
+ *
+ * **两边都拿得到仓库标识时，要一起比仓库**：分片名（`model-00001-of-00002.safetensors`）
+ * 在几乎每个仓库里都一模一样，只比文件名会把「别人仓库正在下这个文件」当成本模型还没下完，
+ * 用户于是去等一个跟自己无关的下载，而真正的原因（架构不认识 / 文件坏了）被这句话盖掉。
+ * 两种写法用 `safeRepoId` 归一（市场里是 `org/repo`，落盘目录是 `org__repo`），大小写一并容忍。
+ * 拿不到仓库标识（例如远端 HF repo id 还没落盘）就退回按文件名比 —— 老行为，别丢。
+ */
 function pendingDownloadFor(info: ServedModelInfo): DownloadTask | null {
   const fileName = info.modelRef.split(/[\\/]/).pop() ?? "";
   if (!fileName) return null;
+  const wantRepo = info.repo ? safeRepoId(info.repo).toLowerCase() : null;
   try {
     return (
       downloadManager.list().find(
         (task) =>
           task.fileName === fileName &&
-          (task.status === "queued" || task.status === "downloading" || task.status === "paused"),
+          (task.status === "queued" || task.status === "downloading" || task.status === "paused") &&
+          (wantRepo == null || !task.repo || safeRepoId(task.repo).toLowerCase() === wantRepo),
       ) ?? null
     );
   } catch {
