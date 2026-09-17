@@ -1,4 +1,7 @@
-import { afterAll, expect, mock, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 import { mockModulePartial } from "./test-mocks";
 
@@ -6,8 +9,13 @@ import { mockModulePartial } from "./test-mocks";
  * 下载队列的排序行为：小文件先下、显式点击插队、失败自动重试后才判死、
  * 老版本持久化的任务恢复后仍按体积重排。
  *
- * 只桩掉数据库设置与文件层（不联网、不碰用户数据目录），队列与状态机用的是
- * 下载管理器自己的实现。
+ * 只桩掉数据库设置与**下载调用**（不联网、不碰用户数据目录），队列与状态机用的是
+ * 下载管理器自己的实现；「磁盘上有没有部分数据」用**真临时目录**里的真文件表达。
+ *
+ * 这里**不能**去 `mock.module("fs", …)`：bun 的 mock 注册表在同一批次里跨文件共享，
+ * 把整个 fs 替换掉会污染同批次里所有做真实 IO 的测试 —— 实测 `downloader.test.ts`
+ * 因而偶发失败（6 次里 1 次「下载中断（2820/20971520 字节）」），而且它返回的假
+ * readdir 结果会让别的套件的用例计数飘。真文件 + 真目录没有这个问题。
  */
 
 const settings = new Map<string, string>();
@@ -22,8 +30,12 @@ await mockModulePartial<typeof import("./model-store")>("./model-store", {
   setModelMeta: () => {},
 });
 
-/** 磁盘上「已有数据」的文件名（决定恢复任务时是续传还是判失败）。 */
-const existing = new Set<string>();
+/**
+ * 这个文件的「磁盘」：一个真临时目录，`reset()` 会把 `seedFiles` 落成真文件
+ * （下载管理器只看「存在且 size > 0」与同目录的 `.part*`）。
+ */
+const modelsRoot = mkdtempSync(join(tmpdir(), "omni-download-manager-test-"));
+
 /** 前 N 次下载调用抛错（模拟 ModelScope 偶发 500）。 */
 let failFirst = 0;
 /** 已启动的下载（按启动顺序），每个都闸住直到测试放行。 */
@@ -31,7 +43,7 @@ const started: string[] = [];
 let gates: Array<() => void> = [];
 
 await mockModulePartial<typeof import("./modelscope")>("./modelscope", {
-  modelDestPath: (repo, fileName) => `models/${repo.replace("/", "__")}/${fileName}`,
+  modelDestPath: (repo, fileName) => join(modelsRoot, repo.replace("/", "__"), fileName),
   removePartialFiles: () => {},
   downloadFile: async (_repo: string, fileName: string) => {
     if (failFirst > 0) {
@@ -51,38 +63,19 @@ await mockModulePartial<typeof import("./modelscope")>("./modelscope", {
   },
 });
 
-// 「磁盘上有没有部分数据」由 existsSync/statSync 决定，这里只认 existing 集合。
-mock.module("fs", () => {
-  const real = require("fs") as typeof import("fs");
-  const fileNameOf = (p: unknown) => String(p).split("/").pop() ?? "";
-  return {
-    ...real,
-    existsSync: (p: import("fs").PathLike) => existing.has(fileNameOf(p)) || real.existsSync(p),
-    statSync: (p: import("fs").PathLike, ...rest: unknown[]) => {
-      const name = fileNameOf(p);
-      if (existing.has(name)) {
-        return { size: 1024, isFile: () => true, isDirectory: () => false } as unknown as ReturnType<
-          typeof real.statSync
-        >;
-      }
-      return real.statSync(p, ...(rest as []));
-    },
-    readdirSync: (p: import("fs").PathLike, ...rest: unknown[]) => {
-      const realEntries = real.existsSync(p) ? real.readdirSync(p, ...(rest as [])) : [];
-      return [...realEntries, ...existing];
-    },
-  };
-});
-
 const { DownloadManager } = await import("./download-manager");
 
 afterAll(() => {
   for (const release of gates) release();
+  rmSync(modelsRoot, { recursive: true, force: true });
 });
 
+/** 换一批「磁盘上已有数据」的文件：`seedFiles` 落成真文件，其余清空。 */
 function reset(seedFiles: string[] = [], failures = 0) {
-  existing.clear();
-  for (const name of seedFiles) existing.add(name);
+  rmSync(modelsRoot, { recursive: true, force: true });
+  const repoDir = join(modelsRoot, "some__repo");
+  mkdirSync(repoDir, { recursive: true });
+  for (const name of seedFiles) writeFileSync(join(repoDir, name), Buffer.alloc(1024));
   failFirst = failures;
   started.length = 0;
   gates = [];
