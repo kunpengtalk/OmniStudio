@@ -441,7 +441,10 @@ describe("远端变化与旧格式", () => {
 describe("旁路数据管理", () => {
   test("removePartialFiles 清掉最终文件、分片与 sidecar", async () => {
     const data = makeData(BIG);
-    const { server } = startServer({ data });
+    // 分片之间留间隔（同「暂停后重启」那条）：回环上这份文件可能在取消生效前就下完，
+    // 那时前缀分片已被搬走并删掉，`.part*` 一个都不剩、「至少留了一个分片」的断言随机失败。
+    // 实测这条在全套里偶发（12 次 1 次）。
+    const { server } = startServer({ data, chunkDelayMs: 5 });
     servers.push(server);
     const dest = path.join(dir, "cleanup.bin");
 

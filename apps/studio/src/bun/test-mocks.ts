@@ -35,3 +35,51 @@ export async function mockModulePartial<T extends object>(
   mock.module(specifier, () => ({ ...real, ...overrides }));
   return real;
 }
+
+/** 本机回环：本应用所有假服务端（`Bun.serve` 的 `port: 0`）都跑在这里。 */
+function isLoopback(url: string): boolean {
+  try {
+    const { hostname } = new URL(url);
+    return (
+      hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1" || hostname === "[::1]"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 要换 `globalThis.fetch` 的测试用它：**只拦远端，本机回环照旧走真 fetch**。
+ *
+ * 为什么必须这样：`globalThis.fetch` 是进程级运行时全局，而 bun 会把多个测试文件放进
+ * 同一个进程里跑。一个文件把 fetch 换成罐头替身（整文件期间生效），同批次里正在用真
+ * fetch 打本地假服务端的用例就会拿到罐头响应 —— 实测 `backup/remote.test.ts` 的
+ * WebDAV / S3 端到端用例因此偶发失败（`HTTP 404（地址 / Bucket 不存在）`、响应体为空，
+ * 单跑 8 次全绿、进全套 12 次红 2 次）。
+ *
+ * 这也和产品行为一致：`bun/proxy.ts` 对回环**永远绕开代理**，所以替身也不该拦回环。
+ *
+ * 用法（装一次，文件结束前别自己再动 `globalThis.fetch`）：
+ *
+ * ```ts
+ * const originalFetch = globalThis.fetch;
+ * const setFetch = installFetchRouter();
+ * // 各用例里原来是 `globalThis.fetch = mock(...) as never`，改成：
+ * setFetch(mock(...) as never);
+ * // afterAll 里照旧 `globalThis.fetch = originalFetch`
+ * ```
+ *
+ * @returns `setFetch`：把「当前这个用例的替身」交给路由器（远端请求用它，回环不用）
+ */
+export function installFetchRouter(): (fake: typeof fetch) => void {
+  const real = globalThis.fetch;
+  let fake: typeof fetch | null = null;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (isLoopback(url) || !fake) return real(input as never, init);
+    return fake(input as never, init);
+  }) as typeof fetch;
+  return (next: typeof fetch) => {
+    fake = next;
+  };
+}

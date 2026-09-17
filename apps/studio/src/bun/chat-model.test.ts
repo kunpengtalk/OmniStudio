@@ -6,7 +6,7 @@ import { join } from "path";
 import type { CloudModelType, CloudProviderInfo } from "../shared/cloud-providers";
 import type { ModelCategory, ModelFileKind, ModelOrigin } from "../shared/modelscope";
 import type { ServerStatus } from "./runtimes/types";
-import { mockModulePartial } from "./test-mocks";
+import { installFetchRouter, mockModulePartial } from "./test-mocks";
 
 /**
  * 对话模型列表的三条硬要求（用户直接提的）：
@@ -186,6 +186,8 @@ const repoDir = join(tmpDir, "repo");
 mkdirSync(repoDir, { recursive: true });
 
 const originalFetch = globalThis.fetch;
+/** 换掉全局 fetch 但**放行本机回环**：同批次别的文件正在用真 fetch 打本地假服务端。 */
+const setFetch = installFetchRouter();
 let fetchedUrls: string[] = [];
 
 beforeEach(async () => {
@@ -204,10 +206,10 @@ beforeEach(async () => {
   SETTINGS.SERVER_PORT = "18600";
   SETTINGS.VLLM_PORT = "18601";
   SETTINGS.VLLM_API_KEY = "EMPTY";
-  globalThis.fetch = mock(async (url: unknown) => {
+  setFetch(mock(async (url: unknown) => {
     fetchedUrls.push(String(url));
     return new Response(JSON.stringify({ data: [{ id: "live-model" }] }), { status: 200 });
-  }) as never;
+  }) as never);
 });
 
 afterAll(async () => {

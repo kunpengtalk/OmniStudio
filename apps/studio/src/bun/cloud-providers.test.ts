@@ -9,6 +9,7 @@ import {
   modelTypeOf,
   type CloudProviderInfo,
 } from "../shared/cloud-providers";
+import { installFetchRouter } from "./test-mocks";
 
 // ---------------------------------------------------------------------------
 // 云服务商：这次改动把「每页各存一份地址 + 密钥」换成「页面只选厂商 + 模型」，
@@ -21,6 +22,8 @@ const CloudProviders = await import("./cloud-providers");
 const { getSetting, updateSettings } = await import("./db/settings");
 
 const originalFetch = globalThis.fetch;
+/** 换掉全局 fetch 但**放行本机回环**：同批次别的文件正在用真 fetch 打本地假服务端。 */
+const setFetch = installFetchRouter();
 const TOUCHED = [
   "IMG_PROVIDER_ID",
   "IMG_API_BASE",
@@ -72,13 +75,13 @@ afterAll(() => {
 
 test("启动厂商：密钥校验通过才启用，并把探到的模型并进清单", async () => {
   const id = makeProvider({ name: "启动测试", baseUrl: "https://live.example/v1", apiKey: "sk-live" });
-  globalThis.fetch = mock(async (url: URL | string) => {
+  setFetch(mock(async (url: URL | string) => {
     expect(String(url)).toContain("live.example/v1/models");
     return new Response(JSON.stringify({ data: [{ id: "flux-dev" }, { id: "qwen-max" }] }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
-  }) as never;
+  }) as never);
 
   const res = await CloudProviders.setCloudProviderEnabled(id, true);
   expect(res.ok).toBe(true);
@@ -91,9 +94,9 @@ test("启动厂商：密钥校验通过才启用，并把探到的模型并进�
 
 test("启动厂商：密钥无效（401）不启用，并把原因交回界面", async () => {
   const id = makeProvider({ name: "密钥错误", baseUrl: "https://bad.example/v1", apiKey: "sk-bad" });
-  globalThis.fetch = mock(
+  setFetch(mock(
     async () => new Response("unauthorized", { status: 401 }),
-  ) as never;
+  ) as never);
 
   const res = await CloudProviders.setCloudProviderEnabled(id, true);
   expect(res.ok).toBe(false);
@@ -110,10 +113,10 @@ test("启动厂商：地址自带版本段时不会探到不存在的 /v1/models
     apiKey: "sk-gem",
   });
   const seen: string[] = [];
-  globalThis.fetch = mock(async (url: URL | string) => {
+  setFetch(mock(async (url: URL | string) => {
     seen.push(String(url));
     return new Response(JSON.stringify({ data: [{ id: "gemini-2.5-pro" }] }), { status: 200 });
-  }) as never;
+  }) as never);
 
   const res = await CloudProviders.setCloudProviderEnabled(gemini, true);
   expect(res.ok).toBe(true);
@@ -122,11 +125,11 @@ test("启动厂商：地址自带版本段时不会探到不存在的 /v1/models
   // 不带版本段的地址（MiniMax 那种只填域名的）仍要能探到：先试 /models，404 再补 /v1。
   const bare = makeProvider({ name: "裸域名", baseUrl: "https://api.bare.example", apiKey: "sk-bare" });
   const tried: string[] = [];
-  globalThis.fetch = mock(async (url: URL | string) => {
+  setFetch(mock(async (url: URL | string) => {
     tried.push(String(url));
     if (tried.length === 1) return new Response("not found", { status: 404 });
     return new Response(JSON.stringify({ data: [{ id: "abab6.5s" }] }), { status: 200 });
-  }) as never;
+  }) as never);
 
   const res2 = await CloudProviders.setCloudProviderEnabled(bare, true);
   expect(res2.ok).toBe(true);
@@ -139,7 +142,7 @@ test("裸域名 + 站点根路径是前端首页：自动退回 /v1/models 拿�
   // 抛 SyntaxError: Failed to parse JSON，设置页于是显示「获取失败」。
   const id = makeProvider({ name: "聚合站", baseUrl: "https://agg.example", apiKey: "sk-agg" });
   const seen: string[] = [];
-  globalThis.fetch = mock(async (url: URL | string) => {
+  setFetch(mock(async (url: URL | string) => {
     seen.push(String(url));
     if (String(url).endsWith("/v1/models")) {
       return new Response(JSON.stringify({ object: "list", data: [{ id: "gpt-image-1" }] }), {
@@ -151,7 +154,7 @@ test("裸域名 + 站点根路径是前端首页：自动退回 /v1/models 拿�
       status: 200,
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
-  }) as never;
+  }) as never);
 
   const res = await CloudProviders.setCloudProviderEnabled(id, true);
   expect(res.ok).toBe(true);
@@ -160,13 +163,13 @@ test("裸域名 + 站点根路径是前端首页：自动退回 /v1/models 拿�
 });
 
 test("候选地址都不是模型清单：说清「返回的是网页、地址要填到 /v1」，而不是 SyntaxError", async () => {
-  globalThis.fetch = mock(
+  setFetch(mock(
     async () =>
       new Response("<!doctype html><html></html>", {
         status: 200,
         headers: { "Content-Type": "text/html" },
       }),
-  ) as never;
+  ) as never);
 
   const r = await CloudProviders.fetchRemoteModels({ baseUrl: "https://site.example", apiKey: "sk-x" });
   expect(r.ok).toBe(false);
@@ -176,13 +179,13 @@ test("候选地址都不是模型清单：说清「返回的是网页、地址�
 });
 
 test("上游用 JSON 报文报错（New API 管理接口形状）：把上游原话交回界面", async () => {
-  globalThis.fetch = mock(
+  setFetch(mock(
     async () =>
       new Response(JSON.stringify({ message: "Unauthorized, invalid access token", success: false }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
-  ) as never;
+  ) as never);
 
   const r = await CloudProviders.fetchRemoteModels({ baseUrl: "https://agg.example/v1", apiKey: "sk-x" });
   expect(r.ok).toBe(false);
@@ -191,7 +194,7 @@ test("上游用 JSON 报文报错（New API 管理接口形状）：把上游原
 
 test("清单形状：{data} / {models} / 根数组都认", async () => {
   for (const body of [{ data: [{ id: "a" }] }, { models: [{ id: "b" }] }, [{ id: "c" }]]) {
-    globalThis.fetch = mock(async () => new Response(JSON.stringify(body), { status: 200 })) as never;
+    setFetch(mock(async () => new Response(JSON.stringify(body), { status: 200 })) as never);
     const r = await CloudProviders.fetchRemoteModels({ baseUrl: "https://shape.example/v1", apiKey: "sk" });
     expect(r.ok).toBe(true);
     expect(r.models).toHaveLength(1);
@@ -200,9 +203,9 @@ test("清单形状：{data} / {models} / 根数组都认", async () => {
 
 test("停用激活中的厂商：回到本地模式（对话不会继续打到已停用的地址）", async () => {
   const id = makeProvider({ name: "停用测试", baseUrl: "https://off.example/v1", apiKey: "sk-x" });
-  globalThis.fetch = mock(
+  setFetch(mock(
     async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
-  ) as never;
+  ) as never);
   await CloudProviders.setCloudProviderEnabled(id, true);
   CloudProviders.activateCloudProvider(id);
   expect(getSetting("SERVER_MODE")).toBe("remote");
@@ -314,9 +317,9 @@ test("没填过 Key 的默认地址不搬家（TTS / 视频自带默认地址，
 
 test("功能页保存「厂商 + 模型」：模型带用途落进厂商清单", async () => {
   const id = makeProvider({ name: "保存选择", baseUrl: "https://save.example/v1", apiKey: "sk-x" });
-  globalThis.fetch = mock(
+  setFetch(mock(
     async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
-  ) as never;
+  ) as never);
 
   // 没启动的厂商不让页面选：先去设置里启动（启动时校验密钥）。
   const denied = CloudProviders.saveAppModelChoice({
@@ -496,9 +499,9 @@ test("存量行补上预设的 musicApi，并因此出现在音乐页的候选�
   expect(CloudProviders.updateCloudProvider(id, { musicApi: "" }).ok).toBe(true);
   // 新建的厂商默认未启用，而选择器只列已启用的 —— 先把密钥校验 mock 掉启用它，
   // 否则这个用例会因为"未启用"而红，掩盖掉真正要验的协议补全。
-  globalThis.fetch = mock(
+  setFetch(mock(
     async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
-  ) as never;
+  ) as never);
   expect(CloudProviders.updateCloudProvider(id, { apiKey: "sk-stepfun-test" }).ok).toBe(true);
   const enabled = await CloudProviders.setCloudProviderEnabled(id, true);
   expect(enabled.ok).toBe(true);
@@ -613,12 +616,12 @@ test("地址被改过的内置行不再锁（老版本允许改地址，用户�
 
 test("引导页那种「选厂商 + 填 Key」：一步落进厂商表、启用并激活", async () => {
   updateSettings({ CLOUD_PROVIDER: "", SERVER_MODE: "local", VLLM_MODEL_NAME: "", CHAT_MODEL: "" });
-  globalThis.fetch = mock(
+  setFetch(mock(
     async () =>
       new Response(JSON.stringify({ data: [{ id: "deepseek-chat" }, { id: "deepseek-reasoner" }] }), {
         status: 200,
       }),
-  ) as never;
+  ) as never);
 
   const res = await CloudProviders.configureCloudProvider({
     providerId: "deepseek",
@@ -640,9 +643,9 @@ test("引导页那种「选厂商 + 填 Key」：一步落进厂商表、启用�
 });
 
 test("引导页填自定义地址：同一台网关复用同一行，已经挑过的模型不被冲掉", async () => {
-  globalThis.fetch = mock(
+  setFetch(mock(
     async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
-  ) as never;
+  ) as never);
 
   const first = await CloudProviders.configureCloudProvider({
     baseUrl: "https://relay.example/v1",
