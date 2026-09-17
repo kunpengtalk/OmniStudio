@@ -5,6 +5,7 @@ import * as Settings from "./db/settings";
 import { EMBEDDING_PORT_BASE, ENGINE_PORT_KEYS, engineSupportsEmbeddings } from "../shared/engines";
 import { classifyStartupError, type StartupErrorKind } from "../shared/engine-errors";
 import { downloadManager, type DownloadTask } from "./download-manager";
+import { hasUnfinishedDownload } from "./downloader";
 import { getModelProfile } from "../shared/model-profiles";
 import { dirModelKind, modelNameForPath, resolveRuntimeTarget } from "./model-scan";
 import { listInstalledModels, servedNameForModelPath, slugModelFileName } from "./model-store";
@@ -572,6 +573,15 @@ function setServedError(info: ServedModelInfo, message: string) {
     // 光看原文分不出来。而应用自己知道下载队列里还挂着这个文件 —— 那就直说，
     // 否则用户会去查架构、换量化、重下模型，全是白费。
     info.error = `权重还在下载中（${formatDownloadProgress(download)}），现在加载必然失败：${message}`;
+    info.errorKind = "download-incomplete";
+    return;
+  }
+  // 队列里没有任务，也可能根本没下完：任务被取消 / 清理之后，磁盘上的半成品还留着
+  // （侧车与分片就是证据 —— 见 downloader.hasUnfinishedDownload）。这条判据同样不看作
+  // 原文：llama.cpp 对「没下完」和「架构不认识」说的是同一句话，判错就会把用户引去
+  // 查架构、换量化，而真正该做的是把这份下完（issue #16 的报告者正是卡在这里）。
+  if (hasUnfinishedDownload(info.modelRef)) {
+    info.error = `权重没有下完（磁盘上的文件不完整），现在加载必然失败：${message}`;
     info.errorKind = "download-incomplete";
     return;
   }

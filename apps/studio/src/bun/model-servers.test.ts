@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -421,6 +421,42 @@ describe("启动失败的类型（LIE-05）", () => {
     expect(res.model?.error).toContain("还在下载中");
     expect(res.model?.error).toContain("3%");
     expect(res.model?.error).toContain("model loading error");
+  });
+
+  test("队列里已经没有任务、但磁盘上的文件没下完：照旧按「没下完」说，不去猜架构", async () => {
+    FAILING.set(modelA, "0.00.058.639 E srv  llama_server: exiting due to model loading error");
+    // 中断留下的现场：最终文件被预分配到完整长度（分片路径一上来就这么干），
+    // 侧车记录只下了一部分 —— 而下载任务已经被取消 / 清掉了（重启后任务列表只剩活着的那些），
+    // 只看队列就会把它当成「架构不认识」，把用户引去查架构、换量化（issue #16）。
+    const sidecar = `${modelA}.download.json`;
+    writeFileSync(modelA, Buffer.alloc(4096));
+    writeFileSync(
+      sidecar,
+      JSON.stringify({
+        url: "https://example.invalid/f",
+        total: 4096,
+        etag: null,
+        flushed: 0,
+        parts: [{ index: 0, start: 0, end: 4096, have: 1024 }],
+      }),
+    );
+    try {
+      const res = await Registry.startServedModel({ model: modelA });
+      expect(res.model?.errorKind).toBe("download-incomplete");
+      expect(res.model?.error).toContain("没有下完");
+      // 原文照旧留着（排查要看）
+      expect(res.model?.error).toContain("model loading error");
+    } finally {
+      rmSync(sidecar, { force: true });
+      writeFileSync(modelA, "gguf");
+    }
+  });
+
+  test("磁盘上文件是完整的（没有旁路数据）：不误判成没下完", async () => {
+    FAILING.set(modelA, "0.00.058.639 E srv  llama_server: exiting due to model loading error");
+    const res = await Registry.startServedModel({ model: modelA });
+    // llama.cpp 对「没下完」和「架构不认识」说的是同一句，认不出来就老实归 unknown
+    expect(res.model?.errorKind).toBe("unknown");
   });
 
   test("下载已经完成 / 失败的任务不算「还在下」", async () => {
