@@ -76,6 +76,23 @@ mock.module("@lib/rpc", () => ({
   rpcClient: {
     listLocalEngines: async () => ({ engines: engineRow ? [engineRow] : [], busy: null }),
     getServedModelLogs: async () => ({ logs: servedLogs }),
+    // 「引擎可能太旧」那一支要读安装能力（装哪个变体、能不能装）。
+    getSetupEnvironment: async () => ({
+      platform: "darwin",
+      arch: "arm64",
+      installSupport: {
+        "llama.cpp": { supported: true, reason: null, approxBytes: 50_000_000 },
+        vllm: { supported: false, reason: null, approxBytes: null },
+        sglang: { supported: false, reason: null, approxBytes: null },
+        mlx: { supported: true, reason: null, approxBytes: null },
+      },
+      installedVersions: { "llama.cpp": "b10976", vllm: null, sglang: null, mlx: null },
+      installing: null,
+      llama: { found: true },
+      vllm: { found: false },
+      sglang: { found: false },
+      mlx: { found: false },
+    }),
   },
 }));
 
@@ -119,6 +136,10 @@ async function renderDetails(props?: { servedId?: string }) {
       ),
     );
   });
+  // 两次 settle：react-query 的 promise 链比一个 tick 长（引擎行 → setup-env 依次结算）。
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
@@ -131,6 +152,34 @@ function buttonByText(text: string): HTMLButtonElement | undefined {
   ) as HTMLButtonElement | undefined;
 }
 
+/** 把失败实例放进 served store：诊断卡从它读 errorKind（主进程已经分好类）。 */
+async function seedServedModel(errorKind: string) {
+  const { useServedStore } = await import("@stores/served");
+  await act(async () => {
+    useServedStore.getState().setSnapshot({
+      models: [
+        {
+          id: "srv-1",
+          modelRef: MODEL.fileName,
+          label: MODEL.fileName,
+          engine: "llama.cpp",
+          port: 18080,
+          endpoint: "http://127.0.0.1:18080/v1",
+          servedName: MODEL.fileName,
+          purpose: "embedding",
+          isDir: false,
+          status: "error",
+          error: "exiting due to model loading error",
+          errorKind: errorKind as never,
+          usesDefaultPort: true,
+          isActive: false,
+        },
+      ],
+      activeId: null,
+    });
+  });
+}
+
 afterEach(async () => {
   if (root) await act(async () => root!.unmount());
   root = null;
@@ -138,6 +187,10 @@ afterEach(async () => {
   engineRow = defaultEngineRow;
   servedLogs = "";
   useRouter.setState({ route: { path: "chat" } });
+  const { useServedStore } = await import("@stores/served");
+  await act(async () => {
+    useServedStore.getState().setSnapshot({ models: [], activeId: null });
+  });
 });
 
 afterAll(() => {
@@ -178,6 +231,29 @@ test("日志里还没有 error 行时明说，并给一个能点进控制台的�
     consoleButton!.click();
   });
   expect(useRouter.getState().route).toEqual({ path: "settings", tab: "logs" });
+});
+
+test("引擎说「不认识这个架构」时，卡片上直接给「装一次最新构建」—— 不用再去设置里翻", async () => {
+  await seedServedModel("model-format");
+  const view = await renderDetails();
+  // 说明为什么该升级（而不是让用户去猜），并给一个能点的安装入口
+  expect(view.textContent).toContain("引擎构建太旧");
+  expect(buttonByText("一键安装")).toBeTruthy();
+  expect(view.textContent).toContain("brew install llama.cpp");
+});
+
+test("别的失败（不认识的那种）不摆安装按钮 —— 引擎不一定有问题，别乱花几十 MB", async () => {
+  await seedServedModel("unknown");
+  const view = await renderDetails();
+  expect(view.textContent).not.toContain("引擎构建太旧");
+  expect(buttonByText("一键安装")).toBeUndefined();
+});
+
+test("引擎没装/没有引擎行时也不重复给安装入口（那是「引擎未安装」那条路的活）", async () => {
+  engineRow = { ...(defaultEngineRow as Record<string, unknown>), state: "missing" };
+  await seedServedModel("model-format");
+  const view = await renderDetails();
+  expect(buttonByText("一键安装")).toBeUndefined();
 });
 
 test("不是应用装的引擎（系统 brew 那份）不硬猜版本，明说版本未知", async () => {

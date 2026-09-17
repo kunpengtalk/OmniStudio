@@ -788,6 +788,7 @@ const zh: Record<string, string> = {
   "server.diag.bytes": "{n} 字节",
   "server.diag.logFirstError": "日志首错",
   "server.diag.noErrorLine": "启动日志里还没有 error 行",
+  "server.diag.engineTooOld": "引擎说它不认识这个模型 —— 常见原因是引擎构建太旧。装一次最新构建再试（不会动你的模型文件）：",
   // 控制台（已启动模型：可同时启动多个，各自端口）
   "console.title": "控制台",
   "console.subtitle": "已启动的模型都在这里，可以同时启动多个（各自一个端口）",
@@ -4096,6 +4097,7 @@ const en: Record<string, string> = {
   "server.diag.bytes": "{n} bytes",
   "server.diag.logFirstError": "First log error",
   "server.diag.noErrorLine": "No error line in the startup log yet",
+  "server.diag.engineTooOld": "The engine says it doesn't recognize this model — the usual cause is an out-of-date engine build. Install the latest build and try again (it won't touch your model files):",
   // Console (served models: several can run at once, each on its own port)
   "console.title": "Console",
   "console.subtitle": "Started models live here — run several at once, each on its own port",
