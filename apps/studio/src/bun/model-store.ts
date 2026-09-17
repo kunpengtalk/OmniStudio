@@ -12,6 +12,7 @@ import {
 } from "./model-scan";
 import type { InstalledModel } from "../shared/modelscope";
 import { getSetting, updateSettings } from "./db/settings";
+import { logEvent } from "./app-log";
 import { isInsideDir } from "./path-safety";
 import {
   classifyModelName,
@@ -344,6 +345,15 @@ export function deleteLocalModel(pathToModel: string): { ok: boolean; error?: st
   const hub = getHfHubCacheDir();
   const cacheEntry = isInsideDir(hub, abs) ? findHfCacheEntry(abs, hub) : null;
 
+  // 删除是**不可逆**的，而且可能落在用户自己添加的目录里（不是应用下载的东西）。
+  // 以前这里什么都不记：issue #18 报告「昨晚还好好的模型今早没了」时，日志里查不出
+  // 应用到底动没动过它，只能靠猜。所以成功与拒绝都留一条可回溯的记录。
+  const locationOf = (): "managed" | "extra-dir" | "hf-cache" => {
+    if (cacheEntry) return "hf-cache";
+    if (isInsideDir(getModelsBaseDir(), abs)) return "managed";
+    return "extra-dir";
+  };
+
   let freed = 0;
   try {
     if (cacheEntry) {
@@ -352,6 +362,13 @@ export function deleteLocalModel(pathToModel: string): { ok: boolean; error?: st
     } else {
       const allowed = [getModelsBaseDir(), ...getExtraModelDirs()];
       if (!allowed.some((root) => isInsideDir(root, abs))) {
+        logEvent({
+          level: "warn",
+          source: "app",
+          event: "model.delete.refused",
+          message: `拒绝删除白名单之外的路径：${abs}`,
+          detail: { path: abs },
+        });
         return {
           ok: false,
           error: "只允许删除应用下载目录、已添加的本地目录或 Hugging Face 缓存里的模型",
@@ -370,8 +387,24 @@ export function deleteLocalModel(pathToModel: string): { ok: boolean; error?: st
       }
     }
   } catch (e) {
+    logEvent({
+      level: "error",
+      source: "app",
+      event: "model.delete.failed",
+      message: `删除模型失败：${abs}`,
+      detail: { path: abs, error: e instanceof Error ? e.message : String(e) },
+    });
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+
+  logEvent({
+    source: "app",
+    event: "model.delete",
+    message: `已删除模型：${path.basename(abs)}`,
+    // location 是这次删除落在哪一类目录：managed = 应用自己下的，extra-dir / hf-cache =
+    // 用户自己的东西。事后追查「谁删的、删的是谁的文件」全看这一条。
+    detail: { path: abs, freed, location: locationOf(), dir: path.dirname(abs) },
+  });
 
   // 删掉的正是当前模型（或当前模型所在目录）时清空调用配置。
   const activePath = getSetting("LOCAL_MODEL_PATH");

@@ -8,6 +8,14 @@ import { ModelCategoryChips } from "@components/model-category-chips";
 import { Button } from "@ui/button";
 import { Badge } from "@ui/badge";
 import { Spinner } from "@ui/spinner";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@ui/dialog";
 import { useServedStore } from "@stores/served";
 import { useT } from "@stores/ui-lang";
 import { fileKind, engineSupports, type InferenceEngine, type ModelCategory, type ModelOrigin, type ModelSource } from "@/shared/modelscope";
@@ -52,6 +60,7 @@ function InstalledModelRow({
   const compatible = engineSupports(engine, kind);
   const [startError, setStartError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const setActiveMutation = useMutation({
     mutationFn: () => rpcClient.setActiveModel({ path: model.path }),
@@ -252,13 +261,53 @@ function InstalledModelRow({
         <Button
           variant="ghost"
           size="icon-sm"
+          aria-label={t("common.delete")}
           tooltip={model.origin === "hf-cache" ? t("models.deleteCacheEntry") : t("common.delete")}
-          onClick={() => deleteMutation.mutate()}
+          onClick={() => setConfirmingDelete(true)}
           disabled={deleteMutation.isPending}
         >
           <Trash2Icon className="size-4" />
         </Button>
       </div>
+
+      {/* 删除不可逆，而且**可能删的是用户自己的文件**：从「本地模型目录」扫进来的模型不在
+          应用下载目录里，删掉没法从应用里恢复。以前点一下图标就直接删了 —— issue #18 里
+          报告者正是把 LM Studio 的目录加进来之后发现权重文件不见了，事后连日志都查不到。
+          所以这里必须先把「删哪个文件、它在哪、是不是应用自己下载的」摆出来再确认。 */}
+      <Dialog open={confirmingDelete} onOpenChange={setConfirmingDelete}>
+        <DialogContent className="text-xs">
+          <DialogHeader>
+            <DialogTitle className="text-sm">{t("models.deleteConfirm.title")}</DialogTitle>
+            <DialogDescription className="break-all font-mono text-[11px]">{model.path}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <p className="break-all">
+              {model.fileName} · {formatBytes(model.size)}
+            </p>
+            <p className={cn("text-[11px]", model.origin === "managed" ? "text-muted-foreground" : "text-destructive")}>
+              {model.origin === "managed" ? t("models.deleteConfirm.managed") : t("models.deleteConfirm.external")}
+            </p>
+            {deleteError && <p className="text-[11px] text-destructive">{deleteError}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => setConfirmingDelete(false)}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-8 text-xs"
+              disabled={deleteMutation.isPending}
+              onClick={() => {
+                setConfirmingDelete(false);
+                deleteMutation.mutate();
+              }}
+            >
+              {t("common.delete")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
