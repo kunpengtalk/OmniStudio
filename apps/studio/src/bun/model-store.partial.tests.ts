@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { isModelWeightExt, modelDisplayName, safeRepoId } from "../shared/modelscope";
@@ -61,6 +61,39 @@ writeFileSync(
 const completePath = join(tmpDir, "ready.gguf");
 writeFileSync(completePath, Buffer.alloc(1024, 1));
 
+// —— 仓库目录条目：权重在**子目录**里（市场里的文件名可以是 `BF16/xxx.gguf`），
+//    侧车就跟着落在子目录里；扫描给我们的 `files` 只有基名，按基名去拼是拼不到它的 ——
+//    这正是「子目录版半成品会漏判」的那个洞。 ——
+const repoPartialDir = join(tmpDir, "repo-partial");
+const nestedWeight = join(repoPartialDir, "BF16", "model.safetensors");
+mkdirSync(join(repoPartialDir, "BF16"), { recursive: true });
+writeFileSync(join(repoPartialDir, "config.json"), "{}");
+writeFileSync(nestedWeight, Buffer.alloc(4096));
+writeFileSync(
+  `${nestedWeight}.download.json`,
+  JSON.stringify({
+    url: "https://example.invalid/f",
+    total: 4096,
+    etag: null,
+    flushed: 0,
+    parts: [{ index: 0, start: 0, end: 4096, have: 1024 }],
+  }),
+);
+
+function dirEntryFor(dir: string, files: string[]) {
+  return {
+    repo: "partial-repo",
+    fileName: "model.safetensors",
+    path: dir,
+    size: 4096,
+    kind: "safetensors",
+    isDir: true,
+    runtimeTarget: dir,
+    origin: "managed",
+    files,
+  };
+}
+
 // —— 下完那一刻崩溃：sidecar 还没来得及删，但字节其实齐了 ——
 const stalePath = join(tmpDir, "stale-sidecar.gguf");
 const STALE_TOTAL = 2048;
@@ -78,7 +111,12 @@ writeFileSync(
 
 mock.module("./model-scan", () => ({
   resolveRuntimeTarget: (p: string) => p,
-  scanModelSources: () => [entryFor(partialPath), entryFor(completePath), entryFor(stalePath)],
+  scanModelSources: () => [
+    entryFor(partialPath),
+    entryFor(completePath),
+    entryFor(stalePath),
+    dirEntryFor(repoPartialDir, ["model.safetensors"]),
+  ],
   getScanDirs: () => [{ dir: tmpDir, origin: "managed" }],
   getExtraModelDirs: () => [],
   getHfHubCacheDir: () => join(tmpDir, "hf-hub"),
@@ -108,5 +146,9 @@ describe("listInstalledModels / 半成品过滤", () => {
 
   test("崩溃残留的陈旧 sidecar、但字节其实齐了：照常出现", () => {
     expect(names()).toContain("stale-sidecar.gguf");
+  });
+
+  test("仓库目录条目里、**子目录**中的半成品也算（扫描只给基名，按基名拼不到它）", () => {
+    expect(names()).not.toContain("model.safetensors");
   });
 });

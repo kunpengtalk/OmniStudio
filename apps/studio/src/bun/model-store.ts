@@ -13,7 +13,7 @@ import {
 } from "./model-scan";
 import type { InstalledModel } from "../shared/modelscope";
 import { getSetting, updateSettings } from "./db/settings";
-import { hasUnfinishedDownload } from "./downloader";
+import { hasUnfinishedDownloadAt } from "./downloader";
 import { logEvent } from "./app-log";
 import { isInsideDir } from "./path-safety";
 import {
@@ -145,7 +145,7 @@ export function toggleFavorite(pathToModel: string): void {
 }
 
 /**
- * 这一条里还留着**没下完**的文件吗（判据见 downloader.hasUnfinishedDownload）？
+ * 这一条里还留着**没下完**的文件吗（判据见 downloader.hasUnfinishedDownloadAt）？
  *
  * 模型是按文件下载的，小文件先下（config.json / tokenizer），大权重最后；分片路径又
  * 一上来就把最终文件预分配到完整长度，所以「下到一半」的模型在列表里看尺寸完全正确、
@@ -154,14 +154,12 @@ export function toggleFavorite(pathToModel: string): void {
  * （issue #16）。所以半成品要从「已安装」里摘掉 —— 继续下载的入口在市场页的文件行
  * 与下载卡片上，那里本来就知道真实进度。
  *
- * 仓库目录条目要**逐个权重**看：整仓库是逐文件下的，缺任何一个都不算能加载。
+ * 仓库目录条目看整棵树：市场里的文件名可以是 `BF16/xxx.gguf` 这种**带子路径**的，
+ * 侧车跟着落在子目录里，而扫描给我们的 `files` 只有基名 —— 按基名拼路径是拼不到的，
+ * 子目录里的半成品会从这条判定里漏过去（`hasUnfinishedDownloadAt` 覆盖目录树）。
  */
 function hasUnfinishedEntry(m: ScannedModel): boolean {
-  if (!m.isDir) return hasUnfinishedDownload(m.path);
-  for (const f of m.files ?? []) {
-    if (hasUnfinishedDownload(path.join(m.path, f))) return true;
-  }
-  return false;
+  return hasUnfinishedDownloadAt(m.path);
 }
 
 /**

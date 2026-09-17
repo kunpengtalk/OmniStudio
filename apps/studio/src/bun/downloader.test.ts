@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, w
 import { tmpdir } from "os";
 import path from "path";
 
-import { downloadWithResume, hasUnfinishedDownload, partCountFor, partsBudgetFor, partialBytesFor, removePartialFiles } from "./downloader";
+import { downloadWithResume, hasUnfinishedDownload, hasUnfinishedDownloadAt, partCountFor, partsBudgetFor, partialBytesFor, removePartialFiles } from "./downloader";
 
 /**
  * 下载内核的离线测试：假服务器支持 Range / 返回 503 / 卡死 / 忽略 Range /
@@ -520,6 +520,46 @@ describe("旁路数据管理", () => {
     );
     expect(hasUnfinishedDownload(dest)).toBe(false);
   });
+
+  test("目标给的是目录：子目录里的半成品也算（市场里的权重可以是 BF16/xxx.gguf 这种子路径）", () => {
+    const repoDir = path.join(dir, "repo");
+    const nested = path.join(repoDir, "BF16");
+    const { mkdirSync } = require("fs") as typeof import("fs");
+    mkdirSync(nested, { recursive: true });
+    // 仓库自带的两个文件（其中 config.json 先下完了）
+    writeFileSync(path.join(repoDir, "config.json"), "{}");
+    // 子目录里的权重：预分配到完整长度 + 侧车说只下了 1/4
+    const weight = path.join(nested, "model.safetensors");
+    writeFileSync(weight, Buffer.alloc(4096));
+    writeFileSync(
+      `${weight}.download.json`,
+      JSON.stringify({
+        url: "https://example.invalid/f",
+        total: 4096,
+        etag: null,
+        flushed: 0,
+        parts: [{ index: 0, start: 0, end: 4096, have: 1024 }],
+      }),
+    );
+
+    expect(hasUnfinishedDownloadAt(repoDir)).toBe(true);
+    // 收口反向：把那半成品补齐后就不该再报
+    writeFileSync(
+      `${weight}.download.json`,
+      JSON.stringify({
+        url: "https://example.invalid/f",
+        total: 4096,
+        etag: null,
+        flushed: 4096,
+        parts: [{ index: 0, start: 0, end: 4096, have: 4096 }],
+      }),
+    );
+    expect(hasUnfinishedDownloadAt(repoDir)).toBe(false);
+    // 文件路径照旧走文件判据（同一个入口）
+    expect(hasUnfinishedDownloadAt(path.join(repoDir, "config.json"))).toBe(false);
+    // 不存在的目标不报
+    expect(hasUnfinishedDownloadAt(path.join(dir, "nope"))).toBe(false);
+  }, 20_000);
 
   test("小文件走单流也能断点续传", async () => {
     const size = 512 * 1024; // 低于并行门槛
