@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, w
 import { tmpdir } from "os";
 import path from "path";
 
-import { downloadWithResume, partCountFor, partsBudgetFor, partialBytesFor, removePartialFiles } from "./downloader";
+import { downloadWithResume, hasUnfinishedDownload, partCountFor, partsBudgetFor, partialBytesFor, removePartialFiles } from "./downloader";
 
 /**
  * 下载内核的离线测试：假服务器支持 Range / 返回 503 / 卡死 / 忽略 Range /
@@ -459,6 +459,67 @@ describe("旁路数据管理", () => {
     expect(readdirSync(dir)).toEqual([]);
     expect(partialBytesFor(dest, BIG)).toBe(0);
   }, 20_000);
+
+  test("中断后最终文件的长度就等于完整大小 —— 光看字节数看不出没下完（issue #16 的坑）", async () => {
+    const data = makeData(BIG);
+    const { server } = startServer({ data, chunkDelayMs: 5 });
+    servers.push(server);
+    const dest = path.join(dir, "halfsize.gguf");
+
+    const ac = new AbortController();
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, {
+      total: BIG,
+      signal: ac.signal,
+      onProgress: (p) => {
+        if (p.received > BIG * 0.35) ac.abort();
+      },
+    }).catch(() => undefined);
+
+    // 分片路径一上来就把最终文件预分配到完整长度（定位写不留空洞的前提），
+    // 所以「下到一半」的文件在资源管理器里看**尺寸是完全正确的** ——
+    // 这正是报告者说「模型大小没有问题」却加载失败的原因：尺寸不是完成判据。
+    expect(statSync(dest).size).toBe(BIG);
+    // 真实进度只有旁路数据（sidecar + 分片）知道
+    expect(partialBytesFor(dest, BIG)).toBeLessThan(BIG);
+    expect(hasUnfinishedDownload(dest)).toBe(true);
+
+    // 续传下完之后：尺寸没变，但不再是半成品，内容逐字节正确
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, { total: BIG });
+    expect(statSync(dest).size).toBe(BIG);
+    expect(hasUnfinishedDownload(dest)).toBe(false);
+    expect(Buffer.compare(readFileSync(dest), Buffer.from(data))).toBe(0);
+  }, 30_000);
+
+  test("下完的文件不是半成品（没有旁路数据）", async () => {
+    const size = 512 * 1024;
+    const data = makeData(size);
+    const { server } = startServer({ data });
+    servers.push(server);
+    const dest = path.join(dir, "done.bin");
+
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, { total: size });
+    expect(hasUnfinishedDownload(dest)).toBe(false);
+    // 不存在的路径当然也不算「没下完」
+    expect(hasUnfinishedDownload(path.join(dir, "nope.bin"))).toBe(false);
+  });
+
+  test("崩溃残留的陈旧 sidecar（字节其实齐了）不算半成品 —— 不能因此把好模型藏起来", () => {
+    const dest = path.join(dir, "stale.gguf");
+    const total = 4096;
+    writeFileSync(dest, Buffer.alloc(total, 7));
+    // 下完那一刻：所有分片都满了、前缀也搬完了，但 sidecar 还没来得及删。
+    writeFileSync(
+      `${dest}.download.json`,
+      JSON.stringify({
+        url: "http://example/f",
+        total,
+        etag: null,
+        flushed: total,
+        parts: [{ index: 0, start: 0, end: total, have: total }],
+      }),
+    );
+    expect(hasUnfinishedDownload(dest)).toBe(false);
+  });
 
   test("小文件走单流也能断点续传", async () => {
     const size = 512 * 1024; // 低于并行门槛

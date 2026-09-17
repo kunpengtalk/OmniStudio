@@ -9,9 +9,11 @@ import {
   modelNameForPath,
   resolveRuntimeTarget,
   scanModelSources,
+  type ScannedModel,
 } from "./model-scan";
 import type { InstalledModel } from "../shared/modelscope";
 import { getSetting, updateSettings } from "./db/settings";
+import { hasUnfinishedDownload } from "./downloader";
 import { logEvent } from "./app-log";
 import { isInsideDir } from "./path-safety";
 import {
@@ -143,6 +145,26 @@ export function toggleFavorite(pathToModel: string): void {
 }
 
 /**
+ * 这一条里还留着**没下完**的文件吗（判据见 downloader.hasUnfinishedDownload）？
+ *
+ * 模型是按文件下载的，小文件先下（config.json / tokenizer），大权重最后；分片路径又
+ * 一上来就把最终文件预分配到完整长度，所以「下到一半」的模型在列表里看尺寸完全正确、
+ * 却根本加载不了。它一旦出现在「已下载」里，用户只会点「运行」，然后拿到一句笼统的
+ * 加载失败；市场页也因为文件名在列表里而显示「已下载」，连重新下载的路都被堵住
+ * （issue #16）。所以半成品要从「已安装」里摘掉 —— 继续下载的入口在市场页的文件行
+ * 与下载卡片上，那里本来就知道真实进度。
+ *
+ * 仓库目录条目要**逐个权重**看：整仓库是逐文件下的，缺任何一个都不算能加载。
+ */
+function hasUnfinishedEntry(m: ScannedModel): boolean {
+  if (!m.isDir) return hasUnfinishedDownload(m.path);
+  for (const f of m.files ?? []) {
+    if (hasUnfinishedDownload(path.join(m.path, f))) return true;
+  }
+  return false;
+}
+
+/**
  * 本地模型列表：应用下载目录 + 用户添加的目录 + Hugging Face 缓存。
  * 目录结构任意深度都能识别（见 model-scan.ts），不再要求 `<dir>/<repo>/<file>` 布局。
  */
@@ -152,7 +174,10 @@ export function listInstalledModels(): InstalledModel[] {
   const favorites = getFavorites();
   const roots = new Map(getScanDirs().map((d) => [d.origin, d.dir]));
 
-  return scanModelSources().map((m) => {
+  // 半成品先摘掉（见 hasUnfinishedEntry）：尺寸对得上、内容不全的文件不能算「已安装」。
+  const scanned = scanModelSources().filter((m) => !hasUnfinishedEntry(m));
+
+  return scanned.map((m) => {
     // 激活目标既可能是文件，也可能是目录（vLLM/SGLang/MLX 加载整个仓库目录）。
     const isActive = m.path === activePath || m.runtimeTarget === activePath;
     const meta =

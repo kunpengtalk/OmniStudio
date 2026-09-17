@@ -244,6 +244,24 @@ export function partialBytesFor(destPath: string, total?: number | null): number
   return Math.min(sidecar.total, sidecar.flushed + inParts);
 }
 
+/**
+ * 这个路径上的文件「还没下完」吗？
+ *
+ * **不能用尺寸判断**：分片路径一上来就把最终文件预分配到完整长度（定位写不留空洞的
+ * 前提），所以下到一半的文件尺寸就是完整大小、后半段还是空内容 —— 它在资源管理器、
+ * 模型列表、市场页里看着都「没问题」，一加载却只得到一句笼统的 `exiting due to
+ * model loading error`（issue #16 报告者的「模型大小没有问题」正是这么来的）。
+ *
+ * 权威口径是旁路数据：侧车里的 `flushed + 各分片 have`（见 `partialBytesFor`）。
+ * 反方向也成立 —— 下完那一刻 sidecar 与分片都会被删掉；万一崩在这两步之间留下陈旧
+ * sidecar，它记录的字节也是齐的，不会把好文件误判成半成品。
+ */
+export function hasUnfinishedDownload(destPath: string): boolean {
+  const size = sizeOf(destPath);
+  if (size <= 0) return false;
+  return partialBytesFor(destPath, size) < size;
+}
+
 /** 清理某个文件的全部旁路数据（取消下载用）。 */
 export function removePartialFiles(destPath: string): void {
   rmSync(destPath, { force: true });
