@@ -778,6 +778,16 @@ const zh: Record<string, string> = {
   "server.error.hint.engine": "推理引擎未安装：到「设置 → 模型引擎」装一次即可（也可以自己 brew install llama.cpp / pip install vllm）。",
   "server.error.hint.noModel": "尚未选择模型，请先在模型页下载并选择一个模型。",
   "server.error.hint.timeout": "服务器启动超时，请打开服务器日志查看原因。",
+  // 启动失败卡片上的「诊断信息」：引擎版本 + 模型字节数 + 日志首条 error。
+  // 这三样是远程定位加载失败所需的最小信息（issue #16），摆在报错下面，用户截一张图就够。
+  "server.diag.title": "诊断信息",
+  "server.diag.engine": "引擎",
+  "server.diag.engineSystem": "版本未知（系统安装，非应用托管）",
+  "server.diag.engineNoVersion": "版本未知",
+  "server.diag.model": "模型文件",
+  "server.diag.bytes": "{n} 字节",
+  "server.diag.logFirstError": "日志首错",
+  "server.diag.noErrorLine": "启动日志里还没有 error 行",
   // 控制台（已启动模型：可同时启动多个，各自端口）
   "console.title": "控制台",
   "console.subtitle": "已启动的模型都在这里，可以同时启动多个（各自一个端口）",
@@ -4076,6 +4086,16 @@ const en: Record<string, string> = {
   "server.error.hint.engine": "The inference engine is not installed. Install it once from Settings → Engines (or with brew install llama.cpp / pip install vllm).",
   "server.error.hint.noModel": "No model selected yet. Download and pick a model from the Models page first.",
   "server.error.hint.timeout": "The server took too long to start. Check the server log for details.",
+  // Diagnostics on the start-failure card: engine build, exact model bytes, first log error.
+  // These three are the minimum needed to diagnose a load failure remotely (issue #16).
+  "server.diag.title": "Diagnostics",
+  "server.diag.engine": "Engine",
+  "server.diag.engineSystem": "version unknown (system install, not app-managed)",
+  "server.diag.engineNoVersion": "version unknown",
+  "server.diag.model": "Model file",
+  "server.diag.bytes": "{n} bytes",
+  "server.diag.logFirstError": "First log error",
+  "server.diag.noErrorLine": "No error line in the startup log yet",
   // Console (served models: several can run at once, each on its own port)
   "console.title": "Console",
   "console.subtitle": "Started models live here — run several at once, each on its own port",

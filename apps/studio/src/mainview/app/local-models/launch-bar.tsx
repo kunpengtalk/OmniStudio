@@ -11,6 +11,7 @@ import { fileKind, engineSupports, type InstalledModel, type InferenceEngine } f
 import { engineSpec } from "@/shared/engines";
 import { isEngineMissingError, serverErrorHint } from "@/mainview/lib/server-error";
 import { EngineInstaller } from "@/mainview/app/setup-screen/engine-install";
+import { StartFailureDetails } from "@components/start-failure-details";
 import { cn } from "@/mainview/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -150,8 +151,10 @@ export function LaunchBar({ installedModels, engine }: { installedModels: Instal
           )}
           {serverStatus === "running" ? t("models.restartServer") : t("models.launch")}
         </Button>
-        {/* 启动是后台进行的：进度 / 日志在控制台看，这里给个直达入口。 */}
-        {serverStatus !== "stopped" && (
+        {/* 启动是后台进行的：进度 / 日志在控制台看，这里给个直达入口。
+            失败（startError）时也要留着 —— 那时实例可能还没建起来（status 仍是
+            stopped），恰恰是最需要看日志的时候，以前这个按钮会正好消失。 */}
+        {(startError || serverStatus !== "stopped") && (
           <Button
             variant="outline"
             size="sm"
@@ -192,6 +195,13 @@ export function LaunchBar({ installedModels, engine }: { installedModels: Instal
             <span className="mt-1.5 size-0.5 shrink-0 rounded-full bg-destructive/50" />
             <span className="min-w-0 break-words">{startError}</span>
           </p>
+          {/* 失败时把「引擎版本 + 模型字节数 + 日志首条 error」直接摆出来（issue #16）：
+              这三样散在设置页里的时候，用户找不到也贴不出来。 */}
+          <StartFailureDetails
+            engine={engine}
+            model={compatibleModels.find((m) => m.path === activePath)}
+            servedId={servedForModel?.id}
+          />
         </div>
       )}
     </div>

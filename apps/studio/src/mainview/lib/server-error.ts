@@ -46,6 +46,52 @@ export function serverErrorHint(
   return null;
 }
 
+/** 日志里的 ANSI 着色（llama.cpp 会给 `E` 行上红色）。 */
+const ANSI_RE = /\u001b\[[0-9;]*m/g;
+
+/**
+ * 「结论句」：加载失败时它总是最后一行，光看它等于什么都没说
+ * （`exiting due to model loading error` 就是 issue #16 截图里那一句）。
+ */
+const SUMMARY_ONLY_RE = /exiting due to model loading error/i;
+
+/** 像一行诊断错误：显式的错误级别（llama.cpp 的 `E srv`）或错误关键词。 */
+const ERROR_LINE_RE = /(^|\s)E(\s|:)|\b(error|fatal|panic|failed|invalid|unsupported|unknown)\b/i;
+
+function capLine(line: string, maxLength: number): string {
+  return line.length > maxLength ? `${line.slice(0, maxLength)}…` : line;
+}
+
+/**
+ * 从启动日志里取出**能定位问题的那一行**：第一条 error，而不是最后那句结论。
+ *
+ * issue #16 里报告者卡在「嵌入模型加载失败」，要定位就得看这一行的原文 ——
+ * 它才写明是 `unknown model architecture`、还是 `wrong shape` / `invalid magic` /
+ * 文件截断。两种日志的约定不一样，各按各的取：
+ *
+ * - 服务器日志（llama.cpp / vLLM 的 stdout）：结论就在第一条 error 行上；
+ * - Python 栈：结论在**最后一行**（`Traceback` 之后第一条不缩进的行），
+ *   中间那些 `File "...", line N` 是栈帧，没有信息量。
+ *
+ * 只有结论句时就把结论句给出去（好过 null）—— 至少说明日志确实到这里为止。
+ */
+export function firstErrorLine(logs: string | null | undefined, maxLength = 300): string | null {
+  if (!logs) return null;
+  const lines = logs.replace(ANSI_RE, "").split(/\r?\n/).map((line) => line.trimEnd());
+
+  const tracebackAt = lines.findIndex((line) => /traceback \(most recent call last\)/i.test(line));
+  if (tracebackAt >= 0) {
+    const last = lines.slice(tracebackAt + 1).find((line) => line.trim() !== "" && !/^\s/.test(line));
+    if (last) return capLine(last.trim(), maxLength);
+  }
+
+  const candidate = lines.find((line) => ERROR_LINE_RE.test(line) && !SUMMARY_ONLY_RE.test(line));
+  if (candidate) return capLine(candidate.trim(), maxLength);
+
+  const summary = lines.find((line) => SUMMARY_ONLY_RE.test(line));
+  return summary ? capLine(summary.trim(), maxLength) : null;
+}
+
 /** Backend persists assistant failure messages as "⚠️ <raw error>". Extract the raw error. */
 export function persistedErrorMessage(content: string): string | null {
   if (!content.startsWith("⚠️")) return null;

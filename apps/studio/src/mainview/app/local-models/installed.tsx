@@ -20,6 +20,7 @@ import { useServedStore } from "@stores/served";
 import { useT } from "@stores/ui-lang";
 import { fileKind, engineSupports, type InferenceEngine, type ModelCategory, type ModelOrigin, type ModelSource } from "@/shared/modelscope";
 import { serverErrorHint } from "@/mainview/lib/server-error";
+import { StartFailureDetails } from "@components/start-failure-details";
 import { cn } from "@/mainview/lib/utils";
 import { formatBytes } from "./parts";
 
@@ -195,6 +196,12 @@ function InstalledModelRow({
               <span className="mt-1.5 size-0.5 shrink-0 rounded-full bg-destructive/50" />
               <span className="min-w-0 break-words">{startError}</span>
             </p>
+            {/* 引擎版本 / 模型字节数 / 日志首条 error —— 远程定位加载失败的最小信息集。 */}
+            <StartFailureDetails
+              engine={engine}
+              model={model}
+              servedId={servedForModel?.id}
+            />
           </div>
         )}
       </div>

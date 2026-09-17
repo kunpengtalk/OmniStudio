@@ -1,6 +1,6 @@
 import { describe, expect, it, test } from "bun:test";
 
-import { isEngineMissingError, persistedErrorMessage, serverErrorHint } from "./server-error";
+import { firstErrorLine, isEngineMissingError, persistedErrorMessage, serverErrorHint } from "./server-error";
 
 /** 只关心「取到哪个键」，所以把 key 原样返回。 */
 const t = (key: string) => key;
@@ -83,5 +83,59 @@ describe("persistedErrorMessage", () => {
   test("从落库的失败消息里取出原文", () => {
     expect(persistedErrorMessage("⚠️ CUDA out of memory")).toBe("CUDA out of memory");
     expect(persistedErrorMessage("正常回答")).toBeNull();
+  });
+});
+
+describe("firstErrorLine", () => {
+  // 真实形态：llama.cpp 的 stdout，带 ANSI 着色、时间戳前缀，最后一行是总结句。
+  const FAILED_LOAD = [
+    "\u001b[32m0.00.100.200 I srv  llama_server: loading model\u001b[0m",
+    "\u001b[32m0.00.180.400 I srv  load_model: the slot context (8192) exceeds the training context of the model (512) - capping\u001b[0m",
+    "\u001b[31m0.00.200.300 E srv  llama_model_load: error loading model: unknown model architecture: 'bert'\u001b[0m",
+    "\u001b[31m0.00.201.900 E srv  llama_init_from_gpt_params: error loading model\u001b[0m",
+    "0.00.202.000 E srv  llama_server: exiting due to model loading error",
+  ].join("\n");
+
+  test("给日志里第一条真正的错误行（不是最后那句『exiting due to model loading error』）", () => {
+    const line = firstErrorLine(FAILED_LOAD);
+    // 用户要贴的就是这一行：它才写明是架构不认识 / 张量形状不对 / 文件截断
+    expect(line).toContain("unknown model architecture");
+    // 只有「结论」的那句排在后面，不能被当成答案
+    expect(line).not.toContain("exiting due to model loading error");
+  });
+
+  test("带颜色的日志要洗干净再给用户（ANSI 转义不能混进界面 / 剪贴板）", () => {
+    expect(firstErrorLine(FAILED_LOAD)).not.toContain("\u001b");
+  });
+
+  test("只有总结句时也照样给这一句，不给 null", () => {
+    const onlySummary = "0.00.202.000 E srv  llama_server: exiting due to model loading error";
+    expect(firstErrorLine(onlySummary)).toContain("exiting due to model loading error");
+  });
+
+  test("没有错误行就是 null（正常加载的日志不该被读出错误）", () => {
+    const ok = [
+      "0.00.100.000 I srv  load_model: model loaded",
+      "0.00.120.000 I srv  llama_server: listening on http://127.0.0.1:18191",
+    ].join("\n");
+    expect(firstErrorLine(ok)).toBeNull();
+    expect(firstErrorLine("")).toBeNull();
+    expect(firstErrorLine(undefined)).toBeNull();
+  });
+
+  test("别的引擎（Python 栈）也认：Traceback / Error 行", () => {
+    const vllm = [
+      "INFO: Loading model weights took 12.3 GB",
+      "Traceback (most recent call last):",
+      'ValueError: Bfloat16 is only supported on GPUs with compute capability >= 8.0',
+    ].join("\n");
+    expect(firstErrorLine(vllm)).toContain("compute capability");
+  });
+
+  test("超长的一行截断显示（日志行可以几百字符，卡片放不下）", () => {
+    const long = `E srv error: ${"x".repeat(1000)}`;
+    const line = firstErrorLine(long)!;
+    expect(line.length).toBeLessThanOrEqual(301);
+    expect(line.endsWith("…")).toBe(true);
   });
 });
