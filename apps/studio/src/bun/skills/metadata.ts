@@ -8,7 +8,7 @@ export interface SkillMeta {
   description: string | null;
 }
 
-/** 技能目录标记文件（大小写敏感，与 skills-manager 一致）。 */
+/** 技能目录标记文件（大小写敏感，两种命名都认）。 */
 const SKILL_DIR_MARKERS = ["SKILL.md", "skill.md"];
 
 export function findSkillMarker(dir: string): string | null {

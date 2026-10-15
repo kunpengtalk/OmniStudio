@@ -1,6 +1,9 @@
 /**
  * apply_patch（对齐 Codex 的补丁工具）。
  *
+ * 出处：算法与补丁文法移植自 openai/codex 的 apply_patch（Apache-2.0），
+ * 以 TypeScript 重写；依 Apache-2.0 要求在此注明来源与许可。
+ *
  * 为什么值得照搬：本地小模型一次改多个文件时，`edit_file` 的 old_str/new_str
  * 要求"带货真价实的原文"，一轮下来往往要连发五六个工具调用，任何一次不匹配就断链。
  * Codex 的做法是让模型发一段**补丁**（`*** Begin Patch` 包裹的 V4A 文本），

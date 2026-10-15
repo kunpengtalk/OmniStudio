@@ -26,11 +26,9 @@ export type UserPromptView = {
   prompt: string;
   summary: string | null;
   ratio: string | null;
-  /** 已解析的图片 URL（本地缓存 → 云端直链）。 */
+  /** 已解析的图片 URL（绝对地址；旧题库相对路径不再解析）。 */
   image: string | null;
   video: string | null;
-  /** 原始媒体相对路径，供前端 ensurePromptMedia 拉取本地缓存。 */
-  mediaKey: string | null;
   playUrl: string | null;
   playLabel: string | null;
   source: string | null;
@@ -59,8 +57,6 @@ export type MyPromptInput = {
 export type MyPromptPatch = Partial<MyPromptInput>;
 
 function toView(r: (typeof upTable.$inferSelect)): UserPromptView {
-  const mediaKey =
-    r.image && r.image.startsWith("/prompt-library/") ? r.image.slice(1) : null;
   return {
     id: r.id,
     key: `user-${r.id}`,
@@ -73,7 +69,6 @@ function toView(r: (typeof upTable.$inferSelect)): UserPromptView {
     ratio: r.ratio,
     image: mediaUrl(r.image),
     video: null,
-    mediaKey,
     playUrl: null,
     playLabel: null,
     source: r.sourceKey ? "plaza" : "mine",

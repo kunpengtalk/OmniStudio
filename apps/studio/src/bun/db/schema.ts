@@ -385,7 +385,7 @@ export const prompts = sqliteTable("prompts", {
   /** 原始出处/原片跳转链接。 */
   playUrl: text("play_url"),
   playLabel: text("play_label"),
-  /** 题库来源 id（img2hub / awesome / 仓库 id）。 */
+  /** 题库来源 id（seed 来源标记或仓库 id，用户自建条目为空）。 */
   source: text("source"),
   sourceUrl: text("source_url"),
   sourceLabel: text("source_label"),
@@ -421,7 +421,7 @@ export const userPrompts = sqliteTable("user_prompts", {
 export type UserPromptRow = typeof userPrompts.$inferSelect;
 
 // ---------------------------------------------------------------------------
-// Skills 管理（参照 skills-manager 移植）：中央技能库索引 / 同步目标 / 场景 / 项目
+// Skills 管理：中央技能库索引 / 同步目标 / 场景 / 项目
 // ---------------------------------------------------------------------------
 
 /** 中央库技能索引：id 即中央库内的目录名（slug）。 */
@@ -1180,3 +1180,20 @@ export const miniappNotes = sqliteTable(
 );
 
 export type MiniappNoteRow = typeof miniappNotes.$inferSelect;
+
+/**
+ * 无限画布的文档：节点 / 连线 / 视口整份 JSON 由 webview 作为唯一作者写入，
+ * 主进程只做形状校验（shared/canvas.ts）与落库 —— 画布的交互状态不走
+ * TanStack Query 的逐记录缓存，逐字段列存没有意义。
+ */
+export const canvasDocs = sqliteTable("canvas_docs", {
+  id: int().primaryKey({ autoIncrement: true }),
+  title: text("title").notNull().default(""),
+  nodes: text("nodes").notNull().default("[]"),
+  connections: text("connections").notNull().default("[]"),
+  viewport: text("viewport").notNull().default('{"x":0,"y":0,"k":1}'),
+  createdAt: int("created_at").notNull(),
+  updatedAt: int("updated_at").notNull(),
+});
+
+export type CanvasDocRow = typeof canvasDocs.$inferSelect;

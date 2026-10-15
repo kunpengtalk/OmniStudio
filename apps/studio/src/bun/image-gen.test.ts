@@ -28,12 +28,9 @@ await mockModulePartial<typeof import("./db/settings")>("./db/settings", {
 });
 await mockModulePartial<typeof import("./image-server")>("./image-server", {
   getImagesBaseDir: () => `/tmp/img-${process.pid}`,
-  getPromptLibraryCacheBase: () => `/tmp/pl-cache-${process.pid}`,
-  promptLibraryLocalUrl: (rel) => `http://localhost:1/prompt-library/${rel}`,
 });
 // server-info 用「真实导出 + 局部覆盖」：以前这里要手工把全部导出列一遍，否则
-// import 这个模块的其它文件（prompt-library.test 的 PROMPT_LIBRARY_MEDIA_ORIGIN 等）
-// 会直接报 "Export named ... not found"。
+// import 这个模块的其它文件会直接报 "Export named ... not found"。
 await mockModulePartial<typeof import("../shared/server-info")>("../shared/server-info", {
   chatImageUrl: (ref: string) => `http://img.local/${ref}`,
 });

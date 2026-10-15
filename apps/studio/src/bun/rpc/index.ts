@@ -226,6 +226,8 @@ import * as AsrAudioCpp from "../asr-audiocpp";
 import type { AsrAudioCppModelInfo, AsrAudioCppStatus } from "../asr-audiocpp";
 import * as AsrConfucius from "../asr-confucius";
 import type { AsrConfuciusModelInfo, AsrConfuciusStatus } from "../asr-confucius";
+import * as AsrInsights from "../asr-insights";
+import type { AsrInsightRequest, AsrInsightResult } from "../../shared/asr-insights";
 import * as WhisperEngine from "../whisper-engine";
 import * as TTSModels from "../tts-models";
 import type { TTSModelInfo } from "../tts-models";
@@ -254,6 +256,9 @@ import {
 import type { SystemOneQuestions, SystemOneResponse } from "../../shared/systemone";
 import * as BgRemove from "../bg-remove";
 import * as Upscale from "../upscale";
+import * as Canvas from "../canvas";
+import * as CanvasGen from "../canvas-gen";
+import type { CanvasDocPayload, CanvasDocSummary, CanvasTextChunkEvent } from "../../shared/canvas";
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
 import * as MediaSetup from "../media-setup";
@@ -1021,10 +1026,6 @@ export type AppRPC = {
       listPrompts: {
         params: PromptLib.PromptListParams;
         response: { items: PromptLib.PromptRow[]; total: number };
-      };
-      ensurePromptMedia: {
-        params: { path: string };
-        response: { url: string | null };
       };
       // ---- 我的提示词 ----
       listMyPrompts: {
@@ -2022,6 +2023,8 @@ export type AppRPC = {
           voice?: string;
           model?: string;
           referenceAudioRef?: string;
+          /** 无限画布按次指定厂商行 id；省略时用「默认模型」配置的 TTS 厂商。 */
+          providerId?: string;
         };
         response: { record: VoiceRecordRow };
       };
@@ -2124,6 +2127,15 @@ export type AppRPC = {
       saveASRProviderConfig: {
         params: { providerId?: string; model?: string };
         response: { ok: boolean };
+      };
+      /**
+       * 转写稿的「智能整理」（摘要 / 待办 / 问答 / 校对 / 翻译 / 标题）。
+       * 稿子以**分段**传过来（不是拼好的字符串）：提示词由主进程按 shared/asr-insights.ts
+       * 的同一份动作目录组装，界面只报告"点了哪个动作"。
+       */
+      runAsrInsight: {
+        params: AsrInsightRequest;
+        response: AsrInsightResult;
       };
       // Local ASR engine (audio.cpp)
       listAsrAudioCppModels: {
@@ -2385,6 +2397,8 @@ export type AppRPC = {
           referenceImageRef?: string;
           /** 页面能改的只有这四项：地址与密钥属于厂商行（`providerId` 现取），不从页面传。 */
           config?: Partial<Pick<ImageGenConfig, "backend" | "providerId" | "model" | "comfyBase">>;
+          /** 无限画布等按节点选模型的调用传 false，避免改写图像页保存的配置。 */
+          persistConfig?: boolean;
         };
         response: { records: ImageRecordRow[]; error?: string };
       };
@@ -2443,6 +2457,8 @@ export type AppRPC = {
           firstFrameRef?: string;
           watermark?: boolean;
           config?: Partial<VideoGenConfig>;
+          /** 无限画布等按节点选模型的调用传 false，避免改写视频页保存的配置。 */
+          persistConfig?: boolean;
         };
         response: { record?: VideoRecordRow; error?: string };
       };
@@ -2476,6 +2492,50 @@ export type AppRPC = {
           error?: string;
         };
       };
+      // 无限画布：文档整份 JSON 由 webview 保存（shared/canvas.ts），文本生成流式推送
+      canvasListDocs: {
+        params: undefined;
+        response: { docs: Canvas.CanvasDocSummary[] };
+      };
+      canvasGetDoc: {
+        params: { id: number };
+        response: {
+          doc?: { id: number; title: string; payload: Canvas.CanvasDocPayload; updatedAt: number };
+          error?: string;
+        };
+      };
+      canvasCreateDoc: {
+        params: { title?: string } | undefined;
+        response: { doc: Canvas.CanvasDocSummary };
+      };
+      canvasSaveDoc: {
+        params: { id: number; title?: string; nodes?: Canvas.CanvasNodeData[]; connections?: Canvas.CanvasConnectionData[]; viewport?: Canvas.CanvasViewport };
+        response: { ok: boolean; error?: string };
+      };
+      canvasDeleteDoc: {
+        params: { id: number };
+        response: { ok: boolean; error?: string };
+      };
+      /** 画布「上传」：图片 dataURL 落成 images/canvas/ 内的 ref。 */
+      canvasImportImage: {
+        params: { dataUrl: string; name?: string };
+        response: { ref?: string; error?: string };
+      };
+      /** 文本节点生成：立即返回，增量与终态经 `canvasTextChunk` 推送。 */
+      canvasRunText: {
+        params: {
+          docId: number;
+          nodeId: string;
+          prompt: string;
+          context?: Canvas.CanvasTextContextItem[];
+          model?: Canvas.CanvasModelChoice;
+        };
+        response: { ok: boolean; error?: string };
+      };
+      canvasStopText: {
+        params: { nodeId: string };
+        response: { ok: boolean };
+      };
       // AI 音乐生成（云端按厂商协议分派：stepfun 异步提交 + 轮询 / minimax 同步长请求；
       // local 本地引擎为预留位，见 bun/music-gen.ts）
       submitMusicGeneration: {
@@ -2493,6 +2553,8 @@ export type AppRPC = {
           responseFormat?: MusicOutputFormat;
           sampleRate?: number;
           config?: Partial<MusicGenConfig>;
+          /** 无限画布等按节点选模型的调用传 false，避免改写音乐页保存的配置。 */
+          persistConfig?: boolean;
         };
         response: { record?: MusicRecordRow; error?: string };
       };
@@ -2624,7 +2686,7 @@ export type AppRPC = {
       };
 
       // -----------------------------------------------------------------
-      // Skills 管理（参照 skills-manager 移植）
+      // Skills 管理
       // -----------------------------------------------------------------
       /** 工具列表（53 内置 + 自定义，含安装检测/启停/中央库同根标记）。 */
       skillsGetTools: {
@@ -3246,6 +3308,8 @@ export type AppRPC = {
         delta: string;
         kind?: "reasoning" | "content";
       };
+      /** 无限画布文本节点的流式增量（终态 done=true，失败带 error）。 */
+      canvasTextChunk: CanvasTextChunkEvent;
       chatDone: {
         conversationId: number;
         messageId: number;
@@ -4268,10 +4332,6 @@ const rpcRequests: NonNullable<
     return PromptLib.listPrompts(params);
   },
 
-  ensurePromptMedia: async ({ path }) => {
-    return { url: await PromptLib.ensurePromptMedia(path) };
-  },
-
   listMyPrompts: async (params) => {
     return Up.listMyPrompts(params);
   },
@@ -5292,6 +5352,9 @@ const rpcRequests: NonNullable<
     return { ok: true };
   },
 
+  // 转写稿整理（一次性调当前对话模型，非流式）
+  runAsrInsight: async (params) => AsrInsights.runAsrInsight(params ?? {}),
+
   // Local ASR (audio.cpp)
   listAsrAudioCppModels: async () => {
     try {
@@ -5861,6 +5924,43 @@ const rpcRequests: NonNullable<
 
   generateImage: async (params) => {
     return ImageGen.generateImage(params);
+  },
+
+  // 无限画布：文档 CRUD + 文本节点流式生成（图片 / 视频 / 音频直接复用
+  // generateImage / submitVideoGeneration / runTTS，节点选的模型走各自 config 参数）
+  canvasListDocs: async () => {
+    return { docs: Canvas.listCanvasDocs() };
+  },
+
+  canvasGetDoc: async ({ id }) => {
+    const doc = Canvas.getCanvasDoc(id);
+    if (!doc) return { error: `画布不存在（id ${id}）` };
+    return { doc };
+  },
+
+  canvasCreateDoc: async (params) => {
+    return { doc: Canvas.createCanvasDoc(params?.title) };
+  },
+
+  canvasSaveDoc: async (params) => {
+    return Canvas.saveCanvasDoc(params.id, params);
+  },
+
+  canvasDeleteDoc: async ({ id }) => {
+    return Canvas.deleteCanvasDoc(id);
+  },
+
+  canvasImportImage: async (params) => {
+    return Canvas.importCanvasImage(params);
+  },
+
+  canvasRunText: async (params) => {
+    return CanvasGen.runCanvasText(params);
+  },
+
+  canvasStopText: async ({ nodeId }) => {
+    CanvasGen.stopCanvasText(nodeId);
+    return { ok: true };
   },
 
   listImageRecords: async (params) => {
@@ -7037,6 +7137,15 @@ export function initBackupBroadcast(win: BrowserWindowWithRPC) {
     try {
       if (event.type === "progress") win.webview.rpc?.send.backupProgress(event.progress);
       else win.webview.rpc?.send.backupFinished(event);
+    } catch {}
+  });
+}
+
+/** 无限画布文本节点的流式增量（canvas-gen → webview）。 */
+export function initCanvasBroadcast(win: BrowserWindowWithRPC) {
+  CanvasGen.onCanvasTextChunk((event) => {
+    try {
+      win.webview.rpc?.send.canvasTextChunk(event);
     } catch {}
   });
 }

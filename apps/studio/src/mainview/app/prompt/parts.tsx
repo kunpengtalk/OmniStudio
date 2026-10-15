@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { ImageIcon, ArrowRightIcon, FilmIcon, Loader2Icon, BookMarkedIcon, SearchIcon, XIcon } from "lucide-react";
-import { rpcClient } from "@lib/rpc";
 import { CopyButton } from "@components/copy-button";
 import { Button } from "@ui/button";
 import { Badge } from "@ui/badge";
@@ -55,7 +54,6 @@ export function PromptMedia({
   fit?: "cover" | "contain";
 }) {
   const [src, setSrc] = useState<string | null>(item.image);
-  const [triedLocal, setTriedLocal] = useState(false);
   const ratio = item.ratio || "1 / 1";
   return (
     <div
@@ -68,20 +66,7 @@ export function PromptMedia({
           alt={item.name}
           loading="lazy"
           decoding="async"
-          onError={() => {
-            if (triedLocal) {
-              setSrc(null);
-              return;
-            }
-            setTriedLocal(true);
-            if (item.mediaKey) {
-              void rpcClient.ensurePromptMedia({ path: item.mediaKey }).then((res) => {
-                setSrc(res?.url ?? null);
-              });
-            } else {
-              setSrc(null);
-            }
-          }}
+          onError={() => setSrc(null)}
           className={cn("absolute inset-0 size-full", fit === "contain" ? "object-contain" : "object-cover")}
         />
       ) : (

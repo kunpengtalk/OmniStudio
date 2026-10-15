@@ -100,6 +100,14 @@ function createdAts(db: Database): number[] {
   ).map((r) => Number(r.created_at));
 }
 
+/** journal 的 when 全序列（供"最新应用行 = 最新迁移"这类断言取末条值）。 */
+function journalWhens(): number[] {
+  const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+    entries: { when: number }[];
+  };
+  return journal.entries.map((e) => e.when);
+}
+
 /** 撤掉多模态六列 + 删除 0037 的应用记录（两批库共同的中毒面）。 */
 function stripMultimodal(db: Database): void {
   for (const col of ["embed_image", "embed_audio", "embed_video"]) {
@@ -117,13 +125,15 @@ describe("迁移时间戳自愈", () => {
       entries: { when: number }[];
     };
     const whens = journal.entries.map((e) => e.when);
-    expect(whens.length).toBe(41);
+    expect(whens.length).toBe(42);
     for (let i = 1; i < whens.length; i++) {
       expect(whens[i]!).toBeGreaterThan(whens[i - 1]!);
     }
     // 任何 when 都不得超过末条的归真值 —— 否则下一条真实时间戳的新迁移又会
-    // 被静默跳过（这正是本次故障的成因）。
-    expect(Math.max(...whens)).toBe(CORRECTED_MUSIC_0040_WHEN);
+    // 被静默跳过（这正是本次故障的成因）。末条现在是画布的 0041，
+    // drizzle-kit 生成时取当前时间，天然大于音乐 0040 的归真值。
+    expect(Math.max(...whens)).toBe(whens[whens.length - 1]!);
+    expect(whens[whens.length - 1]!).toBeGreaterThan(CORRECTED_MUSIC_0040_WHEN);
   });
 
   test("中毒库重启后自愈：六列建回、0037 已应用、已应用行时间戳归真", () => {
@@ -158,13 +168,15 @@ describe("迁移时间戳自愈", () => {
     expect(columnsOf(healed, "knowledge_bases")).toContain("embed_image");
     expect(columnsOf(healed, "knowledge_chunks")).toContain("modality");
     const rows = createdAts(healed);
-    expect(rows.length).toBe(41);
+    expect(rows.length).toBe(42);
     // 0037 的记录被补了回来（它的 when 已不是全序列最大值，drizzle 自己够不着它，
     // 靠 repairUnreachableMigrations 补跑并记账）
     expect(rows).toContain(CORRECTED_TIRED_WHEN);
-    expect(rows[rows.length - 1]!).toBe(CORRECTED_MUSIC_0040_WHEN);
-    // 伪造未来值已清除
-    expect(rows.every((v) => v <= CORRECTED_MUSIC_0040_WHEN)).toBe(true);
+    // 最新应用行现在是画布 0041（journal 末条），音乐 0040 是倒数第二条。
+    expect(rows[rows.length - 1]!).toBe(Math.max(...journalWhens()));
+    expect(rows).toContain(CORRECTED_MUSIC_0040_WHEN);
+    // 伪造未来值已清除（全部行不超过 journal 末条的 when）
+    expect(rows.every((v) => v <= Math.max(...journalWhens()))).toBe(true);
     healed.close();
   });
 
@@ -221,9 +233,10 @@ describe("迁移时间戳自愈", () => {
       healed.query("SELECT name FROM sqlite_master WHERE type='table' AND name='usage_records'").get(),
     ).not.toBeNull();
     const rows = createdAts(healed);
-    expect(rows.length).toBe(41);
-    expect(rows[rows.length - 1]!).toBe(CORRECTED_MUSIC_0040_WHEN);
-    expect(rows.every((v) => v <= CORRECTED_MUSIC_0040_WHEN)).toBe(true);
+    expect(rows.length).toBe(42);
+    // 最新应用行是画布 0041（journal 末条）；全部行都 ≤ 它（伪造的未来时间戳已归真）。
+    expect(rows[rows.length - 1]!).toBe(Math.max(...journalWhens()));
+    expect(rows.every((v) => v <= Math.max(...journalWhens()))).toBe(true);
     healed.close();
   });
 
@@ -276,9 +289,10 @@ describe("迁移时间戳自愈", () => {
       healed.query("SELECT name FROM sqlite_master WHERE type='table' AND name='music_playlists'").get(),
     ).not.toBeNull();
     const rows = createdAts(healed);
-    expect(rows.length).toBe(41);
+    expect(rows.length).toBe(42);
     expect(rows).toContain(CORRECTED_TIRED_WHEN);
-    expect(rows.every((v) => v <= CORRECTED_MUSIC_0040_WHEN)).toBe(true);
+    // 画布 0041（journal 末条）之后没有更多应用行 —— 伪造的未来时间戳已归真。
+    expect(rows.every((v) => v <= Math.max(...journalWhens()))).toBe(true);
     healed.close();
   });
 

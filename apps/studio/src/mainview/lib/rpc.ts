@@ -5,6 +5,7 @@ import { useUpdateStore } from "./update-store";
 import { useServerStore } from "../stores/server";
 import { useServedStore } from "../stores/served";
 import { useChatStore } from "../stores/chat";
+import { useCanvasStore } from "../app/canvas/canvas-store";
 import { useAgentStore } from "../stores/agent";
 import { useTerminalStore } from "../stores/terminal";
 import { useVoiceCallStore } from "../stores/voice-call";
@@ -81,6 +82,10 @@ const rpc = Electroview.defineRPC<AppRPC>({
       },
       chatChunk: ({ conversationId, messageId, delta, kind }) => {
         useChatStore.getState().appendChunk(conversationId, messageId, delta, kind ?? "content");
+      },
+      // 无限画布文本节点的流式增量（canvasRunText 的推送通道）。
+      canvasTextChunk: (event) => {
+        useCanvasStore.getState().applyTextChunk(event);
       },
       chatDone: ({ conversationId, messageId, content, reasoning, error, citations }) => {
         // 不是当前打开的会话：标个未读点，用户切回去时清掉。

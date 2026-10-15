@@ -157,11 +157,6 @@ const copy: Record<string, string> = {
   // 漏掉任一个 → 抠图一打开就报「缺少 ONNX 运行时文件」。
   "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs": "bun/ort-wasm-simd-threaded.mjs",
   "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm": "bun/ort-wasm-simd-threaded.wasm",
-  // 提示词库内置素材（scripts/bundle-prompt-library-assets.ts 生成）：
-  // 有则打进 webview，作为远程封面加载失败时的离线兜底。
-  ...(existsSync("dist/prompt-library")
-    ? { "dist/prompt-library": "views/mainview/prompt-library" }
-    : {}),
 };
 
 assertPathsFitTar(copy);

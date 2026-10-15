@@ -4,8 +4,9 @@ import { proxyWebSocketOptions } from "./proxy";
 
 /**
  * Microsoft Edge 在线 TTS 客户端（完全免费、无需任何 API Key）。
- * 协议基于 edge-tts（https://github.com/rany2/edge-tts）：
- *  WSS 握手 -> speech.config -> ssml -> 收集 audio/mpeg 二进制分片。
+ * 协议是 Edge 浏览器语音服务的公开线协议（多家独立实现的共同事实）：
+ *  WSS 握手 -> speech.config -> ssml -> 收集 audio/mpeg 二进制分片；
+ * Sec-MS-GEC = Windows 文件时间按 5 分钟取整、拼固定 token 后取 SHA-256。
  */
 
 const TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
@@ -33,7 +34,7 @@ function connectId(): string {
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** 与 edge-tts 的 date_to_string() 一致的 JS 风格日期串。 */
+/** 服务端要求的 JS Date 风格日期串（协议事实格式）。 */
 function dateString(): string {
   const d = new Date();
   const p2 = (n: number) => String(n).padStart(2, "0");

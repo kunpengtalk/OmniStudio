@@ -8,7 +8,7 @@ import * as os from "os";
 // 不做模块 mock：bunfig 的 test-preload 已把 OMNI_DATA_DIR / OMNI_DB_PATH 指向
 // 本进程专属的临时目录，真实的 db（含迁移）与 images 目录天然隔离。
 // 在这里 mock ./db 或 ./image-server 会泄漏给同进程的其它测试文件
-// （例如 prompt-library.test 断言 getPromptLibraryMediaBase 的真实取值）。
+// （mock 是进程级的，不是文件级的，同进程别的测试文件会拿到被 mock 的导出）。
 // ---------------------------------------------------------------------------
 const { buildMediaReadTools, buildMediaGenTools } = await import("./media-tools");
 const { db } = await import("./db");

@@ -23,11 +23,6 @@ export function imageServerPort(): number {
 }
 /** 本地推理服务器（llama.cpp / vLLM / SGLang）的默认端口。 */
 export const DEFAULT_INFERENCE_PORT = "18080";
-/**
- * 提示词库封面/视频的远程源。部署时把 vibedesign 的
- * `frontend/public/prompt-library` 内容放到该域根路径下即可。
- */
-export const PROMPT_LIBRARY_MEDIA_ORIGIN = "https://kunpengtalk.com";
 
 /**
  * 本机回环 Host / Origin 判定：本地无鉴权服务（图片服务、网关）用它挡 DNS rebinding

@@ -3,17 +3,12 @@ import { join } from "path";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 
-// 挡住 electrobun 运行时（paths.ts 依赖），用临时 HOME 伪造 vibedesign 目录，
-// 启动真实的 image-server（startImageServer）对 /prompt-library 路由做 HTTP 冒烟测试。
+// 挡住 electrobun 运行时（paths.ts 依赖），用临时 HOME + 环境变量指向临时素材目录，
+// 启动真实的 image-server（startImageServer）对媒体路由做 HTTP 冒烟测试。
 const fakeHome = mkdtempSync(join(tmpdir(), "omni-pl-route-"));
 // 换一个测试专用端口：本地开着应用时 19782 被占，整段路由测试会跳过——而媒体 403 恰恰
 // 就是在这种"本地从没跑到"的路由上漏出去的（见 imageServerPort 的说明）。
 process.env.OMNI_IMAGE_SERVER_PORT = "19799";
-const mediaPublic = join(fakeHome, "ai", "vibedesign", "frontend", "public", "prompt-library");
-mkdirSync(join(mediaPublic, "app-icons"), { recursive: true });
-mkdirSync(join(mediaPublic, "video", "sky"), { recursive: true });
-writeFileSync(join(mediaPublic, "app-icons", "bichon-shop.webp"), "FAKE-WEBP");
-writeFileSync(join(mediaPublic, "video", "sky", "x-001.jpg"), "FAKE-JPG");
 const originalHome = process.env.HOME;
 process.env.HOME = fakeHome;
 
@@ -30,8 +25,6 @@ const {
   getImagesBaseDir,
   getMediaServerStatus,
   mediaServerId,
-  getPromptLibraryMediaBase,
-  getPromptLibraryCacheBase,
   setArtifactResolver,
 } = await import("./image-server");
 const { artifactPreviewUrl, imageServerPort, workspaceFilePreviewUrl } = await import(
@@ -72,39 +65,13 @@ const get = async (p: string) => {
   return { status: r.status, body: await r.text() };
 };
 
-// 广场媒体现在由主进程按需取上游（见 prompt-library.ts 的 mediaUrl / fetchPromptMediaUpstream）：
-// 这里把"非本地"的请求拦下来，测试便不依赖外网，同时能断言"确实走的是主进程这条链路"。
-const upstreamCalls: string[] = [];
-let upstreamReply: () => Response = () =>
-  new Response(FAKE_JPEG, { status: 200, headers: { "Content-Type": "image/jpeg" } });
-const realFetch = globalThis.fetch;
-globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-  const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-  if (url.startsWith(base) || url.includes("127.0.0.1") || url.includes("localhost")) {
-    return realFetch(input as RequestInfo, init);
-  }
-  upstreamCalls.push(url);
-  return Promise.resolve(upstreamReply());
-}) as typeof fetch;
-// 一张最小的合法 JPEG（魔数校验要求 ffd8ff 开头，且至少 12 字节）。
-const FAKE_JPEG = new Uint8Array([
-  0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0xff, 0xd9,
-]);
-
 afterAll(() => {
-  globalThis.fetch = realFetch;
   // HOME 是进程级的，同一个测试进程里后面的文件还要用（homedir() 读的就是它）。
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
-  rmSync(mediaPublic, { recursive: true, force: true });
-  rmSync(getPromptLibraryCacheBase(), { recursive: true, force: true });
   rmSync(previewDir, { recursive: true, force: true });
   rmSync(join(imagesDir, "audio"), { recursive: true, force: true });
   rmSync(join(imagesDir, "gen"), { recursive: true, force: true });
-});
-
-test("mediaBase 指向 vibedesign 素材根目录（含 prompt-library 层）", () => {
-  expect(getPromptLibraryMediaBase()).toBe(mediaPublic);
 });
 
 test("实例身份：占用端口的是谁、服务的是哪份数据目录", async () => {
@@ -122,57 +89,6 @@ test("实例身份：占用端口的是谁、服务的是哪份数据目录", as
 });
 
 if (serverReady) {
-  test("/prompt-library 图片路由正常返回", async () => {
-    const webp = await get("/prompt-library/app-icons/bichon-shop.webp");
-    expect(webp.status).toBe(200);
-    expect(webp.body).toBe("FAKE-WEBP");
-
-    const jpg = await get("/prompt-library/video/sky/x-001.jpg");
-    expect(jpg.status).toBe(200);
-    expect(jpg.body).toBe("FAKE-JPG");
-  });
-
-  test("缺失文件与被禁路径返回非 200", async () => {
-    expect((await get("/prompt-library/nonexistent.png")).status).toBe(404);
-    expect((await get("/prompt-library/../etc/passwd")).status).not.toBe(200);
-  });
-
-  test("本地下载缓存目录也能被 /prompt-library 路由命中", async () => {
-    const cacheDir = getPromptLibraryCacheBase();
-    mkdirSync(join(cacheDir, "awesome"), { recursive: true });
-    writeFileSync(join(cacheDir, "awesome", "case1.jpg"), "CACHE-JPG");
-    // vibedesign 目录里没有，但缓存里有 -> 由缓存兜底（不再问上游）
-    upstreamCalls.length = 0;
-    expect((await get("/prompt-library/awesome/case1.jpg")).body).toBe("CACHE-JPG");
-    expect(upstreamCalls).toEqual([]);
-  });
-
-  test("本地没有的广场图由主进程按需取上游（界面不再直连第三方 CDN）", async () => {
-    upstreamCalls.length = 0;
-    const res = await get("/prompt-library/awesome/case999.jpg");
-    expect(res.status).toBe(200);
-    // 走的是 promptMediaCloudUrl 推出来的云端直链，且**只有主进程**发起了这次请求
-    expect(upstreamCalls).toEqual([
-      "https://cdn.jsdelivr.net/gh/freestylefly/awesome-gpt-image-2@main/data/images/case999.jpg",
-    ]);
-  });
-
-  test("上游回的是一张图才放行（HTML 回退页 / 无法推导的路径都是 404）", async () => {
-    upstreamReply = () =>
-      new Response("<html>not an image</html>", {
-        status: 200,
-        headers: { "Content-Type": "text/html" },
-      });
-    expect((await get("/prompt-library/awesome/case-something.jpg")).status).toBe(404);
-    upstreamReply = () =>
-      new Response(FAKE_JPEG, { status: 200, headers: { "Content-Type": "image/jpeg" } });
-
-    // 推导不出云端地址、也不是特例页面的相对路径：连上游都不用问
-    upstreamCalls.length = 0;
-    expect((await get("/prompt-library/nonexistent.png")).status).toBe(404);
-    expect(upstreamCalls).toEqual([]);
-  });
-
   test("媒体直链（TTS 音频 / 生成图）能按相对路径取到", async () => {
     // 这条路由的 pathname 带前导 "/"；早前直接把它交给 safeJoin，被当成绝对路径越界，
     // 于是所有媒体请求一律 403——表现就是「刚生成的音频点预览说文件不存在」。

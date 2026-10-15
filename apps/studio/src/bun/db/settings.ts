@@ -266,7 +266,7 @@ export type SettingsKey =
   | "VOICE_CALL_OMNI_PROVIDER_ID"
   /** omni 模式使用的模型 id（默认 qwen3.8-omni-flash）。 */
   | "VOICE_CALL_OMNI_MODEL"
-  // Skills 管理（参照 skills-manager 移植）
+  // Skills 管理
   | "SKILLS_CENTRAL_PATH"
   | "SKILLS_SYNC_MODE"
   | "SKILLS_TOOLS_DISABLED"

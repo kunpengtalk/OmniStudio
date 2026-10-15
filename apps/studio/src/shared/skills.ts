@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Skills 管理（参照 skills-manager 移植）：共享类型 + 内置工具适配器表。
+// Skills 管理：共享类型 + 内置工具适配器表（各 CLI 的 skills 目录约定）。
 // 本文件同时被主进程（bun）与 webview 引用，禁止 import electrobun。
 // ---------------------------------------------------------------------------
 
@@ -157,7 +157,7 @@ export interface DiscoveredSkillGroup {
 export type SkillsLeaderboard = "alltime" | "trending" | "hot";
 
 // ---------------------------------------------------------------------------
-// 内置 53 个工具适配器（照搬 skills-manager 的 tool_adapters 映射表）
+// 内置 53 个工具适配器（各 CLI 的 skills 目录约定事实表）
 // ---------------------------------------------------------------------------
 
 export const TOOL_ADAPTERS: ToolAdapterDef[] = [
@@ -223,7 +223,7 @@ export const DEFAULT_CENTRAL_SKILLS_DIR = ".agents/skills";
 /** 中央库内随 git 提交的跨设备元数据命名空间。 */
 export const SKILLS_META_DIR = ".omnistudio";
 
-/** 单个技能体积警告阈值（100MB，与 skills-manager 一致）。 */
+/** 单个技能体积警告阈值。 */
 export const SKILL_SIZE_LIMIT_BYTES = 100 * 1024 * 1024;
 
 export function toolDisplayName(key: string): string {

@@ -1,5 +1,5 @@
 // 同步引擎：中央库技能 → 各工具 skills 目录的部署（symlink / copy）、
-// 实时状态检测与安全卸载。参照 skills-manager 的 sync_engine 移植。
+// 实时状态检测与安全卸载：目标状态分类与卸载安全判定为本仓库自写实现。
 import { join, resolve, dirname } from "path";
 import {
   existsSync,

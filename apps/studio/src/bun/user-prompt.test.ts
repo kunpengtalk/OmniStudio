@@ -12,6 +12,7 @@ import { mockModulePartial } from "./test-mocks";
 // 独立临时测试库（跑全部迁移，得到真实的 user_prompts / prompts 表）
 // ---------------------------------------------------------------------------
 const tmpDb = `/tmp/user-prompt-test-${process.pid}.db`;
+const tmpSeedDir = `/tmp/user-prompt-seed-${process.pid}`;
 fs.rmSync(tmpDb, { force: true });
 const sqlite = new Database(tmpDb, { create: true });
 const db = drizzle({ client: sqlite, schema });
@@ -24,12 +25,24 @@ const Up = await import("./user-prompt");
 
 describe("user-prompt", () => {
   beforeAll(() => {
-    PromptLib.seedIfNeeded(); // 灌入广场数据，供导入测试
+    // 内置题库已清空：喂一份小 fixture 供导入测试
+    fs.mkdirSync(tmpSeedDir, { recursive: true });
+    fs.writeFileSync(
+      join(tmpSeedDir, "image-prompts.json"),
+      JSON.stringify({
+        categories: [{ name: "海报" }],
+        items: [
+          { id: "up-plaza-1", name: "广场图", category: "海报", prompt: "P", image: "https://example.com/plaza.jpg" },
+        ],
+      }),
+    );
+    PromptLib.seedIfNeeded(tmpSeedDir); // 灌入广场数据，供导入测试
   });
 
   afterAll(() => {
     sqlite.close();
     fs.rmSync(tmpDb, { force: true });
+    fs.rmSync(tmpSeedDir, { force: true, recursive: true });
   });
 
   test("新建并列出（默认按更新时间倒序）", () => {
@@ -95,8 +108,8 @@ describe("user-prompt", () => {
     expect(first.item!.name).toBe(src.name);
     expect(first.item!.prompt).toBe(src.prompt);
     expect(first.item!.sourceKey).toBe(src.key);
-    // image 与广场一致（同一 mediaKey；库里存原始路径）
-    expect(first.item!.mediaKey).toBe(src.mediaKey);
+    // image 与广场一致（视图层只透传绝对地址）
+    expect(first.item!.image).toBe(src.image);
 
     const keys = Up.listMyPromptSourceKeys();
     expect(keys).toContain(src.key);

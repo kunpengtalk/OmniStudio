@@ -64,7 +64,7 @@
 
 <table>
   <tr>
-    <th align="center">提示词广场 · 内置 2,733 条可复制题库</th>
+    <th align="center">提示词广场 · 个人提示词库</th>
     <th align="center">小应用 · 一次做一件事的沙箱工具</th>
   </tr>
   <tr>
@@ -72,7 +72,7 @@
     <td><img src="docs/images/screenshot-mini-apps.png" alt="小应用" width="100%"/></td>
   </tr>
   <tr>
-    <td>生图 638 / 视频 2,060 / 大模型 35 条提示词，按 APP、运营、海报、插画、IP、艺术等分类，可搜索、可按来源筛选；「复制」拿原文，「去试试」按类型跳到生图 / 视频 / 对话并带入，「加入我的提示词」收进自己的库。</td>
+    <td>自建分类的个人提示词库：新建 / 编辑 / 删除、全文搜索；「去试试」按类型跳到生图 / 视频 / 对话并带入，攒自己的高频题库。</td>
     <td>七个自包含小页面：抠图换底、证件照、马赛克、形象照、会议纪要、文案助手、笔记；卡片上标明各自需要的能力（本地抠图 / 对话模型 / 语音识别 / 生图），缺哪项点「去配置」补齐，其余照常可用。</td>
   </tr>
 </table>
@@ -163,7 +163,7 @@
 - **OCR 文档识别** — 三引擎：本地 Tesseract（一键安装、多语言 LSTM 语言包、词级 / 行级包围盒）、PaddleOCR（PP-OCRv6 本地常驻 worker，medium 档约 140MB）与 VLM（Chandra / GLM-OCR / LightOnOCR）；识别记录入库；上传 PDF / 图片输出结构化 Markdown（GFM 表格、KaTeX 公式、代码块、图注、按包围盒裁剪的图片区域），带文档队列与检索。
 - **翻译** — 引擎可切：当前对话模型（本地 / OpenAI 兼容）或 Google 免费接口，22 种语言互译，支持源语言自动检测、语言交换与一键复制；「同传翻译」打开麦克风实时转写（复用 whisper.cpp / audio.cpp / API 三套 ASR 引擎）并同步输出多种目标语言译文。
 - **音乐** — StepFun / MiniMax 双协议生成歌曲、翻唱与干声（本地引擎接口已预留）：异步协议提交后轮询、同步协议丢后台任务回填，两种都落进同一张记录表。左栏是歌单库、右侧是曲目页、底部常驻播放条，新曲自动进默认歌单，封面按曲目确定性生成，歌单封面取前四首拼成 2×2。
-- **提示词广场** — 「提示词广场 / 我的提示词」双标签，内置 2,733 条提示词（生图 638 条，按 APP / 运营 / 海报 / 插画 / IP / 其他 / 艺术分类；视频 2,060 条；大模型 35 条），带来源筛选（Image2Hub / GPT-Image-2 / H3 Cases / MiniMax …）与全文搜索；「复制」取原文，「去试试」按类型跳到生图 / 视频 / 对话并带入；「加入我的提示词」把广场条目收进个人库（按来源键去重），个人库可自建分类、新建 / 编辑 / 删除。题库随安装包内置、幂等入库，首屏示例图按需下载到本地并走系统代理。
+- **提示词广场** — 「广场 / 我的提示词」双标签的个人提示词库：自建分类、新建 / 编辑 / 删除与全文搜索；「去试试」按类型跳到生图 / 视频 / 对话并带入。（原内置的第三方聚合题库已于 2026-10-03 法律合规排查中移除，题库后续以自有服务端形式提供。）
 - **小应用** — 八个「一次做一件事」的沙箱工具，首页卡片按能力徽章提示还缺哪项配置，点开即用：**抠图换底**（本地 ONNX 引擎，不上传、约 1 秒，可换底色并擦除修补）、**证件照**（本地抠人像，一寸 / 二寸 / 签证等 20 种规格换底，可排 A4 打印）、**马赛克**（涂抹式打码、批量导出，全程本机）、**形象照**（按风格预设生成职业形象照 / 角色头像）、**会议纪要**（导入或录制音频 → 转写 → 议题 / 结论 / 待办）、**文案助手**（按用途与语气批量出标题 / 卖点 / 口播稿）、**笔记**（日历与标签双视图、图片附件，正文存本机数据库，可选择性对 Agent 只读开放）、**动态表情包**（一张照片 → 16 张统一画风的静态表情，挑一张再转成循环动图 GIF；模型在页面里自选，云端用照片当参考、本地按描述作画）。每个小应用是一份自包含 HTML，跑在不含 `allow-same-origin` 的沙箱 iframe 里，能力由宿主逐个下发。
 - **知识库（本地 RAG）** — 导入本地文件（文本直读，PDF / 图片走 VLM OCR）、手写笔记与网页；Markdown 感知切片（标题分节 + 段落贪心打包 + 超长硬切带重叠）+ 可选向量化（OpenAI 兼容 `/v1/embeddings`）+ BM25 与向量的 RRF 混合检索 + 可选重排序（Jina / SiliconFlow / Cohere 兼容 `/v1/rerank`）；召回测试 / 文档 / 访问 / 设置四个标签页；不依赖外部向量库或 FTS 扩展。
 - **记忆** — 全 Agent 共享的长期记忆：Agent 经 `memory_search` / `memory_save` / `memory_list` 工具沉淀事实、偏好与经验，置顶与高热记忆注入系统提示；同一份库可经网关 REST `/v1/memories`、MCP 工具或 `omi memory` 命令行读写。记忆页给出总量 / 置顶 / Agent 写入 / 近 7 天更新 / 检索命中率 / 合并写入 / 累计归档 / 拦截敏感内容等总览指标，并提供「启用记忆」与「写入需确认」两个开关（后者让 Agent / CLI / MCP 的写入先进待确认区）。
@@ -284,7 +284,7 @@ apps/
 - [x] Local RAG knowledge base (hybrid BM25 + vector recall) with chat citations 本地知识库（混合检索 + 对话引用溯源）
 - [x] Shared memory across agents (built-in tools, gateway REST / MCP, `omi memory`) 跨 Agent 共享记忆（内置工具 / 网关 / CLI 三通道）
 - [x] Skills manager: central repo, 53 tool adapters, presets, Git backup Skills 管理与中央库同步
-- [x] Prompt library: 2,733 bundled prompts (image / video / LLM) with try-it routing + personal list 提示词广场（内置 2,733 条 + 我的提示词）
+- [x] Prompt library: personal prompt library with try-it routing + my-prompts list 提示词广场（个人库 + 我的提示词）
 - [x] Mini apps: 8 sandboxed single-page tools with per-capability gating 小应用（8 个沙箱单页工具 + 能力门禁）
 - [x] MCP both ways: client for external MCP servers + gateway `/mcp` server with playground MCP 客户端与服务端（含调试工作台）
 - [ ] Linux and Windows support Linux 与 Windows 支持
