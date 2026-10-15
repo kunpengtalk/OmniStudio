@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AudioLinesIcon, Loader2Icon, SparklesIcon, SquareIcon, PlayIcon, CircleIcon, DownloadCloudIcon, ChevronsUpDownIcon, HistoryIcon, SearchIcon, TrashIcon, XIcon } from "lucide-react";
+import { AudioLinesIcon, CheckIcon, CircleIcon, ChevronsUpDownIcon, CopyIcon, DownloadCloudIcon, HistoryIcon, Loader2Icon, PlayIcon, SearchIcon, SparklesIcon, SquareIcon, TrashIcon, XIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
 import { formatBytes, formatRecordTime } from "@lib/format";
 import { Button } from "@ui/button";
@@ -91,8 +91,17 @@ export function RecordHistoryBar({
   );
 }
 
+/**
+ * 合成结果的展示卡：标题（哪个模型 / 哪一次）+ 试听 + **原文**。
+ *
+ * 原文为什么必须一起给：右侧只留一段音频等于只给了一半个结果 —— 想核对"它到底念的是不是
+ * 这句话"、想把文案复制出去、想看看这次是不是漏了一段，都得回到数据库里翻。左侧点任意一条
+ * 历史记录，这张卡就该把那条记录的文本一并端出来。
+ */
 export function ResultPanel({ record, label }: { record?: VoiceRecordRow; label: string }) {
   const t = useT();
+  const [copied, setCopied] = useState(false);
+  const text = record?.text?.trim() ?? "";
   if (!record) {
     return (
       <div className="flex items-center justify-center rounded-lg border border-dashed px-4 py-8 text-xs text-muted-foreground">
@@ -101,7 +110,7 @@ export function ResultPanel({ record, label }: { record?: VoiceRecordRow; label:
     );
   }
   return (
-    <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
+    <div className="flex w-full flex-col gap-3 rounded-lg border bg-card p-3">
       <div className="flex items-center justify-between gap-2">
         <span className="flex items-center gap-1.5 text-xs font-medium">
           <SparklesIcon className="size-3.5 text-primary" />
@@ -118,10 +127,36 @@ export function ResultPanel({ record, label }: { record?: VoiceRecordRow; label:
           )}
         </span>
       </div>
-      {record.audioUrl ? (
-        <PlayAudio url={record.audioUrl} />
-      ) : (
-        <p className="whitespace-pre-wrap text-xs">{record.text}</p>
+      {record.audioUrl && <PlayAudio url={record.audioUrl} />}
+
+      {text && (
+        <div className="flex min-w-0 flex-col gap-1.5">
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
+              {t("voice.sourceText")}
+            </span>
+            <span className="shrink-0 text-[11px] text-muted-foreground/70 tabular-nums">
+              {text.length} {t("voice.asr.chars")}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-1.5 text-[11px] text-muted-foreground"
+              tooltip={copied ? t("common.copied") : t("common.copy")}
+              onClick={() => {
+                navigator.clipboard?.writeText(text).catch(() => {});
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1200);
+              }}
+            >
+              {copied ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
+              {copied ? t("common.copied") : t("common.copy")}
+            </Button>
+          </div>
+          <p className="rounded-lg bg-muted/40 px-3 py-2 text-sm leading-relaxed break-words whitespace-pre-wrap">
+            {text}
+          </p>
+        </div>
       )}
     </div>
   );

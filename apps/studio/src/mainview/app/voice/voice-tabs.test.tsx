@@ -8,7 +8,7 @@ import { Window } from "happy-dom";
  * 右边还是空工作台（或者反过来——右侧显示的是刚刚合成的那份，不是点开的那条）。
  * 所以这里直接渲染真的 `AsrTab` / `TtsTab`，只把 rpc 换成桩：
  *   1. 点开一条 ASR 记录 → 右侧是那条记录的稿子，采集控件让位；
- *   2. 点开一条 TTS 记录 → 右侧是那条记录的音频 + 说明条，「填入文案」把原文送回输入框；
+ *   2. 点开一条 TTS 记录 → 右侧是那条记录的音频 + **原文** + 说明条，「填入文案」把原文送回输入框；
  *   3. 「返回当前」把选中收回去。
  */
 const dom = new Window({ url: "http://localhost/" });
@@ -191,7 +191,7 @@ test("点开一条 ASR 记录：右侧是那条记录的稿子，采集控件让
   expect(useVoiceStore.getState().focusRecordId).toBeNull();
 });
 
-test("点开一条 TTS 记录：右侧是那条记录的音频，「填入文案」把原文送回输入框", async () => {
+test("点开一条 TTS 记录：右侧是那条记录的音频 + 原文，「填入文案」把原文送回输入框", async () => {
   records = [
     record({
       id: 31,
@@ -207,6 +207,10 @@ test("点开一条 TTS 记录：右侧是那条记录的音频，「填入文案
   expect(text()).toContain(zh("voice.records.history"));
   expect(text()).toContain("stepaudio-3-tts-max");
   expect(text()).not.toContain(zh("voice.tts.noResult"));
+  // 原文必须一起端出来：右侧只放一段音频，等于把"它到底念的是哪句话"留给用户去数据库里翻。
+  expect(text()).toContain(zh("voice.sourceText"));
+  expect(text()).toContain("鲲鹏Talk 是一档把前沿 AI 讲成人话的栏目。");
+  expect(text()).toContain(zh("common.copy"));
 
   await click(zh("voice.records.reuse"));
   const textarea = container.querySelector("textarea") as HTMLTextAreaElement | null;

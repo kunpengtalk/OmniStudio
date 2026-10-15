@@ -699,24 +699,28 @@ export function TtsTab() {
             )}
           </RecordHistoryBar>
         )}
-        <div className="flex min-h-0 flex-1 items-center justify-center p-8">
-          {generate.isPending && !historyRecord ? (
+        {/* 有结果就铺满整栏：右侧不止一段音频，还有原文要读（点历史记录也一样）——
+            窄条居中会让两边一片空白，长文本还得在 448px 里挤成一竖条。 */}
+        {generate.isPending && !historyRecord ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center p-8">
             <TtsLoading text={text} />
-          ) : (historyRecord ?? result) ? (
-            <div className="w-full max-w-md">
-              <ResultPanel
-                record={(historyRecord ?? result)!}
-                label={t("voice.tts.noResult")}
-              />
-            </div>
-          ) : (
+          </div>
+        ) : (historyRecord ?? result) ? (
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
+            <ResultPanel
+              record={(historyRecord ?? result)!}
+              label={t("voice.tts.noResult")}
+            />
+          </div>
+        ) : (
+          <div className="flex min-h-0 flex-1 items-center justify-center p-8">
             <ResultEmpty
               icon={<AudioLinesIcon className="size-9 text-primary" />}
               title={t("voice.tts.generate")}
               hint={t("voice.tts.noResult")}
             />
-          )}
-        </div>
+          </div>
+        )}
       </main>
     </div>
   );
