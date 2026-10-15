@@ -9,7 +9,7 @@ import { BrowserWindow } from "electrobun/bun";
 import "./db";
 import { startImageServer, onMediaServerStatusChange } from "./image-server";
 import { setWindowRef } from "./window";
-import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initTunnelBroadcast, initEngineInstallBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initMediaSetupBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast, initBackupBroadcast, initSystemOneBroadcast, broadcastCurrentStatus, dispatchRemoteRpc, initRemoteBroadcast, replayRemoteStatus } from "./rpc";
+import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initTunnelBroadcast, initEngineInstallBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initMediaSetupBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast, initBackupBroadcast, initCanvasBroadcast, initSystemOneBroadcast, broadcastCurrentStatus, dispatchRemoteRpc, initRemoteBroadcast, replayRemoteStatus } from "./rpc";
 import { installWebBridge } from "./gateway-web";
 import { seedIfNeeded } from "./prompt-library";
 import { initSkills } from "./skills";
@@ -162,6 +162,7 @@ initSystemOneBroadcast(mainWindow);
 initTessInstallBroadcast(mainWindow);
 initSkillsBroadcast(mainWindow);
 initBackupBroadcast(mainWindow);
+initCanvasBroadcast(mainWindow);
 
 mainWindow.webview.on("dom-ready", () => {
   broadcastUpdateStatus();

@@ -31,6 +31,9 @@ export const APP_RAIL_IDS = [
   "image",
   "video",
   "music",
+  // 无限画布：文本 / 图片 / 视频 / 音频生成集中在一张可缩放画布上，
+  // 属于媒体创作面，紧跟 image / video / music。
+  "canvas",
   "ocr",
   "translate",
   "prompt",

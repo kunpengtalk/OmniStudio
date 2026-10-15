@@ -502,7 +502,7 @@ async function doDownloadMlxModel(
   const model = findMlxModel(modelId) ?? MLX_MODELS[0]!;
   const py = enginePython();
   if (!existsSync(py)) {
-    return { ok: false, error: "MLX 引擎未安装，请先点击「下载引擎」" };
+    return { ok: false, error: "MLX 引擎未安装：请在 设置 → 模型引擎 里安装 mflux" };
   }
 
   // 已完整下载 → 直接成功（顺带清掉可能残留的进度记录）。
@@ -1069,7 +1069,7 @@ export async function startMlxModel(
   const model = findMlxModel(modelId) ?? MLX_MODELS[0]!;
   const py = enginePython();
   if (!existsSync(py)) {
-    return { ok: false, error: "MLX 引擎未安装，请先点击「下载引擎」" };
+    return { ok: false, error: "MLX 引擎未安装：请在 设置 → 模型引擎 里安装 mflux" };
   }
   if (!(await isMlxModelDownloaded(model.id))) {
     return { ok: false, error: `模型「${model.label}」尚未下载，请先点「下载模型」` };
@@ -1254,14 +1254,49 @@ export type MlxGenerateParams = {
   outputPath: string;
 };
 
+/**
+ * 模型 CLI 的候选名。
+ *
+ * mflux 的 console script 名字在不同版本间变过（例如 Qwen-Image-2.1 的
+ * `mflux-generate-qwen-2.1` 在稍旧的版本里叫 `mflux-generate-qwen`）。
+ * 只认一个名字的后果很糟：venv 明明装好了，却报「引擎未安装」——用户按着
+ * 提示去点「下载引擎」也不会好（装的是同一个新版），真凶是版本落后。
+ * 所以先按当前名找，找不到再退回旧版名，并且在日志里说明走了退路。
+ */
+const MODEL_CLI_FALLBACKS: Record<string, string[]> = {
+  "mflux-generate-qwen-2.1": ["mflux-generate-qwen"],
+  "mflux-generate-z-image-turbo": ["mflux-generate-z-image"],
+};
+
+function resolveModelCli(model: { cmd: string }): { bin: string; usedFallback: boolean } | null {
+  for (const name of [model.cmd, ...(MODEL_CLI_FALLBACKS[model.cmd] ?? [])]) {
+    const bin = venvBinary(name);
+    if (existsSync(bin)) return { bin, usedFallback: name !== model.cmd };
+  }
+  return null;
+}
+
+/** 引擎侧的可执行文件缺失时，说清是"没装"还是"版本过旧"。 */
+function modelCliMissingError(model: { cmd: string }): string {
+  if (!existsSync(venvBinary("python3"))) {
+    return "MLX 引擎未安装：请在 设置 → 模型引擎 里安装 mflux";
+  }
+  return `MLX 引擎版本过旧：缺少 ${model.cmd}，请在 设置 → 模型引擎 里升级 mflux`;
+}
+
 /** 调用 mflux CLI 生成一张图片（阻塞直到进程退出）。 */
 async function generateWithMlxInner(
   params: MlxGenerateParams,
 ): Promise<{ ok: boolean; error?: string }> {
   const model = findMlxModel(params.modelId) ?? MLX_MODELS[0]!;
-  const bin = venvBinary(model.cmd);
-  if (!existsSync(bin)) {
-    return { ok: false, error: "MLX 引擎未安装，请先点击「下载引擎」" };
+  const cli = resolveModelCli(model);
+  if (!cli) {
+    const error = modelCliMissingError(model);
+    logMlxFailure("image.mlx.cli_missing", error, { modelId: model.id, cmd: model.cmd });
+    return { ok: false, error };
+  }
+  if (cli.usedFallback) {
+    emitLog(`mflux 未提供 ${model.cmd}，改用旧版脚本 ${path.basename(cli.bin)}（建议在 设置 → 模型引擎 升级 mflux）`);
   }
   // 不再允许生成时自动下载：必须先在「下载模型」里把权重下载好。
   if (!(await isMlxModelDownloaded(model.id))) {
@@ -1308,7 +1343,7 @@ async function generateWithMlxInner(
 
   // 超时保护：进程挂住（网络/内存等）时不再让 UI 永远停在“生图当中”。
   const TIMEOUT_MS = 30 * 60_000;
-  const proc = Bun.spawn([bin, ...args], { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn([cli.bin, ...args], { stdout: "pipe", stderr: "pipe" });
   activeGenerate = proc.exited;
   let timedOut = false;
   const timer = setTimeout(() => {

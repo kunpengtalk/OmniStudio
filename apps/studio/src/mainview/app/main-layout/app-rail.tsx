@@ -17,6 +17,7 @@ import {
   GaugeIcon,
   LayoutGridIcon,
   SlidersHorizontalIcon,
+  WaypointsIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -50,6 +51,8 @@ export const APP_ICONS: Record<AppId, ReactNode> = {
   benchmark: <GaugeIcon className="size-5" />,
   // 小应用中心：九宫格 == "一堆小格子点进去"，与其它具象图标区分开
   apps: <LayoutGridIcon className="size-5" />,
+  // 无限画布：节点 + 连线的路标形 == "素材在节点间流动的生成画布"
+  canvas: <WaypointsIcon className="size-5" />,
 };
 
 function RailButton({

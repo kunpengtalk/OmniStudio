@@ -17,6 +17,7 @@ import { VoiceScreen } from "../voice";
 import { ImageScreen } from "../image";
 import { VideoScreen } from "../video";
 import { MusicScreen } from "../music";
+import { CanvasScreen } from "../canvas";
 import { OcrScreen } from "../ocr";
 import { TranslateScreen } from "../translate";
 import { PromptScreen } from "../prompt";
@@ -54,6 +55,8 @@ const renderActiveApp = (activeApp: AppId): ReactNode => {
       return <VideoScreen />;
     case "music":
       return <MusicScreen />;
+    case "canvas":
+      return <CanvasScreen />;
     case "translate":
       return <TranslateScreen />;
     case "prompt":

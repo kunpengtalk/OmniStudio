@@ -181,8 +181,13 @@ export type TTSProviderConfig = {
   model: string;
 };
 
-export function getTTSProviderConfig(): TTSProviderConfig {
-  const providerId = (getSetting("TTS_PROVIDER_ID") || "").trim();
+/**
+ * TTS 服务商配置。`overrideProviderId` 供无限画布这类"每次调用指定厂商"的入口
+ * 使用：仍然只认厂商行 id（地址 / 密钥从行里解析，不接受调用方直接传 base/key），
+ * 不传时回落到「默认模型」里配置的 TTS 厂商。
+ */
+export function getTTSProviderConfig(overrideProviderId?: string): TTSProviderConfig {
+  const providerId = (overrideProviderId || getSetting("TTS_PROVIDER_ID") || "").trim();
   const provider = CloudProviders.resolveCloudProvider(providerId);
   return {
     providerId,
@@ -271,8 +276,9 @@ async function synthesizeOpenAiAudio(input: {
   voice?: string;
   model?: string;
   referenceAudioRef?: string;
+  providerId?: string;
 }): Promise<Buffer> {
-  const provider = getTTSProviderConfig();
+  const provider = getTTSProviderConfig(input.providerId);
   // 地址 / 密钥只从服务商行（或全局设置）解析：不接受调用方覆盖，
   // 否则 webview 传一个 base 就能把音频发到任意地址。
   const base = provider.base || getBaseUrl();
@@ -332,6 +338,8 @@ export async function runTTS(input: {
   voice?: string;
   model?: string;
   referenceAudioRef?: string;
+  /** 无限画布等入口按次指定厂商行 id；省略时用「默认模型」配置的 TTS 厂商。 */
+  providerId?: string;
   source?: MediaSource;
 }): Promise<VoiceRecordRow> {
   const buf = await synthesizeOpenAiAudio(input);

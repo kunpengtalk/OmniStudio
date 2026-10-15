@@ -122,6 +122,8 @@ export type SubmitMusicParams = {
   sampleRate?: number;
   /** 前端当前页面的实时配置：优先使用（避免读到未保存的旧配置），并顺带落盘。 */
   config?: Partial<MusicGenConfig>;
+  /** 是否把本次生效配置落盘到 settings（默认 true；无限画布按节点选模型的调用传 false）。 */
+  persistConfig?: boolean;
   /** 调用方来源：界面手工生成（manual，默认）还是 agent。 */
   source?: MediaSource;
 };
@@ -962,7 +964,8 @@ export async function submitMusicGeneration(
       params.config?.localModel !== undefined ? params.config.localModel.trim() : dbCfg.localModel,
   };
   try {
-    saveMusicGenConfig(cfg);
+    // 画布节点的模型选择是"这一次用哪个"，不该改写用户在音乐页保存的配置。
+    if (params.persistConfig !== false) saveMusicGenConfig(cfg);
   } catch {}
 
   const invalid = validateParams(params, inferTask(params));

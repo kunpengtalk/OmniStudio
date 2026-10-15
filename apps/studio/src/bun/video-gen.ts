@@ -112,6 +112,8 @@ export type SubmitVideoParams = {
   watermark?: boolean;
   /** 前端当前页面的实时配置。若提供则优先使用（避免读到未保存的旧配置），并顺带落盘。 */
   config?: Partial<VideoGenConfig>;
+  /** 是否把本次生效配置落盘到 settings（默认 true；无限画布等按节点选模型的调用传 false）。 */
+  persistConfig?: boolean;
   /** 调用方来源：界面手工生成（manual，默认）还是 agent（内置 Pi Agent）。 */
   source?: MediaSource;
 };
@@ -919,7 +921,8 @@ export async function submitVideoGeneration(
       params.config?.comfyVae !== undefined ? params.config.comfyVae.trim() : dbCfg.comfyVae,
   };
   try {
-    saveVideoGenConfig(cfg);
+    // 画布节点的模型选择是"这一次用哪个"，不该改写用户在视频页保存的配置。
+    if (params.persistConfig !== false) saveVideoGenConfig(cfg);
   } catch {}
 
   const prompt = params.prompt?.trim() ?? "";

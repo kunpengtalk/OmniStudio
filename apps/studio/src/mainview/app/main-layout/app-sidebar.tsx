@@ -18,6 +18,7 @@ import { VoiceRecordList } from "../voice/record-list";
 import { ImageRecordList } from "../image/record-list";
 import { VideoRecordList } from "../video/record-list";
 import { MusicPlaylistSidebar } from "../music/playlist-sidebar";
+import { CanvasSidebar } from "../canvas/sidebar";
 import { TranslateRecordList } from "../translate/record-list";
 import { PromptSidebar } from "../prompt/sidebar";
 import { BenchmarkRecordList } from "../benchmark/record-list";
@@ -57,6 +58,8 @@ export function AppSidebar() {
           <VideoRecordList />
         ) : activeApp === "music" ? (
           <MusicPlaylistSidebar />
+        ) : activeApp === "canvas" ? (
+          <CanvasSidebar />
         ) : activeApp === "translate" ? (
           <TranslateRecordList />
         ) : activeApp === "prompt" ? (

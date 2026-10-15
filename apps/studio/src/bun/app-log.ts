@@ -60,6 +60,7 @@ export type AppLogSource =
   | "automation" // 自动化
   | "benchmark" // 基准测试（速度扫描 / 能力评测）
   | "miniapp" // 小应用（应用中心里的沙箱页面：能力探测、一次性补全、产物落盘）
+  | "canvas" // 无限画布（文档持久化 / 节点生成）
   | "update" // 版本更新
   | "notice" // 通知中心落下的条目
   | "usage" // 用量账本（记录失败这类不影响业务的告警）

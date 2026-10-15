@@ -287,6 +287,13 @@
       "when": 1789530817002,
       "tag": "0040_music_cover_path",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "6",
+      "when": 1790683703142,
+      "tag": "0041_mature_doctor_faustus",
+      "breakpoints": true
     }
   ]
 }
