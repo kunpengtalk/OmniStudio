@@ -18,6 +18,7 @@ import {
   MousePointer2Icon,
   PlusIcon,
   Redo2Icon,
+  Trash2Icon,
   Undo2Icon,
   ZoomInIcon,
   ZoomOutIcon,
@@ -68,6 +69,7 @@ export function CanvasScreen() {
   const loading = useCanvasStore((s) => s.loading);
   const canUndo = useCanvasStore((s) => s.canUndo);
   const canRedo = useCanvasStore((s) => s.canRedo);
+  const selection = useCanvasStore((s) => s.selection);
 
   const [tool, setTool] = useState<CanvasTool>("pan");
   const [menu, setMenu] = useState<CreateMenuState>(null);
@@ -391,11 +393,12 @@ export function CanvasScreen() {
 
   const openMenuFromBar = useCallback(() => {
     setShortcutsOpen(false);
+    const rect = containerRef.current?.getBoundingClientRect();
     const world = viewportCenterWorld();
     setMenu({
-      // 顶部工具栏 + 号的正下方；create-menu 挂载后自带贴边防裁剪兜底。
-      screenX: 232,
-      screenY: 56,
+      // 底部工具栏（居中）上方弹出；create-menu 挂载后自带贴边防裁剪兜底。
+      screenX: rect ? rect.width / 2 - 144 : 120,
+      screenY: 0,
       worldX: world.x,
       worldY: world.y,
     });
@@ -534,18 +537,28 @@ export function CanvasScreen() {
 
       <CanvasEmptyHint visible={nodes.length === 0 && !loading} />
 
-      {/* 顶部工具栏：标题 / 节点工具 / 撤销重做 / 素材库 / 快捷键 / 缩放，一条收齐 */}
+      {/* 左上角：画布标题 */}
+      <div className="absolute left-3 top-3 z-20" data-canvas-no-zoom>
+        <div className="flex h-9 items-center gap-1.5 rounded-lg border bg-background/90 px-2 shadow-sm backdrop-blur">
+          <Input
+            value={title}
+            onChange={(e) => useCanvasStore.getState().setTitle(e.target.value)}
+            className="h-7 w-44 border-0 bg-transparent px-0 text-sm font-medium shadow-none focus-visible:ring-0"
+            placeholder={t("canvas.untitled")}
+          />
+        </div>
+      </div>
+
+      {/* 右上角：素材库入口 */}
+      <div className="absolute right-3 top-3 z-20" data-canvas-no-zoom>
+        <LibraryButton variant="pill" onOpen={() => setLibraryOpen(true)} />
+      </div>
+
+      {/* 底部居中工具栏：添加 / 选择 / 框选 / 撤销重做 / 快捷键 / 缩放 */}
       <div
-        className="absolute inset-x-3 top-3 z-20 flex h-11 items-center gap-0.5 rounded-xl border bg-background/95 p-1 shadow-lg backdrop-blur"
+        className="absolute bottom-3 left-1/2 z-20 flex h-11 -translate-x-1/2 items-center gap-0.5 rounded-xl border bg-background/95 p-1 shadow-lg backdrop-blur"
         data-canvas-no-zoom
       >
-        <Input
-          value={title}
-          onChange={(e) => useCanvasStore.getState().setTitle(e.target.value)}
-          className="h-7 w-44 border-0 bg-transparent px-1 text-sm font-medium shadow-none focus-visible:ring-0"
-          placeholder={t("canvas.untitled")}
-        />
-        <BarDivider />
         <button
           type="button"
           aria-label={t("canvas.addNode")}
@@ -567,38 +580,50 @@ export function CanvasScreen() {
         <BarToggle active={false} disabled={!canRedo} label={t("canvas.redo")} onClick={() => useCanvasStore.getState().redo()}>
           <Redo2Icon className="size-4" />
         </BarToggle>
-        <div className="ml-auto flex items-center gap-0.5">
-          <LibraryButton variant="icon" onOpen={() => setLibraryOpen(true)} />
-          <BarToggle active={shortcutsOpen} label={t("canvas.shortcuts")} onClick={() => setShortcutsOpen((v) => !v)}>
-            <KeyboardIcon className="size-4" />
-          </BarToggle>
-          <BarDivider />
-          <Button size="icon" variant="ghost" className="size-7" aria-label={t("canvas.zoom.out")} onClick={() => zoomCenter(1 / 1.2)}>
-            <ZoomOutIcon className="size-4" />
-          </Button>
-          <button
-            type="button"
-            className="min-w-12 rounded px-1 text-center text-xs tabular-nums text-muted-foreground hover:text-foreground"
-            onClick={() => {
-              const rect = containerRef.current?.getBoundingClientRect();
-              if (rect) zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, CANVAS_DEFAULT_VIEWPORT.k / viewport.k);
-            }}
-          >
-            {Math.round(viewport.k * 100)}%
-          </button>
-          <Button size="icon" variant="ghost" className="size-7" aria-label={t("canvas.zoom.in")} onClick={() => zoomCenter(1.2)}>
-            <ZoomInIcon className="size-4" />
-          </Button>
-          <Button size="icon" variant="ghost" className="size-7" aria-label={t("canvas.zoom.fit")} onClick={fitView}>
-            <MaximizeIcon className="size-4" />
-          </Button>
-        </div>
+        <BarDivider />
+        {/* 删除选中：无选中时禁用；有节点或多选即删，选中连线则删连线 */}
+        <BarToggle
+          active={false}
+          disabled={selection.length === 0 && !selectedConnectionId}
+          label={t("canvas.deleteSelection")}
+          onClick={() => {
+            const s = useCanvasStore.getState();
+            if (selection.length > 0) s.removeNodes(selection);
+            else if (selectedConnectionId) s.removeConnection(selectedConnectionId);
+          }}
+        >
+          <Trash2Icon className="size-4" />
+        </BarToggle>
+        <BarDivider />
+        <BarToggle active={shortcutsOpen} label={t("canvas.shortcuts")} onClick={() => setShortcutsOpen((v) => !v)}>
+          <KeyboardIcon className="size-4" />
+        </BarToggle>
+        <BarDivider />
+        <Button size="icon" variant="ghost" className="size-7" aria-label={t("canvas.zoom.out")} onClick={() => zoomCenter(1 / 1.2)}>
+          <ZoomOutIcon className="size-4" />
+        </Button>
+        <button
+          type="button"
+          className="min-w-12 rounded px-1 text-center text-xs tabular-nums text-muted-foreground hover:text-foreground"
+          onClick={() => {
+            const rect = containerRef.current?.getBoundingClientRect();
+            if (rect) zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, CANVAS_DEFAULT_VIEWPORT.k / viewport.k);
+          }}
+        >
+          {Math.round(viewport.k * 100)}%
+        </button>
+        <Button size="icon" variant="ghost" className="size-7" aria-label={t("canvas.zoom.in")} onClick={() => zoomCenter(1.2)}>
+          <ZoomInIcon className="size-4" />
+        </Button>
+        <Button size="icon" variant="ghost" className="size-7" aria-label={t("canvas.zoom.fit")} onClick={fitView}>
+          <MaximizeIcon className="size-4" />
+        </Button>
       </div>
 
       {/* 快捷键速查 */}
       {shortcutsOpen ? (
         <div
-          className="absolute right-3 top-16 z-30 w-72 rounded-xl border bg-popover p-3 shadow-xl"
+          className="absolute right-3 bottom-16 z-30 w-72 rounded-xl border bg-popover p-3 shadow-xl"
           data-canvas-no-zoom
         >
           <h3 className="mb-2 text-xs font-semibold">{t("canvas.shortcut.title")}</h3>
@@ -618,7 +643,7 @@ export function CanvasScreen() {
         </div>
       ) : null}
 
-      {/* 创建菜单（双击位置 / 顶部工具栏） */}
+      {/* 创建菜单（双击位置 / 底部工具栏） */}
       {menu ? (
         <CanvasCreateMenu
           position={{ screenX: menu.screenX, screenY: menu.screenY }}
