@@ -4,7 +4,7 @@ import { Button } from "@ui/button";
 import { Label } from "@ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { CloudModelSelect } from "@components/cloud-model-select";
-import { fmtClock } from "../voice-asr-result";
+import { fmtClock } from "../voice/asr-result/transcript-utils";
 import { TranslationEnginePicker } from "../translate/engine-picker";
 import { TRANSLATION_LANGUAGES } from "../../../shared/translate";
 import { cn } from "@/mainview/lib/utils";

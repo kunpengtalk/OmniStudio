@@ -18,3 +18,37 @@ export function findActiveSegment(segments: AsrSegment[], t: number): number {
   }
   return active;
 }
+
+/**
+ * 把「单独一句」的识别结果对回整场录音的时间轴。
+ *
+ * 自动听写是一句一句送检的（见 `shared/asr-vad.ts`），所以引擎返回的时间戳全都从
+ * **这一句的 0 秒**开始；直接塞进逐句列表会让每句都落在 0:00，而且去重逻辑
+ * （按起点相近判定同一句）会把它们合并成一条。
+ *
+ * 上游没给分段（有些服务只回整段文本）时，就按这一句的起止造一条，保证列表里
+ * 仍然是「一句一行」而不是一大段。
+ */
+export function offsetUtteranceSegments(
+  segments: AsrSegment[],
+  text: string,
+  utterance: { startSec: number; endSec: number },
+): AsrSegment[] {
+  const start = Math.max(0, utterance.startSec);
+  const end = Math.max(start, utterance.endSec);
+  const usable = segments.filter((s) => (s.text ?? "").trim().length > 0);
+  if (usable.length === 0) {
+    const body = text.trim();
+    return body ? [{ start, end, text: body }] : [];
+  }
+  return usable.map((s) => {
+    const segStart = start + Math.max(0, s.start);
+    // 引擎有时会回超出这一句长度的结尾（补静音 / 幻觉），夹回句内，时间轴才不会互相重叠。
+    const segEnd = Math.min(Math.max(segStart, start + s.end), end);
+    return {
+      ...s,
+      start: segStart,
+      end: Math.max(segStart, segEnd),
+    };
+  });
+}

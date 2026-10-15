@@ -683,6 +683,8 @@ export async function transcribeAudio(input: {
 }): Promise<AsrTranscript> {
   let audioPath: string | null = null;
   let audioRef: string | null = input.audioRef ?? null;
+  /** 由 wavBase64 落成的临时 WAV：临时转写用完就删（见函数末尾的 finally）。 */
+  let tempWavPath: string | null = null;
 
   if (input.wavBase64) {
     const dir = path.join(getAudioBaseDir(), "in");
@@ -691,6 +693,7 @@ export async function transcribeAudio(input: {
     await Bun.write(path.join(dir, name), Buffer.from(input.wavBase64, "base64"));
     audioRef = `audio/in/${name}`;
     audioPath = path.join(dir, name);
+    tempWavPath = audioPath;
   } else if (input.audioRef) {
     audioPath = resolveAudioPath(input.audioRef);
   }
@@ -745,41 +748,54 @@ export async function transcribeAudio(input: {
   const remoteResult = (useProvider: boolean) =>
     transcribeRemote(audioPath, input.model, input.diarize, useProvider, lang);
 
-  // 显式远程：优先用配置的 OpenAI 兼容 provider，未配置时回退主推理服务。
-  if (source === "remote") {
-    const useProvider = !!provider.base;
-    return saveRecord(
-      await remoteResult(useProvider),
-      input.model || (useProvider ? provider.model : "") || null,
-    );
-  }
+  try {
+    // 显式远程：优先用配置的 OpenAI 兼容 provider，未配置时回退主推理服务。
+    if (source === "remote") {
+      const useProvider = !!provider.base;
+      return saveRecord(
+        await remoteResult(useProvider),
+        input.model || (useProvider ? provider.model : "") || null,
+      );
+    }
 
-  // 显式本地引擎：Confucius4-R2T2 / audio.cpp / whisper.cpp。
-  if (source === "local") {
+    // 显式本地引擎：Confucius4-R2T2 / audio.cpp / whisper.cpp。
+    if (source === "local") {
+      if (getSetting("ASR_ENGINE") === CONFUCIUS_ENGINE_ID) {
+        return saveRecord(await runConfucius(), getSetting("ASR_CONFUCIUS_MODEL") || null);
+      }
+      if (getSetting("ASR_ENGINE") === "audiocpp") {
+        return saveRecord(await runAudioCpp(), getSetting("ASR_AUDIOCPP_MODEL") || null);
+      }
+      if (!hasLocal) throw new Error("未检测到 whisper.cpp，请先安装（brew install whisper-cpp）或使用 OpenAI 兼容 API");
+      const { transcript, modelLabel } = await runWhisperLocal();
+      return saveRecord(transcript, input.model ? input.model : modelLabel);
+    }
+
+    // 自动：本地引擎优先（confucius → audio.cpp → whisper.cpp），都没有时回退主推理服务。
     if (getSetting("ASR_ENGINE") === CONFUCIUS_ENGINE_ID) {
       return saveRecord(await runConfucius(), getSetting("ASR_CONFUCIUS_MODEL") || null);
     }
     if (getSetting("ASR_ENGINE") === "audiocpp") {
       return saveRecord(await runAudioCpp(), getSetting("ASR_AUDIOCPP_MODEL") || null);
     }
-    if (!hasLocal) throw new Error("未检测到 whisper.cpp，请先安装（brew install whisper-cpp）或使用 OpenAI 兼容 API");
-    const { transcript, modelLabel } = await runWhisperLocal();
-    return saveRecord(transcript, input.model ? input.model : modelLabel);
+    if (hasLocal) {
+      const { transcript, modelLabel } = await runWhisperLocal();
+      return saveRecord(transcript, modelLabel);
+    }
+    return saveRecord(
+      await remoteResult(false),
+      input.model || null,
+    );
+  } finally {
+    // 临时转写（save = false）用完即删：自动听写是一句一个临时 WAV，而边说话边显示的
+    // 中间结果更密（约每秒一次）。不删的话一小时能往 images/audio/in 里堆几千个小文件，
+    // 而且没有任何界面会提到它们。save = true 时这个文件就是记录的音频（播放要用），必须留着。
+    if (tempWavPath && !input.save) {
+      try {
+        rmSync(tempWavPath, { force: true });
+      } catch {
+        // 删不掉不影响这次转写的结果，但也不能因此把这次转写判成失败。
+      }
+    }
   }
-
-  // 自动：本地引擎优先（confucius → audio.cpp → whisper.cpp），都没有时回退主推理服务。
-  if (getSetting("ASR_ENGINE") === CONFUCIUS_ENGINE_ID) {
-    return saveRecord(await runConfucius(), getSetting("ASR_CONFUCIUS_MODEL") || null);
-  }
-  if (getSetting("ASR_ENGINE") === "audiocpp") {
-    return saveRecord(await runAudioCpp(), getSetting("ASR_AUDIOCPP_MODEL") || null);
-  }
-  if (hasLocal) {
-    const { transcript, modelLabel } = await runWhisperLocal();
-    return saveRecord(transcript, modelLabel);
-  }
-  return saveRecord(
-    await remoteResult(false),
-    input.model || null,
-  );
 }

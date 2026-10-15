@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AudioLinesIcon, Loader2Icon, SparklesIcon, SquareIcon, PlayIcon, CircleIcon, DownloadCloudIcon, ChevronsUpDownIcon, SearchIcon, TrashIcon } from "lucide-react";
+import { AudioLinesIcon, Loader2Icon, SparklesIcon, SquareIcon, PlayIcon, CircleIcon, DownloadCloudIcon, ChevronsUpDownIcon, HistoryIcon, SearchIcon, TrashIcon, XIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
+import { formatBytes, formatRecordTime } from "@lib/format";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
@@ -13,23 +14,81 @@ import { AUDIOCPP_REPO } from "@/shared/audiocpp";
 import type { TtsLocalModelInfo, TtsLocalStatus } from "../../../bun/tts-local";
 import type { VoiceClone, VoiceRecordRow } from "../../../bun/voice";
 import { cn } from "@/mainview/lib/utils";
+import { AudioBar } from "./audio-player";
 
 export function formatTime(ts: number): string {
   const d = new Date(ts);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+/**
+ * 试听一条音轨（上传的参考音频 / 克隆样本 / 结果音频）。
+ * 全页共用一个 audio 元素，见 `audio-player.tsx` —— 这里不再用浏览器原生播放条：
+ * 一条 30 秒的音频配一整条原生控件，界面上最重的东西就成了播放器。
+ */
 export function PlayAudio({ url, className }: { url: string; className?: string }) {
+  return <AudioBar url={url} className={className} />;
+}
+
+/**
+ * 右侧正在看一条历史记录时的顶栏：这是哪一次任务 + 怎么回去。
+ *
+ * 三个页面（语音合成 / 语音识别 / 声音克隆）共用一条，形状与位置都一致：
+ * 它占的位置就是原来"跑一次"的那条运行条 —— 看图的人一眼能分清"我在看旧的"还是"我在做新的"。
+ * `children` 给页面自己的附加动作（如语音合成的"填入文案"）。
+ */
+export function RecordHistoryBar({
+  record,
+  onClose,
+  className,
+  children,
+}: {
+  record: VoiceRecordRow;
+  onClose: () => void;
+  className?: string;
+  children?: ReactNode;
+}) {
   const t = useT();
-  const [err, setErr] = useState(false);
-  if (err) {
-    return (
-      <p className="rounded bg-muted/60 px-2 py-1 text-xs text-muted-foreground">
-        {t("voice.records.missing")}
-      </p>
-    );
-  }
-  return <audio controls src={url} preload="none" className={cn("h-8 w-full", className)} onError={() => setErr(true)} />;
+  const label = record.model || record.voice;
+  return (
+    <div
+      className={cn(
+        "flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b bg-muted/30 px-3 py-2",
+        className,
+      )}
+    >
+      <span className="flex shrink-0 items-center gap-1.5 text-xs font-medium">
+        <HistoryIcon className="size-3.5 text-primary" />
+        {t("voice.records.history")}
+      </span>
+      <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+        {formatRecordTime(record.createdAt)}
+      </span>
+      {label && (
+        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+          {label}
+        </span>
+      )}
+      {record.status === "failed" && (
+        <Badge variant="destructive" className="h-4 text-[10px]">
+          {t("voice.failed")}
+        </Badge>
+      )}
+      <span className="ml-auto flex shrink-0 items-center gap-1.5">
+        {children}
+        {record.audioUrl && (
+          <AudioDownloadButton
+            url={record.audioUrl}
+            filename={audioFileName(record.audioUrl, label || record.kind)}
+          />
+        )}
+        <Button variant="outline" size="sm" className="h-7 text-xs" onClick={onClose}>
+          <XIcon className="size-3.5" />
+          {t("voice.records.backToCurrent")}
+        </Button>
+      </span>
+    </div>
+  );
 }
 
 export function ResultPanel({ record, label }: { record?: VoiceRecordRow; label: string }) {
@@ -133,6 +192,8 @@ export function SettingsValues() {
     ttsModel: string;
     asrModel: string;
     asrLang: string;
+    asrScene: string;
+    asrVad: string;
     ttsVoice: string;
     edgeVoice: string;
     asrEngine: string;
@@ -140,6 +201,8 @@ export function SettingsValues() {
     ttsModel: "",
     asrModel: "",
     asrLang: "zh",
+    asrScene: "general",
+    asrVad: "",
     ttsVoice: "alloy",
     edgeVoice: "zh-CN-XiaoxiaoNeural",
     asrEngine: "whisper",
@@ -155,6 +218,8 @@ export function SettingsValues() {
         ttsModel: data.settings.TTS_MODEL ?? "",
         asrModel: data.settings.ASR_MODEL ?? "",
         asrLang: data.settings.ASR_LANG || "zh",
+        asrScene: data.settings.ASR_SCENE || "general",
+        asrVad: data.settings.ASR_VAD ?? "",
         ttsVoice: data.settings.TTS_VOICE ?? "alloy",
         edgeVoice: data.settings.TTS_EDGE_VOICE ?? "zh-CN-XiaoxiaoNeural",
         asrEngine: data.settings.ASR_ENGINE ?? "whisper",
@@ -518,7 +583,6 @@ export function LocalVoicePicker({
 }
 
 
-// 体积口径统一到 @lib/format（本文件内也直接调用）。
-import { formatBytes } from "@lib/format";
+// 体积口径统一到 @lib/format（本文件内也直接调用，import 在上方）。
 export { formatBytes };
 

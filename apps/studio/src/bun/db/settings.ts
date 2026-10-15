@@ -111,6 +111,10 @@ export type SettingsKey =
   | "TTS_MODEL"
   | "ASR_MODEL"
   | "ASR_LANG"
+  /** 转写工作台的场景预设（general / meeting / interview / lecture / subtitle）。 */
+  | "ASR_SCENE"
+  /** 自动听写的切句参数：{"sensitivity":"medium","silenceMs":1000}（JSON 字符串）。 */
+  | "ASR_VAD"
   | "TTS_VOICE"
   | "VOICE_CLONES"
   | "TTS_HTTP_BASE"
@@ -435,6 +439,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   TTS_MODEL: "",
   ASR_MODEL: DEFAULT_ASR_MODEL_FILE,
   ASR_LANG: "zh",
+  ASR_SCENE: "general",
+  ASR_VAD: "",
   TTS_VOICE: "alloy",
   VOICE_CLONES: "[]",
   TTS_HTTP_BASE: "",

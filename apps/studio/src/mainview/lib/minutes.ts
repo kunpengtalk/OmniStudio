@@ -4,7 +4,7 @@
  */
 import type { AsrSegment } from "../../bun/asr";
 
-/** 媒体时间轴时钟：m:ss 或 h:mm:ss（与 voice-asr-result 的 fmtClock 同规则）。 */
+/** 媒体时间轴时钟：m:ss 或 h:mm:ss（与 voice/asr-result 的 fmtClock 同规则）。 */
 function fmtClock(sec: number): string {
   if (!Number.isFinite(sec) || sec < 0) sec = 0;
   const h = Math.floor(sec / 3600);

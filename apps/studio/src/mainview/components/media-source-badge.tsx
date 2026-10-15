@@ -10,13 +10,18 @@ import type { MediaSource } from "../../bun/db/schema";
  *
  * 手工生成是常态，所以徽标只在 `agent` 时出现（不给每张图都挂标签造成视觉噪音）；
  * 需要专门看某一类时用 `MediaSourceFilter` 过滤。
+ *
+ * `iconOnly` 给窄列表行用：侧栏一行只有两百来像素，"Agent 生成"五个字能把模型名挤没，
+ * 只留那颗火花图标（判读靠 `title`），来源照样看得出来。
  */
 export function MediaSourceBadge({
   source,
   className,
+  iconOnly,
 }: {
   source: MediaSource;
   className?: string;
+  iconOnly?: boolean;
 }) {
   const t = useT();
   if (source !== "agent") return null;
@@ -24,10 +29,13 @@ export function MediaSourceBadge({
     <Badge
       variant="outline"
       title={t("media.source.agentHint")}
-      className={cn("h-4 gap-0.5 px-1 text-[9px] font-normal text-muted-foreground", className)}
+      className={cn(
+        "h-4 shrink-0 gap-0.5 px-1 text-[9px] font-normal text-muted-foreground",
+        className,
+      )}
     >
       <SparklesIcon className="size-2.5" />
-      {t("media.source.agent")}
+      {!iconOnly && t("media.source.agent")}
     </Badge>
   );
 }

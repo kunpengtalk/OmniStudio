@@ -6,7 +6,7 @@ import { useT } from "@stores/ui-lang";
 import { useMicRecorder } from "@hooks/use-mic-recorder";
 import type { AsrSegment } from "../../../bun/asr";
 import type { AsrAudioCppModelInfo } from "../../../bun/asr-audiocpp";
-import { mergeSegments } from "../voice-asr-result";
+import { mergeSegments } from "../voice/asr-result/transcript-utils";
 import { useTranslationEngine } from "../translate/engine-picker";
 import { TRANSLATION_LANGUAGES, TRANSLATION_SOURCE_AUTO } from "../../../shared/translate";
 import { planLiveTranslations } from "@/mainview/lib/live-translate-queue";

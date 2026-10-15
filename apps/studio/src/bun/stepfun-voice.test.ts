@@ -186,6 +186,33 @@ test("ASR：SSE 里的 error 事件要让用户看到原因", async () => {
   ).rejects.toThrow("音频内容不完整");
 });
 
+/**
+ * 自动听写是「一句一个临时 WAV」、中间结果更密（约每秒一次）。这些文件只用来送检，
+ * 没有任何界面会提到它们 —— 不删的话一小时能往 images/audio/in 里堆几千个。
+ * 手动录音那条路（save = true）的临时文件就是记录的音频，播放要用，必须留着。
+ */
+test("ASR：临时转写（save=false）的临时 WAV 用完就删，落库的（save=true）留着", async () => {
+  const { mkdirSync, readdirSync } = await import("fs");
+  globalThis.fetch = mock(async () =>
+    sseResponse([{ type: "transcript.text.done", text: "你好，世界。" }]),
+  ) as never;
+
+  const dir = `${Voice.getAudioBaseDir()}/in`;
+  mkdirSync(dir, { recursive: true });
+  const countTemp = () => readdirSync(dir).filter((f) => /^rec-.*\.wav$/.test(f)).length;
+
+  const before = countTemp();
+  await Asr.transcribeAudio({ wavBase64: tinyWav().toString("base64"), source: "remote" });
+  expect(countTemp()).toBe(before);
+
+  await Asr.transcribeAudio({
+    wavBase64: tinyWav().toString("base64"),
+    source: "remote",
+    save: true,
+  });
+  expect(countTemp()).toBe(before + 1);
+});
+
 test("ASR：不支持的容器格式在本地就说清楚（而不是等上游 400）", async () => {
   const name = `stepfun-${Date.now()}.flac`;
   const dir = `${Voice.getAudioBaseDir()}/in`;

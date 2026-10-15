@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AudioLinesIcon, XIcon, Loader2Icon, FileAudioIcon, SparklesIcon, SquareIcon, PlayIcon, CircleIcon, ServerIcon, DownloadCloudIcon, GlobeIcon, SaveIcon, CpuIcon } from "lucide-react";
+import { AudioLinesIcon, XIcon, Loader2Icon, FileAudioIcon, SparklesIcon, SquareIcon, PlayIcon, CircleIcon, ServerIcon, DownloadCloudIcon, GlobeIcon, SaveIcon, CpuIcon, ClipboardPasteIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
 import { CloudModelSelect } from "@components/cloud-model-select";
 import { ResultError, ResultEmpty } from "@components/media-result";
@@ -19,7 +19,8 @@ import { VendorVoiceField } from "@components/vendor-voice-select";
 import type { TtsLocalModelInfo } from "../../../bun/tts-local";
 import type { VoiceRecordRow } from "../../../bun/voice";
 import { DEFAULT_VOICE_BASE_URL } from "../voice-provider-presets";
-import { PlayAudio, ResultPanel, TtsLoading, SettingsValues, useClones, EdgeVoicePicker, LocalModelRow, LocalVoicePicker } from "./parts";
+import { PlayAudio, RecordHistoryBar, ResultPanel, TtsLoading, SettingsValues, useClones, EdgeVoicePicker, LocalModelRow, LocalVoicePicker } from "./parts";
+import { useFocusedVoiceRecord } from "./use-focused-record";
 
 export function TtsTab() {
   const t = useT();
@@ -33,6 +34,8 @@ export function TtsTab() {
   const [model, setModel] = useState(settings.ttsModel);
   const [result, setResult] = useState<VoiceRecordRow>();
   const [localError, setLocalError] = useState<string>();
+  /** 左侧历史里点开的那条记录：右侧这时显示它，而不是刚合成的那份。 */
+  const { record: historyRecord, setFocusRecordId } = useFocusedVoiceRecord();
 
   // ---------- 本地引擎 (audio.cpp) ----------
   const [localModelId, setLocalModelId] = useState("");
@@ -267,6 +270,8 @@ export function TtsTab() {
     },
     onSuccess: ({ record }) => {
       setResult(record);
+      // 刚合成的是"当前这份"：把右侧从历史记录上收回来，否则新音频出来了界面还停在旧的。
+      setFocusRecordId(null);
       setLocalError(undefined);
       queryClient.invalidateQueries({ queryKey: ["voice-records"] });
       if (source === "edge") {
@@ -671,14 +676,38 @@ export function TtsTab() {
         </div>
       </aside>
 
-      {/* 右侧：结果区 */}
+      {/* 右侧：结果区。看历史记录时先给一条说明条 —— 听见的是哪一次的音频要说清楚，
+          不然"左侧点一下右侧就出声"和一个新的合成结果分不清。 */}
       <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+        {historyRecord && (
+          <RecordHistoryBar
+            record={historyRecord}
+            onClose={() => setFocusRecordId(null)}
+            className="shrink-0"
+          >
+            {historyRecord.text && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                tooltip={t("voice.records.reuse")}
+                onClick={() => setText(historyRecord.text ?? "")}
+              >
+                <ClipboardPasteIcon className="size-3.5" />
+                {t("voice.records.reuse")}
+              </Button>
+            )}
+          </RecordHistoryBar>
+        )}
         <div className="flex min-h-0 flex-1 items-center justify-center p-8">
-          {generate.isPending ? (
+          {generate.isPending && !historyRecord ? (
             <TtsLoading text={text} />
-          ) : result ? (
+          ) : (historyRecord ?? result) ? (
             <div className="w-full max-w-md">
-              <ResultPanel record={result} label={t("voice.tts.noResult")} />
+              <ResultPanel
+                record={(historyRecord ?? result)!}
+                label={t("voice.tts.noResult")}
+              />
             </div>
           ) : (
             <ResultEmpty

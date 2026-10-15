@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AudioLinesIcon, MicIcon, XIcon, Loader2Icon, FileAudioIcon, SquareIcon, PlayIcon, CircleIcon, ServerIcon, DownloadCloudIcon, GlobeIcon, SaveIcon, CpuIcon, TrashIcon, TimerIcon, BotIcon } from "lucide-react";
+import { AudioLinesIcon, XIcon, Loader2Icon, FileAudioIcon, SquareIcon, PlayIcon, CircleIcon, ServerIcon, DownloadCloudIcon, GlobeIcon, SaveIcon, CpuIcon, TrashIcon, BotIcon, MicIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
 import { CloudModelSelect } from "@components/cloud-model-select";
-import { ResultError, ResultEmpty } from "@components/media-result";
+import { ResultError } from "@components/media-result";
 import { SegmentedControl } from "@components/segmented-control";
 import { Button } from "@ui/button";
 import { Label } from "@ui/label";
@@ -13,15 +13,19 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useT } from "@stores/ui-lang";
 import { useModelDownloadStore } from "@stores/model-download";
 import { useMicRecorder } from "@hooks/use-mic-recorder";
+import { useLiveDictation } from "@hooks/use-live-dictation";
 import type { AsrModelItem, AsrSegment, AsrStatus } from "../../../bun/asr";
 import type { AsrAudioCppModelInfo, AsrAudioCppStatus } from "../../../bun/asr-audiocpp";
 import type { AsrConfuciusModelInfo, AsrConfuciusStatus } from "../../../bun/asr-confucius";
-import { TranscriptViewer, mergeSegments, fmtClock } from "../voice-asr-result";
+import { AsrResultPane, mergeSegments } from "./asr-result";
 import { AUDIOCPP_REPO } from "@/shared/audiocpp";
 import { CONFUCIUS_ASR_REPO, CONFUCIUS_ASR_LICENSE_URL } from "@/shared/asr-confucius";
+import { normalizeScene, type AsrSceneId } from "@/shared/asr-insights";
+import { applySensitivity, DEFAULT_VAD_CONFIG, type VadSensitivity } from "@/shared/asr-vad";
+import { offsetUtteranceSegments } from "@lib/segments";
 import { DEFAULT_ASR_MODEL_FILE } from "@/shared/modelscope";
-import { cn } from "@/mainview/lib/utils";
 import { PlayAudio, SettingsValues, formatBytes } from "./parts";
+import { useFocusedVoiceRecord } from "./use-focused-record";
 
 function AsrModelRow({
   model,
@@ -329,26 +333,9 @@ function AsrAudioCppModelRow({
   );
 }
 
-/** 录音时的音量电平条（rAF 每帧驱动，纯展示）。 */
-function LevelMeter({ level }: { level: number }) {
-  const BARS = 28;
-  return (
-    <div className="flex h-11 items-end gap-[3px] rounded-lg border bg-muted/40 px-3 pt-1.5 pb-1">
-      {Array.from({ length: BARS }).map((_, i) => {
-        // 每个条有固定的“相位”，让整体像波形跳动而不是同步闪烁。
-        const phase = Math.abs(Math.sin(i * 12.9898));
-        const peak = (0.18 + 0.82 * (i / BARS)) * (0.6 + 0.4 * phase);
-        const h = Math.max(8, Math.min(100, (level * 100 * peak + 6) * 0.95));
-        return (
-          <span
-            key={i}
-            className="w-full flex-1 rounded-full bg-primary/70 transition-[height] duration-75"
-            style={{ height: `${h}%` }}
-          />
-        );
-      })}
-    </div>
-  );
+/** 文件名（路径最后一段），用于控制台上的来源胶囊。 */
+function baseName(p: string): string {
+  return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
 }
 
 export function AsrTab() {
@@ -356,10 +343,13 @@ export function AsrTab() {
   const queryClient = useQueryClient();
   const settings = SettingsValues();
   const [asrLang, setAsrLang] = useState(settings.asrLang);
-  const [audio, setAudio] = useState<{ ref: string; url: string } | null>(null);
+  const [audio, setAudio] = useState<{ ref: string; url: string; name: string } | null>(null);
   const [meta, setMeta] = useState<string | null>(null);
   const [tError, setTError] = useState<string | undefined>();
   const [micError, setMicError] = useState<string | undefined>();
+  // 「跑一次」的错误（转写 / 实时转写 / 麦克风）显示在右侧工作台 —— 报错的地方就是按按钮的地方；
+  // tError 留给引擎安装 / 启停这类左栏配置错误，pError 在 API 卡片里就地显示。
+  const [runError, setRunError] = useState<string | undefined>();
   // UI 视图态：whisper / 本地 GGUF（audio.cpp + Confucius4 合并）/ API。
   // 与设置态 ASR_ENGINE 分离 —— 点某个 GGUF 模型的「启动」时才写 ASR_ENGINE。
   const [engineMode, setEngineMode] = useState<"whisper" | "gguf" | "api">("whisper");
@@ -371,7 +361,28 @@ export function AsrTab() {
   const [speakerMode, setSpeakerMode] = useState(true);
   const [level, setLevel] = useState(0);
   const [elapsed, setElapsed] = useState(0);
-  const [jumpIndex, setJumpIndex] = useState<number | null>(null);
+  // 场景（写 ASR_SCENE）：决定整理的默认动作与人声分离默认值。
+  const [scene, setScene] = useState<AsrSceneId>("general");
+  // 实时转写暂停：录音继续，但先不往识别服务发（省算力、也让用户可以安静几秒）。
+  const [livePaused, setLivePaused] = useState(false);
+  // 这份稿子的来源：麦克风 or 音频文件（控制台的来源胶囊按它显示）。
+  const [lastSource, setLastSource] = useState<"mic" | "file">("mic");
+  /**
+   * 采集模式：
+   *   auto   —— 一直听着，按静音自动切句，说一句出一句（默认；"边说话边出字"就是这个）
+   *   manual —— 手动按开始/停止，录一整段再转（适合有明确始终点的场景，如采访录音）
+   */
+  const [mode, setMode] = useState<"auto" | "manual">("auto");
+  // 自动切句的两个旋钮（存 ASR_VAD）：灵敏度与"停顿多久算说完"。
+  const [vadSensitivity, setVadSensitivity] = useState<VadSensitivity>("medium");
+  const [silenceMs, setSilenceMs] = useState(1000);
+  /** 正在说的这一句的中间识别结果（灰色预览行，收句后被正式结果替换）。 */
+  const [interim, setInterim] = useState<string | null>(null);
+  /**
+   * 左侧历史里点开的那条记录：右侧这时显示的是**那次任务**的稿子，
+   * 而不是手上这份草稿（开始采集 / 转写文件时自动让位，见下面几个 handler）。
+   */
+  const { record: historyRecord, setFocusRecordId } = useFocusedVoiceRecord();
 
   // ---------- whisper.cpp engine ----------
   const { data: modelsData } = useQuery({
@@ -414,7 +425,7 @@ export function AsrTab() {
   });
   const confuciusModels = confuciusModelsData?.models ?? [];
 
-  // 恢复上次选择的引擎（ASR_ENGINE 设置）。
+  // 恢复上次选择的引擎（ASR_ENGINE）与场景（ASR_SCENE）。
   const engineHydrated = useRef(false);
   useEffect(() => {
     if (!settings.loaded || engineHydrated.current) return;
@@ -427,6 +438,10 @@ export function AsrTab() {
           : "whisper",
     );
     setGgufEngine(settings.asrEngine === "confucius" ? "confucius" : "audiocpp");
+    setScene(normalizeScene(settings.asrScene));
+    const savedVad = parseVadPrefs(settings.asrVad);
+    setVadSensitivity(savedVad.sensitivity);
+    setSilenceMs(savedVad.silenceMs);
   }, [settings]);
 
   const switchEngine = (mode: "whisper" | "gguf" | "api") => {
@@ -439,6 +454,11 @@ export function AsrTab() {
     void rpcClient.updateSettings({ settings: { ASR_ENGINE: mode } });
     // 本地引擎与 API 模式互斥：切走时停掉 whisper-server（也会停 Confucius4 实例）。
     void rpcClient.stopAsr();
+  };
+
+  const pickScene = (next: AsrSceneId) => {
+    setScene(next);
+    void rpcClient.updateSettings({ settings: { ASR_SCENE: next } });
   };
 
   // 有正在使用的 audio.cpp 模型时自动选中。
@@ -653,10 +673,10 @@ export function AsrTab() {
     error?: string;
   }) => {
     if (r.error) {
-      setTError(r.error);
+      setRunError(r.error);
       return;
     }
-    setTError(undefined);
+    setRunError(undefined);
     setMeta(r.engine ?? null);
     if (r.segments?.length) {
       setSegments(r.segments);
@@ -680,10 +700,13 @@ export function AsrTab() {
         model: engineMode === "api" ? pModel.trim() || undefined : undefined,
       }),
     onSuccess: handleResult,
+    onError: (e) => setRunError(e instanceof Error ? e.message : String(e)),
   });
 
   // 录音是否还在进行（供 liveTranscribe 回调判断，避免停止后回写旧结果）。
   const recordingRef = useRef(false);
+  // 实时转写暂停（与状态同步到 ref，供录音回调读取）。
+  const livePausedRef = useRef(false);
 
   const liveTranscribe = useMutation({
     mutationFn: (wav: string) =>
@@ -695,7 +718,12 @@ export function AsrTab() {
         model: engineMode === "api" ? pModel.trim() || undefined : undefined,
       }),
     onSuccess: (r) => {
-      if (r.error || !recordingRef.current) return;
+      if (!recordingRef.current) return;
+      if (r.error) {
+        setRunError(r.error);
+        return;
+      }
+      setRunError(undefined);
       const segs = r.segments;
       if (segs?.length) {
         setSegments((prev) => mergeSegments(prev, segs));
@@ -704,7 +732,103 @@ export function AsrTab() {
         setPlainText(r.text);
       }
     },
+    // 实时轮询失败不打断录音，第一次失败就把原因挂出来（成功一次后自动清掉）。
+    onError: (e) => setRunError(e instanceof Error ? e.message : String(e)),
   });
+
+  // ---------- 自动听写（VAD 切句，默认模式） ----------
+  const vadConfig = useMemo(
+    () =>
+      applySensitivity(
+        {
+          ...DEFAULT_VAD_CONFIG,
+          // 静音几帧算说完：帧长取默认 hop，1s 对应 16000/512 ≈ 31 帧。
+          silenceHops: Math.max(4, Math.round((silenceMs / 1000) * 16000 / DEFAULT_VAD_CONFIG.hopSize)),
+        },
+        vadSensitivity,
+      ),
+    [silenceMs, vadSensitivity],
+  );
+
+  // 中间结果的请求闸门：上一次还没回来就跳过这一次，避免请求堆成一片。
+  const interimBusyRef = useRef(false);
+  /**
+   * 中间结果的"代次"：每落一句正式结果就加一。
+   * 请求是并发的，晚发出的那次中间识别可能后回来 —— 不认代次的话，收句后还会冒出一行
+   * 已经过时的灰色预览，看着像卡住了。
+   */
+  const interimEpochRef = useRef(0);
+  /** 还在识别中的句子数（界面上的"识别中"指示用；不影响追加顺序）。 */
+  const dictationBusyRef = useRef(0);
+  const handleInterim = (wav: string) => {
+    if (interimBusyRef.current || livePaused) return;
+    interimBusyRef.current = true;
+    const epoch = interimEpochRef.current;
+    void rpcClient
+      .transcribeAudio({
+        wavBase64: wav,
+        save: false,
+        source: engineMode === "api" ? "remote" : "local",
+        // 中间结果只是给人看个大概，不做人声分离（省一半时间）。
+        diarize: false,
+        model: engineMode === "api" ? pModel.trim() || undefined : undefined,
+      })
+      .then((r) => {
+        const text = (r.text ?? "").trim();
+        // 代次变了说明这一句已经落定，这行预览是过期的，丢掉。
+        if (!r.error && text && interimEpochRef.current === epoch) setInterim(text);
+      })
+      .catch(() => {})
+      .finally(() => {
+        interimBusyRef.current = false;
+      });
+  };
+
+  /**
+   * 一句说完：把这一句单独送去识别，再按它在整场录音里的位置贴回时间轴。
+   * 引擎给的时间戳是相对于这一句的，只有加上 startSec 才能和别的句子排成一条时间轴。
+   */
+  const handleUtterance = (wav: string, meta: { startSec: number; endSec: number; durationSec: number }) => {
+    if (livePaused) return;
+    dictationBusyRef.current += 1;
+    void rpcClient
+      .transcribeAudio({
+        wavBase64: wav,
+        save: false,
+        source: engineMode === "api" ? "remote" : "local",
+        diarize: speakerMode,
+        model: engineMode === "api" ? pModel.trim() || undefined : undefined,
+      })
+      .then((r) => {
+        if (r.error) {
+          setRunError(r.error);
+          return;
+        }
+        setRunError(undefined);
+        const segs = offsetUtteranceSegments(r.segments ?? [], r.text ?? "", meta);
+        if (segs.length > 0) {
+          setSegments((prev) => mergeSegments(prev, segs));
+          setHasSpeakers((prev) => prev || !!r.hasSpeakers);
+          setMeta((cur) => cur ?? r.engine ?? null);
+        }
+        // 正式结果到了才撤掉灰色预览行，中间不空窗；同时把代次推进，
+        // 让还在路上的那次中间识别作废。
+        interimEpochRef.current += 1;
+        setInterim(null);
+      })
+      .catch((e) => setRunError(e instanceof Error ? e.message : String(e)))
+      .finally(() => {
+        dictationBusyRef.current -= 1;
+      });
+  };
+
+  const dictation = useLiveDictation(handleUtterance, handleInterim, setLevel, {
+    vad: vadConfig,
+  });
+  // 暂停开关同步给听写：放 ref 里而不是进依赖数组 —— setPaused 本身不依赖任何状态，
+  // 但每次渲染都是新函数，写进依赖会每次重建 effect。
+  const dictationRef = useRef(dictation);
+  dictationRef.current = dictation;
 
   // 同一时间只允许一个实时轮询请求，避免积压。
   const liveBusyRef = useRef(false);
@@ -716,7 +840,7 @@ export function AsrTab() {
   const lastLevelEmit = useRef(0);
   const recorder = useMicRecorder(
     (wav) => {
-      if (!liveBusyRef.current) liveTranscribe.mutate(wav);
+      if (!liveBusyRef.current && !livePausedRef.current) liveTranscribe.mutate(wav);
     },
     (l) => {
       const now = performance.now();
@@ -729,15 +853,22 @@ export function AsrTab() {
 
   useEffect(() => {
     recordingRef.current = recorder.recording;
+    // 停止录音时把暂停态复位，下次录音默认是"实时转写中"。
+    if (!recorder.recording) setLivePaused(false);
   }, [recorder.recording]);
+
+  useEffect(() => {
+    livePausedRef.current = livePaused;
+    dictationRef.current.setPaused(livePaused);
+  }, [livePaused]);
 
   const handleMicStart = () => {
     setSegments([]);
     setPlainText("");
     setHasSpeakers(false);
     setMeta(null);
-    setTError(undefined);
-    setJumpIndex(null);
+    setRunError(undefined);
+    setLastSource("mic");
     recorder.start();
   };
 
@@ -746,16 +877,25 @@ export function AsrTab() {
     transcribe.mutate({ wavBase64: wav });
   };
 
-  // 录音中的计时。
+  // 手动模式下的错误也走右侧工作台；麦克风权限失败同样。
   useEffect(() => {
-    if (!recorder.recording) {
+    if (recorder.error) setRunError(recorder.error);
+  }, [recorder.error]);
+  useEffect(() => {
+    if (dictation.error) setRunError(dictation.error);
+  }, [dictation.error]);
+
+  // 采集中的计时（手动录音与自动听写共用）。
+  const capturing = recorder.recording || dictation.listening;
+  useEffect(() => {
+    if (!capturing) {
       setElapsed(0);
       return;
     }
     const startedAt = Date.now();
     const iv = setInterval(() => setElapsed((Date.now() - startedAt) / 1000), 250);
     return () => clearInterval(iv);
-  }, [recorder.recording]);
+  }, [capturing]);
 
   const pick = useMutation({
     mutationFn: async () => {
@@ -764,7 +904,8 @@ export function AsrTab() {
       });
       if (paths.length === 0) return;
       const { files } = await rpcClient.stageAudio({ paths });
-      if (files[0]) setAudio(files[0]);
+      const first = files[0];
+      if (first) setAudio({ ...first, name: baseName(paths[0] ?? first.ref) });
     },
   });
 
@@ -772,9 +913,116 @@ export function AsrTab() {
     setMicError(recorder.error);
   }, [recorder.error]);
 
+  /** 转写暂存好的音频文件（控制台的主操作）。 */
+  const transcribeFile = () => {
+    if (!audio) return;
+    setFocusRecordId(null);
+    setSegments([]);
+    setPlainText("");
+    setHasSpeakers(false);
+    setMeta(null);
+    setRunError(undefined);
+    setLastSource("file");
+    transcribe.mutate({ audioRef: audio.ref });
+  };
+
+  /** 开始采集：自动听写一直听，手动模式录一整段。 */
+  const handleStart = () => {
+    // 采集的是新的一份：先把右侧从历史记录上收回来，否则录了半天界面还停在那条旧稿子上。
+    setFocusRecordId(null);
+    if (mode === "auto") {
+      setSegments([]);
+      setPlainText("");
+      setHasSpeakers(false);
+      setMeta(null);
+      setInterim(null);
+      setRunError(undefined);
+      setLastSource("mic");
+      setLivePaused(false);
+      void dictation.start();
+      return;
+    }
+    handleMicStart();
+  };
+
+  /** 停止采集：自动听写会把没等到静音的那半句先交出来（不丢最后一句）。 */
+  const handleStop = () => {
+    if (mode === "auto") {
+      dictation.stop();
+      return;
+    }
+    handleMicStop();
+  };
+
+  /**
+   * 切模式：正在听/正在录的时候不许切（按钮此时是禁用的），
+   * 真的切了就先把另一条链路停干净，避免两个采集同时开着。
+   */
+  const changeMode = (next: "auto" | "manual") => {
+    if (next === mode) return;
+    dictation.stop({ flush: false });
+    if (recorder.recording) recorder.finish();
+    setMode(next);
+    setLivePaused(false);
+    setInterim(null);
+    setRunError(undefined);
+  };
+
+  /** 切句参数写回设置：调一次就记住，下次进来不用再调。 */
+  const saveVadPrefs = (next: { sensitivity?: VadSensitivity; silenceMs?: number }) => {
+    const value = {
+      sensitivity: next.sensitivity ?? vadSensitivity,
+      silenceMs: next.silenceMs ?? silenceMs,
+    };
+    if (next.sensitivity) setVadSensitivity(next.sensitivity);
+    if (next.silenceMs) setSilenceMs(next.silenceMs);
+    void rpcClient.updateSettings({ settings: { ASR_VAD: JSON.stringify(value) } });
+  };
+
+  const clearTranscript = () => {
+    setFocusRecordId(null);
+    setSegments([]);
+    setPlainText("");
+    setHasSpeakers(false);
+    setMeta(null);
+    setInterim(null);
+    setRunError(undefined);
+  };
+
+  /** 控制台里的「识别目标」：当前实际会被用到的引擎 · 模型，只作展示。 */
+  const target = (() => {
+    if (engineMode === "whisper") {
+      const active = status?.activeModel ? baseName(status.activeModel) : "";
+      return `whisper.cpp · ${serverRunning && active ? active : t("voice.asr.notRunning")}`;
+    }
+    if (engineMode === "gguf") {
+      if (ggufEngine === "audiocpp") {
+        return `audio.cpp · ${selectedAcp?.name ?? t("voice.asr.notSelected")}`;
+      }
+      const activeConfucius = confuciusModels.find((m) => m.active);
+      return `Confucius4 · ${activeConfucius?.name ?? t("voice.asr.notSelected")}`;
+    }
+    return `${t("voice.asr.sourceRemote")} · ${pModel.trim() || t("voice.asr.notSelected")}`;
+  })();
+
+  /**
+   * 右侧要显示的那份稿子：左侧历史点开一条就是那条记录，否则是手上这份。
+   * 两种来源只在这里合流 —— 工作台本身不认识"历史"，它只认一份稿子。
+   * 记录里存的是整段文字（没有分段），所以按"纯文"那份走。
+   */
+  const viewing = historyRecord
+    ? {
+        segments: [] as AsrSegment[],
+        text: historyRecord.text ?? "",
+        engine: historyRecord.model ?? undefined,
+        hasSpeakers: false,
+        audioUrl: historyRecord.audioUrl ?? undefined,
+      }
+    : { segments, text: plainText, engine: meta ?? undefined, hasSpeakers, audioUrl: audio?.url };
+
   return (
     <div className="flex h-full min-h-0">
-      {/* 左侧：引擎与参数面板（与生图页同款布局） */}
+      {/* 左侧：引擎与参数面板（与生图页同款布局）。跑一次识别在右侧底部控制台。 */}
       <aside className="w-[340px] shrink-0 overflow-y-auto border-r p-4">
         <div className="flex flex-col gap-5">
           {/* 推理引擎切换 */}
@@ -1155,28 +1403,7 @@ export function AsrTab() {
             </>
           )}
 
-          {/* 参数：人声分离开关 */}
-          <div className="flex items-center justify-between gap-2 rounded-lg border bg-card p-3">
-            <span className="text-xs font-medium">{t("voice.asr.spkSeparate")}</span>
-            <button
-              type="button"
-              onClick={() => setSpeakerMode((v) => !v)}
-              aria-pressed={speakerMode}
-              className={cn(
-                "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
-                speakerMode ? "border-primary bg-primary" : "border-border bg-muted",
-              )}
-            >
-              <span
-                className={cn(
-                  "inline-block size-3.5 transform rounded-full bg-background shadow-sm transition-transform",
-                  speakerMode ? "translate-x-[18px]" : "translate-x-[2px]",
-                )}
-              />
-            </button>
-          </div>
-
-          {/* 上传音频 */}
+          {/* 上传音频（识别在右侧控制台点「转写该文件」） */}
           <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
             <div className="flex items-center justify-between gap-2">
               <span className="flex items-center gap-1.5 text-xs font-medium">
@@ -1189,7 +1416,15 @@ export function AsrTab() {
                   {audio ? t("voice.asr.picked") : t("voice.asr.pick")}
                 </Button>
                 {audio && (
-                  <Button variant="ghost" size="icon-sm" tooltip={t("voice.remove")} onClick={() => setAudio(null)}>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    tooltip={t("voice.remove")}
+                    onClick={() => {
+                      setAudio(null);
+                      if (lastSource === "file") clearTranscript();
+                    }}
+                  >
                     <XIcon className="size-4" />
                   </Button>
                 )}
@@ -1198,95 +1433,79 @@ export function AsrTab() {
             {audio && <PlayAudio url={audio.url} />}
           </div>
 
-          {/* 麦克风录音 */}
-          <div className="flex flex-col gap-2 rounded-lg border bg-card p-3">
-            <span className="flex items-center gap-1.5 text-xs font-medium">
-              <MicIcon className="size-3.5 text-muted-foreground" />
-              {t("voice.asr.micTitle")}
-            </span>
-            <div className="flex items-center gap-3">
-              {!recorder.recording ? (
-                <Button onClick={handleMicStart}>
-                  <MicIcon data-icon="inline-start" />
-                  {t("voice.asr.recordStart")}
-                </Button>
-              ) : (
-                <Button variant="destructive" onClick={handleMicStop}>
-                  <SquareIcon data-icon="inline-start" />
-                  {t("voice.asr.recordStop")}
-                </Button>
-              )}
-              {recorder.recording && (
-                <>
-                  <span className="flex items-center gap-1.5 text-xs text-destructive">
-                    <CircleIcon className="size-2.5 animate-pulse fill-current" />
-                    {t("voice.asr.recording")}
-                  </span>
-                  <span className="flex items-center gap-1 font-mono text-xs text-muted-foreground tabular-nums">
-                    <TimerIcon className="size-3.5" />
-                    {fmtClock(elapsed)}
-                  </span>
-                </>
-              )}
-            </div>
-            {recorder.recording && (
-              <>
-                <LevelMeter level={level} />
-                <p className="text-[11px] text-muted-foreground">{t("voice.asr.liveHint")}</p>
-              </>
-            )}
-          </div>
+          {/* 主操作在右侧控制台，这里给一句指路，避免用户在原位置找不到按钮 */}
+          <p className="flex items-center gap-1.5 text-[11px] leading-relaxed text-muted-foreground">
+            <MicIcon className="size-3.5" />
+            {t("voice.asr.dockHint")}
+          </p>
 
-          {(micError || tError || (transcribe.isError ? String(transcribe.error) : undefined) || (liveTranscribe.isError ? String(liveTranscribe.error) : undefined)) && (
-            <ResultError
-              error={micError ?? tError ?? (transcribe.isError ? String(transcribe.error) : String(liveTranscribe.error))}
-            />
-          )}
-
-          {/* 识别 */}
-          <Button
-            size="lg"
-            className="w-full"
-            onClick={() => audio && transcribe.mutate({ audioRef: audio.ref })}
-            disabled={!audio || transcribe.isPending}
-          >
-            {transcribe.isPending ? (
-              <Loader2Icon data-icon="inline-start" className="animate-spin" />
-            ) : (
-              <MicIcon data-icon="inline-start" />
-            )}
-            {transcribe.isPending ? t("voice.asr.transcribing") : t("voice.asr.transcribe")}
-          </Button>
+          {/* 这里只留引擎安装 / 启停这类配置错误；转写与录音的错误显示在右侧工作台 */}
+          {tError && <ResultError error={tError} />}
         </div>
       </aside>
 
-      {/* 右侧：结果区（内容自然高度，整区滚动 —— 全量展示不截断） */}
-      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto p-8">
-          {plainText || segments.length > 0 ? (
-            <div className="w-full max-w-3xl">
-              <TranscriptViewer
-                segments={segments}
-                text={plainText}
-                engine={meta ?? undefined}
-                hasSpeakers={hasSpeakers}
-                speakerMode={speakerMode}
-                streaming={recorder.recording && liveTranscribe.isPending}
-                jumpIndex={jumpIndex}
-                onJump={(i) => setJumpIndex(i)}
-                audioUrl={audio?.url}
-              />
-            </div>
-          ) : (
-            <ResultEmpty
-              icon={<MicIcon className="size-9 text-primary" />}
-              title={t("voice.asr.emptyTitle")}
-              hint={t("voice.asr.emptyHint")}
-            />
-          )}
-        </div>
+      {/* 右侧：转写工作台（稿件 / 智能整理 / 控制台） */}
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <AsrResultPane
+          segments={viewing.segments}
+          text={viewing.text}
+          engine={viewing.engine}
+          hasSpeakers={viewing.hasSpeakers}
+          streaming={!historyRecord && mode === "manual" && recorder.recording && liveTranscribe.isPending}
+          audioUrl={viewing.audioUrl}
+          source={lastSource}
+          history={
+            historyRecord
+              ? { record: historyRecord, onClose: () => setFocusRecordId(null) }
+              : undefined
+          }
+          error={historyRecord ? undefined : (micError ?? runError)}
+          scene={scene}
+          onScene={pickScene}
+          speakerMode={speakerMode}
+          onSpeakerMode={setSpeakerMode}
+          target={target}
+          onClear={clearTranscript}
+          mode={mode}
+          onMode={changeMode}
+          listening={!historyRecord && dictation.listening}
+          speaking={!historyRecord && dictation.speaking}
+          interim={historyRecord ? null : interim}
+          vadSensitivity={vadSensitivity}
+          silenceMs={silenceMs}
+          onVadSensitivity={(v) => saveVadPrefs({ sensitivity: v })}
+          onVadSilence={(v) => saveVadPrefs({ silenceMs: v })}
+          recording={!historyRecord && recorder.recording}
+          paused={livePaused}
+          level={level}
+          elapsed={elapsed}
+          onStart={handleStart}
+          onStop={handleStop}
+          onTogglePause={() => setLivePaused((v) => !v)}
+          onTranscribeFile={transcribeFile}
+          fileBusy={transcribe.isPending}
+          fileReady={!!audio}
+          fileName={historyRecord ? undefined : audio?.name}
+        />
       </main>
     </div>
   );
 }
 
+/** `ASR_VAD` 的解析：坏值/空值一律回默认，绝不因为一条设置读不动就让听写起不来。 */
+function parseVadPrefs(raw: string): { sensitivity: VadSensitivity; silenceMs: number } {
+  const fallback = { sensitivity: "medium" as VadSensitivity, silenceMs: 1000 };
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw) as { sensitivity?: string; silenceMs?: number };
+    const sensitivity: VadSensitivity =
+      parsed.sensitivity === "low" || parsed.sensitivity === "high" ? parsed.sensitivity : "medium";
+    const silenceMs =
+      typeof parsed.silenceMs === "number" && parsed.silenceMs >= 300 && parsed.silenceMs <= 3000
+        ? Math.round(parsed.silenceMs)
+        : fallback.silenceMs;
+    return { sensitivity, silenceMs };
+  } catch {
+    return fallback;
+  }
+}
