@@ -49,6 +49,7 @@ import * as Served from "./model-servers";
 import * as Ocr from "./ocr";
 import * as PpOcr from "./ppocr";
 import { createRuntime } from "./runtimes";
+import { readOmlxVersion, resolveOmlxBinary } from "./runtimes/omlx";
 import * as Tunnel from "./tunnel";
 import * as TTSLocal from "./tts-local";
 import * as WhisperEngine from "./whisper-engine";
@@ -166,7 +167,41 @@ function checkManifest(
   return { installComplete: false, installIssue: v.reason };
 }
 
+/**
+ * oMLX：Homebrew / 官方 .dmg 安装的独立服务器，应用不托管（与 tesseract 同口径）。
+ *
+ * 状态判据是「PATH（含 Homebrew 前缀）/ App 的 `~/.omlx/bin/omlx` shim 上有没有
+ * omlx 命令」，版本读 `omlx --version`；没有托管目录，所以不给卸载、不查 manifest。
+ */
+async function probeOmlx(): Promise<LocalEngineStatus> {
+  const binary = resolveOmlxBinary();
+  const support = engineInstallSupport("omlx");
+  const running = Served.getServedModels().models.some(
+    (m) => m.engine === "omlx" && m.status !== "stopped",
+  );
+  return {
+    id: "omlx",
+    state: binary ? "system" : "missing",
+    version: readOmlxVersion(binary),
+    path: binary,
+    managedDir: null,
+    sizeBytes: null,
+    running,
+    canInstall: support.supported,
+    installNote: support.supported ? null : (support.note ?? null),
+    approxBytes: support.approxBytes ?? null,
+    requirement: support.requirement ?? null,
+    canUninstall: false,
+    upgradeKind: "latest",
+    installComplete: true,
+  };
+}
+
 async function probeInference(id: InferenceEngine): Promise<LocalEngineStatus> {
+  // oMLX 是 Homebrew / .dmg 安装的独立服务器：没有托管目录，状态判据是
+  // 「PATH（含 Homebrew 前缀）/ App shim 上有没有 omlx 命令」，版本读 `omlx --version`。
+  if (id === "omlx") return probeOmlx();
+
   const bin = await createRuntime(id).checkBinary();
   // 「应用自己装的那份」只看托管路径在不在，不看 runtime 报的 mode：`mode === "python"`
   // 在 vLLM / SGLang / MLX 上同时覆盖"托管 venv"和"系统里那个能 import 的 python"，
@@ -465,6 +500,8 @@ const INSTALLER_EMITS_TERMINAL: ReadonlySet<LocalEngineId> = new Set<LocalEngine
   "vllm",
   "sglang",
   "mlx",
+  // oMLX 的 brew 安装器在 installOmlx 里自己发 done / failed。
+  "omlx",
 ]);
 
 /**
@@ -487,6 +524,9 @@ function managedEngineDir(id: LocalEngineId): string | null {
       return pythonEngineDir(PYTHON_ENGINE_DIRS[id]);
     case "mlx":
       return pythonEngineDir("mlx-lm");
+    // oMLX 由 Homebrew / .dmg 安装，应用没有托管目录（与 tesseract 同类）。
+    case "omlx":
+      return null;
     case "whisper.cpp":
       return WhisperEngine.whisperEngineDir();
     case "audio.cpp":
@@ -790,6 +830,8 @@ async function removeManagedInstall(id: LocalEngineId): Promise<{ ok: boolean; e
         return Cloudflared.removeCloudflared();
       case "tesseract":
         return { ok: false, error: "Tesseract 由系统包管理器安装，应用不接管卸载" };
+      case "omlx":
+        return { ok: false, error: "oMLX 由 Homebrew / 官方安装包装入，应用不接管卸载（可用 brew uninstall omlx）" };
     }
   } catch (e) {
     return fail(e);

@@ -140,6 +140,9 @@ function StateBadge({ status }: { status: LocalEngineStatus | null }) {
       <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] font-medium text-sky-500">
         <TerminalIcon className="size-3" />
         {t("engines.state.system")}
+        {/* 系统安装的那份现在也带版本（如 oMLX 的 `omlx --version`、tesseract）：
+            应用不接管升级，但「装的是哪个版本」是排障时最该看到的一项。 */}
+        {status.version ? ` ${status.version}` : ""}
       </span>
     );
   }

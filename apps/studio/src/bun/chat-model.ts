@@ -22,6 +22,7 @@ import * as ModelStore from "./model-store";
 import * as Served from "./model-servers";
 import { activateCloudProvider, activeProviderId, listCloudProviders } from "./cloud-providers";
 import { isMlxActive, resolveMlxModel } from "./runtimes/mlx";
+import { isOmlxActive, resolveOmlxModel } from "./runtimes/omlx";
 
 /**
  * 对话模型的两个约定：
@@ -49,11 +50,18 @@ function localChatModelName(): string {
   const chatModel = getSetting("CHAT_MODEL");
   if (chatModel) return chatModel;
 
+  // 引擎键要在 LOCAL_MODEL_NAME 的 slug 化之前读：oMLX 认的是目录名原样
+  // （`Qwen__Qwen3.5-4B`），slug 化成 `qwen3.5-4b` 在它那里不是合法模型 id。
+  const engine = getSetting("INFERENCE_ENGINE");
+  if (engine === "omlx") {
+    const resolved = resolveOmlxModel();
+    if (resolved.requestModelId) return resolved.requestModelId;
+  }
+
   const localName = getSetting("LOCAL_MODEL_NAME");
   if (localName) return localName.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
 
   // MLX 引擎：部署的 HF repo id 即服务名（mlx_lm.server 的 --model 原样作为模型 id）。
-  const engine = getSetting("INFERENCE_ENGINE");
   if (engine === "mlx") {
     const mlxModel = getSetting("MLX_MODEL");
     if (mlxModel) return mlxModel;
@@ -96,9 +104,11 @@ export function getChatModelName(): string {
 export function getLocalRequestModelId(): string {
   // 活动实例的 servedName 由注册表按同一套约定算好（MLX 下就是绝对路径）。
   const name = localChatModelName();
-  if (!isMlxActive()) return name;
   // MLX 下即便服务名是空的（云端模式残留 / 只配了本地目录），也要给出它认的 id
-  return resolveMlxModel().requestModelId || name;
+  if (isMlxActive()) return resolveMlxModel().requestModelId || name;
+  // oMLX 的 servedName 本来就是它认的目录名；只有服务名为空时按设置兜底。
+  if (isOmlxActive()) return name || resolveOmlxModel().requestModelId;
+  return name;
 }
 
 /**

@@ -1,6 +1,6 @@
 # OmniStudio
 
-Desktop workstation for local LLMs — manage models, run inference servers (llama.cpp / vLLM / SGLang / MLX), and use Chat / Agent / Voice / Image / Video / OCR / Translate apps, with a local knowledge base, shared memory, and Skills management. Built with Electrobun (NOT Electron — do not use Electron APIs).
+Desktop workstation for local LLMs — manage models, run inference servers (llama.cpp / vLLM / SGLang / MLX / oMLX), and use Chat / Agent / Voice / Image / Video / OCR / Translate apps, with a local knowledge base, shared memory, and Skills management. Built with Electrobun (NOT Electron — do not use Electron APIs).
 
 Architecture overview for maintainers: [docs/architecture.md](./docs/architecture.md). Planning and open work: [ROADMAP.md](./ROADMAP.md).
 
@@ -67,8 +67,9 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   Full triage guide: `.agents/skills/omni-doctor/`; one-shot evidence dump:
   `bun run --cwd apps/studio scripts/omni-diag.ts`
 - **Every local runtime the app installs is one catalog, managed in one place**
-  (`shared/local-engines.ts` + `bun/engine-catalog.ts` → Settings → 引擎): the eleven engines —
-  llama.cpp / vLLM / SGLang / MLX (text inference), whisper.cpp, audio.cpp, PaddleOCR,
+  (`shared/local-engines.ts` + `bun/engine-catalog.ts` → Settings → 引擎): the twelve engines —
+  llama.cpp / vLLM / SGLang / MLX / oMLX (text inference; oMLX is the Homebrew / .dmg
+  Apple-Silicon server, not a pip package), whisper.cpp, audio.cpp, PaddleOCR,
   Tesseract, mflux, laya-mlx (SystemOne typed judgments, its own `systemone` group — it is a
   *judgment* model, not a chat model, so it does not belong under inference) and cloudflared —
   each get one row with state, version, path, disk usage

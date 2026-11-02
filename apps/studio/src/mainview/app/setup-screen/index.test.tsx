@@ -71,6 +71,7 @@ const setupEnv = {
   vllm: { found: false },
   sglang: { found: false },
   mlx: { found: false },
+  omlx: { found: false },
 };
 
 /** 让 updateSettings 失败（模拟写库失败 / 主进程在报错）。 */

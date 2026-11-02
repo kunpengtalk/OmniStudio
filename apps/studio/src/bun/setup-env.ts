@@ -1,4 +1,4 @@
-import { createRuntime } from "./runtimes";
+import { createRuntime, type BinaryCheckResult } from "./runtimes";
 import { getHardwareInfo } from "./hardware";
 import { isEngineInstalling, readInstalledEngineVersion } from "./engine-install";
 import { engineInstallSupport, type InferenceEngine } from "../shared/engines";
@@ -33,18 +33,26 @@ export type SetupEnvironment = {
   sglang: { found: boolean };
   /** Apple MLX（mlx-lm）——仅在 macOS 上检测。 */
   mlx: { found: boolean };
+  /** oMLX（Apple Silicon 独立推理服务器，Homebrew / .dmg）——仅在 macOS 上检测。 */
+  omlx: { found: boolean; path?: string };
 };
 
 export async function getSetupEnvironment(): Promise<SetupEnvironment> {
   const hardware = getHardwareInfo();
   const { platform, arch } = hardware;
 
-  const [llama, vllm, sglang, mlx] = await Promise.all([
+  // 非目标平台给一个同型的「没装」，让 `omlx.path` 在类型上仍然可读。
+  const omlxAbsent: BinaryCheckResult = { found: false };
+  const [llama, vllm, sglang, mlx, omlx] = await Promise.all([
     createRuntime("llama.cpp").checkBinary(),
     createRuntime("vllm").checkBinary(),
     createRuntime("sglang").checkBinary(),
     // MLX 引擎只在 macOS 提供（mlx-lm 面向 Apple Silicon）。
     platform === "darwin" ? createRuntime("mlx").checkBinary() : Promise.resolve({ found: false }),
+    // oMLX 是 Apple Silicon 专属的独立服务器，非 mac 平台不检测。
+    platform === "darwin" && arch === "arm64"
+      ? createRuntime("omlx").checkBinary()
+      : Promise.resolve(omlxAbsent),
   ]);
 
   return {
@@ -59,17 +67,21 @@ export async function getSetupEnvironment(): Promise<SetupEnvironment> {
       vllm: engineInstallSupport("vllm", platform, arch),
       sglang: engineInstallSupport("sglang", platform, arch),
       mlx: engineInstallSupport("mlx", platform, arch),
+      omlx: engineInstallSupport("omlx", platform, arch),
     },
     installedVersions: {
       "llama.cpp": readInstalledEngineVersion("llama.cpp"),
       vllm: readInstalledEngineVersion("vllm"),
       sglang: readInstalledEngineVersion("sglang"),
       mlx: readInstalledEngineVersion("mlx"),
+      // oMLX 由 Homebrew / .dmg 安装，没有「应用托管的那份版本」；版本以探测为准。
+      omlx: readInstalledEngineVersion("omlx"),
     },
     installing: isEngineInstalling(),
     llama: { found: llama.found, path: llama.path },
     vllm: { found: vllm.found },
     sglang: { found: sglang.found },
     mlx: { found: mlx.found },
+    omlx: { found: omlx.found, path: omlx.path },
   };
 }

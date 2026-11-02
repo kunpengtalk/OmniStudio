@@ -237,7 +237,7 @@ omi status
 | 桌面 | [Electrobun](https://blackboard.sh/electrobun) + Bun |
 | 前端 | React 19, Tailwind, shadcn/ui, Zustand, TanStack Query |
 | AI | Pi Agent（`@earendil-works/pi-agent-core` + `pi-ai`）驱动 Agent 循环；Vercel AI SDK（`ai` / `@ai-sdk/openai-compatible`）用于 OCR / 翻译等一次性调用 |
-| 推理引擎 | llama.cpp, vLLM, SGLang, MLX, OpenAI-compatible |
+| 推理引擎 | llama.cpp, vLLM, SGLang, MLX, oMLX, OpenAI-compatible |
 | 语音与 OCR | audio.cpp, whisper.cpp, Tesseract, PaddleOCR, Edge-TTS, VLM |
 | 视频生成 | MiniMax (H3), Seedance (火山方舟), ComfyUI |
 | 知识库与记忆 | 纯 JS 向量化 + BM25×RRF 混合检索 + `/v1/rerank` 重排（无外部向量库 / FTS）、SQLite 共享记忆 |

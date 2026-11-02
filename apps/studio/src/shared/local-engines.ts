@@ -126,6 +126,19 @@ export const LOCAL_ENGINE_SPECS: readonly LocalEngineSpec[] = [
     modelsTarget: "local-models",
   },
   {
+    // oMLX 是 Homebrew 公式 / 官方 .dmg 安装的独立服务器，应用能把安装命令自动化，
+    // 但那份软件归 Homebrew 所有，应用不接管卸载（与 tesseract 同口径）。
+    id: "omlx",
+    category: "inference",
+    name: "oMLX",
+    roleKey: "engines.omlx.role",
+    usedByKey: "engines.omlx.usedBy",
+    installHint: "brew tap jundot/omlx https://github.com/jundot/omlx && brew install jundot/omlx/omlx",
+    uninstallHint: "brew uninstall omlx",
+    managedSupported: false,
+    modelsTarget: "local-models",
+  },
+  {
     id: "whisper.cpp",
     category: "voice",
     name: "whisper.cpp",
@@ -250,6 +263,7 @@ export const LOCAL_ENGINE_DIRS: Record<LocalEngineId, string | null> = {
   vllm: "vllm",
   sglang: "sglang",
   mlx: "mlx-lm",
+  omlx: "omlx",
   "whisper.cpp": "whispercpp",
   "audio.cpp": "audiocpp",
   paddleocr: "paddleocr",

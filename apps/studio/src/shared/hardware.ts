@@ -265,12 +265,14 @@ export type EngineAvailability = {
   vllm: boolean;
   sglang: boolean;
   mlx: boolean;
+  /** oMLX（Apple Silicon 独立推理服务器）。 */
+  omlx: boolean;
 };
 
 export type EngineRecommendation = {
   engine: InferenceEngine;
   /** 推荐理由的**代号**（共享层不放 UI 文案，界面按 code 自己写一句话）。 */
-  reason: { code: "mlx-installed" | "apple-metal" | "nvidia-vram" | "generic" } & {
+  reason: { code: "omlx-installed" | "mlx-installed" | "apple-metal" | "nvidia-vram" | "generic" } & {
     vramBytes?: number;
   };
 };
@@ -286,8 +288,10 @@ export function recommendEngine(
   machine: HardwareInfo,
   available: EngineAvailability,
 ): EngineRecommendation {
-  // Apple 芯片：装了 mlx-lm 就直推 MLX（同权重下更快），否则 llama.cpp（Metal 加速，装一个二进制即可）。
+  // Apple 芯片：装了 oMLX 就直推它（连续批处理 + 分层 KV 缓存，长上下文更省内存）；
+  // 否则装了 mlx-lm 推 MLX；都没有则 llama.cpp（Metal 加速，装一个二进制即可）。
   if (machine.gpu.kind === "apple" && machine.arch === "arm64") {
+    if (available.omlx) return { engine: "omlx", reason: { code: "omlx-installed" } };
     return available.mlx
       ? { engine: "mlx", reason: { code: "mlx-installed" } }
       : { engine: "llama.cpp", reason: { code: "apple-metal" } };

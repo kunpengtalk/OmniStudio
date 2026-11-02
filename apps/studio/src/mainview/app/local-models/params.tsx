@@ -129,6 +129,20 @@ export const PARAM_FIELDS: Record<InferenceEngine, ParamField[]> = {
     { key: "SGLANG_CHUNKED_PREFILL_SIZE", labelKey: "models.params.chunkedPrefill" },
   ],
   mlx: [{ key: "MLX_CACHE_SIZE_GB", labelKey: "models.params.mlxCacheGb", step: "1" }],
+  omlx: [
+    {
+      key: "OMLX_MEMORY_GUARD",
+      labelKey: "models.params.omlxGuard",
+      hintKey: "models.params.omlxGuardHint",
+      options: [
+        { value: "safe", label: "safe" },
+        { value: "balanced", label: "balanced" },
+        { value: "aggressive", label: "aggressive" },
+        { value: "off", label: "off" },
+      ],
+    },
+    { key: "OMLX_MAX_CONCURRENT_REQUESTS", labelKey: "models.params.omlxMaxConcurrent", step: "1" },
+  ],
 };
 
 /** 与引擎无关的生成 / 文档处理参数：vLLM 重试次数与页面并发（原来的「设置 → 性能」页）。 */

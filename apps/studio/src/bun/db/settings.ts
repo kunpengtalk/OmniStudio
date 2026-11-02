@@ -99,6 +99,16 @@ export type SettingsKey =
   | "MLX_MODEL"
   | "MLX_CACHE_SIZE_GB"
   | "MLX_HF_ENDPOINT"
+  // oMLX：Apple Silicon 专属的独立推理服务器。端口按它自己的默认 8000（被占时
+  // model-servers 会顺延分配）；`OMLX_MODEL` 是「用户在引擎面板显式部署」的目标，
+  // 与 MLX_MODEL 同口径，留空时回落到 LOCAL_MODEL_PATH。
+  | "OMLX_PORT"
+  | "OMLX_EXTRA_ARGS"
+  | "OMLX_MODEL"
+  /** 传给 `omlx serve --memory-guard` 的档位：off / safe / balanced / aggressive。 */
+  | "OMLX_MEMORY_GUARD"
+  /** `--max-concurrent-requests`；空 = 用 oMLX 自己的默认（8）。 */
+  | "OMLX_MAX_CONCURRENT_REQUESTS"
   | "VLLM_MAX_MODEL_LEN"
   | "VLLM_TENSOR_PARALLEL_SIZE"
   | "VLLM_GPU_MEMORY_UTILIZATION"
@@ -427,6 +437,16 @@ const DEFAULTS: Record<SettingsKey, string> = {
   MLX_CACHE_SIZE_GB: "8",
   // 国内环境优先走 hf-mirror，置空则使用 HuggingFace 官方。
   MLX_HF_ENDPOINT: "https://hf-mirror.com",
+  // oMLX 默认端口 8000（它自己的默认值，也是客户端默认连的地址）。
+  // model-servers 分配端口时若发现被占（例如用户自己还跑着一份 oMLX）会顺延。
+  OMLX_PORT: "8000",
+  OMLX_EXTRA_ARGS: "",
+  // 与 MLX_MODEL 同规矩：留空 = 没有显式部署，运行时回落到 LOCAL_MODEL_PATH。
+  OMLX_MODEL: "",
+  // balanced 是 oMLX 自己的默认档位；显式传等价，但让「设置里改了」有确定语义。
+  OMLX_MEMORY_GUARD: "balanced",
+  // 空 = 不传 --max-concurrent-requests，用 oMLX 默认（8）。
+  OMLX_MAX_CONCURRENT_REQUESTS: "",
   VLLM_MAX_MODEL_LEN: "8192",
   VLLM_TENSOR_PARALLEL_SIZE: "1",
   VLLM_GPU_MEMORY_UTILIZATION: "0.9",
