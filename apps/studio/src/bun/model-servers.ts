@@ -11,6 +11,7 @@ import { dirModelKind, modelNameForPath, resolveRuntimeTarget } from "./model-sc
 import { listInstalledModels, servedNameForModelPath, slugModelFileName } from "./model-store";
 import { createRuntime, type InferenceEngine, type Runtime, type ServerStatus } from "./runtimes";
 import { mlxRequestModelId } from "./runtimes/mlx";
+import { omlxRequestModelId } from "../shared/omlx";
 import {
   engineForModelKind,
   engineSupports,
@@ -368,9 +369,15 @@ function resolveTargetEngine(target: string, preferred?: InferenceEngine): Infer
   return resolveEngineForModel(modelNameForPath(target), wanted);
 }
 
-/** 请求侧该填的 model id：MLX 认绝对路径，其余引擎认服务名 slug。 */
+/**
+ * 请求侧该填的 model id：
+ *  - MLX 认解析后的绝对路径；
+ *  - oMLX 认 `--model-dir` 目录名原样（不 slug：`Qwen__Qwen3.5-4B` 就是它）；
+ *  - 其余引擎认服务名 slug（`--alias` / `--served-model-name`）。
+ */
 function servedNameFor(target: string, engine: InferenceEngine): string {
   if (engine === "mlx") return mlxRequestModelId(target);
+  if (engine === "omlx") return omlxRequestModelId(target);
   if (isLocalTarget(target)) return servedNameForModelPath(target);
   const tail = target.split("/").filter(Boolean).pop() ?? target;
   return slugModelFileName(tail);
@@ -964,6 +971,12 @@ export function resolveConfiguredTarget(): { model: string; engine?: InferenceEn
   if (engine === "mlx") {
     const mlxModel = (Settings.getSetting("MLX_MODEL") || "").trim();
     if (mlxModel) return { model: mlxModel, engine };
+  }
+  // oMLX 只认本地模型目录：引擎面板 / 引导页显式部署的 OMLX_MODEL 优先，
+  // 排在 LOCAL_MODEL_PATH 之前（与 MLX_MODEL 同一个理由）。
+  if (engine === "omlx") {
+    const omlxModel = (Settings.getSetting("OMLX_MODEL") || "").trim();
+    if (omlxModel) return { model: omlxModel, engine };
   }
   const localPath = Settings.getSetting("LOCAL_MODEL_PATH");
   if (localPath) return { model: localPath, engine };

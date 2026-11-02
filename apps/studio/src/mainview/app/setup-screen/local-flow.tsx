@@ -44,6 +44,7 @@ const ENGINE_LABEL: Record<InferenceEngine, string> = {
   vllm: "vLLM",
   sglang: "SGLang",
   mlx: "MLX",
+  omlx: "oMLX",
 };
 
 /** 内存适配分级的展示：文案 + 配色（估算的判定在 shared/hardware.ts）。 */
@@ -130,6 +131,16 @@ const ENGINE_CHOICES: EngineChoice[] = [
         : "MLX 引擎仅支持 macOS（Apple Silicon）",
     installHint: () => "pip install -U mlx-lm",
   },
+  {
+    id: "omlx",
+    label: "oMLX",
+    sub: "Apple Silicon",
+    desc: (env) =>
+      env.appleSilicon
+        ? "为 Apple Silicon 优化的推理服务器：连续批处理 + 分层 KV 缓存（内存 + SSD），长上下文与多模型更省内存"
+        : "oMLX 仅支持 Apple Silicon 的 macOS",
+    installHint: () => "brew install jundot/omlx/omlx（或安装官方 .dmg）",
+  },
 ];
 
 function engineReady(engine: InferenceEngine, env?: SetupEnvironment): boolean {
@@ -137,6 +148,7 @@ function engineReady(engine: InferenceEngine, env?: SetupEnvironment): boolean {
   if (engine === "llama.cpp") return env.llama.found;
   if (engine === "vllm") return env.vllm.found;
   if (engine === "mlx") return env.mlx.found;
+  if (engine === "omlx") return env.omlx.found;
   return env.sglang.found;
 }
 
@@ -209,6 +221,7 @@ export function LocalFlow({
       vllm: env.vllm.found,
       sglang: env.sglang.found,
       mlx: env.mlx.found,
+      omlx: env.omlx.found,
     });
   }, [env, hardware]);
   const recommendedModel = useMemo(() => {
@@ -407,6 +420,17 @@ export function LocalFlow({
       CUSTOM_HF_MODEL: modelRef,
       LOCAL_MODEL_PATH: localPath,
     };
+    // oMLX 只加载本地模型目录：显式记下 OMLX_MODEL（启动时优先读它），并把
+    // CHAT_MODEL 写成目录名原样 —— oMLX 没有 --alias，上面 setActiveModel 按旧引擎
+    // 算出的 slug 在它这里不是合法模型 id。
+    if (engine === "omlx") {
+      settings.OMLX_MODEL = localPath;
+      if (localPath) {
+        const dirName = localPath.split(/[\\/]/).filter(Boolean).pop() ?? "";
+        settings.CHAT_MODEL = dirName;
+        settings.LOCAL_MODEL_NAME = dirName;
+      }
+    }
     await rpcClient.updateSettings({ settings });
     startServerMutation.mutate();
   };
@@ -502,7 +526,11 @@ export function LocalFlow({
           ) : (
             <>
               <div className="flex flex-col gap-3">
-                {ENGINE_CHOICES.filter((c) => c.id !== "mlx" || env.platform === "darwin").map(
+                {ENGINE_CHOICES.filter(
+                  (c) =>
+                    (c.id !== "mlx" && c.id !== "omlx") ||
+                    (c.id === "omlx" ? env.appleSilicon : env.platform === "darwin"),
+                ).map(
                   (choice) => {
                     const selected = engine === choice.id;
                     const isReady = engineReady(choice.id, env);

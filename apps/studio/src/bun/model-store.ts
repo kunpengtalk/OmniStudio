@@ -16,6 +16,7 @@ import { getSetting, updateSettings } from "./db/settings";
 import { hasUnfinishedDownloadAt } from "./downloader";
 import { logEvent } from "./app-log";
 import { isInsideDir } from "./path-safety";
+import { omlxRequestModelId } from "../shared/omlx";
 import {
   classifyModelName,
   engineForModelKind,
@@ -321,16 +322,19 @@ export function setActiveModel(pathToModel: string): { ok: boolean; error?: stri
   // 目录条目按目录内容判定格式（HF 缓存里的模型目录），单文件按扩展名。
   const kind: ModelFileKind = isDir ? dirModelKind(target) : fileKind(path.basename(pathToModel));
   ensureEngineForKind(kind);
-  const name = servedNameForTarget(target, isDir);
+  const engine = (getSetting("INFERENCE_ENGINE") as InferenceEngine) || "llama.cpp";
+  // oMLX 没有 --alias：它对 --model-dir 目录暴露的 id 就是目录名原样，
+  // 写进 CHAT_MODEL 的必须是它，否则请求侧会拿 slug 去问一个不存在的模型。
+  const name = engine === "omlx" ? omlxRequestModelId(target) : servedNameForTarget(target, isDir);
   updateSettings({
     LOCAL_MODEL_PATH: target,
     LOCAL_MODEL_NAME: name,
     CHAT_MODEL: name,
     // 用户刚在模型库里挑了一个具体的 MLX 目录模型：它才是要加载的那个。
     // MLX 引擎面板「部署」写的 MLX_MODEL 优先级更高，不清掉就会继续加载预设。
-    ...(isDir && kind === "safetensors" && getSetting("INFERENCE_ENGINE") === "mlx"
-      ? { MLX_MODEL: "" }
-      : {}),
+    ...(isDir && kind === "safetensors" && engine === "mlx" ? { MLX_MODEL: "" } : {}),
+    // oMLX 同理：引擎面板里显式部署的 OMLX_MODEL 会盖住模型库里选中的那个。
+    ...(engine === "omlx" ? { OMLX_MODEL: "" } : {}),
   });
   return { ok: true };
 }

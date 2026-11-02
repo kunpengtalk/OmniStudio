@@ -37,6 +37,8 @@ function gpuText(hardware: HardwareInfo): string {
 /** 为什么推荐这个引擎 —— 文案在这里，判定在共享层（`recommendEngine` 只回代号）。 */
 export function engineReasonText(rec: EngineRecommendation, hardware: HardwareInfo): string {
   switch (rec.reason.code) {
+    case "omlx-installed":
+      return "已装 oMLX：Apple 芯片上连续批处理 + 分层 KV 缓存（内存 + SSD），长上下文更省内存";
     case "mlx-installed":
       return "已装 mlx-lm：Apple 芯片上同一份权重推理更快";
     case "apple-metal":

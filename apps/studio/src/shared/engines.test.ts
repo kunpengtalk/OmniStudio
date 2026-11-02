@@ -37,6 +37,18 @@ describe("engineInstallSupport", () => {
     expect(engineInstallSupport("mlx", "linux", "x64").supported).toBe(false);
   });
 
+  test("oMLX：Apple Silicon 的 macOS 走 Homebrew / 官方 dmg，其余平台如实说不支持", () => {
+    const mac = engineInstallSupport("omlx", "darwin", "arm64");
+    expect(mac.supported).toBe(true);
+    expect(mac.kind).toBe("binary");
+    expect(mac.requirement).toContain("Homebrew");
+
+    const intel = engineInstallSupport("omlx", "darwin", "x64");
+    expect(intel.supported).toBe(false);
+    expect(intel.note).toContain("Apple Silicon");
+    expect(engineInstallSupport("omlx", "linux", "x64").supported).toBe(false);
+  });
+
   test("vLLM / SGLang：只有 Linux 有 CUDA 轮子，macOS / Windows 只给手动提示", () => {
     for (const engine of ["vllm", "sglang"] as const) {
       expect(engineInstallSupport(engine, "linux", "x64").supported).toBe(true);

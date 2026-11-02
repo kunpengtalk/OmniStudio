@@ -86,6 +86,7 @@ const setupEnv = {
     vllm: engineInstallSupport("vllm", "darwin", "arm64"),
     sglang: engineInstallSupport("sglang", "darwin", "arm64"),
     mlx: engineInstallSupport("mlx", "darwin", "arm64"),
+    omlx: engineInstallSupport("omlx", "darwin", "arm64"),
   },
   // 类型放宽：安装完成后这里会被写成版本号（见下面的 mock installInferenceEngine）
   installedVersions: {
@@ -93,6 +94,7 @@ const setupEnv = {
     vllm: null as string | null,
     sglang: null as string | null,
     mlx: null as string | null,
+    omlx: null as string | null,
   },
   // installing：主进程正在装的引擎（重载恢复用）
   installing: null as string | null,
@@ -100,6 +102,7 @@ const setupEnv = {
   vllm: { found: false },
   sglang: { found: false },
   mlx: { found: false },
+  omlx: { found: false },
 };
 
 /** 下载计划里最终用的仓库：断言它等于"推荐的那个模型 + 档位"。 */

@@ -4,6 +4,7 @@ import { LlamaRuntime } from "./llama";
 import { VllmRuntime } from "./vllm";
 import { SglangRuntime } from "./sglang";
 import { MlxRuntime } from "./mlx";
+import { OmlxRuntime } from "./omlx";
 import type { Runtime, RuntimeOverrides } from "./types";
 
 export type { Runtime, ServerStatus, StartResult, BinaryCheckResult, RuntimeOverrides } from "./types";
@@ -15,6 +16,7 @@ const runtimes: Record<InferenceEngine, (overrides?: RuntimeOverrides) => Runtim
   vllm: (overrides) => new VllmRuntime(overrides),
   sglang: (overrides) => new SglangRuntime(overrides),
   mlx: (overrides) => new MlxRuntime(overrides),
+  omlx: (overrides) => new OmlxRuntime(overrides),
 };
 
 let activeRuntime: Runtime | null = null;

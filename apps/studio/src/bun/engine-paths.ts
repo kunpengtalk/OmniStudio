@@ -54,3 +54,15 @@ export function engineVersionFilePath(id: "llama.cpp" | PythonEngineId): string 
     ? join(llamaCppCurrentDir(), "VERSION")
     : join(pythonEngineDir(id), "VERSION");
 }
+
+/**
+ * oMLX 的应用托管数据目录（传给 `omlx serve --base-path`）。
+ *
+ * oMLX 默认把所有状态写在 `~/.omlx`（settings.json / 日志 / SSD KV 缓存）。应用自己
+ * 拉起的那份实例必须与用户手动安装的实例隔离：否则改一次端口就重写了用户自己的
+ * oMLX 配置，两边的日志与 SSD 缓存还会互相覆盖。所以固定指到 `<dataDir>/omlx`。
+ * 这里不是「托管安装」目录——oMLX 本体由 Homebrew / .dmg 安装，应用不接管卸载。
+ */
+export function omlxBaseDir(): string {
+  return getDataDir("omlx");
+}

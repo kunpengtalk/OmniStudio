@@ -84,6 +84,7 @@ mock.module("@lib/rpc", () => ({
       vllm: { found: false },
       sglang: { found: false },
       mlx: { found: false },
+      omlx: { found: false },
     }),
     listInstalledModels: async () => ({ models: [] }),
     listDownloads: async () => ({ tasks: [] }),

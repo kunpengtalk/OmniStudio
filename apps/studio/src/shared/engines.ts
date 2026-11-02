@@ -7,7 +7,7 @@
  * （例如 `omi serve --engine vllm --port X` 曾把端口写进 llama.cpp 的 SERVER_PORT）。
  */
 
-export type InferenceEngine = "llama.cpp" | "vllm" | "sglang" | "mlx";
+export type InferenceEngine = "llama.cpp" | "vllm" | "sglang" | "mlx" | "omlx";
 
 export type ModelFileKind = "gguf" | "safetensors" | "other";
 
@@ -79,6 +79,20 @@ export const ENGINE_SPECS: Record<InferenceEngine, EngineSpec> = {
     macOnly: true,
     installHint: "pip install -U mlx-lm  （Apple Silicon / macOS）",
   },
+  // oMLX：Apple Silicon 专属的独立推理服务器（不是 pip 包），自带连续批处理与
+  // 「内存 + SSD」分层 KV 缓存，多模型按 LRU 换入换出。它消费 MLX 权重，
+  // 因此市场检索格式与 MLX 一致；GGUF 走它的 Splash 外部引擎，不在本表承诺。
+  omlx: {
+    id: "omlx",
+    labelKey: "settings.engine.omlx",
+    portKey: "OMLX_PORT",
+    extraArgsKey: "OMLX_EXTRA_ARGS",
+    supports: ["safetensors", "other"],
+    searchFormat: "mlx",
+    macOnly: true,
+    installHint:
+      "brew tap jundot/omlx https://github.com/jundot/omlx && brew install jundot/omlx/omlx  （或安装官方 .dmg）",
+  },
 };
 
 /** 全部引擎 id（声明顺序即 UI 展示顺序）。 */
@@ -143,6 +157,8 @@ export const ENGINE_CTX_KEYS: Record<InferenceEngine, string | null> = {
   vllm: "VLLM_MAX_MODEL_LEN",
   sglang: "SGLANG_CONTEXT_LENGTH",
   mlx: null,
+  // oMLX 的上下文窗口来自模型的 config.json（或管理端逐模型设置），没有启动参数键。
+  omlx: null,
 };
 
 /**
@@ -155,6 +171,7 @@ export const ENGINE_SHORT_NAMES: Record<InferenceEngine, string> = {
   vllm: "vLLM",
   sglang: "SGLang",
   mlx: "MLX",
+  omlx: "oMLX",
 };
 
 /** 缺失引擎的安装提示。 */
@@ -230,6 +247,24 @@ export function engineInstallSupport(
         approxBytes: 350e6,
         requirement: "需要本机有 Python 3.10 及以上（应用会建独立虚拟环境安装）",
       };
+    case "omlx": {
+      // oMLX 是独立服务器（Homebrew 公式 / 官方 .dmg），不是 pip 包：应用能把
+      // 「brew install」这条路径自动化，但装完的软件归 Homebrew 所有，不托管、不删除。
+      if (platform !== "darwin" || arch !== "arm64") {
+        return {
+          supported: false,
+          kind: "binary",
+          note: "oMLX 是 Apple Silicon 专属的推理服务器，只在 Apple Silicon 的 macOS 上可用",
+        };
+      }
+      return {
+        supported: true,
+        kind: "binary",
+        approxBytes: 1.2e9,
+        requirement:
+          "需要 Homebrew；也可以安装官方 .dmg（装好后会自动识别）。自带 Metal 内核的构建需要完整 Xcode",
+      };
+    }
     case "vllm":
     case "sglang": {
       const label = engine === "vllm" ? "vLLM" : "SGLang";

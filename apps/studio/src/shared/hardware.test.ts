@@ -234,10 +234,14 @@ describe("按机器挑档位与模型", () => {
 });
 
 describe("引擎推荐", () => {
-  const none = { llama: false, vllm: false, sglang: false, mlx: false };
+  const none = { llama: false, vllm: false, sglang: false, mlx: false, omlx: false };
 
-  test("Apple 芯片：装了 mlx-lm 推 MLX，没装推 llama.cpp（Metal）", () => {
+  test("Apple 芯片：装了 oMLX 优先推 oMLX，其次 mlx-lm，都没装推 llama.cpp（Metal）", () => {
     const m = machine({ gpu: appleGpu, totalGB: 32 });
+    expect(recommendEngine(m, { ...none, omlx: true, mlx: true })).toEqual({
+      engine: "omlx",
+      reason: { code: "omlx-installed" },
+    });
     expect(recommendEngine(m, { ...none, mlx: true })).toEqual({
       engine: "mlx",
       reason: { code: "mlx-installed" },

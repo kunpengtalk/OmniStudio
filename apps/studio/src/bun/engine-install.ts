@@ -29,7 +29,7 @@ import { ENGINE_SHORT_NAMES, engineInstallSupport, type InferenceEngine } from "
 import type { GpuKind } from "../shared/hardware";
 import type { LocalEngineId } from "../shared/local-engines";
 import { logEvent } from "./app-log";
-import { defaultCommandRunner, type CommandRunner } from "./command-runner";
+import { defaultCommandRunner, searchPath, type CommandRunner } from "./command-runner";
 import { engineVersionFilePath, llamaCppRootDir, pythonEngineDir, type PythonEngineId } from "./engine-paths";
 import { getHardwareInfo } from "./hardware";
 import { removeManifest, writeManifest } from "./install-manifest";
@@ -40,6 +40,7 @@ import {
   type InstallPhase,
   type InstallReporter,
 } from "./python-engine";
+import { readOmlxVersion, resolveOmlxBinary } from "./runtimes/omlx";
 
 export type { InstallPhase } from "./python-engine";
 
@@ -666,7 +667,7 @@ async function installLlamaPlan(input: {
 // ---------------------------------------------------------------------------
 
 /** Python 引擎的 pip 包与探测模块（装完能不能用，以"模块导得进来"为准）。 */
-const PYTHON_ENGINE_TARGETS: Record<Exclude<InferenceEngine, "llama.cpp">, {
+const PYTHON_ENGINE_TARGETS: Record<"vllm" | "sglang" | "mlx", {
   id: PythonEngineId;
   packages: string[];
   probeModule: string;
@@ -676,6 +677,102 @@ const PYTHON_ENGINE_TARGETS: Record<Exclude<InferenceEngine, "llama.cpp">, {
   vllm: { id: "vllm", packages: ["vllm"], probeModule: "vllm", distribution: "vllm" },
   sglang: { id: "sglang", packages: ["sglang[all]"], probeModule: "sglang", distribution: "sglang" },
 };
+
+/** Homebrew 可执行文件（GUI 进程不继承 shell PATH，必须拼上 Homebrew 前缀再找）。 */
+function resolveBrew(): string | null {
+  return Bun.which("brew", { PATH: searchPath() }) ?? null;
+}
+
+/**
+ * oMLX 的一键安装：官方渠道就是 Homebrew（另一个渠道是 .dmg，需要 GUI 拖拽）。
+ *
+ * 应用能把 `brew tap` + `brew install` 自动化到「一键」，但装完的软件归 Homebrew
+ * 所有 —— 与 tesseract 同口径：不写托管 manifest、不给卸载按钮；`--with-custom-kernel`
+ * 需要完整 Xcode，所以默认不带内核安装（功能正常、只是少数模型族慢一些）。
+ */
+async function installOmlx(deps: {
+  reporter: InstallReporter;
+  runner?: CommandRunner;
+  findBrew?: () => string | null;
+  upgrade?: boolean;
+}): Promise<EngineInstallResult> {
+  const reporter = deps.reporter;
+  const runner = deps.runner ?? defaultCommandRunner;
+  const brew = deps.findBrew ? deps.findBrew() : resolveBrew();
+  if (!brew) {
+    const error =
+      "未找到 Homebrew，无法自动安装 oMLX。请先安装 Homebrew（https://brew.sh），或从 https://github.com/jundot/omlx/releases 下载官方 .dmg。";
+    reporter.log(`${error}\n`);
+    reporter.phase("failed", error);
+    logEvent({
+      level: "warn",
+      source: "server",
+      event: "engine.install.omlx.no_brew",
+      message: error,
+    });
+    return { ok: false, error };
+  }
+
+  reporter.phase("preparing", "准备安装 oMLX");
+  reporter.log("$ brew tap jundot/omlx https://github.com/jundot/omlx\n");
+  const tapCode = await runner.runStreaming(
+    [brew, "tap", "jundot/omlx", "https://github.com/jundot/omlx"],
+    (line) => reporter.log(`${line}\n`),
+  );
+  if (tapCode !== 0) {
+    const error = `brew tap jundot/omlx 失败（退出码 ${tapCode}），请检查网络或手动执行该命令`;
+    reporter.log(`${error}\n`);
+    reporter.phase("failed", error);
+    return { ok: false, error };
+  }
+
+  // 升级：先 brew upgrade（配方名 omlx）；没装过时它失败，install 会补上。
+  if (deps.upgrade) {
+    reporter.phase("preparing", "升级 oMLX");
+    reporter.log("$ brew upgrade omlx\n");
+    await runner.runStreaming([brew, "upgrade", "omlx"], (line) => reporter.log(`${line}\n`));
+  }
+
+  reporter.phase("preparing", "安装 oMLX（Homebrew）");
+  reporter.log("$ brew install jundot/omlx/omlx\n");
+  const code = await runner.runStreaming(
+    [brew, "install", "jundot/omlx/omlx"],
+    (line) => reporter.log(`${line}\n`),
+  );
+  if (code !== 0) {
+    const error = `brew install jundot/omlx/omlx 失败（退出码 ${code}）`;
+    reporter.log(`${error}\n`);
+    reporter.phase("failed", error);
+    logEvent({
+      level: "error",
+      source: "server",
+      event: "engine.install.omlx.failed",
+      message: error,
+      detail: { brew, code },
+    });
+    return { ok: false, error };
+  }
+
+  // 安装器返回 0 不等于 PATH 上就有：用同一个解析函数复核，并把版本读出来。
+  const binary = resolveOmlxBinary();
+  if (!binary) {
+    const error = "Homebrew 安装完成，但没找到 omlx 命令；请确认 Homebrew 的 bin 目录在 PATH 上";
+    reporter.log(`${error}\n`);
+    reporter.phase("failed", error);
+    return { ok: false, error };
+  }
+  const version = readOmlxVersion(binary);
+  reporter.log(`oMLX ${version ?? "(版本未知)"} 已安装：${binary}\n`);
+  reporter.phase("done", `安装完成：oMLX${version ? ` ${version}` : ""}`);
+  logEvent({
+    level: "info",
+    source: "server",
+    event: "engine.install.omlx.ok",
+    message: `oMLX 安装完成${version ? `（${version}）` : ""}`,
+    detail: { engine: "omlx", binary, version },
+  });
+  return { ok: true, version: version ?? undefined };
+}
 
 /** 同一时刻只允许一个安装：pip / 下载同时跑两份只会互相踩（同一个 venv / 同一个暂存目录）。 */
 let installing: InferenceEngine | null = null;
@@ -688,6 +785,8 @@ export function isEngineInstalling(): InferenceEngine | null {
 export type EngineInstallOverrides = Partial<LlamaInstallDeps> & {
   /** Python 引擎：注入的系统 Python 查找（测试用）。 */
   findPython?: () => string | null;
+  /** oMLX：注入的 Homebrew 查找（测试用，避免真的去点 brew）。 */
+  findBrew?: () => string | null;
   /** 已装过也重装一遍（拿到更新的版本）——引擎管理页的「升级」。 */
   upgrade?: boolean;
 };
@@ -712,6 +811,14 @@ export async function installInferenceEngine(
   try {
     if (engine === "llama.cpp") {
       return await installLlamaCpp({ reporter, ...overrides });
+    }
+    if (engine === "omlx") {
+      return await installOmlx({
+        reporter,
+        runner: overrides.runner,
+        findBrew: overrides.findBrew,
+        upgrade: overrides.upgrade,
+      });
     }
     const target = PYTHON_ENGINE_TARGETS[engine];
     // Python 引擎的 manifest 由 python-engine 在内核里写（它的目录与版本就在那里），
@@ -788,5 +895,8 @@ export function readInstalledEngineVersion(engine: InferenceEngine): string | nu
       return null;
     }
   }
+  // oMLX 由 Homebrew / .dmg 安装，版本以 `omlx --version` 探测为准（见 engine-catalog 的
+  // probeOmlx）；这里只回答「应用托管安装的版本」，系统那份不猜。
+  if (engine === "omlx") return null;
   return readPythonEngineVersion(PYTHON_ENGINE_TARGETS[engine].id);
 }
