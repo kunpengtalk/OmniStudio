@@ -178,10 +178,17 @@ export default {
       codesign: signForDistribution,
       notarize: signForDistribution,
       entitlements: {
-        // Microphone access (voice recording for ASR). Electrobun maps this
-        // entitlement to NSMicrophoneUsageDescription in the generated Info.plist.
+        // Microphone access (voice recording for ASR / realtime voice calls).
+        // Electrobun maps this entitlement to NSMicrophoneUsageDescription in the
+        // generated Info.plist.
         "com.apple.security.device.audio-input":
           "OmniStudio needs microphone access for voice input and real-time speech-to-text.",
+        // Camera access (MOSS-Live calls can share camera frames for the model to
+        // look at). Without this entry the generated Info.plist has no
+        // NSCameraUsageDescription, and macOS kills the app the moment a stream is
+        // requested — the request fails with no permission prompt at all.
+        "com.apple.security.device.camera":
+          "OmniStudio needs camera access when you choose to share your camera during a voice call.",
       },
     },
     linux: {

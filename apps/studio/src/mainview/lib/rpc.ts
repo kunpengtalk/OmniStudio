@@ -202,8 +202,10 @@ const rpc = Electroview.defineRPC<AppRPC>({
         if (vc.callConversationId !== conversationId) return;
         vc.setPhase(phase);
       },
-      voicecallAudio: ({ conversationId, wavBase64, format }) => {
-        useVoiceCallStore.getState().enqueueAudio({ conversationId, base64: wavBase64, format });
+      voicecallAudio: ({ conversationId, wavBase64, format, chunkId, runId, turnId }) => {
+        useVoiceCallStore
+          .getState()
+          .enqueueAudio({ conversationId, base64: wavBase64, format, chunkId, runId, turnId });
       },
       voicecallAudioStop: ({ conversationId }) => {
         const vc = useVoiceCallStore.getState();

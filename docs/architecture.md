@@ -46,7 +46,7 @@
   Python 常驻 worker   mlx-worker.py（生图）、ppocr-worker.py（PP-OCR）
   Python 一次性脚本    mlx-model.py（MLX 权重下载 / 校验）
   引擎二进制           llama-server / vllm / sglang / mlx_lm
-                       / whisper-server / audiocpp_cli
+                       / whisper-server / audiocpp_cli / speech
                        / tesseract / mflux（独立 venv）
 ```
 
@@ -311,7 +311,9 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 
 文档管线是 `上传 → pdfjs/canvas 逐页渲染（或 sharp 归一化）→ 信号量并发（默认 3）→ VLM 识别 → HTML/Markdown 解析 → 按 bbox 裁图存 WebP`。裁剪出的图片文件名用**内容 md5**，保证同一张图跨页去重后名字一致。
 
-**语音**：ASR 四条路径（Confucius4-R2T2（llama.cpp）/ audio.cpp / whisper.cpp / 远端），TTS 三条（本地 audio.cpp GGUF / vLLM 兼容端点 / Edge TTS 兜底）。
+**语音**：ASR 四条路径（Confucius4-R2T2（llama.cpp）/ audio.cpp / whisper.cpp / 远端），TTS 三条（本地引擎 GGUF（audio.cpp 或 speech.cpp）/ vLLM 兼容端点 / Edge TTS 兜底）。
+
+**本地 TTS 是两个并列引擎，由 `TTS_LOCAL_ENGINE` 二选一**：`bun/tts-local.ts`（audio.cpp，`audiocpp_cli`，模型全部托管在一个 HF 仓库 `audio-cpp/audio.cpp-gguf`）与 `bun/tts-speechcpp.ts`（speech.cpp，`speech`，一个模型一个 `sakasegawa/*` 仓库）。两者都是**单次调用的 CLI**（无常驻进程，每次请求现起一个、用完退出），二进制各自独立托管在 `<dataDir>/engines/audiocpp` 与 `<dataDir>/engines/speechcpp`，在 设置 → 模型引擎 里各占一行、各能一键装 / 卸。切换引擎只写 `TTS_LOCAL_ENGINE`（语音页本地引擎下方的二级切换），**两侧已下载的模型权重都不动** —— 换引擎是换推理后端，不该让用户把几十 GB 重下一遍。三个入口按同一个键分流：RPC `runTTSLocal`（界面与 Agent 合成）、`bun/media-tools.ts` 的 `generate_speech`、`bun/voice.ts` 的 `synthesizeCallSpeech`（通话逐句合成）。speech.cpp 的模型量化档位钉在 Q8_0（官方实测 Q4_K 的 CER 从 6% 涨到 13%），音色有两类：Qwen3-TTS 的九个命名音色（`--voice <name>`），以及 Irodori / Drama 3 的"参考录音或一句话描述"（`speech voice` 把参考录音编成 `.voice.gguf` 缓存到 `<dataDir>/engines/speechcpp/voices/`，再 `--add-voice name=<file> --voice <name>`；没有音色文件时 `--voice none --instructions '<怎么念>'`）。它的退出码 **3 = 文本被截到模型单次能说的上限（音频仍完整）**，按成功处理 —— 当成失败会白扔一段已经合成好的音频。
 
 **Confucius4-R2T2 是第四条本地 ASR 路径**（网易有道流式语音识别，Qwen3-ASR-1.7B 微调）：权重从 `netease-youdao/Confucius4-R2T2-GGUF` 下载（`bun/asr-confucius.ts` 的目录清单），音频编码器按 llama.cpp 的 mmproj 惯例单独发布，推理引擎就是应用已托管的 **llama.cpp**（不新增引擎行）。转写走一个**专用** llama-server 实例（默认端口 18085，与聊天/嵌入实例互不干扰）：`-m <主模型> --mmproj <音频编码器> --ctx-size 8192 --parallel 1`，请求是 `/v1/chat/completions` 的 `input_audio` 内容块（llama.cpp 原生支持，miniaudio 解码 wav/flac/mp3）—— 与视觉走 `--mmproj` 是同一套机制。模型实测输出形如 `language Chinese<asr_text>你好…`，清洗时把 `<asr_text>` 之前（语言声明）整体切掉。**本地 ASR 引擎互斥**：whisper 与 confucius 各有一个常驻 server，`startAsr` / `startAsrConfucius` / `stopAsr` 互相停对端实例（RPC 层与 `asr.ts` 两处收口），同一时刻只有一个在跑；实时麦克风/语音通话走与远端一致的分窗口重转写 + 客户端合并，不做官方 LSP 流式协议（llama-server 没有它的 HTTP 化）。通话有三种模式（`VOICE_CALL_PROVIDER`）——**本地半双工**（增量转写 + 句切分 + 逐句合成，支持抢话打断）、**云端全双工**（Realtime WebSocket，服务端 VAD 与出声）、**omni**（前端能量 VAD 断句，整段音频作为 `input_audio` 直送多模态对话模型，流式收文字后仍走本地逐句 TTS）。omni 的取舍写在 `shared/voice-call-omni.ts`：省掉 ASR 这一段，代价是半双工，且这些模型只出文字。
 
@@ -323,6 +325,17 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 | --- | --- | --- | --- |
 | 百炼（DashScope） | OpenAI 兼容 `/v1/audio/transcriptions`（multipart） | `wss://…/api-ws/v1/realtime`，格式 `pcm`、断句 `smart_turn` / `semantic_vad` | 16k |
 | 阶跃星辰（StepFun） | `/v1/audio/asr/sse`（base64 + SSE 增量文本：StepAudio 3 ASR 只在这个端点，带时间戳的文件接口要公网可下载的 URL） | `wss://api.stepfun.com/v1/realtime`，格式 `pcm16`、只认 `server_vad`、不能发手工 commit | 24k |
+| MOSS（MOSI） | `/v1/audio/transcriptions`（也支持 file_id / url） | `wss://api.mosi.cn/v1/realtime`（`moss-live-1.0`）：**自有 action 协议 + 二进制帧**，见下 | 16k |
+
+**MOSS-Live 是第三套实时协议，不是 OpenAI-Realtime 的又一个方言**（`bun/moss-live.ts` 是独立客户端；两条路共用归一化的 `RealtimeVoiceEvent`，所以 `voice-call.ts` 的下游不必分叉）。五条实测得出的硬约束：
+
+1. 握手是**两步**：`{"action":"attach_session"}` → `session_attached` → `session.update`（persona / instructions）→ `session.updated` 且 `data.error` 为空才算就绪。少了这串后面什么事件都不会来，所以 `testRealtimeConnection` 对 MOSS 不能用"onopen 即成功"判 —— 那会把"Key 对、配置写错"测成通过。
+2. 音频是**二进制帧**，不是 base64 JSON；开启 `tagged-v1` 后上行带 `0x00` 前缀（摄像头 `0x01`、屏幕 `0x02`），**下行不带前缀**。上行 16k、下行 **48k**（另两家 24k）—— 播放端按 `realtimeOutputRate(dialect)` 取，写死 24k 会变成慢放的低音。
+3. **必须持续送静音帧**：停止发送后 `input.speech.stopped` 与回合结束都等不到（实测）。前端在云端模式按 120ms 持续推（说话推音频、不说话推静音），客户端只在断流 800ms 后兜底补静音 —— 两边同时发会把一句话切成碎片，转写变成一串残句。
+4. 服务端要**播放回执**：每个 `response.audio.context` 的 `chunk_id` 在该块**真正播完后**回 `playback.chunk.completed`（字段在顶层，不嵌在 `data` 里）。不回执服务端就停在那一句，`output.transcript.done` / `response.ended` 永远不来。这件事只能由 webview 播放端发（主进程没有播放时钟），走 RPC `voicecallAckPlayback`。
+5. 没有 voice 参数（音色由 persona 决定），页面对该方言隐藏音色字段；转写是**累计全文**（协议明写 replace），助手正文在客户端转增量、用户字幕保持全文（前端是替换语义）；`output.transcript.updated` **可能一条都不发**（取决于服务端走哪条生成路径），所以 `output.transcript.done` 里还没推过的正文必须补发，否则界面上一整轮回复是空的 —— 听得到声音、一个字没有。
+
+画面理解挂在同一条连接上（`video.state` + `0x01`/`0x02` JPEG 帧，建议 1 FPS、长边 640/1024）：UI 只在该方言下显示摄像头 / 屏幕按钮，帧由 webview 用 canvas 缩放编码后经 `voicecallPushVideoFrame` 上行（单帧 2MB 上限，webview 输入一律当不可信）。
 
 `realtimeBaseUrlForProvider` 把厂商的 HTTP 地址推成实时端点，所以换厂商时地址、模型、音色会一起跟着换（手填的中转地址除外）。它按主机形状判而不是逐个比常量：百炼有国内（`dashscope.aliyuncs.com`）与国际（`dashscope-intl.aliyuncs.com`，qwencloud.com）两套主机，路径相同但**密钥不通用** —— 主机原样带过去，否则国际站用户会被当成"自建中转"而永远要手填 wss 地址。
 
@@ -515,7 +528,7 @@ omi <cmd>
 ```
 omni-studio.db          SQLite
 models/<repo>/...       模型权重
-engines/{paddleocr,mflux,whispercpp,audiocpp,tessdata}/   各本地引擎
+engines/{paddleocr,mflux,whispercpp,audiocpp,speechcpp,tessdata}/   各本地引擎
 images/{<docId>,chat,gen,edit,ocr,audio,videos}/          媒体产物
 uploads/                上传的原始文件
 backups/                全局备份文件（*.omnibackup，可加密）+ 恢复时的临时目录

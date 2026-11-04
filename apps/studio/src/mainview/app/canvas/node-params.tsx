@@ -6,7 +6,7 @@
  * 两个刻意的取舍：
  * 1. **预设与选择器一律从功能页 import**（`app/image/parts.tsx` 的 RATIOS、
  *    `app/video/parts.tsx` 的时长/分辨率档位、`app/music/parts.tsx` 的格式与任务、
- *    `app/voice/parts.tsx` 的 EdgeVoicePicker / LocalVoicePicker、
+ *    `app/voice/parts.tsx` 的 EdgeVoicePicker / LocalVoicePicker / SpeechCppVoicePicker、
  *    组件 `VendorVoiceField`）—— 各抄一份必然与功能页漂移，用户会在两处看到不同档位。
  * 2. 只做参数本身：引擎安装 / 模型下载 / 启停仍归功能页与设置页（节点里给明确提示），
  *    否则画布会长成一个半吊子的引擎管理器。
@@ -30,7 +30,7 @@ import { RATIOS as IMAGE_RATIOS } from "../image/parts";
 import { MLX_FALLBACKS } from "@lib/image-model";
 import { DURATION_RANGE, RESOLUTIONS, DEFAULT_RESOLUTION, RATIOS as VIDEO_RATIOS, snapDuration } from "../video/parts";
 import { FORMATS, TASK_LABELS as MUSIC_TASK_LABELS, LYRIC_TAGS } from "../music/parts";
-import { EdgeVoicePicker, LocalVoicePicker, useClones } from "../voice/parts";
+import { EdgeVoicePicker, LocalVoicePicker, SpeechCppVoicePicker, useClones } from "../voice/parts";
 import { VendorVoiceField } from "@components/vendor-voice-select";
 import { useCanvasStore } from "./canvas-store";
 import type { CanvasNodeData } from "@/shared/canvas";
@@ -398,7 +398,7 @@ export function MusicNodeParams({ node }: { node: CanvasNodeData }) {
 }
 
 // ---------------------------------------------------------------------------
-// 语音（TTS）：Edge（免费在线）/ 兼容（云端厂商或本地兼容服务）/ 本地 audio.cpp
+// 语音（TTS）：Edge（免费在线）/ 兼容（云端厂商或本地兼容服务）/ 本地（audio.cpp 或 speech.cpp）
 // ---------------------------------------------------------------------------
 
 export function TtsNodeParams({ node }: { node: CanvasNodeData }) {
@@ -411,8 +411,17 @@ export function TtsNodeParams({ node }: { node: CanvasNodeData }) {
   const clones = useClones();
   const locals = useQuery({ queryKey: ["tts-local-models"], queryFn: () => rpcClient.listTtsLocalModels(undefined), enabled: source === "local" });
   const localStatus = useQuery({ queryKey: ["tts-local-status"], queryFn: () => rpcClient.getTtsLocalStatus(undefined), enabled: source === "local" });
-  const localModels = (locals.data?.models ?? []).filter((m) => m.downloaded);
-  const localModel = localModels.find((m) => m.id === (node.localModelId ?? localStatus.data?.activeModelId)) ?? localModels[0];
+  const spLocals = useQuery({ queryKey: ["tts-speechcpp-models"], queryFn: () => rpcClient.listTtsSpeechCppModels(undefined), enabled: source === "local" });
+  const spStatus = useQuery({ queryKey: ["tts-speechcpp-status"], queryFn: () => rpcClient.getTtsSpeechCppStatus(undefined), enabled: source === "local" });
+  /*
+   * 这个下拉只列**当前启用**的那套本地引擎的模型：后端按模型 id 认引擎，列出另一套的
+   * 模型点下去只会得到一句“未启动”（切引擎是语音页的事，画布不替用户切）。
+   */
+  const useSpeechCpp = !localStatus.data?.active && !!spStatus.data?.active;
+  const localModels = (useSpeechCpp ? (spLocals.data?.models ?? []) : (locals.data?.models ?? [])).filter((m) => m.downloaded);
+  const activeLocalModelId = useSpeechCpp ? spStatus.data?.activeModelId : localStatus.data?.activeModelId;
+  const localEngineActive = useSpeechCpp ? !!spStatus.data?.active : !!localStatus.data?.active;
+  const localModel = localModels.find((m) => m.id === (node.localModelId ?? activeLocalModelId)) ?? localModels[0];
 
   return (
     <div className="flex flex-col gap-2">
@@ -477,13 +486,22 @@ export function TtsNodeParams({ node }: { node: CanvasNodeData }) {
               </SelectContent>
             </Select>
           </Field>
-          {!localStatus.data?.active || !localModel ? (
+          {!localEngineActive || !localModel ? (
             <p className="text-[10px] leading-relaxed text-amber-600 dark:text-amber-500">
               {t("voice.local.notStarted")}
             </p>
+          ) : useSpeechCpp ? (
+            <SpeechCppVoicePicker
+              model={spLocals.data?.models?.find((m) => m.id === localModel.id)}
+              clones={clones}
+              voice={node.voice ?? ""}
+              instruct={node.instruct ?? ""}
+              onVoice={(v) => update({ voice: v })}
+              onInstruct={(v) => update({ instruct: v })}
+            />
           ) : (
             <LocalVoicePicker
-              model={localModels.find((m) => m.id === localModel.id)}
+              model={locals.data?.models?.find((m) => m.id === localModel.id)}
               clones={clones}
               voice={node.voice ?? ""}
               emotion={node.emotion ?? ""}

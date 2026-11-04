@@ -4,6 +4,43 @@ All notable changes are documented here. 所有重要变更记录于此。
 
 Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and the project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/).
 
+## [Unreleased]
+
+## [0.1.11] - 2026-11-04
+
+### Added / 新增
+
+- **本地 TTS 多了一个引擎：speech.cpp**（语音 → 语音合成 → 本地引擎）。本地这一档现在有两个并列引擎，在引擎标题下方切换：原来的 **audio.cpp** 与新增的 **speech.cpp**（[nyosegawa/speech.cpp](https://github.com/nyosegawa/speech.cpp)，一个 `speech` 二进制做合成）。两套引擎各自一键安装、各自一份模型清单、各自记自己的当前模型 —— **切换引擎不会删掉另一侧已下载的权重**。「设置 → 模型引擎」里 speech.cpp 与 audio.cpp 各占一行，可分别安装 / 升级 / 卸载。
+- **语音通话多了一个云端渠道：MOSS-Live 1.0**（通话 → 云端模式 → 云厂商选 MOSS）。它一条连接同时做实时语音与画面理解：边听边说、自然打断，并可在通话中开摄像头或共享屏幕给模型看。MOSS 的协议与百炼 / 阶跃那套完全不同（`attach_session` 两步握手、二进制音频帧、上行 16k / 下行 **48k**），所以是一个独立客户端（`bun/moss-live.ts`），归一化成与另两家同一套事件，通话页其余逻辑不必分叉。选它时页面不再显示音色字段（音色由人格 persona 决定），并多出摄像头 / 屏幕两个按钮。
+- **MOSS 厂商行**进「设置 → 云端模型」内置目录（`moss`，12 个模型：实时语音、TTS / 音色设计、ASR 含说话人分离）。只把确认存在的模型 id 写进预设，免得选到不存在的 id 再报 404。
+
+### Fixed / 修复
+
+- **云端实时语音的杂音与卡顿**（MOSS 首次接入时暴露的三个真 bug）：
+  1. 下行音频曾被"看首字节是不是 `0x00` 就剥掉一个字节当 tagged-v1 前缀"——但 PCM16 首字节是采样**低字节**，正常语音里经常正好是 0x00，剥掉后整帧采样高低颠倒，变成刺耳白噪声。现在原样透传。
+  2. 播放端曾逐块 `floor(len/2)` 切样本，WebSocket 分片长度是奇数时丢掉末尾半个样本，**其后的采样全部错位一个字节**。现在先拼成连续字节流再整体切，并跨块保留那半个样本。
+  3. 播放曾按"攒一批 → 播完 → 再取"的接力方式，每批之间等 `onended` 回调，连续说话就听成持续卡顿；现在改成按音频时钟**排程**（后一块接在前一块结束时刻），块间无空隙。
+- **麦克风 / 摄像头被拒时的提示换成可执行的指引**：`NotAllowedError` 的原始英文文案（"The request is not allowed by the user agent or the platform in the current context"）在桌面端几乎只有"系统隐私开关"与"之前拒绝过被记住"两种成因，现在直接指到「系统设置 → 隐私与安全性」并说明授权后需重启；屏幕共享时用户主动取消不再报错。拨号失败与采集失败的现场（`secure` / `protocol` / `origin`）写入 app.log，不再只存在于界面上。
+- **拨号顺序**：改为先拿麦克风再连云端（原来云端已计费连接、麦克风失败后回滚）。
+- **摄像头权限描述缺失**：`electrobun.config.ts` 补上 `com.apple.security.device.camera`，否则 macOS 会在请求视频流的瞬间直接杀掉应用（Info.plist 里没有 `NSCameraUsageDescription`）。
+
+
+- **本地 TTS 多了一个引擎：speech.cpp**（语音 → 语音合成 → 本地引擎）。本地这一档现在有两个并列引擎，在引擎标题下方切换：原来的 **audio.cpp** 与新增的 **speech.cpp**（[nyosegawa/speech.cpp](https://github.com/nyosegawa/speech.cpp)，一个 `speech` 二进制做合成）。两套引擎各自一键安装（GitHub Release，约 13MB）、各自一份模型清单、各自记自己的当前模型 —— **切换引擎不会删掉另一侧已下载的权重**，换回来接着用。设置 → 模型引擎 里 speech.cpp 与 audio.cpp 各占一行，可分别安装 / 升级 / 卸载。
+- **speech.cpp 的六个 TTS 模型**（一个模型一个 HuggingFace 仓库，Q8_0 档）：Qwen3-TTS 0.6B / 1.7B（10 种语言、9 个内置音色，1.7B 还支持用一句话说明「怎么念」）、Irodori-TTS v4.1 Small MF / Small / v4 Large（日文，可用参考录音克隆音色，也可用一句描述定义音色）、Drama 3（35B MoE，83 种语言、一场戏最多 16 个说话人）。
+- **音色两套玩法**：Qwen3-TTS 点内置音色名直接合成；Irodori / Drama 3 选一个「声音克隆」页里的克隆音色（引擎会用参考录音生成音色文件并缓存，下次直接复用），或者不选音色、只写一句描述。通话（半双工）的逐句合成与前两个入口都跟着当前启用的引擎走。
+
+### Internal / 内部
+
+- `shared/realtime-voice.ts` 的方言从两家变三家（`dashscope` / `stepfun` / `moss`）：新增 `realtimeOutputRate()`（MOSS 48k，另两家 24k）、`realtimeDialectHasVoice()`、MOSS 端点推导（`api.mosi.cn` 与平台站 `moss.cn` 都认）。播放采样率跟着方言走 —— 写死 24k 会让 MOSS 的声音变慢变低。
+- 新增 `bun/moss-live.ts`：手写 MOSS 协议客户端。五条实测得出的硬约束写在文件顶部 —— 两步握手、二进制帧与 `tagged-v1` 前缀、**必须持续送静音帧**才能断句、播放回执（`playback.chunk.completed`，字段在顶层）、`output.transcript.updated` 可能一条都不发所以 `transcript.done` 要兜底补正文。重连遇 `1013 Session already connected` 会丢掉会话 id 以新会话重连。
+- RPC 新增 `voicecallAckPlayback`（播放端播完后回执）、`voicecallSetVideo` / `voicecallPushVideoFrame`（画面帧上行，单帧 2MB 上限）；`voicecallAudio` 带上 `chunkId` / `runId` / `turnId`。`voicecallPreflight` 带出 `cloudDialect`，界面据此显隐画面按钮、定播放采样率。
+- 云端模式的前端推流改成"推完即弃"（此前采样数组在整场通话里持续增长，一小时约 700MB）。
+- 新增回归：`bun/moss-live.test.ts`（握手顺序、二进制帧与前缀、下行不剥前缀、回执字段位置、累计全文转增量、`transcript.done` 兜底、`response.ended` 三种状态、画面帧、配置失败上报），`shared/realtime-voice.test.ts` 补 MOSS 方言 / 速率 / 端点 / 模型过滤。
+- 新增 `scripts/voicecall-preview.tsx`：不起桌面应用就能看通话页的云端配置与画面按钮（MOSS 与阶跃并排对照）。
+
+- 新增 `shared/speechcpp.ts`（引擎版本、模型目录、音色清单）与 `bun/tts-speechcpp.ts`（安装 / 状态 / 合成 / 克隆音色）；`TTS_LOCAL_ENGINE` 从「audio.cpp 独有」变成两个引擎的公共选择键，RPC `runTTSLocal`、`bun/media-tools.ts` 的 `generate_speech`、`bun/voice.ts` 的 `synthesizeCallSpeech` 三处按同一个键分流（`runTTSLocal` 保持单一入口，界面不必知道用的是哪个引擎）。新增 `TTS_SPEECHCPP_MODEL` 设置；引擎目录 `<dataDir>/engines/speechcpp`。
+- 新增回归：`bun/tts-speechcpp.test.ts`（模型目录完整性、Release 资产名、`speech tts` 参数拼装，覆盖 `--voice` 缺省回落、`--add-voice` 克隆路径、`--voice none --instructions` 描述路径）。
+
 ## [0.1.10] - 2026-10-15
 
 ### Added / 新增

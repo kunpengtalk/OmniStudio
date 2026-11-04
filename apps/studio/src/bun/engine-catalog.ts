@@ -52,6 +52,7 @@ import { createRuntime } from "./runtimes";
 import { readOmlxVersion, resolveOmlxBinary } from "./runtimes/omlx";
 import * as Tunnel from "./tunnel";
 import * as TTSLocal from "./tts-local";
+import * as TtsSpeechCpp from "./tts-speechcpp";
 import * as WhisperEngine from "./whisper-engine";
 
 // ---------------------------------------------------------------------------
@@ -285,6 +286,33 @@ async function probeAudioCpp(): Promise<LocalEngineStatus> {
   };
 }
 
+async function probeSpeechCpp(): Promise<LocalEngineStatus> {
+  const status = await TtsSpeechCpp.getSpeechCppStatus();
+  const dir = TtsSpeechCpp.speechCppEngineDir();
+  // 托管判定看目录本身（PATH / install.sh 那份不接管）；resolve 只回答"能不能用"。
+  const managed = existsSync(TtsSpeechCpp.speechCppEngineBin());
+  const supported = TtsSpeechCpp.speechCppSupported();
+  const version = managed ? status.version : null;
+  return {
+    id: "speech.cpp",
+    state: stateOf(managed, status.engineInstalled),
+    version,
+    path: status.binaryPath,
+    managedDir: managed ? dir : null,
+    sizeBytes: managed ? await engineDirSize(dir) : null,
+    running: status.active,
+    canInstall: supported,
+    installNote: supported
+      ? null
+      : `当前平台（${process.platform}/${process.arch}）没有预编译包，请手动安装 speech 并加入 PATH`,
+    approxBytes: 13e6,
+    requirement: null,
+    canUninstall: managed,
+    upgradeKind: "repair",
+    ...checkManifest("speech.cpp", managed ? dir : null, version),
+  };
+}
+
 async function probePaddleOcr(): Promise<LocalEngineStatus> {
   const status = await PpOcr.getPpOcrStatus();
   const dir = PpOcr.engineDirPath();
@@ -409,6 +437,8 @@ async function probeEngine(id: LocalEngineId): Promise<LocalEngineStatus> {
       return await probeWhisper();
     case "audio.cpp":
       return await probeAudioCpp();
+    case "speech.cpp":
+      return await probeSpeechCpp();
     case "paddleocr":
       return await probePaddleOcr();
     case "tesseract":
@@ -531,6 +561,8 @@ function managedEngineDir(id: LocalEngineId): string | null {
       return WhisperEngine.whisperEngineDir();
     case "audio.cpp":
       return TTSLocal.audioCppEngineDir();
+    case "speech.cpp":
+      return TtsSpeechCpp.speechCppEngineDir();
     case "paddleocr":
       return PpOcr.engineDirPath();
     case "tesseract":
@@ -648,6 +680,9 @@ async function dispatchInstall(
     case "audio.cpp":
       emitPhase(id, "downloading", "下载 audio.cpp 预编译包", null);
       return await TTSLocal.downloadTtsLocalEngine({ upgrade });
+    case "speech.cpp":
+      emitPhase(id, "downloading", "下载 speech.cpp 预编译包", null);
+      return await TtsSpeechCpp.downloadSpeechCppEngine({ upgrade });
     case "paddleocr":
       return await PpOcr.downloadPpOcrEngine();
     case "tesseract":
@@ -781,6 +816,9 @@ async function stopConsumers(id: LocalEngineId): Promise<number> {
       const wasAsr = getSetting("ASR_ENGINE") === "audiocpp";
       return wasTts || wasAsr ? 1 : 0;
     }
+    case "speech.cpp":
+      // 同样是单次调用的 CLI：收回指向它的设置即可（模型权重不在托管目录里）。
+      return getSetting("TTS_LOCAL_ENGINE") === "speech.cpp" ? 1 : 0;
     case "laya-mlx": {
       // 常驻 worker 持有那个 venv 里的解释器与 mlx，先停它再删目录。
       const status = await Laya.getLayaStatus();
@@ -816,6 +854,8 @@ async function removeManagedInstall(id: LocalEngineId): Promise<{ ok: boolean; e
         return { ok: true };
       case "audio.cpp":
         return TTSLocal.removeAudioCppEngine();
+      case "speech.cpp":
+        return TtsSpeechCpp.removeSpeechCppEngine();
       case "paddleocr":
         // 引擎与识别模型在同一个目录里：清 venv、留模型（模型在 OCR 页单独删）。
         return await PpOcr.cleanupPpOcrEngine();

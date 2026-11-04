@@ -21,6 +21,8 @@ import {
   type RealtimeVoiceEvent,
   type VoiceCallProvider,
 } from "./realtime-voice";
+import { MossLiveClient } from "./moss-live";
+import { realtimeDialectFor } from "../shared/realtime-voice";
 
 // ---------------------------------------------------------------------------
 // 实时语音通话（电话式协作）
@@ -52,8 +54,20 @@ export type VoiceCallOutgoing =
   | { type: "partial"; conversationId: number; text: string }
   | { type: "utterance"; conversationId: number; messageId: number; text: string }
   | { type: "state"; conversationId: number; phase: VoiceCallPhase }
-  /** 音频事件：本地模式推 WAV；云端模式推裸 PCM16 24k（前端按 format 解码）。 */
-  | { type: "audio"; conversationId: number; wavBase64: string; format: "wav" | "pcm" }
+  /** 音频事件：本地模式推 WAV；云端模式推裸 PCM16（MOSS 48k，另两家 24k）。 */
+  | {
+      type: "audio";
+      conversationId: number;
+      wavBase64: string;
+      format: "wav" | "pcm";
+      /**
+       * 云端音频块的对齐信息（目前只有 MOSS 给）。播放端播完后按 chunkId 回执，
+       * 不回执服务端会认为这一句没播完。
+       */
+      chunkId?: string;
+      runId?: string;
+      turnId?: string;
+    }
   | { type: "audioStop"; conversationId: number }
   /** 云端模式：助手流式正文 / 回合定稿（复用 chatChunk/chatDone 通道画气泡）。 */
   | { type: "assistantPartial"; conversationId: number; messageId: number; text: string }
@@ -68,6 +82,8 @@ export type VoiceCallPreflight = {
     mode: VoiceCallProvider;
     cloudConfigured: boolean;
     omniConfigured: boolean;
+    /** 云端实时方言：决定上行 / 下行采样率与界面上的音色字段。 */
+    cloudDialect: "dashscope" | "stepfun" | "moss";
     detail: string;
   };
 };
@@ -149,8 +165,12 @@ type Session = {
   active: boolean;
   /** local = 本地 ASR+LLM+TTS 三段管线；cloud = 实时语音全双工；omni = 音频直送多模态模型。 */
   provider: VoiceCallProvider;
-  /** 云端实时客户端（仅 cloud 模式持有）。 */
+  /**
+   * 云端实时客户端（仅 cloud 模式持有）。两家协议完全不同，所以是两个类型：
+   * MOSS 是 attach_session + 二进制帧，另两家是 OpenAI-Realtime 的 JSON 事件。
+   */
   realtime: RealtimeVoiceClient | null;
+  moss: MossLiveClient | null;
   /**
    * 是否对用户语音做增量 / 端句转写。
    *
@@ -597,28 +617,55 @@ async function endOmniUtterance(
 
 function openRealtime(session: Session, ack?: (r: { ok: boolean; error?: string }) => void): void {
   const cfg = getRealtimeProviderConfig();
-  const client = new RealtimeVoiceClient(
-    {
-      apiKey: cfg.apiKey,
-      baseUrl: cfg.baseUrl,
-      model: cfg.model,
-      voice: cfg.voice,
-      instructions: VOICE_CALL_SYSTEM_PROMPT,
-      // 恢复历史通话时注入最近几轮对话，让云端会话记得上下文（新通话为空）。
-      history: getCloudHistory(session.conversationId),
-      onEvent: (ev) => onRealtimeEvent(session, ev),
-    },
-    callLog,
-    (message, detail) => callLogFailure("realtime.failed", message, detail),
-  );
-  session.realtime = client;
+  const history = getCloudHistory(session.conversationId);
+  const onEvent = (ev: RealtimeVoiceEvent) => onRealtimeEvent(session, ev);
+  const onFailure = (message: string, detail?: Record<string, unknown>) =>
+    callLogFailure("realtime.failed", message, detail);
+  /**
+   * MOSS 与另两家是两套完全不同的协议（attach_session + 二进制帧 vs
+   * OpenAI-Realtime JSON 事件），所以按方言建不同的客户端，而不是在同一个客户端里
+   * 到处 if。两者的归一化事件相同，下游 `onRealtimeEvent` 完全共用。
+   */
+  const client =
+    cfg.dialect === "moss"
+      ? new MossLiveClient(
+          {
+            apiKey: cfg.apiKey,
+            baseUrl: cfg.baseUrl,
+            model: cfg.model,
+            instructions: VOICE_CALL_SYSTEM_PROMPT,
+            personaName: "Omni",
+            history,
+            onEvent,
+          },
+          callLog,
+          onFailure,
+        )
+      : new RealtimeVoiceClient(
+          {
+            apiKey: cfg.apiKey,
+            baseUrl: cfg.baseUrl,
+            model: cfg.model,
+            voice: cfg.voice,
+            instructions: VOICE_CALL_SYSTEM_PROMPT,
+            // 恢复历史通话时注入最近几轮对话，让云端会话记得上下文（新通话为空）。
+            history,
+            onEvent,
+          },
+          callLog,
+          onFailure,
+        );
+  if (client instanceof MossLiveClient) session.moss = client;
+  else session.realtime = client;
   if (ack) {
     // 连接就绪（session.updated）或失败（error/超时）时回执给 startVoiceCall。
     const timer = setTimeout(() => {
       if (!session.readyAck) return; // 已被正常回执或挂断清理
       session.readyAck = null;
       session.realtime?.stop();
+      session.moss?.stop();
       session.realtime = null;
+      session.moss = null;
       ack({ ok: false, error: "连接云端实时语音超时，请检查网络或 API Key" });
     }, CONNECT_ACK_TIMEOUT_MS);
     session.readyAck = (r) => {
@@ -701,9 +748,19 @@ function onRealtimeEvent(session: Session, ev: RealtimeVoiceEvent): void {
         conversationId,
         wavBase64: ev.pcm.toString("base64"),
         format: "pcm",
+        chunkId: ev.chunkId,
+        runId: ev.runId,
+        turnId: ev.turnId,
       });
       break;
     }
+    case "audioStop":
+      // 服务端要求停声（MOSS 的 response.audio.stop / response.interrupted）：
+      // 与"用户抢话"同一个前端通道，播放队列立即清空。
+      session.cloudBargeIn = true;
+      emit({ type: "audioStop", conversationId });
+      setPhase(session, "listening");
+      break;
     case "turnEnd": {
       if (!session.active) return;
       const text = ev.text.trim();
@@ -810,7 +867,11 @@ export function voiceCallPreflight(): Promise<VoiceCallPreflight> {
     const detail =
       mode === "cloud"
         ? rtc.configured
-          ? `已就绪：${rtc.model}（音色 ${rtc.voice}）`
+          ? rtc.dialect === "moss"
+            ? // MOSS 没有 voice 参数（音色由 persona 决定）：把设置里残留的上一个厂商
+              // 的音色名印出来会误导用户去查"为什么我设的音色没生效"。
+              `已就绪：${rtc.model}`
+            : `已就绪：${rtc.model}（音色 ${rtc.voice}）`
           : "云端模式未配置 API Key"
         : mode === "omni"
           ? omni.configured
@@ -821,6 +882,7 @@ export function voiceCallPreflight(): Promise<VoiceCallPreflight> {
       mode,
       cloudConfigured: rtc.configured,
       omniConfigured: omni.configured,
+      cloudDialect: rtc.dialect,
       detail,
     };
 
@@ -874,6 +936,7 @@ export async function startVoiceCall(opts: {
     active: true,
     provider,
     realtime: null,
+    moss: null,
     asrEnabled,
     phase: "listening",
     utterance: Buffer.alloc(0),
@@ -905,6 +968,8 @@ export async function startVoiceCall(opts: {
       session.readyAck = null;
       session.realtime?.stop();
       session.realtime = null;
+      session.moss?.stop();
+      session.moss = null;
       sessions.delete(conv.id);
       return { ok: false, conversation: conv, error: ack.error };
     }
@@ -926,7 +991,8 @@ export function pushVoiceCallAudio(opts: {
   if (session.provider === "cloud") {
     const raw = Buffer.from(opts.wavBase64, "base64");
     const pcm = opts.format === "pcm" ? raw : wavToPcm16(raw);
-    session.realtime?.appendAudio(pcm);
+    if (session.moss) session.moss.appendAudio(pcm);
+    else session.realtime?.appendAudio(pcm);
     return { ok: true };
   }
   // 本地 / omni：前端按增量推裸 PCM16 16k，这里累积成整段（端句时整段使用：
@@ -959,7 +1025,7 @@ export async function endVoiceCallUtterance(opts: {
 }): Promise<{ ok: boolean; text?: string; error?: string }> {
   const session = getSession(opts.conversationId);
   if (!session?.active) return { ok: false, error: "通话未开始" };
-  // 云端：断句由服务端 smart_turn 负责；这里只发「输入缓冲可落定」信号让断句更跟手。
+  // 云端：断句由服务端 VAD 负责；这里只发「输入缓冲可落定」信号让断句更跟手。
   if (session.provider === "cloud") {
     session.realtime?.commit();
     return { ok: true };
@@ -1013,8 +1079,10 @@ export function interruptVoiceCall(conversationId: number): { ok: boolean } {
   const session = getSession(conversationId);
   if (!session?.active) return { ok: false };
   if (session.provider === "cloud") {
-    // 云端：response.cancel 停掉生成；服务端 smart_turn 同时负责本回合截断。
-    session.realtime?.interrupt();
+    // 云端：打断请求交给协议层 —— 百炼 / 阶跃发 response.cancel，MOSS 回报
+    // playback.stopped（它没有客户端取消事件，服务端自己会在用户开口时截断）。
+    if (session.moss) session.moss.interrupt();
+    else session.realtime?.interrupt();
     session.spoken = false;
     session.cloudText = "";
     session.cloudBargeIn = true;
@@ -1053,6 +1121,8 @@ export function stopVoiceCall(conversationId: number): { ok: boolean } {
     session.readyAck = null;
     session.realtime?.stop();
     session.realtime = null;
+    session.moss?.stop();
+    session.moss = null;
   }
   if (session.asrTimer) {
     clearTimeout(session.asrTimer);
@@ -1076,6 +1146,61 @@ export function stopVoiceCall(conversationId: number): { ok: boolean } {
 /** 通话是否进行中（供界面/切换兜底查询）。 */
 export function isVoiceCallActive(conversationId: number): boolean {
   return sessions.get(conversationId)?.active ?? false;
+}
+
+/**
+ * 播放回执（MOSS 专用）：某块音频在**前端真正播完**后回报。
+ *
+ * 为什么必须由前端发：协议要求 `playback.chunk.completed` 表示"这一块已经播完"。
+ * 主进程没有播放时钟，替它回执等于谎报进度，服务端会提前丢掉还没播的音频。
+ * 另两家的服务端不要这个信号，所以这里对它们是无操作。
+ */
+export function ackVoiceCallPlayback(opts: {
+  conversationId: number;
+  chunkId: string;
+  runId?: string;
+  turnId?: string;
+}): { ok: boolean } {
+  const session = getSession(opts.conversationId);
+  if (!session?.active || !session.moss) return { ok: false };
+  session.moss.ackChunkPlayed(opts.chunkId, opts.runId, opts.turnId);
+  return { ok: true };
+}
+
+/** 切换画面源（摄像头 / 屏幕）：仅 MOSS 支持，其余方言返回 false 让界面隐藏入口。 */
+export function setVoiceCallVideo(opts: {
+  conversationId: number;
+  source: "camera" | "screen";
+  enabled: boolean;
+}): { ok: boolean; supported: boolean } {
+  const session = getSession(opts.conversationId);
+  if (!session?.active || !session.moss) return { ok: false, supported: !!session?.moss };
+  session.moss.setVideoState(opts.source, opts.enabled);
+  if (opts.enabled) session.moss.setVideoFocus(opts.source);
+  return { ok: true, supported: true };
+}
+
+/**
+ * 上传一帧画面（JPEG）。帧率与分辨率由前端控制（协议建议 1 FPS、长边 640/1024），
+ * 这里只做上限校验 —— webview 的输入一律当不可信处理。
+ */
+export function pushVoiceCallVideoFrame(opts: {
+  conversationId: number;
+  source: "camera" | "screen";
+  jpegBase64: string;
+}): { ok: boolean } {
+  const session = getSession(opts.conversationId);
+  if (!session?.active || !session.moss) return { ok: false };
+  const raw = Buffer.from(opts.jpegBase64, "base64");
+  // 单帧 2MB 上限：超过基本是传错了内容（视频 / 原始位图），不浪费上行带宽。
+  if (raw.length === 0 || raw.length > 2 * 1024 * 1024) return { ok: false };
+  session.moss.sendVideoFrame(opts.source, raw);
+  return { ok: true };
+}
+
+/** 当前通话是否支持画面理解（决定界面显不显示摄像头按钮）。 */
+export function voiceCallSupportsVideo(conversationId: number): boolean {
+  return !!getSession(conversationId)?.moss;
 }
 
 // omni 模式的配置读写直接转出去：RPC 层不必知道它住在哪个模块

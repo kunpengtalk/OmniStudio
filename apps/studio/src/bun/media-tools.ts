@@ -9,7 +9,7 @@ import { getImagesBaseDir } from "./image-server";
 import * as ImageGen from "./image-gen";
 import * as VideoGen from "./video-gen";
 import * as Voice from "./voice";
-import * as TtsLocal from "./tts-local";
+import * as LocalTtsRoute from "./tts-engine-route";
 import { prepareImageGeneration } from "./media-setup";
 import {
   assertInsideWorkspace,
@@ -790,7 +790,7 @@ function createGenerateImage(ctx: ToolContext): BuiltTool {
 // generate_speech
 // ---------------------------------------------------------------------------
 
-/** 按引擎链合成语音：auto = 本地 audio.cpp → 三方 Provider → Edge 在线。 */
+/** 按引擎链合成语音：auto = 本地引擎（audio.cpp / speech.cpp）→ 三方 Provider → Edge 在线。 */
 async function synthesizeSpeech(input: {
   text: string;
   voice?: string;
@@ -804,12 +804,13 @@ async function synthesizeSpeech(input: {
   for (const engine of order) {
     try {
       if (engine === "local") {
-        if (!TtsLocal.isTtsLocalActive()) {
+        // 本地是两个并列引擎（audio.cpp / speech.cpp），路由规则只有一份。
+        if (!LocalTtsRoute.anyLocalTtsActive()) {
           attempts.push("本地引擎未启动");
           continue;
         }
         return {
-          record: await TtsLocal.runTTSLocal({
+          record: await LocalTtsRoute.runLocalTts({
             text: input.text,
             voice: input.voice,
             model: input.model,

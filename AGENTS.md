@@ -67,9 +67,9 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   Full triage guide: `.agents/skills/omni-doctor/`; one-shot evidence dump:
   `bun run --cwd apps/studio scripts/omni-diag.ts`
 - **Every local runtime the app installs is one catalog, managed in one place**
-  (`shared/local-engines.ts` + `bun/engine-catalog.ts` → Settings → 引擎): the twelve engines —
+  (`shared/local-engines.ts` + `bun/engine-catalog.ts` → Settings → 引擎): the fourteen engines —
   llama.cpp / vLLM / SGLang / MLX / oMLX (text inference; oMLX is the Homebrew / .dmg
-  Apple-Silicon server, not a pip package), whisper.cpp, audio.cpp, PaddleOCR,
+  Apple-Silicon server, not a pip package), whisper.cpp, audio.cpp, speech.cpp, PaddleOCR,
   Tesseract, mflux, laya-mlx (SystemOne typed judgments, its own `systemone` group — it is a
   *judgment* model, not a chat model, so it does not belong under inference) and cloudflared —
   each get one row with state, version, path, disk usage
@@ -89,6 +89,21 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   for engines whose version is pinned in code); progress reuses the setup-screen push channel
   (`engineInstallLog` / `engineInstallPhase`), and `startEngineLogBridge()` folds the other
   installers' own logs into it rather than adding a second channel.
+- **Local TTS is two parallel engines, switched by one setting** (`TTS_LOCAL_ENGINE`):
+  `bun/tts-local.ts` (audio.cpp / `audiocpp_cli`, every model in the one repo
+  `audio-cpp/audio.cpp-gguf`) and `bun/tts-speechcpp.ts` (speech.cpp / `speech`, one
+  `sakasegawa/*` repo per model). Both are one-shot CLIs with no resident process, each with its
+  own managed binary (`<dataDir>/engines/audiocpp` vs `engines/speechcpp`), its own model list and
+  its own model slot (`TTS_LOCAL_MODEL` vs `TTS_SPEECHCPP_MODEL`) — so switching engines keeps the
+  other side's downloads. Four rules: the key must be read at **every** synthesis entry
+  (RPC `runTTSLocal`, `media-tools.ts`'s `generate_speech`, `voice.ts`'s `synthesizeCallSpeech`)
+  rather than only in the UI, or one of them keeps calling the engine the user just switched away
+  from; a model's download task is keyed by `(repo, fileName)` — speech.cpp file names collide
+  across repos, and name-only matching downloads the wrong repo's file (the same bug the model
+  market already hit); speech.cpp's **exit code 3 means "text truncated to the model's max, audio
+  is complete"** and must be treated as success, or a finished clip gets thrown away; and its
+  `described` models build a clone voice through `speech voice` (cached under
+  `engines/speechcpp/voices/`), falling back to `--voice none --instructions '<how to speak>'`.
 - **The 模型 group is five entries, one per question — don't add a sixth** (设置 → 模型):
   **模型库** (`library`), **运行模型** (`run`), **云端模型** (`cloud`), **默认模型** (`defaults`),
   **模型引擎** (`engines`).

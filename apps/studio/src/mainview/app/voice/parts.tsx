@@ -12,6 +12,7 @@ import { useModelDownloadStore } from "@stores/model-download";
 import { AudioDownloadButton, audioFileName } from "@components/audio-download";
 import { AUDIOCPP_REPO } from "@/shared/audiocpp";
 import type { TtsLocalModelInfo, TtsLocalStatus } from "../../../bun/tts-local";
+import type { SpeechCppModelInfo, SpeechCppStatus } from "../../../bun/tts-speechcpp";
 import type { VoiceClone, VoiceRecordRow } from "../../../bun/voice";
 import { cn } from "@/mainview/lib/utils";
 import { AudioBar } from "./audio-player";
@@ -232,6 +233,8 @@ export function SettingsValues() {
     ttsVoice: string;
     edgeVoice: string;
     asrEngine: string;
+    ttsLocalEngine: string;
+    ttsSpeechCppModel: string;
   }>({
     ttsModel: "",
     asrModel: "",
@@ -241,6 +244,8 @@ export function SettingsValues() {
     ttsVoice: "alloy",
     edgeVoice: "zh-CN-XiaoxiaoNeural",
     asrEngine: "whisper",
+    ttsLocalEngine: "",
+    ttsSpeechCppModel: "",
   });
   const [loaded, setLoaded] = useState(false);
   const { data } = useQuery({
@@ -258,6 +263,8 @@ export function SettingsValues() {
         ttsVoice: data.settings.TTS_VOICE ?? "alloy",
         edgeVoice: data.settings.TTS_EDGE_VOICE ?? "zh-CN-XiaoxiaoNeural",
         asrEngine: data.settings.ASR_ENGINE ?? "whisper",
+        ttsLocalEngine: data.settings.TTS_LOCAL_ENGINE ?? "",
+        ttsSpeechCppModel: data.settings.TTS_SPEECHCPP_MODEL ?? "",
       });
       setLoaded(true);
     }
@@ -621,3 +628,202 @@ export function LocalVoicePicker({
 // 体积口径统一到 @lib/format（本文件内也直接调用，import 在上方）。
 export { formatBytes };
 
+// ---------------------------------------------------------------------------
+// 本地引擎（speech.cpp TTS）—— 与 audio.cpp 那一组并列，各自有自己的模型清单
+// ---------------------------------------------------------------------------
+
+export function SpeechCppModelRow({
+  model,
+  status,
+  pending,
+  onDownload,
+  onStart,
+  onStop,
+  onDelete,
+}: {
+  model: SpeechCppModelInfo;
+  status?: SpeechCppStatus;
+  pending: boolean;
+  onDownload: (m: SpeechCppModelInfo) => void;
+  onStart: (m: SpeechCppModelInfo) => void;
+  onStop: () => void;
+  onDelete: (m: SpeechCppModelInfo) => void;
+}) {
+  const t = useT();
+  const tasks = useModelDownloadStore((s) => s.tasks);
+  // 下载任务的键是 (repo, fileName)：每个模型一个仓库，只按文件名找会串到别的模型上。
+  const task = tasks.find((x) => x.repo === model.repo && x.fileName === model.repoPath);
+  const downloading = task && (task.status === "downloading" || task.status === "queued");
+  const running = model.active && !!status?.active;
+
+  return (
+    <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-medium">{model.name}</p>
+          {running && (
+            <Badge variant="default" className="gap-1 text-[10px]">
+              <CircleIcon className="size-2.5 fill-current" />
+              {t("voice.local.running")}
+            </Badge>
+          )}
+          {task?.status === "failed" && (
+            <Badge variant="destructive" className="text-[10px]">
+              {t("voice.failed")}
+            </Badge>
+          )}
+        </div>
+        <p className="mt-0.5 text-[11px] text-muted-foreground">{model.description}</p>
+        <p className="mt-0.5 text-[11px] text-muted-foreground/70 tabular-nums">
+          {model.languages.join(" / ")} · {formatBytes(model.installedSize ?? model.sizeBytes)}
+          {model.installedSize ? ` · ${t("voice.local.installed")}` : ""}
+        </p>
+        {downloading && task && (
+          <div className="mt-1.5 h-1.5 w-full max-w-56 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-[width] duration-300"
+              style={{ width: `${task.percent ?? 0}%` }}
+            />
+          </div>
+        )}
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        {!model.downloaded ? (
+          <Button size="sm" disabled={downloading || pending} onClick={() => onDownload(model)}>
+            {downloading ? (
+              <Loader2Icon data-icon="inline-start" className="animate-spin" />
+            ) : (
+              <DownloadCloudIcon data-icon="inline-start" />
+            )}
+            {downloading
+              ? `${task?.percent != null ? Math.round(task.percent) : 0}%`
+              : t("voice.local.download")}
+          </Button>
+        ) : (
+          <>
+            <Button
+              size="sm"
+              variant={running ? "outline" : "default"}
+              disabled={pending}
+              onClick={() => (running ? onStop() : onStart(model))}
+            >
+              {pending ? (
+                <Loader2Icon data-icon="inline-start" className="animate-spin" />
+              ) : running ? (
+                <SquareIcon data-icon="inline-start" />
+              ) : (
+                <PlayIcon data-icon="inline-start" />
+              )}
+              {running ? t("voice.local.stop") : t("voice.local.start")}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              tooltip={t("voice.local.delete")}
+              onClick={() => onDelete(model)}
+              disabled={pending}
+            >
+              <TrashIcon className="size-4" />
+            </Button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * speech.cpp 的音色控件。两种形态：
+ *  - preset     —— 模型自带命名音色，点一个即可（`--voice <id>`）。
+ *  - described  —— 可选一个克隆音色（用参考录音生成音色文件），也可以只写一句音色描述；
+ *                  两者都不给时由模型自己挑默认音色。
+ */
+export function SpeechCppVoicePicker({
+  model,
+  clones,
+  voice,
+  instruct,
+  onVoice,
+  onInstruct,
+}: {
+  model?: SpeechCppModelInfo;
+  clones: VoiceClone[];
+  voice: string;
+  instruct: string;
+  onVoice: (v: string) => void;
+  onInstruct: (v: string) => void;
+}) {
+  const t = useT();
+  if (!model) return null;
+
+  const chip = (key: string, label: string, active: boolean, onClick: () => void) => (
+    <button
+      key={key}
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "rounded-full border px-2.5 py-1 text-xs transition-colors",
+        active
+          ? "border-primary bg-primary/10 text-primary"
+          : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
+      )}
+    >
+      {label}
+    </button>
+  );
+
+  // 「怎么念」的描述框：只有认这条选项的模型才给（模型会拒绝不认识的选项，给了就是一次失败）。
+  const instructField = (
+    <div>
+      <Label htmlFor="speechcpp-instruct" className="mb-1 block text-xs">
+        {model.voiceKind === "preset" ? t("voice.speechCpp.instructTitle") : t("voice.local.voice")}
+      </Label>
+      <Input
+        id="speechcpp-instruct"
+        placeholder={t(
+          model.voiceKind === "preset"
+            ? "voice.speechCpp.instructPlaceholder"
+            : "voice.speechCpp.voiceDescPlaceholder",
+        )}
+        value={instruct}
+        onChange={(e) => onInstruct(e.target.value)}
+        className="h-8 text-xs"
+      />
+    </div>
+  );
+
+  if (model.voiceKind === "preset") {
+    return (
+      <>
+        <div>
+          <Label className="mb-1 block text-xs">{t("voice.local.voice")}</Label>
+          <div className="flex flex-wrap gap-1.5">
+            {(model.presetVoices ?? []).map((v) =>
+              chip(v.id, v.name, voice === v.id, () => onVoice(v.id)),
+            )}
+          </div>
+        </div>
+        {model.supportsInstruct && instructField}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div>
+        <Label className="mb-1 block text-xs">{t("voice.speechCpp.voiceOptional")}</Label>
+        {clones.length === 0 ? (
+          <p className="text-xs text-muted-foreground">{t("voice.local.noClone")}</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {clones.map((c) =>
+              chip(c.name, c.name, voice === c.name, () => onVoice(voice === c.name ? "" : c.name)),
+            )}
+          </div>
+        )}
+        <p className="mt-1 text-[11px] text-muted-foreground">{t("voice.speechCpp.cloneHint")}</p>
+      </div>
+      {!voice && model.supportsInstruct && instructField}
+    </>
+  );
+}

@@ -233,6 +233,10 @@ import * as TTSModels from "../tts-models";
 import type { TTSModelInfo } from "../tts-models";
 import * as TTSLocal from "../tts-local";
 import type { TtsLocalModelInfo, TtsLocalStatus } from "../tts-local";
+import * as TtsSpeechCpp from "../tts-speechcpp";
+import type { SpeechCppModelInfo, SpeechCppStatus } from "../tts-speechcpp";
+import * as LocalTtsRoute from "../tts-engine-route";
+import { SPEECHCPP_ENGINE_VERSION } from "../../shared/speechcpp";
 import * as Ocr from "../ocr";
 import type {
   OcrLangModelInfo,
@@ -1817,6 +1821,24 @@ export type AppRPC = {
         };
         response: { ok: boolean; error?: string; latencyMs?: number };
       };
+      /**
+       * MOSS 的播放回执：某块音频在前端真正播完后回报（协议要求，不回报服务端
+       * 会以为这一句没播完）。另两家不需要，调用它返回 ok:false 即可忽略。
+       */
+      voicecallAckPlayback: {
+        params: { conversationId: number; chunkId: string; runId?: string; turnId?: string };
+        response: { ok: boolean };
+      };
+      /** 开关画面（仅 MOSS 支持）：摄像头 / 屏幕共享。 */
+      voicecallSetVideo: {
+        params: { conversationId: number; source: "camera" | "screen"; enabled: boolean };
+        response: { ok: boolean; supported: boolean };
+      };
+      /** 上传一帧画面（JPEG base64，帧率与尺寸由前端控制）。 */
+      voicecallPushVideoFrame: {
+        params: { conversationId: number; source: "camera" | "screen"; jpegBase64: string };
+        response: { ok: boolean };
+      };
       openDirectoryDialog: {
         params: undefined;
         response: { path: string };
@@ -2214,6 +2236,31 @@ export type AppRPC = {
           model?: string;
         };
         response: { record: VoiceRecordRow };
+      };
+      // Local TTS engine (speech.cpp) —— 与 audio.cpp 并列，由 TTS_LOCAL_ENGINE 二选一
+      listTtsSpeechCppModels: {
+        params: undefined;
+        response: { models: SpeechCppModelInfo[]; error?: string };
+      };
+      getTtsSpeechCppStatus: {
+        params: undefined;
+        response: SpeechCppStatus;
+      };
+      downloadSpeechCppEngine: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      startTtsSpeechCpp: {
+        params: { modelId: string };
+        response: { ok: boolean; error?: string };
+      };
+      stopTtsSpeechCpp: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      deleteTtsSpeechCppModel: {
+        params: { modelId: string };
+        response: { ok: boolean; error?: string };
       };
       // OCR（Tesseract 本地引擎 + VLM 服务）
       listOcrModels: {
@@ -3375,6 +3422,10 @@ export type AppRPC = {
         conversationId: number;
         wavBase64: string;
         format: "wav" | "pcm";
+        /** MOSS 的音频块对齐信息：播放完后按 chunkId 回执（见 ackVoiceCallPlayback）。 */
+        chunkId?: string;
+        runId?: string;
+        turnId?: string;
       };
       voicecallAudioStop: { conversationId: number };
       voicecallError: { conversationId: number; message: string };
@@ -4952,6 +5003,15 @@ const rpcRequests: NonNullable<
   voicecallTestRealtime: async (params) => {
     return VoiceCall.testRealtimeConnection(params ?? {});
   },
+  voicecallAckPlayback: async ({ conversationId, chunkId, runId, turnId }) => {
+    return VoiceCall.ackVoiceCallPlayback({ conversationId, chunkId, runId, turnId });
+  },
+  voicecallSetVideo: async ({ conversationId, source, enabled }) => {
+    return VoiceCall.setVoiceCallVideo({ conversationId, source, enabled });
+  },
+  voicecallPushVideoFrame: async ({ conversationId, source, jpegBase64 }) => {
+    return VoiceCall.pushVoiceCallVideoFrame({ conversationId, source, jpegBase64 });
+  },
 
   openDirectoryDialog: async () => {
     const dirs = await Utils.openFileDialog({
@@ -5480,7 +5540,10 @@ const rpcRequests: NonNullable<
 
   runTTSLocal: async (params) => {
     try {
-      return { record: await TTSLocal.runTTSLocal(params) };
+      // 本地的两个引擎共用一个入口：路由规则只有一份（`tts-engine-route.ts`）——
+      // 调用方点名的模型优先，没点名才听 TTS_LOCAL_ENGINE。界面 / 画布 / Agent
+      // 都不必知道当前用的是 audio.cpp 还是 speech.cpp。
+      return { record: await LocalTtsRoute.runLocalTts(params) };
     } catch (e) {
       logEvent({
         level: "error",
@@ -5489,12 +5552,57 @@ const rpcRequests: NonNullable<
         message: e instanceof Error ? e.message : String(e),
         detail: {
           entry: "runTTSLocal",
+          engine: LocalTtsRoute.resolveLocalTtsEngine(params?.model),
           params: { text: params?.text?.slice(0, 200), model: params?.model },
           error: e,
         },
       });
       throw e;
     }
+  },
+
+  // Local TTS (speech.cpp) —— 与 audio.cpp 并列的第二个本地引擎
+  listTtsSpeechCppModels: async () => {
+    try {
+      return { models: TtsSpeechCpp.listSpeechCppModels() };
+    } catch (e) {
+      return { models: [], error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  getTtsSpeechCppStatus: async () => {
+    try {
+      return await TtsSpeechCpp.getSpeechCppStatus();
+    } catch {
+      return {
+        engineInstalled: false,
+        binaryPath: null,
+        backend: "cpu" as const,
+        active: false,
+        activeModelId: null,
+        activeModelPath: null,
+        version: SPEECHCPP_ENGINE_VERSION,
+      };
+    }
+  },
+
+  downloadSpeechCppEngine: async () =>
+    loggedEngineCall("tts", "tts.speechcpp.engine_download_failed", {}, () =>
+      TtsSpeechCpp.downloadSpeechCppEngine(),
+    ),
+
+  startTtsSpeechCpp: async ({ modelId }) =>
+    loggedEngineCall("tts", "tts.speechcpp.start_failed", { modelId }, () =>
+      TtsSpeechCpp.startSpeechCpp(modelId),
+    ),
+
+  stopTtsSpeechCpp: async () => {
+    await TtsSpeechCpp.stopSpeechCpp();
+    return { ok: true };
+  },
+
+  deleteTtsSpeechCppModel: async ({ modelId }) => {
+    return TtsSpeechCpp.deleteSpeechCppModel(modelId);
   },
 
   // OCR
@@ -7355,6 +7463,9 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
             conversationId: msg.conversationId,
             wavBase64: msg.wavBase64,
             format: msg.format,
+            chunkId: msg.chunkId,
+            runId: msg.runId,
+            turnId: msg.turnId,
           });
           break;
         case "audioStop":

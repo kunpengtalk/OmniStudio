@@ -44,6 +44,36 @@ export const DEFAULT_STEPFUN_REALTIME_MODEL = "stepaudio-3-realtime-preview";
 export const DEFAULT_STEPFUN_REALTIME_VOICE = "linjiajiejie";
 
 /**
+ * MOSS-Live 1.0（`moss-live-1.0`，全双工语音 + 摄像头 / 屏幕画面理解）。
+ *
+ * 协议形状与上面两家**完全不同**，不能按 OpenAI-Realtime 那套发：
+ *   - 握手：连上后先发 `{"action":"attach_session"}`，收到 `session_attached`
+ *     才能发 `session.update`（persona / instructions），再收到 `session.updated`
+ *     且 `data.error` 为空才算就绪 —— 顺序错了服务端直接忽略配置。
+ *   - 音频：16k 上行 / **48k 下行**，裸 PCM S16LE，没有 base64 JSON 包裹；
+ *     行 / 下行都是 WebSocket **二进制帧**。开启 `tagged-v1` 后上行音频要带
+ *     `0x00` 前缀（摄像头 `0x01`、屏幕 `0x02`），下行音频**不带**前缀。
+ *   - 断句：服务端自己判，但**必须持续送静音帧**（实测停止发送后 `input.speech.stopped`
+ *     / 回合结束都等不到）。所以通话期间要一直按 20ms 节奏推，包括不说话的时候。
+ *   - 回执：`response.audio.context` 给出的 chunk_id 要在该块**真正播完后**回
+ *     `playback.chunk.completed`（字段在顶层，不嵌在 data 里），整轮播完回
+ *     `playback.completed`；被打断则回 `playback.stopped`。
+ *   - 音色：由服务端人格决定，没有 voice 参数 —— 页面上不该再让人填音色。
+ */
+export const MOSS_REALTIME_MODELS = ["moss-live-1.0"] as const;
+export const MOSS_REALTIME_BASE_URL = "wss://api.mosi.cn/v1/realtime";
+export const DEFAULT_MOSS_REALTIME_MODEL = "moss-live-1.0";
+/** MOSS-Live 没有 voice 参数（音色来自 persona），这个值只用于界面占位。 */
+export const DEFAULT_MOSS_REALTIME_VOICE = "persona";
+
+/**
+ * MOSS 的域名族：产品 API 是 `api.mosi.cn`（注意是 mosi 不是 moss），
+ * 平台站是 `moss.cn` / `platform.moss.cn`。两种拼写都要认，否则「选了 MOSS
+ * 却推不出实时端点」会让用户去手填一个 wss 地址。
+ */
+const MOSS_API_HOSTS = /^(?:(?:api|platform)\.)?mos[si]\.cn$/i;
+
+/**
  * 实时语音的协议方言。两家都走 OpenAI-Realtime 那套事件名（session.update /
  * input_audio_buffer.append / response.audio.delta），但**字段取值不一样**，
  * 按同一套发过去会以"连上了但没声音 / 语速不对"告终：
@@ -51,14 +81,14 @@ export const DEFAULT_STEPFUN_REALTIME_VOICE = "linjiajiejie";
  *   - 断句：百炼 `smart_turn` / `semantic_vad`，阶跃只有 `server_vad`；
  *   - 采样率：百炼上行 16k，阶跃上行 24k（喂错会被当成另一种语速）。
  */
-export type RealtimeDialect = "dashscope" | "stepfun";
+export type RealtimeDialect = "dashscope" | "stepfun" | "moss";
 
 /**
  * 从厂商地址（HTTP 或 ws）认出实时语音方言。
  *
- * 地址优先：自建中转把阶跃 / 百炼的地址原样透传时也认得出。认不出地址再看模型名
- * （用户手填了中转地址但模型仍是 `stepaudio-*` / `qwen-*`），最后按百炼处理 ——
- * 那是本功能最初的实现，不能把老配置的默认行为改掉。
+ * 地址优先：自建中转把阶跃 / 百炼 / MOSS 的地址原样透传时也认得出。认不出地址再看
+ * 模型名（用户手填了中转地址但模型仍是 `stepaudio-*` / `qwen-*` / `moss-*`），
+ * 最后按百炼处理 —— 那是本功能最初的实现，不能把老配置的默认行为改掉。
  */
 export function realtimeDialectFor(opts: {
   baseUrl?: string | null;
@@ -73,10 +103,12 @@ export function realtimeDialectFor(opts: {
       host = "";
     }
     if (/\.stepfun\.com$/i.test(host)) return "stepfun";
+    if (MOSS_API_HOSTS.test(host)) return "moss";
     if (DASHSCOPE_HOSTS.test(host)) return "dashscope";
   }
   const model = (opts.model ?? "").trim().toLowerCase();
   if (/stepaudio|step-audio|step-1o-audio/.test(model)) return "stepfun";
+  if (/^moss-/.test(model)) return "moss";
   return "dashscope";
 }
 
@@ -100,6 +132,8 @@ export function realtimeBaseUrlForProvider(providerBaseUrl: string | null | unde
     return null;
   }
   if (/\.stepfun\.com$/i.test(host)) return STEPFUN_REALTIME_BASE_URL;
+  // MOSS：平台站地址与产品 API 地址都能推出同一条 wss 端点（`api.mosi.cn/v1/realtime`）。
+  if (MOSS_API_HOSTS.test(host)) return MOSS_REALTIME_BASE_URL;
   // 主机原样带过来：国际站（qwencloud.com）是 `dashscope-intl.…`，路径与国内一致，
   // 写死国内主机等于把国际站用户挡在"必须手填 wss 地址"那一档。
   if (!DASHSCOPE_HOSTS.test(host)) return null;
@@ -121,30 +155,47 @@ export function realtimeBaseUrlForProvider(providerBaseUrl: string | null | unde
  */
 export function isRealtimeModelId(id: string): boolean {
   if (/realtime/i.test(id)) return true;
+  // MOSS-Live：语音 + 画面全双工，名字里既没有 realtime 也没有 audio。
+  if (/^moss-live/i.test(id)) return true;
   return /(^|[-_])audio([-_]|$)/i.test(id);
 }
 
-/** 上行音频采样率（PCM16）：两家不同，喂错会被当成另一种语速。 */
+/** 上行音频采样率（PCM16）：三家不同，喂错会被当成另一种语速。 */
 export function realtimeInputRate(dialect: RealtimeDialect): number {
-  return dialect === "stepfun" ? 24000 : 16000;
+  if (dialect === "stepfun") return 24000;
+  // MOSS 文档明确 16k 上行 / 48k 下行。
+  return 16000;
 }
 
-/** 下行音频采样率（PCM16）：两家都是 24k，播放端用它建 AudioBuffer。 */
+/** 下行音频采样率（PCM16）：MOSS 是 48k，另两家 24k。播放端用它建 AudioBuffer。 */
 export const REALTIME_OUTPUT_RATE = 24000;
+export const MOSS_OUTPUT_RATE = 48000;
+
+/** 该方言的下行播放采样率（切厂商时播放端要跟着换，喂错就是变调变快）。 */
+export function realtimeOutputRate(dialect: RealtimeDialect): number {
+  return dialect === "moss" ? MOSS_OUTPUT_RATE : REALTIME_OUTPUT_RATE;
+}
 
 /** 没配过音色时该用的默认音色（跟随方言，不能把百炼的音色发给阶跃）。 */
 export function realtimeDefaultVoice(dialect: RealtimeDialect): string {
-  return dialect === "stepfun" ? DEFAULT_STEPFUN_REALTIME_VOICE : DEFAULT_REALTIME_VOICE;
+  if (dialect === "stepfun") return DEFAULT_STEPFUN_REALTIME_VOICE;
+  // MOSS-Live 没有 voice 参数（音色来自 persona），占位值不参与握手。
+  if (dialect === "moss") return DEFAULT_MOSS_REALTIME_VOICE;
+  return DEFAULT_REALTIME_VOICE;
 }
 
 /** 没配过模型时该用的默认模型（跟随方言）。 */
 export function realtimeDefaultModel(dialect: RealtimeDialect): string {
-  return dialect === "stepfun" ? DEFAULT_STEPFUN_REALTIME_MODEL : DEFAULT_REALTIME_MODEL;
+  if (dialect === "stepfun") return DEFAULT_STEPFUN_REALTIME_MODEL;
+  if (dialect === "moss") return DEFAULT_MOSS_REALTIME_MODEL;
+  return DEFAULT_REALTIME_MODEL;
 }
 
 /** 方言对应的实时端点（用户没手填地址时的兜底）。 */
 export function realtimeBaseUrl(dialect: RealtimeDialect): string {
-  return dialect === "stepfun" ? STEPFUN_REALTIME_BASE_URL : DEFAULT_REALTIME_BASE_URL;
+  if (dialect === "stepfun") return STEPFUN_REALTIME_BASE_URL;
+  if (dialect === "moss") return MOSS_REALTIME_BASE_URL;
+  return DEFAULT_REALTIME_BASE_URL;
 }
 
 /**
@@ -161,17 +212,26 @@ export function isPresetRealtimeEndpoint(url: string | null | undefined): boolea
   const v = (url ?? "").trim();
   if (!v) return false;
   if (v === STEPFUN_REALTIME_BASE_URL) return true;
+  if (v === MOSS_REALTIME_BASE_URL) return true;
   let host: string;
   try {
     host = new URL(v.replace(/^ws/i, "http")).host;
   } catch {
     return false;
   }
+  if (MOSS_API_HOSTS.test(host)) return v === MOSS_REALTIME_BASE_URL;
   if (!DASHSCOPE_HOSTS.test(host)) return false;
   return v === dashscopeRealtimeUrl(host);
 }
 
 /** 方言的模型候选（厂商清单里一条实时模型都没有时，至少能选到这几个）。 */
 export function realtimeModelsFor(dialect: RealtimeDialect): readonly string[] {
-  return dialect === "stepfun" ? STEPFUN_REALTIME_MODELS : REALTIME_MODELS;
+  if (dialect === "stepfun") return STEPFUN_REALTIME_MODELS;
+  if (dialect === "moss") return MOSS_REALTIME_MODELS;
+  return REALTIME_MODELS;
+}
+
+/** 该方言是否有「音色」这个概念（MOSS 由 persona 决定，页面上不该让人填）。 */
+export function realtimeDialectHasVoice(dialect: RealtimeDialect): boolean {
+  return dialect !== "moss";
 }

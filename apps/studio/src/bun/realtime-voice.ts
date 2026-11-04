@@ -52,6 +52,8 @@ export type RealtimeProviderConfig = {
   baseUrl: string;
   model: string;
   voice: string;
+  /** 当前方言（百炼 / 阶跃 / MOSS）。前端按它决定音色字段、采样率与提示文案。 */
+  dialect: RealtimeDialect;
   /** 云端是否已配好（有 API Key 即可走云端）。 */
   configured: boolean;
 };
@@ -92,6 +94,7 @@ export function getRealtimeProviderConfig(): RealtimeProviderConfig {
     baseUrl,
     model: (getSetting("VOICE_CALL_REALTIME_MODEL") || realtimeDefaultModel(dialect)).trim(),
     voice: (getSetting("VOICE_CALL_REALTIME_VOICE") || realtimeDefaultVoice(dialect)).trim(),
+    dialect,
     configured: !!apiKey,
   };
 }
@@ -162,8 +165,8 @@ export type RealtimeVoiceEvent =
   | { type: "userText"; text: string }
   /** 助手流式正文（response.audio_transcript.delta）。 */
   | { type: "partial"; text: string }
-  /** 助手音频块（PCM16 24k 单声道）。 */
-  | { type: "audio"; pcm: Buffer }
+  /** 助手音频块（PCM16；百炼 / 阶跃 24k，MOSS 48k）。 */
+  | { type: "audio"; pcm: Buffer; chunkId?: string; runId?: string; turnId?: string }
   /** 一回合开始（服务端开始生成）。 */
   | { type: "turnStart" }
   /** 一回合结束（含本回合助手全文）。 */
@@ -171,6 +174,11 @@ export type RealtimeVoiceEvent =
   /** 服务端 VAD 检测到用户开始说话（speaking 期打断靠它触发）。 */
   | { type: "speechStart" }
   | { type: "speechEnd" }
+  /**
+   * 服务端要求停止播放（MOSS 的 `response.audio.stop` / `response.interrupted`）。
+   * 与 `audio` 不同，这条要求前端**立即**停声（`audioStop` 通道）。
+   */
+  | { type: "audioStop" }
   | { type: "error"; message: string };
 
 export type RealtimeVoiceConfig = {
@@ -533,6 +541,10 @@ export type RealtimeTestResult = {
  * 用给定（或已保存的）配置开一条真实 WebSocket 连接，验证 API Key / 地址 / 模型
  * 是否可用。能收到 onopen 即代表鉴权通过（两家都在升级阶段校验 token，
  * key 无效时直接回非 101 状态码、进 onclose）。测试完立即关闭连接。
+ *
+ * **MOSS 例外**：它的鉴权在握手阶段也可能通过，但配置错误是在
+ * `session.updated.data.error` 里回的，所以 MOSS 要等这一步才算真正可用 ——
+ * 只看 onopen 会把「Key 对、模型名写错」测成成功，拨号时才炸。
  */
 export function testRealtimeConnection(
   cfg?: Partial<Pick<RealtimeProviderConfig, "baseUrl" | "model">>,
@@ -547,6 +559,7 @@ export function testRealtimeConnection(
       resolve({ ok: false, error: "请先在「设置 → 云端模型」里为所选厂商填写 API Key" });
       return;
     }
+    const dialect = realtimeDialectFor({ baseUrl, model });
     const url = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}model=${encodeURIComponent(model)}`;
     let ws: WebSocket;
     try {
@@ -575,7 +588,51 @@ export function testRealtimeConnection(
       () => finish({ ok: false, error: "连接超时（10s）：请检查网络与 WebSocket 地址" }),
       REALTIME_TEST_TIMEOUT_MS,
     );
-    ws.onopen = () => finish({ ok: true });
+    let attached = false;
+    ws.onopen = () => {
+      // MOSS 必须先 attach_session 才能配会话；另两家 onopen 即代表鉴权通过。
+      if (dialect === "moss") {
+        try {
+          ws.send(JSON.stringify({ action: "attach_session" }));
+        } catch {
+          finish({ ok: false, error: "发送 attach_session 失败" });
+        }
+        return;
+      }
+      finish({ ok: true });
+    };
+    ws.onmessage = (ev: { data: unknown }) => {
+      if (dialect !== "moss" || typeof ev.data !== "string") return;
+      let msg: { action?: string; data?: Record<string, unknown> };
+      try {
+        msg = JSON.parse(ev.data) as { action?: string; data?: Record<string, unknown> };
+      } catch {
+        return;
+      }
+      if (msg.action === "session_attached") {
+        attached = true;
+        // 只发一份最小配置：测的是「这个模型能不能配好」，不是内容。
+        try {
+          ws.send(JSON.stringify({ action: "session.update", session: { instructions: "连接测试" } }));
+        } catch {
+          finish({ ok: false, error: "发送 session.update 失败" });
+        }
+        return;
+      }
+      if (msg.action === "session.updated") {
+        const error = typeof msg.data?.error === "string" ? msg.data.error : "";
+        if (error) finish({ ok: false, error: `会话配置失败：${error}` });
+        else finish({ ok: true });
+        return;
+      }
+      if (msg.action === "error") {
+        const err = (msg.data?.error ?? {}) as Record<string, unknown>;
+        finish({
+          ok: false,
+          error: String(err.message ?? "") || `已连接但服务端报错${attached ? "" : "（attach 阶段）"}`,
+        });
+      }
+    };
     ws.onerror = () => {
       // Bun 无可读消息，拒绝细节由 onclose 承担。
     };

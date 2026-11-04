@@ -1,6 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AudioLinesIcon, XIcon, Loader2Icon, FileAudioIcon, SparklesIcon, SquareIcon, PlayIcon, CircleIcon, ServerIcon, DownloadCloudIcon, GlobeIcon, SaveIcon, CpuIcon, ClipboardPasteIcon } from "lucide-react";
+import {
+  AudioLinesIcon,
+  XIcon,
+  Loader2Icon,
+  FileAudioIcon,
+  SparklesIcon,
+  SquareIcon,
+  PlayIcon,
+  CircleIcon,
+  ServerIcon,
+  DownloadCloudIcon,
+  GlobeIcon,
+  SaveIcon,
+  CpuIcon,
+  ClipboardPasteIcon,
+} from "lucide-react";
 import { rpcClient } from "@lib/rpc";
 import { CloudModelSelect } from "@components/cloud-model-select";
 import { ResultError, ResultEmpty } from "@components/media-result";
@@ -13,13 +28,27 @@ import { Spinner } from "@ui/spinner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { useT } from "@stores/ui-lang";
 import { AUDIOCPP_REPO, AUDIOCPP_LANG_LABELS } from "@/shared/audiocpp";
+import { SPEECHCPP_LANG_LABELS, speechCppLicenseUrl } from "@/shared/speechcpp";
 import { detectReferenceAudioSupport } from "@/shared/tts-reference-audio";
 import { audioVendorFor } from "@/shared/tts-voices";
 import { VendorVoiceField } from "@components/vendor-voice-select";
 import type { TtsLocalModelInfo } from "../../../bun/tts-local";
+import type { SpeechCppModelInfo } from "../../../bun/tts-speechcpp";
 import type { VoiceRecordRow } from "../../../bun/voice";
 import { DEFAULT_VOICE_BASE_URL } from "../voice-provider-presets";
-import { PlayAudio, RecordHistoryBar, ResultPanel, TtsLoading, SettingsValues, useClones, EdgeVoicePicker, LocalModelRow, LocalVoicePicker } from "./parts";
+import {
+  PlayAudio,
+  RecordHistoryBar,
+  ResultPanel,
+  TtsLoading,
+  SettingsValues,
+  useClones,
+  EdgeVoicePicker,
+  LocalModelRow,
+  LocalVoicePicker,
+  SpeechCppModelRow,
+  SpeechCppVoicePicker,
+} from "./parts";
 import { useFocusedVoiceRecord } from "./use-focused-record";
 
 export function TtsTab() {
@@ -37,12 +66,19 @@ export function TtsTab() {
   /** 左侧历史里点开的那条记录：右侧这时显示它，而不是刚合成的那份。 */
   const { record: historyRecord, setFocusRecordId } = useFocusedVoiceRecord();
 
-  // ---------- 本地引擎 (audio.cpp) ----------
+  // ---------- 本地引擎：audio.cpp / speech.cpp 二选一 ----------
+  // 视图态；真正用哪个引擎由模型卡上的「启动」写进 TTS_LOCAL_ENGINE 决定。
+  const [localEngine, setLocalEngine] = useState<"audiocpp" | "speechcpp">("audiocpp");
   const [localModelId, setLocalModelId] = useState("");
   const [localVoice, setLocalVoice] = useState("");
   const [localEmotion, setLocalEmotion] = useState("neutral");
   const [localInstruct, setLocalInstruct] = useState("");
   const [localLanguage, setLocalLanguage] = useState("");
+
+  // ---------- speech.cpp 引擎 ----------
+  const [speechCppModelId, setSpeechCppModelId] = useState("");
+  const [speechCppVoice, setSpeechCppVoice] = useState("");
+  const [speechCppInstruct, setSpeechCppInstruct] = useState("");
 
   const { data: localStatus } = useQuery({
     queryKey: ["tts-local-status"],
@@ -56,12 +92,30 @@ export function TtsTab() {
   });
   const localModels = localModelsData?.models ?? [];
 
+  const { data: speechCppStatus } = useQuery({
+    queryKey: ["tts-speechcpp-status"],
+    queryFn: () => rpcClient.getTtsSpeechCppStatus(),
+    refetchInterval: 2500,
+  });
+
+  const { data: speechCppModelsData } = useQuery({
+    queryKey: ["tts-speechcpp-models"],
+    queryFn: () => rpcClient.listTtsSpeechCppModels(),
+  });
+  const speechCppModels = speechCppModelsData?.models ?? [];
+
   // 有正在使用的模型时自动选中；否则选中已启动的模型。
   useEffect(() => {
     if (localStatus?.activeModelId) {
       setLocalModelId((cur) => cur || localStatus.activeModelId!);
     }
   }, [localStatus?.activeModelId]);
+
+  useEffect(() => {
+    if (speechCppStatus?.activeModelId) {
+      setSpeechCppModelId((cur) => cur || speechCppStatus.activeModelId!);
+    }
+  }, [speechCppStatus?.activeModelId]);
 
   useEffect(() => {
     if (!localModelId) {
@@ -71,39 +125,56 @@ export function TtsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [localModels?.length]);
 
-  // 根据已保存的设置恢复上次选择（合成模型 + 音色），仅执行一次。
+  useEffect(() => {
+    if (!speechCppModelId) {
+      const active = speechCppModels.find((m) => m.active);
+      if (active) setSpeechCppModelId(active.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speechCppModels?.length]);
+
+  // 根据已保存的设置恢复上次选择（合成模型 + 音色 + 本地引擎），仅执行一次。
   const sourceHydrated = useRef(false);
   useEffect(() => {
     if (!settings.loaded || sourceHydrated.current || !localModelsData) return;
     sourceHydrated.current = true;
     setEdgeVoice(settings.edgeVoice);
     setVoice(settings.ttsVoice);
+    // 上次用的是哪个本地引擎：由 TTS_LOCAL_ENGINE 决定（speech.cpp 的模型 id 只在它自己那份清单里）。
+    setLocalEngine(settings.ttsLocalEngine === "speech.cpp" ? "speechcpp" : "audiocpp");
+    if (settings.ttsSpeechCppModel) setSpeechCppModelId(settings.ttsSpeechCppModel);
     const m = settings.ttsModel.trim();
-    if (m && m !== "edge-tts" && localModels.some((x) => x.id === m)) {
+    const knownLocal =
+      localModels.some((x) => x.id === m) || speechCppModels.some((x) => x.id === m);
+    if (m && m !== "edge-tts" && knownLocal) {
       setSource("local");
-      setLocalModelId(m);
+      if (localModels.some((x) => x.id === m)) setLocalModelId(m);
+      else setSpeechCppModelId(m);
     } else if (m && m !== "edge-tts") {
       setSource("compat");
       setModel(m);
     } else {
       setSource("edge");
     }
-  }, [settings, localModels, localModelsData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings, localModels, speechCppModels, localModelsData]);
 
-  // 顶部切换推理引擎（本地 audio.cpp / Edge TTS / OpenAI 兼容服务）。
+  // 顶部切换推理引擎（本地引擎 / Edge TTS / OpenAI 兼容服务）。
   const switchSource = (s: "local" | "edge" | "compat") => {
     setLocalError(undefined);
     setSource(s);
     if (s === "edge") {
       void rpcClient.updateSettings({ settings: { TTS_MODEL: "edge-tts" } });
     } else if (s === "local") {
-      if (localModelId) void rpcClient.updateSettings({ settings: { TTS_MODEL: localModelId } });
+      const active = localEngine === "speechcpp" ? speechCppModelId : localModelId;
+      if (active) void rpcClient.updateSettings({ settings: { TTS_MODEL: active } });
     } else if (s === "compat") {
       if (model.trim()) void rpcClient.updateSettings({ settings: { TTS_MODEL: model.trim() } });
     }
   };
 
   const selectedLocal = localModels.find((m) => m.id === localModelId);
+  const selectedSpeechCpp = speechCppModels.find((m) => m.id === speechCppModelId);
 
   // 切换模型时重置音色/描述/语言为默认值。
   useEffect(() => {
@@ -123,9 +194,34 @@ export function TtsTab() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedLocal?.id]);
 
+  // speech.cpp 的预设音色同样在换模型时补一个默认值。
+  useEffect(() => {
+    if (!selectedSpeechCpp) return;
+    if (
+      selectedSpeechCpp.voiceKind === "preset" &&
+      !speechCppVoice &&
+      selectedSpeechCpp.defaultVoice
+    ) {
+      setSpeechCppVoice(selectedSpeechCpp.defaultVoice);
+    }
+    if (
+      localLanguage &&
+      selectedSpeechCpp.languageSupported &&
+      !(selectedSpeechCpp.languageCodes ?? []).includes(localLanguage)
+    ) {
+      setLocalLanguage("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSpeechCpp?.id]);
+
   const refreshLocal = () => {
     queryClient.invalidateQueries({ queryKey: ["tts-local-models"] });
     queryClient.invalidateQueries({ queryKey: ["tts-local-status"] });
+  };
+
+  const refreshSpeechCpp = () => {
+    queryClient.invalidateQueries({ queryKey: ["tts-speechcpp-models"] });
+    queryClient.invalidateQueries({ queryKey: ["tts-speechcpp-status"] });
   };
 
   const downloadEngine = useMutation({
@@ -174,12 +270,71 @@ export function TtsTab() {
     },
   });
 
+  // ---------- speech.cpp ----------
+  const downloadSpeechCppEngine = useMutation({
+    mutationFn: () => rpcClient.downloadSpeechCppEngine(),
+    onSuccess: (r) => {
+      setLocalError(r.ok ? undefined : r.error);
+      refreshSpeechCpp();
+    },
+    onError: (e) => setLocalError(String(e)),
+  });
+
+  const downloadSpeechCppModel = useMutation({
+    mutationFn: (m: SpeechCppModelInfo) =>
+      rpcClient.startModelDownload({
+        // 每个模型一个仓库：文件名在多个仓库里重名，只按文件名下会串到别的模型上。
+        repo: m.repo,
+        fileName: m.repoPath,
+        category: "tts",
+        source: "huggingface",
+      }),
+    onSuccess: refreshSpeechCpp,
+  });
+
+  const startSpeechCppModel = useMutation({
+    mutationFn: (m: SpeechCppModelInfo) => rpcClient.startTtsSpeechCpp({ modelId: m.id }),
+    onSuccess: (r, m) => {
+      setLocalError(r.ok ? undefined : r.error);
+      if (r.ok) {
+        setSpeechCppModelId(m.id);
+        setSpeechCppVoice("");
+        setSpeechCppInstruct("");
+        refreshLocal();
+      }
+      refreshSpeechCpp();
+    },
+  });
+
+  const stopSpeechCppEngine = useMutation({
+    mutationFn: () => rpcClient.stopTtsSpeechCpp(),
+    onSuccess: () => {
+      refreshSpeechCpp();
+      refreshLocal();
+    },
+  });
+
+  const deleteSpeechCppModel = useMutation({
+    mutationFn: (m: SpeechCppModelInfo) => rpcClient.deleteTtsSpeechCppModel({ modelId: m.id }),
+    onSuccess: (r) => {
+      if (!r.ok) setLocalError(t("voice.engine.deleteFailed"));
+      refreshSpeechCpp();
+    },
+  });
+
   const localPending =
     downloadEngine.isPending ||
     downloadLocalModel.isPending ||
     startLocalModel.isPending ||
     stopLocalEngine.isPending ||
     deleteLocalModel.isPending;
+
+  const speechCppPending =
+    downloadSpeechCppEngine.isPending ||
+    downloadSpeechCppModel.isPending ||
+    startSpeechCppModel.isPending ||
+    stopSpeechCppEngine.isPending ||
+    deleteSpeechCppModel.isPending;
 
   // ---------- OpenAI 兼容 provider ----------
   const { data: providerData } = useQuery({
@@ -253,14 +408,24 @@ export function TtsTab() {
   const generate = useMutation({
     mutationFn: () => {
       if (source === "local") {
-        return rpcClient.runTTSLocal({
-          text,
-          model: localModelId || undefined,
-          voice: localVoice || undefined,
-          emotion: localEmotion,
-          language: localLanguage || undefined,
-          instruct: localInstruct || undefined,
-        });
+        // 两个本地引擎共用一个 RPC（后端按 TTS_LOCAL_ENGINE 分流），模型 id 与音色
+        // 都取当前那套引擎的状态 —— 传错一侧的 id，后端会报"未知模型"。
+        return localEngine === "speechcpp"
+          ? rpcClient.runTTSLocal({
+              text,
+              model: speechCppModelId || undefined,
+              voice: speechCppVoice || undefined,
+              language: localLanguage || undefined,
+              instruct: speechCppInstruct || undefined,
+            })
+          : rpcClient.runTTSLocal({
+              text,
+              model: localModelId || undefined,
+              voice: localVoice || undefined,
+              emotion: localEmotion,
+              language: localLanguage || undefined,
+              instruct: localInstruct || undefined,
+            });
       }
       return source === "edge"
         ? rpcClient.runTTSEdge({ text, voice: edgeVoice })
@@ -277,7 +442,8 @@ export function TtsTab() {
       if (source === "edge") {
         void rpcClient.updateSettings({ settings: { TTS_EDGE_VOICE: edgeVoice } });
       } else if (source === "local") {
-        if (localModelId) void rpcClient.updateSettings({ settings: { TTS_MODEL: localModelId } });
+        const active = localEngine === "speechcpp" ? speechCppModelId : localModelId;
+        if (active) void rpcClient.updateSettings({ settings: { TTS_MODEL: active } });
       } else if (source === "compat") {
         // 用参考音频合成时，音色来源是参考音频本身，不要回写默认 alloy。
         const toSave: Record<string, string> = {};
@@ -314,59 +480,169 @@ export function TtsTab() {
 
           {source === "local" && (
             <>
-              {/* 引擎状态 */}
-              <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
-                <CpuIcon className="size-4 text-muted-foreground" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium">{t("voice.local.engine")}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {!localStatus?.engineInstalled
-                      ? t("voice.local.engineNone")
-                      : `${t("voice.local.engineReady")}${localStatus.binaryPath ? ` · ${localStatus.binaryPath}` : ""}`}
-                  </p>
-                </div>
-                {!localStatus?.engineInstalled ? (
-                  <Button size="sm" disabled={downloadEngine.isPending} onClick={() => downloadEngine.mutate()}>
-                    {downloadEngine.isPending ? (
-                      <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                    ) : (
-                      <DownloadCloudIcon data-icon="inline-start" />
-                    )}
-                    {downloadEngine.isPending ? t("voice.local.downloadingEngine") : t("voice.local.downloadEngine")}
-                  </Button>
-                ) : (
-                  <Badge variant="default" className="gap-1 text-[10px]">
-                    <CircleIcon className="size-2.5 fill-current" />
-                    {t("voice.local.engineReady")}
-                  </Badge>
-                )}
+              {/* 本地引擎二选一：两套引擎各自有独立的二进制与模型清单（切换不影响对方已下的模型） */}
+              <div>
+                <Label className="mb-1.5 block text-xs">{t("voice.local.engineSelect")}</Label>
+                <SegmentedControl
+                  variant="attached"
+                  value={localEngine}
+                  onChange={(v) => {
+                    setLocalEngine(v);
+                    setLocalError(undefined);
+                  }}
+                  options={[
+                    {
+                      value: "audiocpp",
+                      label: t("voice.local.engineAcp"),
+                      icon: <CpuIcon className="size-3.5" />,
+                    },
+                    {
+                      value: "speechcpp",
+                      label: "speech.cpp",
+                      icon: <AudioLinesIcon className="size-3.5" />,
+                    },
+                  ]}
+                />
               </div>
 
-              {/* 模型列表（下载管理） */}
-              <div>
-                <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
-                  <AudioLinesIcon className="size-4 text-muted-foreground" />
-                  {t("voice.local.models")}
-                  <span className="text-xs font-normal text-muted-foreground">
-                    {t("voice.local.modelsHint")}
-                  </span>
-                </h3>
-                <div className="flex flex-col gap-2">
-                  {localModels.map((m) => (
-                    <LocalModelRow
-                      key={m.id}
-                      model={m}
-                      status={localStatus}
-                      pending={localPending}
-                      showControls={false}
-                      onDownload={(mm) => downloadLocalModel.mutate(mm)}
-                      onStart={(mm) => startLocalModel.mutate(mm)}
-                      onStop={() => stopLocalEngine.mutate()}
-                      onDelete={(mm) => deleteLocalModel.mutate(mm)}
-                    />
-                  ))}
-                </div>
-              </div>
+              {localEngine === "audiocpp" && (
+                <>
+                  {/* 引擎状态 */}
+                  <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
+                    <CpuIcon className="size-4 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium">{t("voice.local.engine")}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {!localStatus?.engineInstalled
+                          ? t("voice.local.engineNone")
+                          : `${t("voice.local.engineReady")}${localStatus.binaryPath ? ` · ${localStatus.binaryPath}` : ""}`}
+                      </p>
+                    </div>
+                    {!localStatus?.engineInstalled ? (
+                      <Button
+                        size="sm"
+                        disabled={downloadEngine.isPending}
+                        onClick={() => downloadEngine.mutate()}
+                      >
+                        {downloadEngine.isPending ? (
+                          <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                        ) : (
+                          <DownloadCloudIcon data-icon="inline-start" />
+                        )}
+                        {downloadEngine.isPending
+                          ? t("voice.local.downloadingEngine")
+                          : t("voice.local.downloadEngine")}
+                      </Button>
+                    ) : (
+                      <Badge variant="default" className="gap-1 text-[10px]">
+                        <CircleIcon className="size-2.5 fill-current" />
+                        {t("voice.local.engineReady")}
+                      </Badge>
+                    )}
+                  </div>
+
+                  {/* 模型列表（下载管理） */}
+                  <div>
+                    <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
+                      <AudioLinesIcon className="size-4 text-muted-foreground" />
+                      {t("voice.local.models")}
+                      <span className="text-xs font-normal text-muted-foreground">
+                        {t("voice.local.modelsHint")}
+                      </span>
+                    </h3>
+                    <div className="flex flex-col gap-2">
+                      {localModels.map((m) => (
+                        <LocalModelRow
+                          key={m.id}
+                          model={m}
+                          status={localStatus}
+                          pending={localPending}
+                          showControls={false}
+                          onDownload={(mm) => downloadLocalModel.mutate(mm)}
+                          onStart={(mm) => startLocalModel.mutate(mm)}
+                          onStop={() => stopLocalEngine.mutate()}
+                          onDelete={(mm) => deleteLocalModel.mutate(mm)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {localEngine === "speechcpp" && (
+                <>
+                  {/* 引擎状态（speech.cpp 自带二进制，与 audio.cpp 分开装） */}
+                  <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
+                    <AudioLinesIcon className="size-4 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium">{t("voice.speechCpp.engine")}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {!speechCppStatus?.engineInstalled
+                          ? t("voice.speechCpp.engineNone")
+                          : `${t("voice.speechCpp.engineReady")}${speechCppStatus.binaryPath ? ` · ${speechCppStatus.binaryPath}` : ""}`}
+                      </p>
+                    </div>
+                    {!speechCppStatus?.engineInstalled ? (
+                      <Button
+                        size="sm"
+                        disabled={downloadSpeechCppEngine.isPending}
+                        onClick={() => downloadSpeechCppEngine.mutate()}
+                      >
+                        {downloadSpeechCppEngine.isPending ? (
+                          <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                        ) : (
+                          <DownloadCloudIcon data-icon="inline-start" />
+                        )}
+                        {downloadSpeechCppEngine.isPending
+                          ? t("voice.local.downloadingEngine")
+                          : t("voice.local.downloadEngine")}
+                      </Button>
+                    ) : (
+                      <Badge variant="default" className="gap-1 text-[10px]">
+                        <CircleIcon className="size-2.5 fill-current" />
+                        {t("voice.speechCpp.engineReady")}
+                      </Badge>
+                    )}
+                  </div>
+
+                  {/* 模型列表（下载管理） */}
+                  <div>
+                    <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
+                      <AudioLinesIcon className="size-4 text-muted-foreground" />
+                      {t("voice.speechCpp.models")}
+                      <span className="text-xs font-normal text-muted-foreground">
+                        {t("voice.speechCpp.modelsHint")}
+                      </span>
+                    </h3>
+                    <div className="flex flex-col gap-2">
+                      {speechCppModels.map((m) => (
+                        <SpeechCppModelRow
+                          key={m.id}
+                          model={m}
+                          status={speechCppStatus}
+                          pending={speechCppPending}
+                          onDownload={(mm) => downloadSpeechCppModel.mutate(mm)}
+                          onStart={(mm) => startSpeechCppModel.mutate(mm)}
+                          onStop={() => stopSpeechCppEngine.mutate()}
+                          onDelete={(mm) => deleteSpeechCppModel.mutate(mm)}
+                        />
+                      ))}
+                    </div>
+                    <a
+                      href={
+                        selectedSpeechCpp
+                          ? speechCppLicenseUrl(selectedSpeechCpp)
+                          : "https://github.com/nyosegawa/speech.cpp"
+                      }
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-1.5 inline-block text-[10px] text-muted-foreground underline underline-offset-2"
+                    >
+                      {t("voice.speechCpp.license")}
+                    </a>
+                  </div>
+                </>
+              )}
             </>
           )}
 
@@ -437,125 +713,263 @@ export function TtsTab() {
 
           {source === "local" && (
             <>
-              {/* 当前引擎：状态 + 选择模型 + 启动/停止 */}
-              <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="flex items-center gap-1.5 text-xs font-medium">
-                    <CpuIcon className="size-3.5 text-primary" />
-                    {t("voice.local.engine")}
-                  </span>
-                  {localStatus?.active ? (
-                    <Badge variant="default" className="gap-1 text-[10px]">
-                      <CircleIcon className="size-2.5 fill-current" />
-                      {t("voice.local.running")}
-                    </Badge>
-                  ) : localStatus?.engineInstalled ? (
-                    <Badge variant="secondary" className="gap-1 text-[10px]">
-                      <CircleIcon className="size-2.5 fill-current" />
-                      {t("voice.local.notStarted")}
-                    </Badge>
-                  ) : null}
-                </div>
-
-                <div>
-                  <Label className="mb-1 block text-xs">{t("voice.local.select")}</Label>
-                  {localModels.filter((m) => m.downloaded).length === 0 ? (
-                    <div className="flex items-center justify-center rounded-lg border border-dashed px-4 py-6 text-xs text-muted-foreground">
-                      {t("voice.local.empty")}
+              {localEngine === "audiocpp" && (
+                <>
+                  {/* 当前引擎：状态 + 选择模型 + 启动/停止 */}
+                  <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5 text-xs font-medium">
+                        <CpuIcon className="size-3.5 text-primary" />
+                        {t("voice.local.engine")}
+                      </span>
+                      {localStatus?.active ? (
+                        <Badge variant="default" className="gap-1 text-[10px]">
+                          <CircleIcon className="size-2.5 fill-current" />
+                          {t("voice.local.running")}
+                        </Badge>
+                      ) : localStatus?.engineInstalled ? (
+                        <Badge variant="secondary" className="gap-1 text-[10px]">
+                          <CircleIcon className="size-2.5 fill-current" />
+                          {t("voice.local.notStarted")}
+                        </Badge>
+                      ) : null}
                     </div>
-                  ) : (
-                    <Select
-                      value={localModelId}
-                      onValueChange={(v) => {
-                        setLocalModelId(v);
-                        setLocalError(undefined);
-                      }}
-                    >
-                      <SelectTrigger className="h-8 w-full text-xs">
-                        <SelectValue placeholder={t("voice.local.select")} />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {localModels
-                          .filter((m) => m.downloaded)
-                          .map((m) => (
-                            <SelectItem key={m.id} value={m.id}>
-                              {m.name}
-                              {m.active ? ` · ${t("voice.local.active")}` : ""}
+
+                    <div>
+                      <Label className="mb-1 block text-xs">{t("voice.local.select")}</Label>
+                      {localModels.filter((m) => m.downloaded).length === 0 ? (
+                        <div className="flex items-center justify-center rounded-lg border border-dashed px-4 py-6 text-xs text-muted-foreground">
+                          {t("voice.local.empty")}
+                        </div>
+                      ) : (
+                        <Select
+                          value={localModelId}
+                          onValueChange={(v) => {
+                            setLocalModelId(v);
+                            setLocalError(undefined);
+                          }}
+                        >
+                          <SelectTrigger className="h-8 w-full text-xs">
+                            <SelectValue placeholder={t("voice.local.select")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {localModels
+                              .filter((m) => m.downloaded)
+                              .map((m) => (
+                                <SelectItem key={m.id} value={m.id}>
+                                  {m.name}
+                                  {m.active ? ` · ${t("voice.local.active")}` : ""}
+                                </SelectItem>
+                              ))}
+                          </SelectContent>
+                        </Select>
+                      )}
+                    </div>
+
+                    {!selectedLocal?.downloaded && (
+                      <p className="text-xs text-amber-600">{t("voice.local.needModel")}</p>
+                    )}
+
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant={localStatus?.active ? "outline" : "default"}
+                        disabled={
+                          localPending ||
+                          !selectedLocal?.downloaded ||
+                          !localStatus?.engineInstalled
+                        }
+                        onClick={() => {
+                          if (localStatus?.active) stopLocalEngine.mutate();
+                          else if (selectedLocal) startLocalModel.mutate(selectedLocal);
+                        }}
+                      >
+                        {localPending ? (
+                          <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                        ) : localStatus?.active ? (
+                          <SquareIcon data-icon="inline-start" />
+                        ) : (
+                          <PlayIcon data-icon="inline-start" />
+                        )}
+                        {localStatus?.active ? t("voice.local.stop") : t("voice.local.start")}
+                      </Button>
+                      {!localStatus?.engineInstalled && (
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="h-6 px-1 text-xs"
+                          onClick={() => downloadEngine.mutate()}
+                        >
+                          {t("voice.local.downloadEngine")}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  <LocalVoicePicker
+                    model={selectedLocal}
+                    clones={clones}
+                    voice={localVoice}
+                    emotion={localEmotion}
+                    instruct={localInstruct}
+                    onVoice={setLocalVoice}
+                    onEmotion={setLocalEmotion}
+                    onInstruct={setLocalInstruct}
+                  />
+
+                  {selectedLocal?.languageSupported && (
+                    <div>
+                      <Label className="mb-1 block text-xs">{t("voice.local.language")}</Label>
+                      <Select
+                        value={localLanguage || "auto"}
+                        onValueChange={(v) => setLocalLanguage(v === "auto" ? "" : v)}
+                        key={selectedLocal?.id}
+                      >
+                        <SelectTrigger className="h-8 w-full text-xs">
+                          <SelectValue placeholder="auto" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="auto">auto</SelectItem>
+                          {(selectedLocal.languageCodes ?? []).map((code) => (
+                            <SelectItem key={code} value={code}>
+                              {AUDIOCPP_LANG_LABELS[code] ?? code}
                             </SelectItem>
                           ))}
-                      </SelectContent>
-                    </Select>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   )}
-                </div>
+                </>
+              )}
 
-                {!selectedLocal?.downloaded && (
-                  <p className="text-xs text-amber-600">{t("voice.local.needModel")}</p>
-                )}
+              {localEngine === "speechcpp" && (
+                <>
+                  <div className="flex flex-col gap-3 rounded-lg border bg-card p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5 text-xs font-medium">
+                        <AudioLinesIcon className="size-3.5 text-primary" />
+                        {t("voice.speechCpp.engine")}
+                      </span>
+                      {speechCppStatus?.active ? (
+                        <Badge variant="default" className="gap-1 text-[10px]">
+                          <CircleIcon className="size-2.5 fill-current" />
+                          {t("voice.local.running")}
+                        </Badge>
+                      ) : speechCppStatus?.engineInstalled ? (
+                        <Badge variant="secondary" className="gap-1 text-[10px]">
+                          <CircleIcon className="size-2.5 fill-current" />
+                          {t("voice.local.notStarted")}
+                        </Badge>
+                      ) : null}
+                    </div>
 
-                <div className="flex items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant={localStatus?.active ? "outline" : "default"}
-                    disabled={localPending || !selectedLocal?.downloaded || !localStatus?.engineInstalled}
-                    onClick={() => {
-                      if (localStatus?.active) stopLocalEngine.mutate();
-                      else if (selectedLocal) startLocalModel.mutate(selectedLocal);
-                    }}
-                  >
-                    {localPending ? (
-                      <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                    ) : localStatus?.active ? (
-                      <SquareIcon data-icon="inline-start" />
-                    ) : (
-                      <PlayIcon data-icon="inline-start" />
+                    <div>
+                      <Label className="mb-1 block text-xs">{t("voice.local.select")}</Label>
+                      {speechCppModels.filter((m) => m.downloaded).length === 0 ? (
+                        <div className="flex items-center justify-center rounded-lg border border-dashed px-4 py-6 text-xs text-muted-foreground">
+                          {t("voice.local.empty")}
+                        </div>
+                      ) : (
+                        <Select
+                          value={speechCppModelId}
+                          onValueChange={(v) => {
+                            setSpeechCppModelId(v);
+                            setLocalError(undefined);
+                          }}
+                        >
+                          <SelectTrigger className="h-8 w-full text-xs">
+                            <SelectValue placeholder={t("voice.local.select")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {speechCppModels
+                              .filter((m) => m.downloaded)
+                              .map((m) => (
+                                <SelectItem key={m.id} value={m.id}>
+                                  {m.name}
+                                  {m.active ? ` · ${t("voice.local.active")}` : ""}
+                                </SelectItem>
+                              ))}
+                          </SelectContent>
+                        </Select>
+                      )}
+                    </div>
+
+                    {!selectedSpeechCpp?.downloaded && (
+                      <p className="text-xs text-amber-600">{t("voice.local.needModel")}</p>
                     )}
-                    {localStatus?.active ? t("voice.local.stop") : t("voice.local.start")}
-                  </Button>
-                  {!localStatus?.engineInstalled && (
-                    <Button
-                      variant="link"
-                      size="sm"
-                      className="h-6 px-1 text-xs"
-                      onClick={() => downloadEngine.mutate()}
-                    >
-                      {t("voice.local.downloadEngine")}
-                    </Button>
+
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant={speechCppStatus?.active ? "outline" : "default"}
+                        disabled={
+                          speechCppPending ||
+                          !selectedSpeechCpp?.downloaded ||
+                          !speechCppStatus?.engineInstalled
+                        }
+                        onClick={() => {
+                          if (speechCppStatus?.active) stopSpeechCppEngine.mutate();
+                          else if (selectedSpeechCpp) startSpeechCppModel.mutate(selectedSpeechCpp);
+                        }}
+                      >
+                        {speechCppPending ? (
+                          <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                        ) : speechCppStatus?.active ? (
+                          <SquareIcon data-icon="inline-start" />
+                        ) : (
+                          <PlayIcon data-icon="inline-start" />
+                        )}
+                        {speechCppStatus?.active ? t("voice.local.stop") : t("voice.local.start")}
+                      </Button>
+                      {!speechCppStatus?.engineInstalled && (
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="h-6 px-1 text-xs"
+                          onClick={() => downloadSpeechCppEngine.mutate()}
+                        >
+                          {t("voice.local.downloadEngine")}
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  <SpeechCppVoicePicker
+                    model={selectedSpeechCpp}
+                    clones={clones}
+                    voice={speechCppVoice}
+                    instruct={speechCppInstruct}
+                    onVoice={(v) => {
+                      // 选了克隆音色就不再需要文字描述，反之亦然（两个一起给时后端优先用音色文件）。
+                      setSpeechCppVoice(v);
+                      if (v) setSpeechCppInstruct("");
+                    }}
+                    onInstruct={setSpeechCppInstruct}
+                  />
+
+                  {selectedSpeechCpp?.languageSupported && (
+                    <div>
+                      <Label className="mb-1 block text-xs">{t("voice.local.language")}</Label>
+                      <Select
+                        value={localLanguage || "auto"}
+                        onValueChange={(v) => setLocalLanguage(v === "auto" ? "" : v)}
+                        key={selectedSpeechCpp?.id}
+                      >
+                        <SelectTrigger className="h-8 w-full text-xs">
+                          <SelectValue placeholder="auto" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="auto">auto</SelectItem>
+                          {(selectedSpeechCpp.languageCodes ?? []).map((code) => (
+                            <SelectItem key={code} value={code}>
+                              {SPEECHCPP_LANG_LABELS[code] ?? code}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
                   )}
-                </div>
-              </div>
-
-              <LocalVoicePicker
-                model={selectedLocal}
-                clones={clones}
-                voice={localVoice}
-                emotion={localEmotion}
-                instruct={localInstruct}
-                onVoice={setLocalVoice}
-                onEmotion={setLocalEmotion}
-                onInstruct={setLocalInstruct}
-              />
-
-              {selectedLocal?.languageSupported && (
-                <div>
-                  <Label className="mb-1 block text-xs">{t("voice.local.language")}</Label>
-                  <Select
-                    value={localLanguage || "auto"}
-                    onValueChange={(v) => setLocalLanguage(v === "auto" ? "" : v)}
-                    key={selectedLocal?.id}
-                  >
-                    <SelectTrigger className="h-8 w-full text-xs">
-                      <SelectValue placeholder="auto" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="auto">auto</SelectItem>
-                      {(selectedLocal.languageCodes ?? []).map((code) => (
-                        <SelectItem key={code} value={code}>
-                          {AUDIOCPP_LANG_LABELS[code] ?? code}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                </>
               )}
             </>
           )}

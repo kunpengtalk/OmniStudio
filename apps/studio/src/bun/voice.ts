@@ -9,7 +9,7 @@ import { chatImageUrl } from "../shared/server-info";
 import { TTS_REFERENCE_AUDIO_FIELD } from "../shared/tts-reference-audio";
 import { audioVendorFor, resolveTtsVoice } from "../shared/tts-voices";
 import { edgeSynthesize } from "./edge-tts";
-import { synthesizeCallLocal } from "./tts-local";
+import { synthesizeLocalTtsCall } from "./tts-engine-route";
 import * as CloudProviders from "./cloud-providers";
 import { normalizeApiBase } from "../shared/cloud-providers";
 
@@ -315,14 +315,16 @@ async function synthesizeOpenAiAudio(input: {
 }
 
 /**
- * 通话逐句合成：优先本地 audio.cpp TTS（合成快、无网络延迟，适合逐句播报），
+ * 通话逐句合成：优先本地 TTS（合成快、无网络延迟，适合逐句播报），
  * 其次用 TTS 页配置的三方 provider，最后回退 Edge（免密钥）。
  * 不落库、不写 voice_records，避免一句一记录污染语音历史。
  */
 export async function synthesizeCallSpeech(
   text: string,
 ): Promise<{ buffer: Buffer; engine: "local" | "provider" | "edge" }> {
-  const local = await synthesizeCallLocal(text);
+  // 本地这一档有两个并列引擎（audio.cpp / speech.cpp）：先走当前启用的那个，
+  // 它没有可用模型时再试另一个，之后才落到云端 —— 路由规则在 tts-engine-route.ts 一处。
+  const local = await synthesizeLocalTtsCall(text);
   if (local) return { buffer: local, engine: "local" };
   const provider = getTTSProviderConfig();
   if (provider.base) {

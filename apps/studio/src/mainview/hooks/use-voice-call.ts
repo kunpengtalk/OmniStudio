@@ -5,7 +5,8 @@ import { rpcClient } from "../lib/rpc";
 import { useChatStore } from "../stores/chat";
 import { useVoiceCallStore, type AudioEntry, type VoiceCallProvider } from "../stores/voice-call";
 import { encodePcm16Base64 } from "../lib/wav";
-import { REALTIME_OUTPUT_RATE, realtimeDialectFor, realtimeInputRate } from "@/shared/realtime-voice";
+import { describeCaptureContext, describeCaptureFailure, describeMicFailure } from "../lib/capture-errors";
+import { REALTIME_OUTPUT_RATE, realtimeDialectFor, realtimeInputRate, realtimeOutputRate } from "@/shared/realtime-voice";
 
 /**
  * 实时语音通话引擎（前端侧）：
@@ -27,35 +28,125 @@ const SILENCE_END_CHUNKS = 5; // ≈430ms 连续低电平 → 一句话结束（
 const SPEECH_START_CHUNKS = 2;
 
 /**
- * 把连续多个 PCM 音频块拼成一块 AudioBuffer 再播。
- * 云端 `response.audio.delta` 每块只有一小段（几十到几百毫秒），若逐块
- * decodeAudioData→source.start() 会产生可闻的块间间隙；合并后一整段连续播放。
+ * 云端实时 PCM 的**连续播放调度器**。
+ *
+ * 以前是"攒一批 → 播完（onended）→ 再取下一批"的接力：每一批之间都要等
+ * `onended` 回调 + 一次 `await`，而 Web Audio 的调度精度是"排程时刻"，两次
+ * 独立 `start()` 之间必然有几十毫秒空隙 —— 连续说话时就听成持续卡顿；每批
+ * 又各自新建 `AudioBuffer`，块边界处的波形不连续又变成"咔哒"声。
+ *
+ * 现在的做法（也是 Web Audio 处理流式音频的标准做法）：**按时间轴排程**。
+ * 每个块算出它在音频时间轴上的起点 `nextStartTime`，后一块紧接前一块的结束时刻
+ * 调用 `start(when)`，于是播放由音频硬件时钟连续驱动，块之间没有空隙也没有
+ * 重新起振的跳变。
+ *
+ * 同时解决字节对齐：PCM16 的字节流是连续的，**上一块剩下的半个样本要接到下一块
+ * 开头**，而不是各自 `floor(len/2)` 丢掉。
+ */
+function createPcmScheduler(ctx: AudioContext, sampleRate: number) {
+  /** 上一块还剩下的半个样本（奇数长度时），拼到下一块开头。 */
+  let carry: Uint8Array | null = null;
+  /** 下一块应当开始播放的音频时钟时刻。 */
+  let nextStartTime = 0;
+  /** 已调度的 source；打断时要一起停。 */
+  const sources = new Set<AudioBufferSourceNode>();
+
+  return {
+    /** 排入一块裸 PCM16 字节。 */
+    push(bytes: Uint8Array): void {
+      // 1) 接上上一块残留的半个样本，保持字节流连续。
+      let all = bytes;
+      if (carry) {
+        all = new Uint8Array(carry.length + bytes.length);
+        all.set(carry, 0);
+        all.set(bytes, carry.length);
+        carry = null;
+      }
+      // 2) 奇数长度：把末尾那一个字节留到下一块，不能丢（丢了后面全部错位）。
+      if (all.length % 2 !== 0) {
+        carry = all.slice(all.length - 1);
+        all = all.subarray(0, all.length - 1);
+      }
+      const frames = all.length / 2;
+      if (frames === 0) return;
+
+      // 3) 切样本。
+      const ch = new Float32Array(frames);
+      const dv = new DataView(all.buffer, all.byteOffset, all.byteLength);
+      for (let i = 0; i < frames; i++) ch[i] = dv.getInt16(i * 2, true) / 0x8000;
+
+      const buf = ctx.createBuffer(1, frames, sampleRate);
+      buf.getChannelData(0).set(ch);
+
+      const source = ctx.createBufferSource();
+      source.buffer = buf;
+      source.connect(ctx.destination);
+      // 4) 排程：晚于当前时刻就从现在开始，否则紧接着上一块结束 —— 不留空隙。
+      const startAt = Math.max(ctx.currentTime, nextStartTime);
+      source.start(startAt);
+      nextStartTime = startAt + buf.duration;
+      sources.add(source);
+      source.onended = () => sources.delete(source);
+    },
+
+    /** 下一次可以安全排程的时刻（用来判断缓冲是否已经落后）。 */
+    get nextTime(): number {
+      return nextStartTime;
+    },
+
+    /** 停止全部已排程音频（打断 / 挂断）。 */
+    stop(): void {
+      carry = null;
+      nextStartTime = 0;
+      for (const s of sources) {
+        try {
+          s.stop();
+          s.disconnect();
+        } catch {
+          // ignore
+        }
+      }
+      sources.clear();
+    },
+  };
+}
+
+/**
+ * 把连续多个 PCM 音频块拼成一块 AudioBuffer（本地 / 单条播放用）。
+ *
+ * **先把所有块拼成一整条字节流，再整体按 16bit 切样本** —— 不能逐块各自
+ * `floor(len/2)`。PCM16 的帧边界是协议层概念，字节流本身是连续的：某一块长度是
+ * 奇数（网络分片不按样本对齐）时，逐块处理会把它末尾那半个样本丢掉，于是**这一块
+ * 之后的所有采样都错位一个字节**（高低字节颠倒），听感就是刺耳白噪声。
  */
 function pcmBatchToAudioBuffer(
   ctx: AudioContext,
   entries: Pick<AudioEntry, "base64">[],
   sampleRate: number,
 ): AudioBuffer {
-  const channels: Float32Array[] = [];
-  let totalFrames = 0;
+  // 1) 拼成一整条连续字节流。
+  let totalBytes = 0;
+  const parts: Uint8Array[] = [];
   for (const e of entries) {
     const binary = atob(e.base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const frames = Math.floor(bytes.length / 2);
-    const ch = new Float32Array(frames);
-    const dv = new DataView(bytes.buffer);
-    for (let i = 0; i < frames; i++) ch[i] = dv.getInt16(i * 2, true) / 0x8000;
-    channels.push(ch);
-    totalFrames += frames;
+    parts.push(bytes);
+    totalBytes += bytes.length;
   }
-  const buf = ctx.createBuffer(1, Math.max(1, totalFrames), sampleRate);
-  const out = buf.getChannelData(0);
-  let offset = 0;
-  for (const ch of channels) {
-    out.set(ch, offset);
-    offset += ch.length;
+  const all = new Uint8Array(totalBytes);
+  let at = 0;
+  for (const p of parts) {
+    all.set(p, at);
+    at += p.length;
   }
+  // 2) 整体切样本：末尾若剩半个样本（奇数总长），丢掉它而不是让后续全部错位。
+  const frames = Math.floor(totalBytes / 2);
+  const ch = new Float32Array(frames);
+  const dv = new DataView(all.buffer, all.byteOffset, all.byteLength);
+  for (let i = 0; i < frames; i++) ch[i] = dv.getInt16(i * 2, true) / 0x8000;
+  const buf = ctx.createBuffer(1, Math.max(1, frames), sampleRate);
+  buf.getChannelData(0).set(ch);
   return buf;
 }
 
@@ -75,10 +166,15 @@ export function useVoiceCallEngine() {
   /** 是不是"持续推流"的云端实时模式（本地与 omni 都只在说话窗口内推）。 */
   const isRealtime = () => providerRef.current === "cloud";
   /**
-   * 云端上行采样率：拨号时按厂商定一次（百炼 16k / 阶跃 24k）。
+   * 云端上行采样率：拨号时按厂商定一次（百炼 16k / 阶跃 24k / MOSS 16k）。
    * 通话中不能改（改设置不影响正在进行的连接），所以存在 ref 里。
    */
   const inputRateRef = useRef(realtimeInputRate("dashscope"));
+  /**
+   * 云端下行采样率：MOSS 是 48k，另两家 24k。播放端按它建 AudioBuffer ——
+   * 用固定 24k 去解 MOSS 的音频会变成慢放的低音。
+   */
+  const outputRateRef = useRef(REALTIME_OUTPUT_RATE);
   const pushTimerRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
   const activeRef = useRef(false);
@@ -144,35 +240,124 @@ export function useVoiceCallEngine() {
     agentQuietAtRef.current = performance.now() + AGENT_ECHO_TAIL_MS;
   };
 
+  /**
+   * `playNext` 的重入锁。
+   *
+   * `playingRef` 表达的是"扬声器正在出声"，不能兼职做重入保护：它由 `source.onended`
+   * 复位，而 store 订阅与 onended 会同时触发 `playNext`，两者都在 `await ctx.resume()`
+   * 前后交汇。并发进入时后来者会把**同一批音频再播一遍**（两路 source 叠加 → 噪声），
+   * 或者把已取出的 batch 丢掉（这段音频就永远不播了）。所以用一把独立的、在
+   * **取队列之前**就置位的锁。
+   */
+  const pumpingRef = useRef(false);
+
+  /** 云端 PCM 的连续播放调度器（跟着 AudioContext 与采样率重建）。 */
+  const pcmSchedulerRef = useRef<{
+    ctx: AudioContext;
+    rate: number;
+    scheduler: ReturnType<typeof createPcmScheduler>;
+  } | null>(null);
+
+  /**
+   * 取（或按需建立）PCM 调度器。
+   *
+   * 采样率变了（换厂商 / 换方言）就得重建：AudioBuffer 的采样率在创建时固定，
+   * 用 24k 的缓冲配 48k 的时钟就是"变慢一倍"，反过来是"变快一倍"。
+   */
+  const getPcmScheduler = (ctx: AudioContext, rate: number) => {
+    const cur = pcmSchedulerRef.current;
+    if (cur && cur.ctx === ctx && cur.rate === rate) return cur.scheduler;
+    cur?.scheduler.stop();
+    const scheduler = createPcmScheduler(ctx, rate);
+    pcmSchedulerRef.current = { ctx, rate, scheduler };
+    return scheduler;
+  };
+
   const playNext = async () => {
+    if (pumpingRef.current) return;
+    pumpingRef.current = true;
+    try {
+      await playNextInner();
+    } finally {
+      pumpingRef.current = false;
+    }
+  };
+
+  const playNextInner = async () => {
     const store = useVoiceCallStore.getState();
     const queue = store.audioQueue;
     if (queue.length === 0) {
       playingRef.current = false;
       return;
     }
-    // 连续 PCM 块合并成一块缓冲播放（消除块间间隙）；wav 单条独立播放（本地逐句）。
-    let take = 1;
+    // 云端 PCM 走"排程"而不是"接力"：一次把队列里所有 PCM 块都排进时间轴，
+    // 由音频时钟连续播出去（见 createPcmScheduler 的说明）。
     if (queue[0]!.format === "pcm") {
+      let take = 0;
       while (take < queue.length && queue[take]!.format === "pcm") take++;
+      const batch = queue.slice(0, take);
+      useVoiceCallStore.setState({ audioQueue: queue.slice(take) });
+      playingRef.current = true;
+      agentAudibleRef.current = true;
+      try {
+        const ctx = getAudioCtx();
+        if (ctx.state === "suspended") await ctx.resume();
+        const scheduler = getPcmScheduler(ctx, outputRateRef.current);
+        for (const e of batch) {
+          const binary = atob(e.base64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          scheduler.push(bytes);
+        }
+        // 回执：排程后按"这块应当播完的音频时刻"回报。MOSS 要求真正播完后才回，
+        // 而排程模式下我们精确知道每块在时间轴上的结束时刻，不必等 onended
+        // （等 onended 会把回执拖到整批结束，服务端以为一直没播完）。
+        const conversationId = useVoiceCallStore.getState().callConversationId;
+        const settleAt = scheduler.nextTime;
+        const leadMs = Math.max(0, (settleAt - ctx.currentTime) * 1000);
+        if (conversationId != null) {
+          // filter 已保证 chunkId 非空，但 TS 不会跨数组收窄，这里显式取值。
+          const acks = batch
+            .filter((e): e is typeof e & { chunkId: string } => !!e.chunkId)
+            .map((e) => ({ chunkId: e.chunkId, runId: e.runId, turnId: e.turnId }));
+          if (acks.length > 0) {
+            window.setTimeout(() => {
+              const still = useVoiceCallStore.getState().callConversationId;
+              if (still !== conversationId) return;
+              for (const e of acks) {
+                void rpcClient
+                  .voicecallAckPlayback({ conversationId, ...e })
+                  .catch(() => {});
+              }
+            }, leadMs);
+          }
+        }
+        void rpcClient
+          .voicecallDebug({
+            line: `pcm scheduled ${batch.length} chunks, +${leadMs.toFixed(0)}ms (rate=${outputRateRef.current})`,
+          })
+          .catch(() => {});
+      } catch (e) {
+        playingRef.current = false;
+        void rpcClient.voicecallDebug({ line: `pcm schedule error: ${String(e)}` }).catch(() => {});
+      }
+      // 排程完接着看队列里还有没有（播放本身不阻塞这里）。
+      void playNext();
+      return;
     }
-    const batch = queue.slice(0, take);
-    useVoiceCallStore.setState({ audioQueue: queue.slice(take) });
+
+    // 本地逐句 WAV：一条一个缓冲，播放仍然靠 onended 接力（本来就该一句一句播）。
+    const batch = queue.slice(0, 1);
+    useVoiceCallStore.setState({ audioQueue: queue.slice(1) });
     playingRef.current = true;
     agentAudibleRef.current = true;
     try {
       const ctx = getAudioCtx();
       if (ctx.state === "suspended") await ctx.resume();
-      let audioBuffer: AudioBuffer;
-      if (batch[0]!.format === "pcm") {
-        // 云端实时音频：PCM16 24k 裸流，直接构 AudioBuffer（没有 WAV 头）。
-        audioBuffer = pcmBatchToAudioBuffer(ctx, batch, REALTIME_OUTPUT_RATE);
-      } else {
-        const binary = atob(batch[0]!.base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0) as ArrayBuffer);
-      }
+      const binary = atob(batch[0]!.base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const audioBuffer = await ctx.decodeAudioData(bytes.buffer.slice(0) as ArrayBuffer);
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
@@ -185,17 +370,20 @@ export function useVoiceCallEngine() {
         void playNext();
       };
       source.start();
-      const byteLen = Math.floor((batch[0]!.base64.length * 3 * batch.length) / 4);
-      void rpcClient.voicecallDebug({
-        line: `web-audio playing ${audioBuffer.duration.toFixed(2)}s (${byteLen}B, ${batch.length}×${batch[0]!.format})`,
-      });
+      void rpcClient
+        .voicecallDebug({
+          line: `web-audio playing ${audioBuffer.duration.toFixed(2)}s (wav)`,
+        })
+        .catch(() => {});
     } catch (e) {
       playingRef.current = false;
       agentAudibleRef.current = false;
-      void rpcClient.voicecallDebug({ line: `web-audio error: ${String(e)}` });
+      void rpcClient.voicecallDebug({ line: `web-audio error: ${String(e)}` }).catch(() => {});
       void playNext();
     }
   };
+
+  /** 老的内部函数已由上面的 playNextInner 取代。 */
 
   // 队列有新音频就接着播；被清空（打断/挂断）则立即停声。
   useEffect(() => {
@@ -238,13 +426,22 @@ export function useVoiceCallEngine() {
     const samples = samplesRef.current;
     const from = lastPushRef.current;
     if (samples.length - from < UTTERANCE_MIN_SAMPLES) return;
+    const chunk = samples.subarray(from);
     // 三种模式统一发增量裸 PCM16：
-    //  - 云端直接喂给实时模型（input_audio_buffer.append），采样率按厂商取
+    //  - 云端直接喂给实时模型（采样率按厂商取）；**不说话时也一直推** ——
+    //    MOSS 要靠持续的静音流才能判定"用户说完了"，百炼 / 阶跃也靠它维持连接节奏
     //  - 本地 / omni 由后端累积，用前统一包 WAV 头（避免把多个 WAV 小块粘成一个非法文件）
     const pcmBase64 = isRealtime()
-      ? encodePcm16Base64(samples.subarray(from), INPUT_RATE, inputRateRef.current)
-      : encodePcm16Base64(samples.subarray(from), INPUT_RATE);
-    lastPushRef.current = samples.length;
+      ? encodePcm16Base64(chunk, INPUT_RATE, inputRateRef.current)
+      : encodePcm16Base64(chunk, INPUT_RATE);
+    if (isRealtime()) {
+      // 云端是"推完即弃"的流：整段保留会让长通话的数组无限增长（一小时 ≈ 700MB）。
+      // 本地 / omni 不能丢 —— 那段音频就是这一轮的输入。
+      samplesRef.current = new Float32Array(0);
+      lastPushRef.current = 0;
+    } else {
+      lastPushRef.current = samples.length;
+    }
     void rpcClient.voicecallPushAudio({ conversationId, wavBase64: pcmBase64, format: "pcm" });
   };
 
@@ -276,25 +473,28 @@ export function useVoiceCallEngine() {
     const conversationId = store.callConversationId;
     // 本地 / omni 的推流随一段话音启停；云端模式持续推流（断句在服务端），这里不停。
     if (!isRealtime()) stopPushTimer();
-    const samples = samplesRef.current;
-    const start = utteranceStartRef.current;
-    utteranceStartRef.current = samples.length;
     store.setLiveActive(false);
     const cloud = isRealtime();
-    // 云端推流本来就持续，端句只补发最后一段增量并给服务端 commit 信号；
-    // 本地端句也按增量补发（后端累积成整段再转写）。
-    const from = Math.max(start, lastPushRef.current);
-    if (conversationId == null || samples.length - from < UTTERANCE_MIN_SAMPLES) {
-      // 没有可补发的音频：云端仍需 commit 信号让服务端尽快断句。
-      if (cloud && conversationId != null) {
+    if (cloud) {
+      // 先把还没到定时器的那几十毫秒音频推上去，再叫后端收尾 —— 云端没有
+      // commit 语义，服务端靠字节流自己断句，最后一片晚到只会让断句更迟。
+      if (conversationId != null) {
+        sendUtterancePush();
         void rpcClient.voicecallEndUtterance({ conversationId }).catch(() => {});
       }
       return;
     }
-    const finalPush = cloud
-      ? encodePcm16Base64(samples.subarray(from), INPUT_RATE, inputRateRef.current)
-      : encodePcm16Base64(samples.subarray(from), INPUT_RATE);
-    lastPushRef.current = samples.length;    if (!cloud) store.setPhase("transcribing");
+    const samples = samplesRef.current;
+    const start = utteranceStartRef.current;
+    utteranceStartRef.current = samples.length;
+    // 本地端句按增量补发（后端累积成整段再转写）。
+    const from = Math.max(start, lastPushRef.current);
+    if (conversationId == null || samples.length - from < UTTERANCE_MIN_SAMPLES) {
+      return;
+    }
+    const finalPush = encodePcm16Base64(samples.subarray(from), INPUT_RATE);
+    lastPushRef.current = samples.length;
+    store.setPhase("transcribing");
     void (async () => {
       try {
         await rpcClient.voicecallPushAudio({
@@ -308,10 +508,7 @@ export function useVoiceCallEngine() {
       try {
         const res = await rpcClient.voicecallEndUtterance({ conversationId });
         const s = useVoiceCallStore.getState();
-        if (cloud) {
-          // 云端断句在服务端，不显示「转写中」；真有错误才提示。
-          if (!res.ok && res.error) s.setError(res.error);
-        } else if ((!res.ok && res.error) || !res.text) {
+        if ((!res.ok && res.error) || !res.text) {
           // 空转写（没听清），回到聆听；失败则提示。
           if (s.phase === "transcribing") s.setPhase("listening");
           if (res.error) s.setError(res.error);
@@ -412,6 +609,7 @@ export function useVoiceCallEngine() {
   const stopCapture = () => {
     activeRef.current = false;
     stopPushTimer();
+    stopVideo();
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -432,10 +630,23 @@ export function useVoiceCallEngine() {
 
   const beginCapture = async () => {
     // 回声消除 + 降噪 + 自动增益：TTS 从扬声器出声时不让它被 VAD 当成"用户说话"。
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      video: false,
-    });
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: false,
+      });
+    } catch (e) {
+      // 把判定所需的现场一并记进 app.log：`NotAllowedError` 在这台机器上到底是
+      // 「系统权限关了」「之前拒绝过被记住」还是「这个 URL 根本不是安全上下文」，
+      // 只看一句 message 分不出来，而三种情况的修法完全不同。
+      void rpcClient
+        .voicecallDebug({ line: `mic failed: ${describeCaptureContext(e)}` })
+        .catch(() => {});
+      // 原始的 DOMException 长这样：`NotAllowedError: The request is not allowed by the
+      // user agent or the platform in the current context` —— 用户看到这句没法照着做。
+      throw new Error(describeMicFailure(e), { cause: e });
+    }
     streamRef.current = stream;
     const ctx = new AudioContext({ sampleRate: INPUT_RATE });
     const src = ctx.createMediaStreamSource(stream);
@@ -470,6 +681,92 @@ export function useVoiceCallEngine() {
   };
 
   // ------------------------------------------------------------------
+  // 画面（仅 MOSS）：摄像头 / 屏幕共享 → JPEG 帧
+  // ------------------------------------------------------------------
+
+  /** 当前画面流与它的定时器（只有 MOSS 会用到）。 */
+  const videoRef = useRef<{
+    source: "camera" | "screen";
+    stream: MediaStream;
+    canvas: HTMLCanvasElement;
+    timer: number;
+  } | null>(null);
+
+  const stopVideo = () => {
+    const v = videoRef.current;
+    videoRef.current = null;
+    if (!v) return;
+    window.clearInterval(v.timer);
+    v.stream.getTracks().forEach((t) => t.stop());
+    useVoiceCallStore.getState().setVideoSource(null);
+  };
+
+  /**
+   * 开一路画面。协议建议 1 FPS、长边 640（摄像头）/ 1024（屏幕），JPEG 质量 0.8 ——
+   * 这些都是"客户端默认值"而非硬限制，但按它来最稳（上游在负载下会丢旧帧）。
+   *
+   * 关键实现点：`drawImage` 必须在**同一张 canvas** 上按长边等比缩放，
+   * 直接把原始分辨率塞进去会让每帧 200KB+，1 FPS 也会把上行带宽吃满。
+   */
+  const startVideo = async (source: "camera" | "screen") => {
+    const store = useVoiceCallStore.getState();
+    const conversationId = store.callConversationId;
+    if (conversationId == null) return;
+    stopVideo();
+    let stream: MediaStream;
+    try {
+      stream =
+        source === "camera"
+          ? await navigator.mediaDevices.getUserMedia({
+              video: { width: { ideal: 640 }, height: { ideal: 480 } },
+              audio: false,
+            })
+          : await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    } catch (e) {
+      // 原始 DOMException 的文案（"The request is not allowed by the user agent or the
+      // platform in the current context"）用户看了没法照着做 —— 换成能指到系统设置的一句话。
+      // null = 用户在屏幕选择器里主动取消，不算错误。
+      store.setError(describeCaptureFailure(source, e));
+      return;
+    }
+    const video = document.createElement("video");
+    video.srcObject = stream;
+    video.muted = true;
+    video.playsInline = true;
+    try {
+      await video.play();
+    } catch {
+      // 某些环境 play() 会被拒，帧循环里再试一次即可
+    }
+    const canvas = document.createElement("canvas");
+    const longEdge = source === "camera" ? 640 : 1024;
+    const res = await rpcClient.voicecallSetVideo({ conversationId, source, enabled: true });
+    if (!res.ok) {
+      stream.getTracks().forEach((t) => t.stop());
+      store.setError(res.supported ? "无法开启画面：通话未就绪" : "当前通话渠道不支持画面理解");
+      return;
+    }
+    const timer = window.setInterval(() => {
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+      if (!vw || !vh) return;
+      const scale = Math.min(1, longEdge / Math.max(vw, vh));
+      canvas.width = Math.max(1, Math.round(vw * scale));
+      canvas.height = Math.max(1, Math.round(vh * scale));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+      const b64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+      void rpcClient
+        .voicecallPushVideoFrame({ conversationId, source, jpegBase64: b64 })
+        .catch(() => {});
+    }, 1000);
+    videoRef.current = { source, stream, canvas, timer };
+    store.setVideoSource(source);
+  };
+
+  // ------------------------------------------------------------------
   // 对外控制
   // ------------------------------------------------------------------
 
@@ -482,24 +779,45 @@ export function useVoiceCallEngine() {
     store.setError(null);
     primeAudio();
     if (mode === "cloud") {
-      // 上行采样率跟着厂商走（百炼 16k / 阶跃 24k）：拿当前配置里的地址 + 模型判方言。
-      // 取不到配置就沿用上一次的值 —— 采样率猜错的代价是"对方听不清"，不值得在这里失败。
+      // 上行 / 下行采样率跟着厂商走（百炼 16k/24k、阶跃 24k/24k、MOSS 16k/48k）：
+      // 拿当前配置里的地址 + 模型判方言。取不到配置就沿用上一次的值 ——
+      // 采样率猜错的代价是"听不清 / 变调"，不值得在这里失败。
       try {
         const { config } = await rpcClient.voicecallGetProviderConfig(undefined);
-        inputRateRef.current = realtimeInputRate(
-          realtimeDialectFor({ baseUrl: config?.baseUrl, model: config?.model }),
-        );
-      } catch {
-        // 保持上一次的采样率
+        const dialect = realtimeDialectFor({ baseUrl: config?.baseUrl, model: config?.model });
+        inputRateRef.current = realtimeInputRate(dialect);
+        outputRateRef.current = realtimeOutputRate(dialect);
+        void rpcClient
+          .voicecallDebug({
+            line: `rates: dialect=${dialect} in=${inputRateRef.current} out=${outputRateRef.current}`,
+          })
+          .catch(() => {});
+      } catch (e) {
+        // 静默沿用旧值仍然是错的采样率（比如上一次是 24k、这次切到 MOSS 的 48k）：
+        // 表现是"声音又慢又闷"，用户不会想到是采样率。至少留一条日志。
+        void rpcClient
+          .voicecallDebug({
+            line: `rates: 读取厂商配置失败，沿用 in=${inputRateRef.current} out=${outputRateRef.current} (${
+              e instanceof Error ? e.message : String(e)
+            })`,
+          })
+          .catch(() => {});
       }
     }
     let convId: number | null = null;
     try {
+      // 先拿麦克风，再拨号。反过来（先连云端再开麦）有两个真实的坏处：
+      //   1. 云端已经开始按在线时长计费，麦克风一被拒就白连一次；
+      //   2. 用户看到的是"点了启动就报错"，而此时服务端会话已经建好、又被回滚，
+      //      日志里会多出一对 connect/stop，掩盖真正的原因（权限）。
+      // 麦克风是所有模式的前提，先失败在最前面最省事。
+      await beginCapture();
       const res = await rpcClient.voicecallStart({
         conversationId: conversationId ?? undefined,
         provider: mode,
       });
       if (!res.ok || !res.conversation) {
+        stopCapture();
         store.setError(res.error ?? "无法开始通话");
         store.setPhase("error");
         return;
@@ -508,9 +826,19 @@ export function useVoiceCallEngine() {
       useChatStore.getState().setActiveConversation(convId);
       useChatStore.getState().setActiveMessages([]);
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
-      await beginCapture();
       store.beginCall(convId, mode);
     } catch (e) {
+      // 拨号失败必须留痕：麦克风被拒这类错误此前只写进 store，界面上是一句话、
+      // app.log 里什么都没有，事后只能靠用户复述"报了个英文错"。带上错误名与
+      // 模式，才能分清是权限被拒（NotAllowedError）、设备不存在，还是云端连不上。
+      const name = e instanceof DOMException ? e.name : e instanceof Error ? e.name : "";
+      void rpcClient
+        .voicecallDebug({
+          line: `start failed provider=${mode} error=${name || "Error"}: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        })
+        .catch(() => {});
       store.setError(e instanceof Error ? e.message : String(e));
       store.setPhase("error");
       if (convId != null) void rpcClient.voicecallStop({ conversationId: convId });
@@ -549,5 +877,5 @@ export function useVoiceCallEngine() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { start, hangup, stopCurrentAudio };
+  return { start, hangup, stopCurrentAudio, startVideo, stopVideo };
 }

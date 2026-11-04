@@ -70,10 +70,13 @@ mock.module("@lib/rpc", () => ({
     listAsrAudioCppModels: async () => ({ models: [] }),
     listAsrConfuciusModels: async () => ({ models: [] }),
     listTtsLocalModels: async () => ({ models: [] }),
+    listTtsSpeechCppModels: async () => ({ models: [] }),
     getAsrStatus: async () => ({ serverRunning: false }),
     getAsrAudioCppStatus: async () => ({ active: false }),
     getAsrConfuciusStatus: async () => ({ serverRunning: false }),
     getTtsLocalStatus: async () => ({ active: false }),
+    getTtsSpeechCppStatus: async () => ({ active: false }),
+    updateSettings: async () => ({ ok: true }),
     getASRProviderConfig: async () => ({ config: { providerId: "", model: "" } }),
     getTTSProviderConfig: async () => ({ config: { providerId: "", model: "" } }),
     getSettings: async () => ({ settings: {} }),
@@ -230,4 +233,21 @@ test("没有选中记录时右侧照旧显示当前成果（历史只在点开�
   expect(text()).not.toContain(zh("voice.records.history"));
   expect(text()).not.toContain("历史里的文案");
   expect(text()).toContain(zh("voice.tts.noResult"));
+});
+
+test("本地引擎下方的二级切换：切到 speech.cpp 时只列它自己的模型，audio.cpp 那套收起来", async () => {
+  await render(createElement(TtsTab));
+
+  // 先切到「本地引擎」——二级切换只在本地这一档显示。
+  await click(zh("voice.tts.sourceLocal"));
+  expect(text()).toContain(zh("voice.local.engineSelect"));
+  expect(text()).toContain(zh("voice.local.modelsHint")); // audio.cpp 的模型清单
+
+  await click("speech.cpp");
+
+  // 换到 speech.cpp：标题与模型清单都换成它那一套，另一套的块收起来（两套清单同屏只会互相干扰）。
+  // 断言用 modelsHint 而不是 voice.local.models：「请先下载并启动一个本地 TTS 模型」里也含那串字。
+  expect(text()).toContain(zh("voice.speechCpp.models"));
+  expect(text()).not.toContain(zh("voice.local.modelsHint"));
+  expect(text()).toContain(zh("voice.speechCpp.engine"));
 });

@@ -346,6 +346,63 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     musicApi: "stepfun",
   },
   {
+    id: "moss",
+    name: "MOSS",
+    vendor: "MOSI 摩西智能",
+    // 注意是 **mosi**.cn（产品 API），平台站是 moss.cn —— 两个拼写都存在，
+    // 只写错一个会让「选了 MOSS 却推不出实时端点」。
+    baseUrl: "https://api.mosi.cn/v1",
+    section: "cn",
+    apiKeyUrl: "https://platform.moss.cn/app/api-keys/",
+    /**
+     * 语音 + 多模态这一家独有的几条线都挂在这行下：
+     *   - `moss-live-1.0`：全双工实时语音（外加摄像头 / 屏幕画面理解），
+     *     端点不在 OpenAI 兼容面上（`wss://api.mosi.cn/v1/realtime`），由
+     *     `realtimeBaseUrlForProvider` 从 baseUrl 推导；没有 voice 参数。
+     *   - `moss-tts-*` / `moss-voice-generator-*`：TTS 与音色设计。
+     *   - `moss-transcribe-*`：ASR（含说话人分离）。
+     *   - `moss-vl-*`：视觉理解。
+     */
+    /**
+     * 只列**确认存在**的模型：`/v1/models` 实际返回的那批（2026-11 实测），
+     * 加上官方文档写死、但不在列表接口里的 `moss-live-1.0`（实时协议只认这一个
+     * model 参数）。凭名字猜的 id 不写进来 —— 各功能页会照着这份清单给用户选，
+     * 选一个不存在的 id 只会在调用时报 404。
+     */
+    models: [
+      // 实时语音（文档规定固定值；不在 /v1/models 里）。端点由 baseUrl 推导。
+      "moss-live-1.0",
+      // TTS / 音色
+      "moss-tts-1.5-flash",
+      "moss-tts-1.0-pro",
+      "moss-ttsd-1.0",
+      "moss-voice-generator-1.0",
+      "moss-speech",
+      "moss-speech-enhance",
+      // ASR（含说话人分离）
+      "moss-transcribe-1.0",
+      "moss-transcribe-diarize-pro",
+      "moss-transcribe-diarize-flash-2026-09-02",
+      // 对话（该账号下也转售了 Kimi）
+      "tob-kimi-k3",
+      "moss-image-prompt-enhancer-1.0",
+    ],
+    modelTypes: {
+      // 实时语音不属于 TTS / ASR 任何一类（自己就是一条双向会话），标 other；
+      // 对话选择器另有 realtime 过滤（chat-model.ts），不会漏进来。
+      "moss-live-1.0": "other",
+      // `moss-speech` 系列名字里没有 tts 特征，分类器会漏判。
+      "moss-speech": "tts",
+      "moss-speech-enhance": "tts",
+      "moss-ttsd-1.0": "tts",
+      "moss-voice-generator-1.0": "tts",
+      "moss-image-prompt-enhancer-1.0": "other",
+      "tob-kimi-k3": "chat",
+    },
+    note: "实时语音 MOSS-Live 1.0 支持边听边说、自然打断与摄像头/屏幕画面理解；另有 TTS、ASR（含说话人分离）与视觉理解",
+    color: "#0d9488",
+  },
+  {
     id: "siliconflow",
     name: "硅基流动",
     vendor: "SiliconFlow",

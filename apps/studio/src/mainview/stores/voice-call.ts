@@ -23,8 +23,15 @@ export type CallPhase =
 export type AudioEntry = {
   conversationId: number;
   base64: string;
-  /** wav = 本地 TTS（decodeAudioData）；pcm = 云端实时音频（PCM16 24k 裸流）。 */
+  /**
+   * wav = 本地 TTS（decodeAudioData）；pcm = 云端实时音频（裸 PCM16，采样率随方言：
+   * 百炼 / 阶跃 24k，MOSS 48k —— 按错的采样率解码就是变调变快）。
+   */
   format: "wav" | "pcm";
+  /** 云端音频块的对齐信息（MOSS）：播完后要按 chunkId 回执。 */
+  chunkId?: string;
+  runId?: string;
+  turnId?: string;
 };
 
 /**
@@ -45,11 +52,14 @@ interface VoiceCallState {
   liveActive: boolean;
   /** 麦克风电平 0..1（驱动波形动画）。 */
   micLevel: number;
+  /** 正在共享的画面源（仅 MOSS 支持）：null = 没开画面。 */
+  videoSource: "camera" | "screen" | null;
   error: string | null;
   /** 待播放的 TTS 音频队列（按到达顺序播放，支持打断清空）。 */
   audioQueue: AudioEntry[];
   setPhase: (phase: CallPhase) => void;
   setMicLevel: (level: number) => void;
+  setVideoSource: (source: "camera" | "screen" | null) => void;
   setLiveActive: (active: boolean) => void;
   setLiveText: (text: string) => void;
   setError: (error: string | null) => void;
@@ -70,6 +80,7 @@ export const useVoiceCallStore = create<VoiceCallState>((set, get) => ({
   liveText: "",
   liveActive: false,
   micLevel: 0,
+  videoSource: null,
   error: null,
   audioQueue: [],
 
@@ -79,6 +90,7 @@ export const useVoiceCallStore = create<VoiceCallState>((set, get) => ({
   },
 
   setMicLevel: (micLevel) => set({ micLevel }),
+  setVideoSource: (videoSource) => set({ videoSource }),
   setLiveActive: (liveActive) => set({ liveActive }),
   setLiveText: (liveText) => set({ liveText }),
   setError: (error) => set({ error }),
@@ -94,6 +106,7 @@ export const useVoiceCallStore = create<VoiceCallState>((set, get) => ({
       liveText: "",
       liveActive: false,
       micLevel: 0,
+      videoSource: null,
       error: null,
       audioQueue: [],
     }),

@@ -3,11 +3,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangleIcon,
   BotIcon,
+  CameraIcon,
   CheckIcon,
   CloudIcon,
   CpuIcon,
   Loader2Icon,
   MicIcon,
+  MonitorIcon,
   PhoneIcon,
   PhoneOffIcon,
   SparklesIcon,
@@ -39,6 +41,7 @@ import {
   realtimeDefaultModel,
   realtimeDefaultVoice,
   realtimeDialectFor,
+  realtimeDialectHasVoice,
   realtimeModelsFor,
 } from "../../shared/realtime-voice";
 import { audioVendorFor } from "../../shared/tts-voices";
@@ -357,14 +360,14 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
                 sideOffset={6}
                 className="w-[18rem] max-w-[min(18rem,90vw)]"
               >
-                {/* 认得出的实时厂商（百炼 / 阶跃）排前面，其它厂商排在后面
-                    （自建中转同样可用，只是需要用户自己确认是这两家的 Key）。 */}
+                {/* 认得出的实时厂商（百炼 / 阶跃 / MOSS）排前面，其它厂商排在后面
+                    （自建中转同样可用，只是需要用户自己确认是哪家的 Key）。 */}
                 {providerList
                   .filter((p) => p.enabled)
                   .sort(
                     (a, b) =>
-                      Number(!/dashscope|aliyuncs|stepfun/i.test(a.baseUrl)) -
-                      Number(!/dashscope|aliyuncs|stepfun/i.test(b.baseUrl)),
+                      Number(!/dashscope|aliyuncs|stepfun|mos[si]\.cn/i.test(a.baseUrl)) -
+                      Number(!/dashscope|aliyuncs|stepfun|mos[si]\.cn/i.test(b.baseUrl)),
                   )
                   .map((p) => (
                     <SelectItem key={p.id} value={p.id}>
@@ -407,13 +410,19 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
               </SelectContent>
             </Select>
           </div>
-          <VendorVoiceField
-            vendor={callVendor}
-            value={voice}
-            onChange={setVoice}
-            label={t("voicecall.cloudVoice")}
-            placeholder={realtimeDefaultVoice(dialect)}
-          />
+          {/* MOSS 没有 voice 参数（音色由 persona 决定）：显示一个填不动的音色框
+              只会让人以为改了有用。 */}
+          {realtimeDialectHasVoice(dialect) ? (
+            <VendorVoiceField
+              vendor={callVendor}
+              value={voice}
+              onChange={setVoice}
+              label={t("voicecall.cloudVoice")}
+              placeholder={realtimeDefaultVoice(dialect)}
+            />
+          ) : (
+            <p className="text-[10px] leading-4 text-muted-foreground">{t("voicecall.mossNoVoice")}</p>
+          )}
           <div className="space-y-1">
             <Label className="text-[11px] text-muted-foreground">{t("voicecall.cloudBaseUrl")}</Label>
             <Input
@@ -686,7 +695,7 @@ function CallMessageBubble({
 export function VoiceCallWindow() {
   const t = useT();
   const queryClient = useQueryClient();
-  const { start, hangup } = useVoiceCallEngine();
+  const { start, hangup, startVideo, stopVideo } = useVoiceCallEngine();
 
   const phase = useVoiceCallStore((s) => s.phase);
   const callConversationId = useVoiceCallStore((s) => s.callConversationId);
@@ -694,6 +703,7 @@ export function VoiceCallWindow() {
   const liveText = useVoiceCallStore((s) => s.liveText);
   const liveActive = useVoiceCallStore((s) => s.liveActive);
   const micLevel = useVoiceCallStore((s) => s.micLevel);
+  const videoSource = useVoiceCallStore((s) => s.videoSource);
   const error = useVoiceCallStore((s) => s.error);
 
   const activeConversationId = useChatStore((s) => s.activeConversationId);
@@ -758,6 +768,11 @@ export function VoiceCallWindow() {
     queryKey: ["voicecall-preflight"],
     queryFn: () => rpcClient.voicecallPreflight(),
   });
+
+  // 画面理解只有 MOSS-Live 支持（另两家没有视频帧协议）。按 preflight 里的方言判，
+  // 不用页面本地状态：用户在设置里换了厂商后这里要跟着变。
+  const videoSupported =
+    callProvider === "cloud" && preflightQuery.data?.provider.cloudDialect === "moss";
 
   // 未在通话且没有可展示的内容（新通话 / 全新会话）→ 拨号面板
   const showDial =
@@ -996,7 +1011,37 @@ export function VoiceCallWindow() {
                 >
                   <PhoneOffIcon className="size-5" />
                 </Button>
-                <div className="w-40" />
+                <div className="flex w-40 items-center gap-2">
+                  {/* 画面理解只有 MOSS-Live 支持：别的渠道上摆一个点了没用的按钮
+                      比不摆更糟，所以按当前方言显隐。摄像头与屏幕共享各一个图标，
+                      同时只开一路（协议侧也是"聚焦某一路"的语义）。 */}
+                  {videoSupported &&
+                    (["camera", "screen"] as const).map((src) => (
+                      <Button
+                        key={src}
+                        size="icon"
+                        variant={videoSource === src ? "default" : "outline"}
+                        className="rounded-full"
+                        tooltip={
+                          videoSource === src
+                            ? t("voicecall.stopVideo")
+                            : src === "camera"
+                              ? t("voicecall.camera")
+                              : t("voicecall.screen")
+                        }
+                        onClick={() => {
+                          if (videoSource === src) stopVideo();
+                          else void startVideo(src);
+                        }}
+                      >
+                        {src === "camera" ? (
+                          <CameraIcon className="size-4" />
+                        ) : (
+                          <MonitorIcon className="size-4" />
+                        )}
+                      </Button>
+                    ))}
+                </div>
               </>
             ) : (
               activeConversationId != null &&

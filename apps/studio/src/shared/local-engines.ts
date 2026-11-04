@@ -17,6 +17,7 @@ export type LocalEngineId =
   | InferenceEngine
   | "whisper.cpp"
   | "audio.cpp"
+  | "speech.cpp"
   | "paddleocr"
   | "tesseract"
   | "mflux"
@@ -161,6 +162,17 @@ export const LOCAL_ENGINE_SPECS: readonly LocalEngineSpec[] = [
     modelsTarget: "voice",
   },
   {
+    id: "speech.cpp",
+    category: "voice",
+    name: "speech.cpp",
+    roleKey: "engines.speechcpp.role",
+    usedByKey: "engines.speechcpp.usedBy",
+    installHint: null,
+    uninstallHint: null,
+    managedSupported: true,
+    modelsTarget: "voice",
+  },
+  {
     id: "paddleocr",
     category: "ocr",
     name: "PaddleOCR",
@@ -266,6 +278,7 @@ export const LOCAL_ENGINE_DIRS: Record<LocalEngineId, string | null> = {
   omlx: "omlx",
   "whisper.cpp": "whispercpp",
   "audio.cpp": "audiocpp",
+  "speech.cpp": "speechcpp",
   paddleocr: "paddleocr",
   tesseract: "tessdata",
   mflux: "mflux",

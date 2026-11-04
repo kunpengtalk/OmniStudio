@@ -137,6 +137,7 @@ export type SettingsKey =
   | "TTS_PROVIDER_MODEL"
   | "TTS_LOCAL_ENGINE"
   | "TTS_LOCAL_MODEL"
+  | "TTS_SPEECHCPP_MODEL"
   | "ASR_PORT"
   | "ASR_ENGINE"
   | "ASR_AUDIOCPP_MODEL"
@@ -475,6 +476,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   TTS_PROVIDER_MODEL: "",
   TTS_LOCAL_ENGINE: "",
   TTS_LOCAL_MODEL: "",
+  TTS_SPEECHCPP_MODEL: "",
   ASR_PORT: "18081",
   ASR_ENGINE: "whisper",
   ASR_AUDIOCPP_MODEL: "",

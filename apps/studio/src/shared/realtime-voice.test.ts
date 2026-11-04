@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   DEFAULT_REALTIME_BASE_URL,
+  MOSS_REALTIME_BASE_URL,
   STEPFUN_REALTIME_BASE_URL,
   isPresetRealtimeEndpoint,
   isRealtimeModelId,
@@ -10,6 +11,7 @@ import {
   realtimeDefaultVoice,
   realtimeDialectFor,
   realtimeInputRate,
+  realtimeOutputRate,
 } from "./realtime-voice";
 
 /**
@@ -33,6 +35,14 @@ describe("realtimeBaseUrlForProvider", () => {
   test("阶跃的兼容地址推出它自己的实时端点", () => {
     expect(realtimeBaseUrlForProvider("https://api.stepfun.com/v1")).toBe(STEPFUN_REALTIME_BASE_URL);
     expect(STEPFUN_REALTIME_BASE_URL).toBe("wss://api.stepfun.com/v1/realtime");
+  });
+
+  test("MOSS 的兼容地址（含平台站域名）都推出同一条实时端点", () => {
+    // 产品 API 是 mosi.cn（注意不是 moss），平台站是 moss.cn —— 两种拼写都要认，
+    // 认不出会让用户去手填一个换厂商不会跟着换的 wss 地址。
+    expect(realtimeBaseUrlForProvider("https://api.mosi.cn/v1")).toBe(MOSS_REALTIME_BASE_URL);
+    expect(realtimeBaseUrlForProvider("https://platform.moss.cn/v1")).toBe(MOSS_REALTIME_BASE_URL);
+    expect(MOSS_REALTIME_BASE_URL).toBe("wss://api.mosi.cn/v1/realtime");
   });
 
   test("百炼国际站（qwencloud.com）推出国际站端点，而不是国内那条", () => {
@@ -74,11 +84,23 @@ describe("realtimeDialectFor", () => {
   test("上行采样率跟着方言（喂错会被当成另一种语速）", () => {
     expect(realtimeInputRate("stepfun")).toBe(24000);
     expect(realtimeInputRate("dashscope")).toBe(16000);
+    // MOSS 文档明确 16k 上行 / **48k 下行**：上行与百炼相同，下行是另一回事。
+    expect(realtimeInputRate("moss")).toBe(16000);
+    expect(realtimeOutputRate("moss")).toBe(48000);
+    expect(realtimeOutputRate("dashscope")).toBe(24000);
+    expect(realtimeOutputRate("stepfun")).toBe(24000);
+  });
+
+  test("MOSS 地址 / 模型都认得出方言", () => {
+    expect(realtimeDialectFor({ baseUrl: "https://api.mosi.cn/v1" })).toBe("moss");
+    expect(realtimeDialectFor({ baseUrl: "wss://api.mosi.cn/v1/realtime" })).toBe("moss");
+    expect(realtimeDialectFor({ baseUrl: "wss://relay.example/ws", model: "moss-live-1.0" })).toBe("moss");
   });
 
   test("默认模型 / 音色互不通用", () => {
     expect(realtimeDefaultModel("stepfun")).toBe("stepaudio-3-realtime-preview");
     expect(realtimeDefaultModel("dashscope")).toBe("qwen-audio-3.0-realtime-plus");
+    expect(realtimeDefaultModel("moss")).toBe("moss-live-1.0");
     expect(realtimeDefaultVoice("stepfun")).not.toBe(realtimeDefaultVoice("dashscope"));
   });
 });
@@ -96,6 +118,12 @@ describe("isPresetRealtimeEndpoint", () => {
     expect(isPresetRealtimeEndpoint("wss://relay.example/api-ws/v1/realtime")).toBe(false);
   });
 
+  test("MOSS 的预设端点也算预设", () => {
+    expect(isPresetRealtimeEndpoint(MOSS_REALTIME_BASE_URL)).toBe(true);
+    // 平台站域名与产品域名的关系同上：路径不对就不是预设端点。
+    expect(isPresetRealtimeEndpoint("wss://api.mosi.cn/v1/other")).toBe(false);
+  });
+
   test("自建中转的地址不算：那是用户改过的值，不能被厂商推导覆盖", () => {
     expect(isPresetRealtimeEndpoint("wss://relay.example/ws")).toBe(false);
     expect(isPresetRealtimeEndpoint("")).toBe(false);
@@ -111,6 +139,13 @@ describe("isRealtimeModelId", () => {
     expect(isRealtimeModelId("stepaudio-2.5-realtime")).toBe(true);
     expect(isRealtimeModelId("step-1o-audio")).toBe(true);
     expect(isRealtimeModelId("step-audio-2")).toBe(true);
+    // MOSS-Live：名字里既没有 realtime 也没有 audio，只能按前缀认。
+    expect(isRealtimeModelId("moss-live-1.0")).toBe(true);
+  });
+
+  test("MOSS 的非实时模型不被放行（TTS / ASR 会混进实时下拉）", () => {
+    expect(isRealtimeModelId("moss-tts-1.5-flash")).toBe(false);
+    expect(isRealtimeModelId("moss-transcribe-1.0")).toBe(false);
   });
 
   test("对话 / 生图 / 嵌入 / 语音合成与识别模型挡掉", () => {
