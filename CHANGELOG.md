@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-11-19
+
+### Added / 新增
+
+- **通话静音现在是协议信号**：点静音后客户端向云端报 `mic_state{enabled:false}`（MOSS-Live），服务端立刻知道你闭麦了；音频帧照旧按节奏推静音，不断流（停发服务端不会断句）。重连就绪后自动重报当前麦克风状态。
+- **通话区重做**：球体换成 WebGL 渲染的「通话星球」（松籁 / 潮汐 / 赭石 / 墨玉四款皮肤可换，刷新记住），无 WebGL 环境自动退回 CSS 渐变球；顶部状态点 + 渠道徽章，底部 dock 三键（静音 / 挂断 / 摄像头·屏幕），未通话时是一粒呼出胶囊；实时字幕自动跟随滚动。
+- **连不上时告诉你为什么**（不只是「云端拒绝连接」）：WebSocket 升级被拒时真实原因藏在 HTTP 响应里、WS 客户端看不到——现在拒接后补一次 HTTPS 请求拿服务端原文，把额度不足（insufficient_credits → 去 platform.moss.cn 充值）、密钥无效、缺 model 参数等翻成可执行提示，补探 4 秒封顶不拖慢失败反馈。
+
+### Fixed / 修复
+
+- **同采样率不再「顺手」重采样**：16k→16k 也过了一遍低通滤波器，起步暂态会把短音频的前几毫秒整段削掉（whisper 收到的正是这种样本）。现在同率直通。
+- **omlx 生命周期测试被真安装遮蔽**：装了 omlx 的机器上测试会摸到真二进制。改为显式注入测试 binary，三平台 CI 口径一致。
+
+### Internal / 内部
+
+- **CI / Release 的 macOS runner 切到 `macos-latest`**：`macos-14` 的 hosted 配置已停供，mac 作业 0~1 秒即挂（The configuration 'macos-14-arm64-us-default' is not supported）。不切的话本版本无法发布。
+
 ## [0.1.11] - 2026-11-04
 
 ### Added / 新增
