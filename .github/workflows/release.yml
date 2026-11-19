@@ -17,7 +17,7 @@ permissions:
 jobs:
   build-macos:
     name: Build macOS (Apple Silicon)
-    runs-on: macos-14 # M1/M2 Apple Silicon runner
+    runs-on: macos-latest # Apple Silicon runner（macos-14 标签已停供）
 
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}

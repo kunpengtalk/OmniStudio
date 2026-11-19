@@ -17,7 +17,7 @@ jobs:
     name: lint / typecheck / test
     # macOS runner：应用目标平台是 macOS（llama.cpp / MLX 等引擎与路径逻辑都有
     # darwin 分支），测试也按 macOS 假设编写；Linux/Windows 的构建由 release.yml 覆盖。
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -81,7 +81,7 @@ jobs:
 
   build:
     name: vite build
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
