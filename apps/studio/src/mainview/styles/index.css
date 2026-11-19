@@ -432,8 +432,102 @@
 }
 
 /* ------------------------------------------------------------------ */
-/* 实时语音 — GPT-4o 风格语音球（随声音律动的蓝色光球）                  */
+/* 实时语音 — 通话星球区（纸白底 + 墨绿点缀的通话舞台）                   */
 /* ------------------------------------------------------------------ */
+/* 通话区背景：极淡的墨绿顶光 + 纸白渐变，让球体"挂"在一段安静的天空里。
+   深色下是同一构成的夜版（顶光提亮、底色压深），不是简单 invert。 */
+.vc-stage-bg {
+  background:
+    radial-gradient(120% 90% at 50% 12%, rgba(54, 115, 91, 0.08) 0%, rgba(54, 115, 91, 0) 58%),
+    linear-gradient(180deg, #fafbf9 0%, #f2f5f1 100%);
+}
+.dark .vc-stage-bg {
+  background:
+    radial-gradient(120% 90% at 50% 12%, rgba(74, 155, 122, 0.12) 0%, rgba(74, 155, 122, 0) 58%),
+    linear-gradient(180deg, #101512 0%, #0b0f0d 100%);
+}
+
+/* 底部 dock 的圆形键：大圆片 + 居中的图标。功能用颜色分档：
+   灰=可切换（静音）、暖红=挂断、深墨=开始。hover 只提一档亮度，
+   不放大不位移 —— 通话中误触的代价是一次断线。 */
+.vc-dock-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 58px;
+  height: 58px;
+  border-radius: 9999px;
+  border: 1px solid rgba(32, 39, 34, 0.08);
+  background: #ecefea;
+  color: #202722;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease;
+}
+.vc-dock-btn:hover:not(:disabled) {
+  background: #e2e6df;
+}
+.vc-dock-btn:disabled {
+  opacity: 0.45;
+}
+.dark .vc-dock-btn {
+  background: #262c28;
+  color: #e6ece8;
+  border-color: rgba(230, 236, 232, 0.1);
+}
+.dark .vc-dock-btn:hover:not(:disabled) {
+  background: #2e3530;
+}
+.vc-dock-btn[data-on="true"] {
+  background: #dcefe2;
+  color: #2f6b52;
+}
+.dark .vc-dock-btn[data-on="true"] {
+  background: #24372e;
+  color: #8fceae;
+}
+.vc-dock-hangup {
+  background: #f0dedb;
+  color: #a34c40;
+  border-color: rgba(163, 76, 64, 0.18);
+}
+.vc-dock-hangup:hover:not(:disabled) {
+  background: #e9d2ce;
+}
+.dark .vc-dock-hangup {
+  background: #3c2723;
+  color: #e8a99e;
+  border-color: rgba(232, 169, 158, 0.16);
+}
+.dark .vc-dock-hangup:hover:not(:disabled) {
+  background: #472d28;
+}
+
+/* 呼出键（深墨圆角胶囊）：页面里唯一的"主动作"，比 dock 灰键更重一档。 */
+.vc-dock-start {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 46px;
+  padding: 0 26px;
+  border-radius: 9999px;
+  background: #252f28;
+  color: #f4f7f3;
+  transition: background-color 140ms ease;
+}
+.vc-dock-start:hover:not(:disabled) {
+  background: #313d35;
+}
+.dark .vc-dock-start {
+  background: #e8efe9;
+  color: #18211c;
+}
+.dark .vc-dock-start:hover:not(:disabled) {
+  background: #f4f7f3;
+}
+
+/* 外圈呼吸光环：一颗球安静地"在听"的节奏。 */
 @keyframes orb-halo {
   0%,
   100% {
@@ -447,21 +541,4 @@
 }
 .orb-halo {
   animation: orb-halo 2.6s ease-out infinite;
-}
-
-@keyframes orb-speaking {
-  0%,
-  100% {
-    box-shadow:
-      0 0 70px rgba(56, 189, 248, 0.55),
-      0 0 140px rgba(56, 189, 248, 0.22);
-  }
-  50% {
-    box-shadow:
-      0 0 110px rgba(125, 211, 252, 0.85),
-      0 0 200px rgba(56, 189, 248, 0.4);
-  }
-}
-.orb-speaking {
-  animation: orb-speaking 1.4s ease-in-out infinite;
 }

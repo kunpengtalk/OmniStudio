@@ -52,6 +52,8 @@ interface VoiceCallState {
   liveActive: boolean;
   /** 麦克风电平 0..1（驱动波形动画）。 */
   micLevel: number;
+  /** 麦克风是否被用户静音（云端会同步 mic_state，上行改推静音帧）。 */
+  muted: boolean;
   /** 正在共享的画面源（仅 MOSS 支持）：null = 没开画面。 */
   videoSource: "camera" | "screen" | null;
   error: string | null;
@@ -59,6 +61,7 @@ interface VoiceCallState {
   audioQueue: AudioEntry[];
   setPhase: (phase: CallPhase) => void;
   setMicLevel: (level: number) => void;
+  setMuted: (muted: boolean) => void;
   setVideoSource: (source: "camera" | "screen" | null) => void;
   setLiveActive: (active: boolean) => void;
   setLiveText: (text: string) => void;
@@ -80,6 +83,7 @@ export const useVoiceCallStore = create<VoiceCallState>((set, get) => ({
   liveText: "",
   liveActive: false,
   micLevel: 0,
+  muted: false,
   videoSource: null,
   error: null,
   audioQueue: [],
@@ -90,13 +94,21 @@ export const useVoiceCallStore = create<VoiceCallState>((set, get) => ({
   },
 
   setMicLevel: (micLevel) => set({ micLevel }),
+  setMuted: (muted) => set({ muted }),
   setVideoSource: (videoSource) => set({ videoSource }),
   setLiveActive: (liveActive) => set({ liveActive }),
   setLiveText: (liveText) => set({ liveText }),
   setError: (error) => set({ error }),
 
   beginCall: (conversationId, provider) =>
-    set({ callConversationId: conversationId, provider, phase: "listening", error: null, liveText: "" }),
+    set({
+      callConversationId: conversationId,
+      provider,
+      phase: "listening",
+      error: null,
+      liveText: "",
+      muted: false,
+    }),
 
   endCall: () =>
     set({
@@ -106,6 +118,7 @@ export const useVoiceCallStore = create<VoiceCallState>((set, get) => ({
       liveText: "",
       liveActive: false,
       micLevel: 0,
+      muted: false,
       videoSource: null,
       error: null,
       audioQueue: [],

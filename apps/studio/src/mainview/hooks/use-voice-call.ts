@@ -4,7 +4,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { rpcClient } from "../lib/rpc";
 import { useChatStore } from "../stores/chat";
 import { useVoiceCallStore, type AudioEntry, type VoiceCallProvider } from "../stores/voice-call";
-import { encodePcm16Base64 } from "../lib/wav";
+import { createUplinkEncoder, encodePcm16Base64 } from "../lib/wav";
+import { createPcmPlayer } from "../lib/pcm-player";
 import { describeCaptureContext, describeCaptureFailure, describeMicFailure } from "../lib/capture-errors";
 import { REALTIME_OUTPUT_RATE, realtimeDialectFor, realtimeInputRate, realtimeOutputRate } from "@/shared/realtime-voice";
 
@@ -26,90 +27,6 @@ const CLOUD_PUSH_INTERVAL_MS = 120; // 云端实时流：推得越勤，断句�
 const UTTERANCE_MIN_SAMPLES = INPUT_RATE * 0.08; // <80ms 视为误触发
 const SILENCE_END_CHUNKS = 5; // ≈430ms 连续低电平 → 一句话结束（早一点进下一轮，响应更快）
 const SPEECH_START_CHUNKS = 2;
-
-/**
- * 云端实时 PCM 的**连续播放调度器**。
- *
- * 以前是"攒一批 → 播完（onended）→ 再取下一批"的接力：每一批之间都要等
- * `onended` 回调 + 一次 `await`，而 Web Audio 的调度精度是"排程时刻"，两次
- * 独立 `start()` 之间必然有几十毫秒空隙 —— 连续说话时就听成持续卡顿；每批
- * 又各自新建 `AudioBuffer`，块边界处的波形不连续又变成"咔哒"声。
- *
- * 现在的做法（也是 Web Audio 处理流式音频的标准做法）：**按时间轴排程**。
- * 每个块算出它在音频时间轴上的起点 `nextStartTime`，后一块紧接前一块的结束时刻
- * 调用 `start(when)`，于是播放由音频硬件时钟连续驱动，块之间没有空隙也没有
- * 重新起振的跳变。
- *
- * 同时解决字节对齐：PCM16 的字节流是连续的，**上一块剩下的半个样本要接到下一块
- * 开头**，而不是各自 `floor(len/2)` 丢掉。
- */
-function createPcmScheduler(ctx: AudioContext, sampleRate: number) {
-  /** 上一块还剩下的半个样本（奇数长度时），拼到下一块开头。 */
-  let carry: Uint8Array | null = null;
-  /** 下一块应当开始播放的音频时钟时刻。 */
-  let nextStartTime = 0;
-  /** 已调度的 source；打断时要一起停。 */
-  const sources = new Set<AudioBufferSourceNode>();
-
-  return {
-    /** 排入一块裸 PCM16 字节。 */
-    push(bytes: Uint8Array): void {
-      // 1) 接上上一块残留的半个样本，保持字节流连续。
-      let all = bytes;
-      if (carry) {
-        all = new Uint8Array(carry.length + bytes.length);
-        all.set(carry, 0);
-        all.set(bytes, carry.length);
-        carry = null;
-      }
-      // 2) 奇数长度：把末尾那一个字节留到下一块，不能丢（丢了后面全部错位）。
-      if (all.length % 2 !== 0) {
-        carry = all.slice(all.length - 1);
-        all = all.subarray(0, all.length - 1);
-      }
-      const frames = all.length / 2;
-      if (frames === 0) return;
-
-      // 3) 切样本。
-      const ch = new Float32Array(frames);
-      const dv = new DataView(all.buffer, all.byteOffset, all.byteLength);
-      for (let i = 0; i < frames; i++) ch[i] = dv.getInt16(i * 2, true) / 0x8000;
-
-      const buf = ctx.createBuffer(1, frames, sampleRate);
-      buf.getChannelData(0).set(ch);
-
-      const source = ctx.createBufferSource();
-      source.buffer = buf;
-      source.connect(ctx.destination);
-      // 4) 排程：晚于当前时刻就从现在开始，否则紧接着上一块结束 —— 不留空隙。
-      const startAt = Math.max(ctx.currentTime, nextStartTime);
-      source.start(startAt);
-      nextStartTime = startAt + buf.duration;
-      sources.add(source);
-      source.onended = () => sources.delete(source);
-    },
-
-    /** 下一次可以安全排程的时刻（用来判断缓冲是否已经落后）。 */
-    get nextTime(): number {
-      return nextStartTime;
-    },
-
-    /** 停止全部已排程音频（打断 / 挂断）。 */
-    stop(): void {
-      carry = null;
-      nextStartTime = 0;
-      for (const s of sources) {
-        try {
-          s.stop();
-          s.disconnect();
-        } catch {
-          // ignore
-        }
-      }
-      sources.clear();
-    },
-  };
-}
 
 /**
  * 把连续多个 PCM 音频块拼成一块 AudioBuffer（本地 / 单条播放用）。
@@ -175,6 +92,43 @@ export function useVoiceCallEngine() {
    * 用固定 24k 去解 MOSS 的音频会变成慢放的低音。
    */
   const outputRateRef = useRef(REALTIME_OUTPUT_RATE);
+  /**
+   * 上行编码器（持有重采样状态）。
+   *
+   * 必须跨块复用同一个实例：每次新建会让滤波器状态与相位在块边界重置，
+   * 对方听到的是每 120ms 一次的跳变，连起来就是持续的轻微失真。
+   * 采样率变了才重建。
+   */
+  const uplinkEncoderRef = useRef<{
+    inRate: number;
+    outRate: number;
+    encoder: ReturnType<typeof createUplinkEncoder>;
+  } | null>(null);
+
+  const getUplinkEncoder = (outputRate: number) => {
+    const cur = uplinkEncoderRef.current;
+    if (cur && cur.inRate === INPUT_RATE && cur.outRate === outputRate) return cur.encoder;
+    const encoder = createUplinkEncoder(INPUT_RATE, outputRate);
+    uplinkEncoderRef.current = { inRate: INPUT_RATE, outRate: outputRate, encoder };
+    return encoder;
+  };
+  /**
+   * 用户静音。语义与官方 demo 的静音键一致（mic.js / client-demo.js）：
+   * **采集与推流照常跑，只是把这一段的采样换成等长静音**，并给云端发一次
+   * `mic_state{enabled:false}`。停掉推流是错的 —— 上游靠持续字节流维持
+   * 连接节奏与断句判定，停推会被当成掉线。
+   */
+  const mutedRef = useRef(false);
+  /** 静音时给 onAudio 用的等长零块（按块长缓存，不每帧新建）。 */
+  const silenceBlockRef = useRef<Float32Array | null>(null);
+  const silenceBlock = (len: number): Float32Array => {
+    let b = silenceBlockRef.current;
+    if (!b || b.length !== len) {
+      b = new Float32Array(len);
+      silenceBlockRef.current = b;
+    }
+    return b;
+  };
   const pushTimerRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
   const activeRef = useRef(false);
@@ -234,6 +188,9 @@ export function useVoiceCallEngine() {
         // ignore
       }
     }
+    // 云端 PCM 走常驻播放器：它不会自己停，必须显式清空队列，
+    // 否则打断之后队列里剩下的音频还会继续播出来（用户抢话时尤其明显）。
+    pcmPlayerRef.current?.player.stop();
     playingRef.current = false;
     // stop() 之后 onended 不一定触发；在这里复位，避免回声门控一直卡住。
     agentAudibleRef.current = false;
@@ -251,26 +208,26 @@ export function useVoiceCallEngine() {
    */
   const pumpingRef = useRef(false);
 
-  /** 云端 PCM 的连续播放调度器（跟着 AudioContext 与采样率重建）。 */
-  const pcmSchedulerRef = useRef<{
+  /** 云端 PCM 的常驻播放器（跟着 AudioContext 与采样率重建）。 */
+  const pcmPlayerRef = useRef<{
     ctx: AudioContext;
     rate: number;
-    scheduler: ReturnType<typeof createPcmScheduler>;
+    player: ReturnType<typeof createPcmPlayer>;
   } | null>(null);
 
   /**
-   * 取（或按需建立）PCM 调度器。
+   * 取（或按需建立）PCM 播放器。
    *
-   * 采样率变了（换厂商 / 换方言）就得重建：AudioBuffer 的采样率在创建时固定，
+   * 采样率变了（换厂商 / 换方言）就得重建：常驻节点的输出采样率在创建时固定，
    * 用 24k 的缓冲配 48k 的时钟就是"变慢一倍"，反过来是"变快一倍"。
    */
   const getPcmScheduler = (ctx: AudioContext, rate: number) => {
-    const cur = pcmSchedulerRef.current;
-    if (cur && cur.ctx === ctx && cur.rate === rate) return cur.scheduler;
-    cur?.scheduler.stop();
-    const scheduler = createPcmScheduler(ctx, rate);
-    pcmSchedulerRef.current = { ctx, rate, scheduler };
-    return scheduler;
+    const cur = pcmPlayerRef.current;
+    if (cur && cur.ctx === ctx && cur.rate === rate) return cur.player;
+    cur?.player.dispose();
+    const player = createPcmPlayer(ctx, rate);
+    pcmPlayerRef.current = { ctx, rate, player };
+    return player;
   };
 
   const playNext = async () => {
@@ -291,7 +248,7 @@ export function useVoiceCallEngine() {
       return;
     }
     // 云端 PCM 走"排程"而不是"接力"：一次把队列里所有 PCM 块都排进时间轴，
-    // 由音频时钟连续播出去（见 createPcmScheduler 的说明）。
+    // 由常驻节点连续播出去（见 createPcmPlayer 的说明）。
     if (queue[0]!.format === "pcm") {
       let take = 0;
       while (take < queue.length && queue[take]!.format === "pcm") take++;
@@ -302,19 +259,19 @@ export function useVoiceCallEngine() {
       try {
         const ctx = getAudioCtx();
         if (ctx.state === "suspended") await ctx.resume();
-        const scheduler = getPcmScheduler(ctx, outputRateRef.current);
+        const player = getPcmScheduler(ctx, outputRateRef.current);
         for (const e of batch) {
           const binary = atob(e.base64);
           const bytes = new Uint8Array(binary.length);
           for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-          scheduler.push(bytes);
+          player.push(bytes);
         }
-        // 回执：排程后按"这块应当播完的音频时刻"回报。MOSS 要求真正播完后才回，
-        // 而排程模式下我们精确知道每块在时间轴上的结束时刻，不必等 onended
-        // （等 onended 会把回执拖到整批结束，服务端以为一直没播完）。
+        // 回执：MOSS 要求某块**真正播完**后才回报。常驻播放器没有"每块的结束时刻"，
+        // 但队列里的音频是**串行**播出去的，所以「这批别全部播完」≈
+        // 「当前水位这么久之后」。用 bufferedSec 估算，误差只影响回执早晚，
+        // 不影响播放本身。
         const conversationId = useVoiceCallStore.getState().callConversationId;
-        const settleAt = scheduler.nextTime;
-        const leadMs = Math.max(0, (settleAt - ctx.currentTime) * 1000);
+        const leadMs = Math.max(0, player.bufferedSec * 1000);
         if (conversationId != null) {
           // filter 已保证 chunkId 非空，但 TS 不会跨数组收窄，这里显式取值。
           const acks = batch
@@ -334,12 +291,12 @@ export function useVoiceCallEngine() {
         }
         void rpcClient
           .voicecallDebug({
-            line: `pcm scheduled ${batch.length} chunks, +${leadMs.toFixed(0)}ms (rate=${outputRateRef.current})`,
+            line: `pcm buffered ${batch.length} chunks, ${player.bufferedSec.toFixed(2)}s (rate=${outputRateRef.current})`,
           })
           .catch(() => {});
       } catch (e) {
         playingRef.current = false;
-        void rpcClient.voicecallDebug({ line: `pcm schedule error: ${String(e)}` }).catch(() => {});
+        void rpcClient.voicecallDebug({ line: `pcm playback error: ${String(e)}` }).catch(() => {});
       }
       // 排程完接着看队列里还有没有（播放本身不阻塞这里）。
       void playNext();
@@ -432,7 +389,7 @@ export function useVoiceCallEngine() {
     //    MOSS 要靠持续的静音流才能判定"用户说完了"，百炼 / 阶跃也靠它维持连接节奏
     //  - 本地 / omni 由后端累积，用前统一包 WAV 头（避免把多个 WAV 小块粘成一个非法文件）
     const pcmBase64 = isRealtime()
-      ? encodePcm16Base64(chunk, INPUT_RATE, inputRateRef.current)
+      ? getUplinkEncoder(inputRateRef.current).encode(chunk)
       : encodePcm16Base64(chunk, INPUT_RATE);
     if (isRealtime()) {
       // 云端是"推完即弃"的流：整段保留会让长通话的数组无限增长（一小时 ≈ 700MB）。
@@ -523,7 +480,9 @@ export function useVoiceCallEngine() {
 
   const onAudio = (e: AudioProcessingEvent) => {
     if (!activeRef.current) return;
-    const data = e.inputBuffer.getChannelData(0);
+    // 静音：整块换成等长零（对齐 demo 的 silentFrame 换帧）。下游 VAD 自然不触发、
+    // 推流推的是静音、转写为空 —— 一处换帧，三条链路全部安静。
+    const data = mutedRef.current ? silenceBlock(e.inputBuffer.length) : e.inputBuffer.getChannelData(0);
     const prev = samplesRef.current;
     const next =
       prev.length === 0
@@ -593,7 +552,11 @@ export function useVoiceCallEngine() {
 
   const levelLoop = () => {
     const an = analyserRef.current;
-    if (an) {
+    if (an && mutedRef.current) {
+      // 静音时电平必须归零：analyser 直接挂在麦克风上，不拦的话球体会跟着
+      // 用户被静音掉的声音跳动 —— 看起来就像静音键没生效。
+      useVoiceCallStore.getState().setMicLevel(0);
+    } else if (an) {
       const buf = new Uint8Array(an.frequencyBinCount);
       an.getByteTimeDomainData(buf);
       let sum = 0;
@@ -770,11 +733,32 @@ export function useVoiceCallEngine() {
   // 对外控制
   // ------------------------------------------------------------------
 
+  /**
+   * 静音开关（通话中底部 dock 的麦克风键）。
+   *
+   * 不挂断、不停采集：只把上行换静音 + 给云端发 mic_state 信号（见 mutedRef）。
+   * 本地 / omni 没有服务端信号可发（hub 返回 supported:false），静音完全由
+   * 前端换帧实现，效果一致。
+   */
+  const setMuted = (muted: boolean) => {
+    const store = useVoiceCallStore.getState();
+    if (store.muted === muted) return;
+    mutedRef.current = muted;
+    store.setMuted(muted);
+    if (muted) store.setMicLevel(0);
+    const conversationId = store.callConversationId;
+    if (conversationId != null) {
+      void rpcClient.voicecallMicState({ conversationId, enabled: !muted }).catch(() => {});
+    }
+    void rpcClient.voicecallDebug({ line: `mic muted=${muted}` }).catch(() => {});
+  };
+
   const start = async (conversationId: number | null, provider?: VoiceCallProvider) => {
     const store = useVoiceCallStore.getState();
     if (store.callConversationId != null) return;
     const mode = provider ?? "local";
     providerRef.current = mode;
+    mutedRef.current = false;
     store.setPhase("starting");
     store.setError(null);
     primeAudio();
@@ -848,6 +832,7 @@ export function useVoiceCallEngine() {
   const hangup = async () => {
     const store = useVoiceCallStore.getState();
     const conversationId = store.callConversationId;
+    mutedRef.current = false;
     stopCapture();
     stopCurrentAudio();
     store.clearAudio();
@@ -877,5 +862,5 @@ export function useVoiceCallEngine() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { start, hangup, stopCurrentAudio, startVideo, stopVideo };
+  return { start, hangup, stopCurrentAudio, setMuted, startVideo, stopVideo };
 }

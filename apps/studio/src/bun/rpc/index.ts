@@ -1829,6 +1829,14 @@ export type AppRPC = {
         params: { conversationId: number; chunkId: string; runId?: string; turnId?: string };
         response: { ok: boolean };
       };
+      /**
+       * 麦克风静音信号（官方 demo 的静音键：mic_state{enabled}）。静音帧由前端生成
+       * 并照常推流（上游靠持续字节流维持断句），这里只同步服务端的状态。
+       */
+      voicecallMicState: {
+        params: { conversationId: number; enabled: boolean };
+        response: { ok: boolean; supported: boolean };
+      };
       /** 开关画面（仅 MOSS 支持）：摄像头 / 屏幕共享。 */
       voicecallSetVideo: {
         params: { conversationId: number; source: "camera" | "screen"; enabled: boolean };
@@ -5005,6 +5013,9 @@ const rpcRequests: NonNullable<
   },
   voicecallAckPlayback: async ({ conversationId, chunkId, runId, turnId }) => {
     return VoiceCall.ackVoiceCallPlayback({ conversationId, chunkId, runId, turnId });
+  },
+  voicecallMicState: async ({ conversationId, enabled }) => {
+    return VoiceCall.setVoiceCallMicState({ conversationId, enabled });
   },
   voicecallSetVideo: async ({ conversationId, source, enabled }) => {
     return VoiceCall.setVoiceCallVideo({ conversationId, source, enabled });
