@@ -26,6 +26,12 @@ export type RuntimeOverrides = {
    * 回落到嵌入端口段（EMBEDDING_PORT）；不传即 chat，命令行与旧行为完全一致。
    */
   purpose?: "chat" | "embedding";
+  /**
+   * 显式二进制路径（托管安装与测试注入用）；不传则按 PATH + 常见安装位置自动发现。
+   * 要显式传而不是靠改 `process.env.PATH`：发现顺序里 `/opt/homebrew/bin` 等固定
+   * 前缀排在进程 PATH 之前（GUI 进程不继承 shell PATH 的补偿），假 CLI 会被真安装遮蔽。
+   */
+  binary?: string;
 };
 
 export interface Runtime {

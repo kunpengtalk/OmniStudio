@@ -144,7 +144,6 @@ Bun.serve({
 describe("OmlxRuntime 生命周期（假 omlx CLI）", () => {
   test("start 等到目标模型就绪，stop 停掉进程组", async () => {
     const root = mkdtempSync(join(tmpdir(), "omlx-runtime-"));
-    const oldPath = process.env.PATH;
     try {
       const modelDir = join(root, "Qwen__Qwen3.5-4B");
       mkdirSync(modelDir, { recursive: true });
@@ -156,14 +155,16 @@ describe("OmlxRuntime 生命周期（假 omlx CLI）", () => {
       writeFileSync(binary, `#!/bin/sh\nexec "${process.execPath}" "${serverFile}" "$@"\n`, {
         mode: 0o755,
       });
-      process.env.PATH = `${root}:${oldPath ?? ""}`;
 
+      // 假 CLI 走 overrides.binary 显式注入，不走 PATH：解析顺序里 /opt/homebrew/bin、
+      // ~/.local/bin 等固定前缀排在进程 PATH 之前（GUI 进程的补偿），装了真 omlx 的
+      // 开发机上 PATH 假 CLI 会被真二进制顶掉，拉起整台真服务器。
       // 先让内核分配一个空闲端口，再关掉交给假服务，避免 8000 被占。
       const probe = Bun.serve({ port: 0, fetch: () => new Response("") });
       const port = probe.port;
       probe.stop(true);
 
-      const runtime = new OmlxRuntime({ model: modelDir, port: String(port) });
+      const runtime = new OmlxRuntime({ model: modelDir, port: String(port), binary });
       const result = await runtime.start();
       expect(result.ok).toBe(true);
       expect(runtime.getStatus()).toBe("running");
@@ -174,7 +175,6 @@ describe("OmlxRuntime 生命周期（假 omlx CLI）", () => {
       await runtime.stop();
       expect(runtime.getStatus()).toBe("stopped");
     } finally {
-      process.env.PATH = oldPath;
       rmSync(root, { recursive: true, force: true });
     }
   }, 20_000);
