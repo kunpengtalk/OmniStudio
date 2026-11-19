@@ -101,6 +101,13 @@ export class OmlxRuntime implements Runtime {
   }
 
   async checkBinary(): Promise<BinaryCheckResult> {
+    // 显式注入的二进制优先（托管安装 / 测试假 CLI）；PATH 发现顺序里固定前缀排在
+    // 进程 PATH 之前，假二进制放在 PATH 最前也会被真安装遮蔽。
+    const override = this.overrides.binary?.trim();
+    if (override && existsSync(override)) {
+      this.binary = override;
+      return { found: true, path: override, mode: "cli" };
+    }
     const path = resolveOmlxBinary();
     if (path) {
       this.binary = path;
