@@ -36,6 +36,55 @@ export const MOSS_TAG_AUDIO = 0x00;
 export const MOSS_TAG_CAMERA = 0x01;
 export const MOSS_TAG_SCREEN = 0x02;
 
+/**
+ * 握手被拒的 HTTP 状态码。
+ *
+ * Bun 的 WebSocket 升级失败会把一切塌缩成 close 1006，真实状态码只出现在
+ * onerror 的文本里（`Expected 101 status code: 402`）—— 抠出来才能把
+ * "key 不对"与"账号没额度"分开。
+ */
+export function extractUpgradeStatus(message: string | null | undefined): number | null {
+  const m = /status code:\s*(\d{3})/.exec(message ?? "");
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * 把实时端点拒绝握手时的 JSON 错误体翻成可执行的中文提示。
+ *
+ * 错误体是 OpenAI 形状的 `{"error":{"message","type","code"}}`
+ * （2026-11-19 实测：`insufficient_credits` = 账号额度不足——同一把 key 在
+ * `/v1/models` 仍然 200，所以厂商能在设置页启用、通话却拨不出去；只报
+ * "云端拒绝连接"会让人反复重填 key 与地址）。认不出来返回 null，调用方回落通用文案。
+ */
+export function explainMossHandshakeError(
+  status: number | null,
+  body: unknown,
+): string | null {
+  const err = (body as { error?: { message?: string; code?: string; type?: string } } | null)?.error;
+  const code = (err?.code ?? "").toLowerCase();
+  const type = (err?.type ?? "").toLowerCase();
+  const message = (err?.message ?? "").trim();
+  if (status === 402 || code === "insufficient_credits" || code === "billing_error" || type === "billing_error") {
+    return "账号额度不足（insufficient_credits）——请到 platform.moss.cn 充值后再拨";
+  }
+  if (status === 401 || code === "invalid_api_key" || code === "unauthorized") {
+    return "API Key 被拒绝——请到设置 → 云端模型 重新粘贴 MOSS 的密钥";
+  }
+  if (status === 403 || code === "access_denied" || code === "permission_denied") {
+    return "这把密钥没有 MOSS-Live 的访问权限——请到 platform.moss.cn 确认该 key 已开通实时模型";
+  }
+  if (status === 404) {
+    return "找不到实时端点——默认应为 wss://api.mosi.cn/v1/realtime";
+  }
+  if (status === 429) {
+    return "请求过于频繁（429）——稍后再拨";
+  }
+  if (/model must/i.test(message)) {
+    return "缺少 model 参数——MOSS-Live 实时端点要求 model=moss-live-1.0";
+  }
+  return null;
+}
+
 /** 上行一帧的时长（协议给的节奏：20ms = 16k × 2 字节 × 0.02）。 */
 export const MOSS_FRAME_MS = 20;
 /** 20ms @ 16k mono s16le。 */
@@ -85,6 +134,10 @@ export class MossLiveClient {
   private reconnectAttempts = 0;
   /** 会话 id：重连时带回去，服务端才知道是同一条会（记忆与计费都跟着它）。 */
   private sessionId: string | null = null;
+  /** 最近一次连接的真实 URL（握手被拒时给 HTTPS 补探用）。 */
+  private lastUrl = "";
+  /** onerror 的原文（Bun 把升级失败的 HTTP 状态码只藏在这里）。 */
+  private upgradeErrorText = "";
   /** 待推的音频队列（未就绪 / 断线期间攒着，连上后按节奏发）。 */
   private pending: Buffer[] = [];
   /** 持续推流定时器：说话与不说话都在跑（不发静音服务端不断句）。 */
@@ -107,6 +160,8 @@ export class MossLiveClient {
   private lastChunkId: string | null = null;
   /** 刚收到的 context：下一条二进制音频属于它（见 response.audio.context 分支）。 */
   private pendingChunk: { chunkId: string; runId?: string; turnId?: string } | null = null;
+  /** 麦克风当前状态（静音时 mic_state 已报 false；重连就绪后要重新报 true）。 */
+  private micEnabled = true;
   private log: (line: string) => void;
   private onFailure: (message: string, detail?: Record<string, unknown>) => void;
 
@@ -131,6 +186,8 @@ export class MossLiveClient {
     const base = (this.cfg.baseUrl || MOSS_REALTIME_BASE_URL).trim();
     const model = (this.cfg.model || DEFAULT_MOSS_REALTIME_MODEL).trim();
     const url = `${base}${base.includes("?") ? "&" : "?"}model=${encodeURIComponent(model)}`;
+    this.lastUrl = url;
+    this.upgradeErrorText = "";
     this.log(`moss connect: ${url}`);
     let ws: WebSocket;
     try {
@@ -156,12 +213,19 @@ export class MossLiveClient {
       this.ready = false;
       this.respText = "";
       // 第一步：加入会话。重连时带上原 session_id（记忆连续、计费归一条会话）。
-      this.send({ action: "attach_session", ...(this.sessionId ? { session_id: this.sessionId } : {}) });
+      // `memory_scope:'session'` 与官方 demo 的桥接端一致（demo 的 server.mjs 就是这么发的）：
+      // 记忆只在这条会话内连续，不会把别处的会话内容串进来。
+      this.send({
+        action: "attach_session",
+        memory_scope: "session",
+        ...(this.sessionId ? { session_id: this.sessionId } : {}),
+      });
     };
     handle.onmessage = (ev) => this.handleMessage(ev.data);
-    handle.onerror = () => {
-      // Bun 不提供可读消息，细节由 onclose 的 code/reason 承担。
-      this.log("moss ws onerror (no readable detail)");
+    handle.onerror = (ev) => {
+      // Bun 的升级失败只在这里给出 HTTP 状态码（close 会塌缩成 1006），存下原文给补探用。
+      this.upgradeErrorText = (ev as { message?: string } | null)?.message ?? "";
+      this.log(`moss ws onerror ${JSON.stringify(this.upgradeErrorText.slice(0, 200))}`);
     };
     handle.onclose = (ev) => {
       if (this.ws === handle) this.ws = null;
@@ -180,13 +244,57 @@ export class MossLiveClient {
       // 1008 = 会话参数错误（协议文档：Invalid session option）。重连不带改动的
       // 参数只会再挂一次，直接报错让人看到真实原因。
       if (!this.openedOnce || code === 1008) {
-        this.fail(
-          `云端拒绝连接（code=${code ?? "?"}${reason ? `：${reason}` : ""}）：请检查 API Key 与 WebSocket 地址`,
-        );
+        void this.reportRefusal(code, reason);
         return;
       }
       void this.scheduleReconnect();
     };
+  }
+
+  /**
+   * 把「拒绝连接」讲到人能懂。
+   *
+   * WebSocket 升级被拒时 close 塌缩成 1006、HTTP 错误体整个丢掉 —— 但服务端在
+   * HTTPS 上对同一个地址会给 JSON 错误体（402=`insufficient_credits` 额度不足、
+   * 401=key 不对，2026-11-19 实测）。补一次 GET 把它翻成可执行提示；补探失败
+   * 就用原来的通用文案，且只等 4 秒，不为文案把失败拖成长时间无响应。
+   */
+  private async reportRefusal(code?: number, reason?: string): Promise<void> {
+    const generic = `云端拒绝连接（code=${code ?? "?"}${reason ? `：${reason}` : ""}）：请检查 API Key 与 WebSocket 地址`;
+    try {
+      const probeUrl = this.lastUrl.replace(/^wss:/i, "https:").replace(/^ws:/i, "http:");
+      const res = await fetch(probeUrl, {
+        headers: {
+          Authorization: `Bearer ${this.cfg.apiKey}`,
+          // 带 upgrade 头去撞真实握手路径：不带时有些网关回的是另一条通用错误（实测带回头 402 的 JSON）。
+          Connection: "Upgrade",
+          Upgrade: "websocket",
+          "Sec-WebSocket-Version": "13",
+          "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+        },
+        signal: AbortSignal.timeout(4000),
+      });
+      this.log(`moss refusal probe: HTTP ${res.status}`);
+      if (res.ok) {
+        // HTTP 层过了（key 与地址都对）却拨不通：多半是实时开通状态，保留原文。
+        this.fail(generic);
+        return;
+      }
+      let body: unknown = null;
+      try {
+        body = await res.json();
+      } catch {
+        // 有的网关拒升级时不给 JSON；无 body 只剩状态码可用。
+      }
+      // 补探拿到的才是真实 HTTP 状态（升级文本里的状态只作日志参考）。
+      const upgradeStatus = extractUpgradeStatus(this.upgradeErrorText);
+      const hint = explainMossHandshakeError(res.status, body);
+      this.log(`moss refusal detail: probe=${res.status} upgrade=${upgradeStatus ?? "?"} ${JSON.stringify(body ?? null).slice(0, 300)}`);
+      this.fail(hint ? `${generic}\nHTTP ${res.status}：${hint}` : `${generic}（HTTP ${res.status}）`);
+    } catch (e) {
+      this.log(`moss refusal probe failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.fail(generic);
+    }
   }
 
   private scheduleReconnect(): void {
@@ -358,6 +466,16 @@ export class MossLiveClient {
     this.sendBinary(source === "camera" ? MOSS_TAG_CAMERA : MOSS_TAG_SCREEN, jpeg);
   }
 
+  /**
+   * 麦克风开关（官方 demo 的静音就是这样）：`mic_state{enabled:false}` 只发一次信号，
+   * **音频帧照常推静音** —— 上游靠持续字节流维持节奏与断句，停推会让它以为断了。
+   * 静音帧由前端生成（把采样换成等长零），这里只管信号。
+   */
+  setMicState(enabled: boolean): void {
+    this.micEnabled = enabled;
+    this.send({ action: "mic_state", enabled });
+  }
+
   /** 开关摄像头 / 屏幕帧（关掉画面不会结束会话）。 */
   setVideoState(source: "camera" | "screen", enabled: boolean): void {
     this.send({ action: "video.state", source, enabled });
@@ -429,8 +547,10 @@ export class MossLiveClient {
           return;
         }
         // 第三步：开媒体。tagged-v1 必须显式开（音频前缀靠它）。
+        // mic_state 报的是**当前**状态而不是硬编码 true：用户在通话中静音过，
+        // 断线重连就绪时若报 true，等于替他取消了静音。
         this.send({ action: "media.mode", binary_protocol: "tagged-v1" });
-        this.send({ action: "mic_state", enabled: true });
+        this.send({ action: "mic_state", enabled: this.micEnabled });
         this.ready = true;
         this.startUplink();
         this.emit({ type: "ready" });

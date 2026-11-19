@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangleIcon,
@@ -9,6 +9,7 @@ import {
   CpuIcon,
   Loader2Icon,
   MicIcon,
+  MicOffIcon,
   MonitorIcon,
   PhoneIcon,
   PhoneOffIcon,
@@ -29,6 +30,7 @@ import { useAppStore } from "@stores/app";
 import { useRouter } from "@stores/router";
 import { useVoiceCallStore, type CallPhase, type VoiceCallProvider } from "@stores/voice-call";
 import { useVoiceCallEngine } from "@hooks/use-voice-call";
+import { ORB_SKINS, loadOrbSkin, saveOrbSkin, PlanetOrb, type OrbSkinId } from "@components/planet-orb";
 import { useServerMessageSync } from "@hooks/use-server-message-sync";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
@@ -60,11 +62,18 @@ function formatDuration(s: number): string {
   return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
 
-/** 通话中的状态指示：说话时跳动的频谱条，聆听时话筒图标。 */
-function CallStatusChip({ phase, elapsed }: { phase: CallPhase; elapsed: number }) {
+/** 通话中的状态指示：说话时跳动的频谱条，聆听时话筒图标，静音时话筒斜杠。 */
+function CallStatusChip({ phase, elapsed, muted }: { phase: CallPhase; elapsed: number; muted?: boolean }) {
   const t = useT();
   return (
     <div className="flex items-center gap-2 text-sm">
+      <span
+        className={cn(
+          "size-2 rounded-full",
+          phase === "thinking" || phase === "starting" ? "animate-pulse bg-amber-500" : "bg-emerald-500",
+          muted && "bg-zinc-400",
+        )}
+      />
       {phase === "speaking" ? (
         <span className="flex h-4 items-end gap-0.5">
           {[0, 1, 2, 3].map((i) => (
@@ -75,12 +84,14 @@ function CallStatusChip({ phase, elapsed }: { phase: CallPhase; elapsed: number 
             />
           ))}
         </span>
+      ) : muted ? (
+        <MicOffIcon className="size-4 text-muted-foreground" />
       ) : phase === "listening" ? (
         <MicIcon className="size-4 text-primary" />
       ) : (
         <Loader2Icon className="size-4 animate-spin text-primary" />
       )}
-      <span className="font-medium">{t(`voicecall.status.${phase}`)}</span>
+      <span className="font-medium">{t(muted ? "voicecall.muted" : `voicecall.status.${phase}`)}</span>
       {elapsed > 0 && (
         <span className="text-xs text-muted-foreground tabular-nums">{formatDuration(elapsed)}</span>
       )}
@@ -88,88 +99,67 @@ function CallStatusChip({ phase, elapsed }: { phase: CallPhase; elapsed: number 
   );
 }
 
-/** 麦克风电平条：中间高两边低，高度随电平伸缩。 */
-function MicLevelBar({ level }: { level: number }) {
-  const BARS = 13;
-  return (
-    <div className="flex h-6 items-end gap-[3px]" aria-hidden>
-      {Array.from({ length: BARS }).map((_, i) => {
-        const weight = Math.sin((i / (BARS - 1)) * Math.PI);
-        const h = Math.max(3, Math.round(Math.max(0.1, level) * weight * 24));
-        return (
-          <span
-            key={i}
-            className="w-[3px] rounded-sm bg-primary/70 transition-all duration-100"
-            style={{ height: h }}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-/** 实时语音球：GPT-4o 风格，随输入电平缩放，说话（AI 回复）时亮起。 */
-function VoiceOrb({ level, speaking }: { level: number; speaking: boolean }) {
-  const lvl = Math.max(0, Math.min(1, level));
-  const scale = 1 + lvl * 0.16;
-  return (
-    <div className="relative flex size-64 items-center justify-center" aria-hidden>
-      {/* 双层呼吸光环 */}
-      <span className="orb-halo absolute inset-3 rounded-full border-2 border-sky-400/50" />
-      <span
-        className="orb-halo absolute inset-3 rounded-full border-2 border-sky-300/40"
-        style={{ animationDelay: "1.3s" }}
-      />
-      {/* 外部光晕 */}
-      <div
-        className="absolute inset-0 rounded-full bg-sky-400/25 blur-2xl transition-transform duration-150"
-        style={{ transform: `scale(${scale * 1.15})` }}
-      />
-      {/* 主体球 */}
-      <div
-        className={cn("relative size-44 rounded-full", speaking && "orb-speaking")}
-        style={{
-          background:
-            "radial-gradient(circle at 35% 28%, #bae6fd 0%, #38bdf8 42%, #2563eb 78%, #1d4ed8 100%)",
-          boxShadow:
-            "0 0 70px rgba(56,189,248,.55), 0 0 140px rgba(56,189,248,.22), inset -18px -24px 48px rgba(29,78,216,.6)",
-          transform: `scale(${scale})`,
-          transition: "transform 110ms ease-out",
-        }}
-      >
-        {/* 顶部受光高光 */}
-        <div className="absolute left-1/2 top-[16%] size-16 -translate-x-1/2 rounded-full bg-white/30 blur-lg" />
-      </div>
-    </div>
-  );
-}
-
-/** 云端 Realtime 通话场景：语音球居中，下方实时字幕（GPT-4o 风格）。 */
-function RealtimeScene({
+/**
+ * 通话舞台：星球球体 + 状态行 + 实时字幕 + 对话转录，一列纵向排开。
+ *
+ * 三种渠道共用这一个舞台（旧版只有云端有场景、本地只剩消息列表）：球体是
+ * "通话正在进行"的单一注视点，转录就在它下面继续滚动 —— 云端通话的助手正文
+ * 此前完全没地方看（旧版云端把消息区整个换掉了），现在就在球下方流。
+ */
+function CallStage({
   phase,
   liveText,
+  liveActive,
   micLevel,
+  muted,
+  skin,
+  scrollRef,
+  children,
 }: {
   phase: CallPhase;
   liveText: string;
+  liveActive: boolean;
   micLevel: number;
+  muted: boolean;
+  skin: OrbSkinId;
+  /** 转录滚动容器（新消息自动滚到底由外层驱动）。 */
+  scrollRef?: React.RefObject<HTMLDivElement | null>;
+  children?: ReactNode;
 }) {
   const t = useT();
-  const listening = phase === "listening";
+  const speaking = phase === "speaking";
+  const busy = phase === "starting" || phase === "thinking";
+  // 字幕优先级：用户在说 > 助手在说 > 状态占位。
+  const caption = liveActive && liveText ? liveText : null;
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-6 px-6">
-      <VoiceOrb level={micLevel} speaking={phase === "speaking"} />
-      <div className="text-center">
+    <div className="flex h-full flex-col items-center gap-5 overflow-hidden px-6 pt-4 pb-2">
+      <PlanetOrb
+        level={muted ? 0 : micLevel}
+        speaking={speaking}
+        muted={muted}
+        busy={busy}
+        skin={skin}
+        size={210}
+      />
+      <div className="w-full max-w-xl text-center">
         <p className="text-sm font-medium">
-          {listening ? t("voicecall.talkToStart") : t(`voicecall.status.${phase}`)}
+          {muted
+            ? t("voicecall.muted")
+            : phase === "listening"
+              ? t("voicecall.talkToStart")
+              : t(`voicecall.status.${phase}`)}
         </p>
-        {liveText ? (
-          <p className="mx-auto mt-2 max-w-md break-words text-sm leading-6 text-muted-foreground">
-            {liveText}
+        {caption ? (
+          <p className="mx-auto mt-2 max-h-16 min-h-6 overflow-hidden break-words text-sm leading-6 text-muted-foreground">
+            {caption}
+            <span className="animate-pulse">▍</span>
           </p>
         ) : (
           <p className="mt-1 text-xs text-muted-foreground">{t("voicecall.interruptHint")}</p>
         )}
+      </div>
+      <div ref={scrollRef} className="vc-transcript min-h-0 w-full flex-1 overflow-y-auto">
+        <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-2 pb-6">{children}</div>
       </div>
     </div>
   );
@@ -695,7 +685,7 @@ function CallMessageBubble({
 export function VoiceCallWindow() {
   const t = useT();
   const queryClient = useQueryClient();
-  const { start, hangup, startVideo, stopVideo } = useVoiceCallEngine();
+  const { start, hangup, setMuted, startVideo, stopVideo } = useVoiceCallEngine();
 
   const phase = useVoiceCallStore((s) => s.phase);
   const callConversationId = useVoiceCallStore((s) => s.callConversationId);
@@ -703,8 +693,15 @@ export function VoiceCallWindow() {
   const liveText = useVoiceCallStore((s) => s.liveText);
   const liveActive = useVoiceCallStore((s) => s.liveActive);
   const micLevel = useVoiceCallStore((s) => s.micLevel);
+  const muted = useVoiceCallStore((s) => s.muted);
   const videoSource = useVoiceCallStore((s) => s.videoSource);
   const error = useVoiceCallStore((s) => s.error);
+  // 球体皮肤：纯外观，记在 localStorage（见 planet-orb.tsx）。
+  const [skin, setSkin] = useState<OrbSkinId>(() => loadOrbSkin());
+  const chooseSkin = (id: OrbSkinId) => {
+    setSkin(id);
+    saveOrbSkin(id);
+  };
 
   const activeConversationId = useChatStore((s) => s.activeConversationId);
   const activeMessages = useChatStore((s) => s.activeMessages);
@@ -910,16 +907,39 @@ export function VoiceCallWindow() {
               {omniUnready ? t("voicecall.omniNeedSetup") : t("voicecall.cloudNeedSetup")}
             </p>
           )}
+
+          {/* 球体皮肤：四张"行星皮肤"，纯外观（localStorage 记忆，不影响通话行为）。 */}
+          <div>
+            <Label className="mb-1.5 block text-xs">{t("voicecall.skinTitle")}</Label>
+            <div className="flex items-center gap-2.5">
+              {ORB_SKINS.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  title={t(s.labelKey)}
+                  aria-pressed={skin === s.id}
+                  onClick={() => chooseSkin(s.id)}
+                  className={cn(
+                    "size-8 rounded-full ring-2 ring-offset-2 ring-offset-background",
+                    skin === s.id ? "ring-primary" : "ring-transparent",
+                  )}
+                  style={{
+                    background: `radial-gradient(circle at 34% 28%, ${s.colors.a} 0%, ${s.colors.b} 55%, ${s.colors.c} 100%)`,
+                  }}
+                />
+              ))}
+            </div>
+          </div>
         </div>
       </aside>
 
-      {/* 右侧：通话区 */}
-      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-        {/* 顶栏：通话状态 */}
+      {/* 右侧：通话舞台 */}
+      <main className="vc-stage-bg relative flex min-w-0 flex-1 flex-col overflow-hidden">
+        {/* 顶栏：居中的连接状态（drag 区）；渠道徽标钉在最右。 */}
         {inCall && (
-          <header className="electrobun-webkit-app-region-drag flex shrink-0 items-center gap-2.5 border-b px-4 py-2.5">
-            <CallStatusChip phase={phase} elapsed={elapsed} />
-            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+          <header className="electrobun-webkit-app-region-drag relative flex shrink-0 items-center justify-center px-4 py-3">
+            <CallStatusChip phase={phase} elapsed={elapsed} muted={muted} />
+            <span className="absolute right-4 rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
               {callProvider === "cloud"
                 ? t("voicecall.providerCloud")
                 : callProvider === "omni"
@@ -929,132 +949,127 @@ export function VoiceCallWindow() {
           </header>
         )}
 
-        {/* 通话内容 / 空状态 */}
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {/* 云端拨号中：先亮起语音球等待接通（GPT-4o 风格） */}
-          {phase === "starting" && callProvider === "cloud" ? (
-            <RealtimeScene phase={phase} liveText={liveText} micLevel={micLevel} />
-          ) : showDial ? (
-            <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
-              <div className="flex size-20 items-center justify-center rounded-2xl bg-primary/15">
-                <PhoneIcon className="size-9 text-primary" />
-              </div>
-              <p className="text-lg font-medium">{t("voicecall.title")}</p>
-              <p className="max-w-xs text-sm whitespace-pre-line text-muted-foreground">
-                {t("voicecall.hint")}
-              </p>
-              <p className="text-xs text-muted-foreground">{t("voicecall.tapToCall")}</p>
-            </div>
-          ) : inCall && callProvider === "cloud" ? (
-            <RealtimeScene phase={phase} liveText={liveText} micLevel={micLevel} />
-          ) : convQuery.isLoading ? (
-            <div className="flex h-full items-center justify-center">
-              <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
-            </div>
-          ) : (
-            <div
-              ref={scrollRef}
-              className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-6 py-6"
-            >
-              {activeMessages.map((m) => {
-                const isLastStreaming = streaming && m.id === lastMessageId;
-                return (
-                  <CallMessageBubble
-                    key={m.id}
-                    message={m}
-                    isStreamingMessage={isLastStreaming}
-                    masked={isLastStreaming && phase === "thinking"}
-                  />
-                );
-              })}
-              {inCall && activeMessages.length === 0 && (
-                <div className="flex flex-col items-center gap-2 py-16 text-sm text-muted-foreground">
-                  <SparklesIcon className="size-5" />
-                  <span>{t("voicecall.talkToStart")}</span>
-                  <span className="text-xs">{t("voicecall.interruptHint")}</span>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* 实时字幕：正在说的话，随 ASR 增量更新（云端模式由 RealtimeScene 展示） */}
-        {inCall && callProvider !== "cloud" && liveActive && (
-          <div className="shrink-0 border-t bg-muted/30 px-6 py-2.5">
-            <div className="mx-auto flex max-w-3xl items-start gap-2 text-sm">
-              <span className="mt-0.5 shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] text-primary">
-                {t("voicecall.live")}
-              </span>
-              <span className="min-w-0 flex-1 text-muted-foreground">
-                {liveText || "…"}
-                <span className="animate-pulse">▍</span>
-              </span>
+        {/* 通话中：统一的舞台（球体 + 字幕 + 转录）。 */}
+        {inCall ? (
+          <CallStage
+            phase={phase}
+            liveText={liveText}
+            liveActive={liveActive}
+            micLevel={micLevel}
+            muted={muted}
+            skin={skin}
+            scrollRef={scrollRef}
+          >
+            {activeMessages.map((m) => {
+              const isLastStreaming = streaming && m.id === lastMessageId;
+              return (
+                <CallMessageBubble
+                  key={m.id}
+                  message={m}
+                  isStreamingMessage={isLastStreaming}
+                  masked={isLastStreaming && phase === "thinking"}
+                />
+              );
+            })}
+          </CallStage>
+        ) : showDial ? (
+          /* 未通话空态：安静的球 + 一句问候（球在低电平下缓慢自转）。 */
+          <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+            <PlanetOrb level={0} speaking={false} muted={false} busy={false} skin={skin} size={168} />
+            <p className="text-lg font-medium">{t("voicecall.dialPrompt")}</p>
+            <p className="max-w-xs text-sm whitespace-pre-line text-muted-foreground">
+              {t("voicecall.hint")}
+            </p>
+            <p className="text-xs text-muted-foreground">{t("voicecall.tapToCall")}</p>
+          </div>
+        ) : convQuery.isLoading ? (
+          <div className="flex h-full items-center justify-center">
+            <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
+          </div>
+        ) : (
+          /* 历史通话记录（未通话）：仍是消息列表。 */
+          <div
+            ref={scrollRef}
+            className="min-h-0 flex-1 overflow-y-auto"
+          >
+            <div className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-6 py-6">
+              {activeMessages.map((m) => (
+                <CallMessageBubble key={m.id} message={m} isStreamingMessage={false} />
+              ))}
             </div>
           </div>
         )}
 
-        {/* 底部控制条：挂断 / 继续通话 */}
-        <footer className="shrink-0 border-t bg-gradient-to-t from-muted/40 to-transparent p-4">
-          <div className="mx-auto flex max-w-3xl items-center justify-center gap-4">
+        {/* 底部 dock：通话中=静音/挂断（+画面键，仅 MOSS）；未通话=呼出键。 */}
+        <footer className="shrink-0 px-6 pb-5 pt-2">
+          <div className="mx-auto flex max-w-2xl items-center justify-center gap-5">
             {inCall ? (
               <>
-                <div className="flex w-40 items-center justify-end gap-3">
-                  <span className="text-xs text-muted-foreground">{t(`voicecall.status.${phase}`)}</span>
-                  <MicLevelBar level={micLevel} />
-                </div>
-                <Button
-                  size="icon"
-                  variant="destructive"
-                  onClick={() => void hangup()}
-                  className="flex size-14 items-center justify-center rounded-full"
-                  tooltip={t("voicecall.hangup")}
+                {/* 静音：采集照常跑、上行换静音帧（见 use-voice-call 的 mutedRef）。 */}
+                <button
+                  type="button"
+                  className="vc-dock-btn"
+                  data-on={muted || undefined}
+                  aria-pressed={muted}
+                  title={muted ? t("voicecall.unmute") : t("voicecall.mute")}
+                  onClick={() => setMuted(!muted)}
                 >
-                  <PhoneOffIcon className="size-5" />
-                </Button>
-                <div className="flex w-40 items-center gap-2">
-                  {/* 画面理解只有 MOSS-Live 支持：别的渠道上摆一个点了没用的按钮
-                      比不摆更糟，所以按当前方言显隐。摄像头与屏幕共享各一个图标，
-                      同时只开一路（协议侧也是"聚焦某一路"的语义）。 */}
-                  {videoSupported &&
-                    (["camera", "screen"] as const).map((src) => (
-                      <Button
-                        key={src}
-                        size="icon"
-                        variant={videoSource === src ? "default" : "outline"}
-                        className="rounded-full"
-                        tooltip={
-                          videoSource === src
-                            ? t("voicecall.stopVideo")
-                            : src === "camera"
-                              ? t("voicecall.camera")
-                              : t("voicecall.screen")
-                        }
-                        onClick={() => {
-                          if (videoSource === src) stopVideo();
-                          else void startVideo(src);
-                        }}
-                      >
-                        {src === "camera" ? (
-                          <CameraIcon className="size-4" />
-                        ) : (
-                          <MonitorIcon className="size-4" />
-                        )}
-                      </Button>
-                    ))}
-                </div>
+                  {muted ? <MicOffIcon className="size-5" /> : <MicIcon className="size-5" />}
+                </button>
+                <button
+                  type="button"
+                  className="vc-dock-btn vc-dock-hangup"
+                  title={t("voicecall.hangup")}
+                  onClick={() => void hangup()}
+                >
+                  <PhoneOffIcon className="size-[22px]" />
+                </button>
+                {/* 画面理解只有 MOSS-Live 支持：别的渠道上摆一个点了没用的按钮
+                    比不摆更糟，所以按当前方言显隐。摄像头与屏幕共享各一个图标，
+                    同时只开一路（协议侧也是"聚焦某一路"的语义）。 */}
+                {videoSupported &&
+                  (["camera", "screen"] as const).map((src) => (
+                    <button
+                      key={src}
+                      type="button"
+                      className="vc-dock-btn"
+                      data-on={videoSource === src || undefined}
+                      title={
+                        videoSource === src
+                          ? t("voicecall.stopVideo")
+                          : src === "camera"
+                            ? t("voicecall.camera")
+                            : t("voicecall.screen")
+                      }
+                      onClick={() => {
+                        if (videoSource === src) stopVideo();
+                        else void startVideo(src);
+                      }}
+                    >
+                      {src === "camera" ? (
+                        <CameraIcon className="size-[18px]" />
+                      ) : (
+                        <MonitorIcon className="size-[18px]" />
+                      )}
+                    </button>
+                  ))}
               </>
             ) : (
-              activeConversationId != null &&
-              activeMessages.length > 0 && (
-                <Button
-                  size="lg"
-                  className="gap-2 rounded-full px-6"
-                  onClick={() => void start(activeConversationId, provider)}
-                >
+              <button
+                type="button"
+                className="vc-dock-start text-sm font-medium disabled:cursor-not-allowed disabled:opacity-45"
+                disabled={phase === "starting" || unready}
+                onClick={() => void start(activeConversationId, provider)}
+              >
+                {phase === "starting" ? (
+                  <Loader2Icon className="size-4 animate-spin" />
+                ) : (
                   <PhoneIcon className="size-4" />
-                  {t("voicecall.resume")}
-                </Button>
-              )
+                )}
+                {activeMessages.length > 0 && activeConversationId != null
+                  ? t("voicecall.resume")
+                  : t("voicecall.start")}
+              </button>
             )}
           </div>
         </footer>

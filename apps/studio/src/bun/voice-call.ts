@@ -1167,6 +1167,24 @@ export function ackVoiceCallPlayback(opts: {
   return { ok: true };
 }
 
+/**
+ * 麦克风静音信号（MOSS：`mic_state{enabled}`；另两家协议没有这个事件，返回
+ * supported:false）。静音本身不依赖这条信号生效——前端已经把这个窗口的上行
+ * 采样换成静音帧，这里只是让服务端的 VAD / 录音状态与界面保持一致。
+ */
+export function setVoiceCallMicState(opts: {
+  conversationId: number;
+  enabled: boolean;
+}): { ok: boolean; supported: boolean } {
+  const session = getSession(opts.conversationId);
+  if (!session) return { ok: false, supported: false };
+  if (session.moss) {
+    session.moss.setMicState(opts.enabled);
+    return { ok: true, supported: true };
+  }
+  return { ok: true, supported: false };
+}
+
 /** 切换画面源（摄像头 / 屏幕）：仅 MOSS 支持，其余方言返回 false 让界面隐藏入口。 */
 export function setVoiceCallVideo(opts: {
   conversationId: number;

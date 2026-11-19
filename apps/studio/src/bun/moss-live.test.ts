@@ -1,6 +1,13 @@
 import { afterAll, expect, test } from "bun:test";
 
-import { MossLiveClient, MOSS_TAG_AUDIO, MOSS_TAG_CAMERA, type MossVoiceConfig } from "./moss-live";
+import {
+  MossLiveClient,
+  MOSS_TAG_AUDIO,
+  MOSS_TAG_CAMERA,
+  explainMossHandshakeError,
+  extractUpgradeStatus,
+  type MossVoiceConfig,
+} from "./moss-live";
 import type { RealtimeVoiceEvent } from "./realtime-voice";
 
 // ---------------------------------------------------------------------------
@@ -119,11 +126,34 @@ test("握手顺序：attach_session → session.update → media.mode → mic_st
   expect(actions).toEqual(["attach_session", "session.update", "media.mode", "mic_state"]);
   // 新会话不带 session_id；重连才带。
   expect(jsonFrames(srv)[0]!.body.session_id).toBeUndefined();
+  // 记忆作用域与官方 demo 的桥接端一致（demo server.mjs: memory_scope:'session'）。
+  expect(jsonFrames(srv)[0]!.body.memory_scope).toBe("session");
   // 人格与业务规则都从 instructions 来（MOSS 没有 voice 参数）。
   const update = jsonFrames(srv)[1]!.body.session as Record<string, unknown>;
   expect((update.persona as Record<string, unknown>).prompt).toBe("简短回答");
   expect(jsonFrames(srv)[2]!.body.binary_protocol).toBe("tagged-v1");
   expect(jsonFrames(srv)[3]!.body.enabled).toBe(true);
+  client.stop();
+});
+
+test("静音：mic_state{enabled:false} 只发信号，音频帧不断（静音由前端生成）", async () => {
+  const srv = startServer();
+  servers.push(srv);
+  const events: RealtimeVoiceEvent[] = [];
+  const client = connect(srv.port, events);
+  await waitFor(() => events.some((e) => e.type === "ready"));
+
+  client.setMicState(false);
+  await waitFor(() => jsonFrames(srv).some((f) => f.body.action === "mic_state" && f.body.enabled === false));
+  const micOff = jsonFrames(srv).filter((f) => f.body.action === "mic_state");
+  expect(micOff.map((f) => f.body.enabled)).toEqual([true, false]);
+
+  // 静音期间照常推帧：上游靠持续字节流维持节奏，停推会被当成掉线。
+  client.appendAudio(Buffer.from([7, 8]));
+  await waitFor(() => srv.frames.some((f) => f.kind === "binary"));
+  const bin = srv.frames.filter((f) => f.kind === "binary").pop() as { tag: number; payload: Buffer };
+  expect(bin.tag).toBe(MOSS_TAG_AUDIO);
+  expect([...bin.payload]).toEqual([7, 8]);
   client.stop();
 });
 
@@ -317,4 +347,44 @@ test("会话配置失败（session.updated.data.error 非空）当作连接失�
   expect(failures[0]).toContain("invalid persona");
   expect(events.some((e) => e.type === "error")).toBe(true);
   client.stop();
+});
+
+test("升级被拒 402：补探拿到 insufficient_credits，报错说额度不足（2026-11-19 真机形状）", async () => {
+  // 真机实测：`wss://api.mosi.cn/v1/realtime?model=moss-live-1.0` + 有效 key 但
+  // 账号没钱 → 升级前 HTTP 402 + OpenAI 形 JSON。Bun 客户端只看到 close 1006，
+  // 所以必须 HTTPS 补探同一地址拿错误体，把"检查 API Key"升级成"去充值"。
+  const server = Bun.serve({
+    port: 0,
+    fetch: () =>
+      new Response(
+        JSON.stringify({
+          error: { message: "billing error", type: "billing_error", code: "insufficient_credits" },
+        }),
+        { status: 402, headers: { "Content-Type": "application/json" } },
+      ),
+  });
+  const failures: string[] = [];
+  const client = connect(server.port!, [], failures);
+  await waitFor(() => failures.length > 0);
+  expect(failures[0]).toContain("额度不足");
+  expect(failures[0]).toContain("充值");
+  client.stop();
+  void server.stop(true);
+});
+
+test("握手拒绝文案：402/缺 model/认不出各有归宿", () => {
+  expect(extractUpgradeStatus("WebSocket connection failed: Expected 101 status code: 402")).toBe(402);
+  expect(extractUpgradeStatus("")).toBeNull();
+  expect(
+    explainMossHandshakeError(402, {
+      error: { message: "billing error", type: "billing_error", code: "insufficient_credits" },
+    }),
+  ).toContain("充值");
+  expect(
+    explainMossHandshakeError(400, {
+      error: { message: "model must be supplied exactly once", type: "invalid_request_error", code: "invalid_field_value" },
+    }),
+  ).toContain("moss-live-1.0");
+  expect(explainMossHandshakeError(401, { error: { message: "bad key" } })).toContain("云端模型");
+  expect(explainMossHandshakeError(418, { error: { message: "teapot" } })).toBeNull();
 });
