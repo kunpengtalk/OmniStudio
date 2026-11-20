@@ -182,6 +182,43 @@ async function tavilySearch(
     }));
 }
 
+
+/**
+ * Keenable 网页搜索。无 Key 走公开接口；若设置了 WEB_SEARCH_API_KEY 则走付费接口以提高额度。
+ * POST https://api.keenable.ai/v1/search/public（或 /v1/search），Header 需要 X-Keenable-Title。
+ */
+async function keenableSearch(query: string, maxResults: number, apiKey?: string): Promise<WebSearchResult[]> {
+  const trimmed = apiKey?.trim() ?? "";
+  const url = trimmed ? "https://api.keenable.ai/v1/search" : "https://api.keenable.ai/v1/search/public";
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+    "X-Keenable-Title": "OmniStudio",
+  };
+  if (trimmed) headers["X-API-Key"] = trimmed;
+  const res = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ query, max_results: maxResults }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Keenable HTTP ${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
+  const json = (await res.json()) as {
+    results?: { title?: string; url?: string; description?: string; snippet?: string }[];
+  };
+  return (json.results ?? [])
+    .filter((r) => r.url)
+    .slice(0, maxResults)
+    .map((r) => ({
+      title: r.title ?? r.url ?? "",
+      url: r.url ?? "",
+      snippet: r.description ?? r.snippet ?? "",
+    }));
+}
+
 /**
  * 执行一次联网检索。opts 未提供的字段回落到设置项；
  * 失败时不抛异常，返回 ok: false + error，由调用方决定如何提示模型。
@@ -194,7 +231,9 @@ export async function webSearch(
   const requested = opts?.provider ?? config.provider;
   // 未知值一律回落到 bing，且返回的 provider 反映实际使用的服务。
   const provider =
-    requested === "tavily" || requested === "duckduckgo" || requested === "brave" ? requested : "bing";
+    requested === "tavily" || requested === "duckduckgo" || requested === "brave" || requested === "keenable"
+      ? requested
+      : "bing";
   const maxResults = opts?.maxResults ?? config.maxResults;
   const apiKey = opts?.apiKey ?? config.apiKey;
   const trimmed = query.trim();
@@ -208,7 +247,9 @@ export async function webSearch(
           ? await duckDuckGoSearch(trimmed, maxResults)
           : provider === "brave"
             ? await braveSearch(trimmed, maxResults, apiKey)
-            : await bingSearch(trimmed, maxResults);
+            : provider === "keenable"
+              ? await keenableSearch(trimmed, maxResults, apiKey)
+              : await bingSearch(trimmed, maxResults);
     return { ok: results.length > 0, provider, results, error: results.length === 0 ? "No results" : undefined };
   } catch (e) {
     return {
