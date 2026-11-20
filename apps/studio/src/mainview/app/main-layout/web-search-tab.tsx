@@ -11,7 +11,7 @@ import { Switch } from "@ui/switch";
 import { useT } from "@stores/ui-lang";
 import { SettingsSection, SettingRow, PageHeader } from "@components/setting-ui";
 
-const WEB_SEARCH_PROVIDERS = ["bing", "duckduckgo", "tavily", "brave"] as const;
+const WEB_SEARCH_PROVIDERS = ["bing", "duckduckgo", "tavily", "brave", "keenable"] as const;
 
 /**
  * 设置 → 工具 → 联网检索。
@@ -44,6 +44,7 @@ export function WebSearchTab({
 
   const provider = form.WEB_SEARCH_PROVIDER ?? "bing";
   const needsKey = provider === "tavily" || provider === "brave";
+  const keyOptional = provider === "keenable";
 
   return (
     <div className="flex flex-col gap-4">
@@ -75,7 +76,7 @@ export function WebSearchTab({
           </Select>
         </SettingRow>
 
-        {needsKey && (
+        {(needsKey || keyOptional) && (
           <SettingRow title={t("settings.webSearch.apiKey")} description={t("settings.webSearch.apiKeyHint")} stacked>
             <Input
               type="password"
